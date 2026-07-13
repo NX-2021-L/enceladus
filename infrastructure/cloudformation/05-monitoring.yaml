@@ -622,12 +622,13 @@ Resources:
               "type": "metric",
               "x": 8, "y": 13, "width": 8, "height": 6,
               "properties": {
-                "title": "Fiedler λ2 — Algebraic Connectivity (Enceladus/GraphHealth, K43)",
+                "title": "GraphHealth — Fiedler λ2 + IsolatedNodeRatio (K43 / ISS-555)",
                 "view": "timeSeries",
                 "stacked": false,
                 "region": "${AWS::Region}",
                 "metrics": [
-                  [ "Enceladus/GraphHealth", "FiedlerValue", { "stat": "Average", "label": "Fiedler lambda2" } ]
+                  [ "Enceladus/GraphHealth", "FiedlerValue", { "stat": "Average", "label": "Fiedler lambda2" } ],
+                  [ "Enceladus/GraphHealth", "IsolatedNodeRatio", "ProjectId", "enceladus", { "stat": "Average", "label": "IsolatedNodeRatio (zero-degree nodes)" } ]
                 ],
                 "period": 900
               }
@@ -636,7 +637,7 @@ Resources:
               "type": "metric",
               "x": 16, "y": 13, "width": 8, "height": 6,
               "properties": {
-                "title": "CEE Per-Category Entropy Counts (Enceladus/CEE, K41)",
+                "title": "CEE Per-Category Entropy Counts — lineage_unanchored ≠ isolated (Enceladus/CEE, K41)",
                 "view": "timeSeries",
                 "stacked": true,
                 "region": "${AWS::Region}",

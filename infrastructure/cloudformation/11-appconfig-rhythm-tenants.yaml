@@ -180,7 +180,7 @@ Resources:
               "function_name": "enceladus-graph-health-metrics${EnvironmentSuffix}",
               "order": 40,
               "expected_output_contract": {
-                "artifact": "Enceladus/GraphHealth CloudWatch metrics (GraphEdgeDensity, OrphanNodeRatio, GraphNodeCount, FiedlerAlgebraicConnectivity) per window",
+                "artifact": "Enceladus/GraphHealth CloudWatch metrics (GraphEdgeDensity, IsolatedNodeRatio, GraphNodeCount, FiedlerAlgebraicConnectivity) per window",
                 "min_metrics_per_window": 4,
                 "window_hours": 12
               }

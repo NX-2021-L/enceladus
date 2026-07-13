@@ -35,8 +35,8 @@ class _Sess:
         return False
 
     def run(self, cypher, **params):
-        if "RETURN count(n)" in cypher or "RETURN count(r)" in cypher or "orphans" in cypher:
-            return _Single({"total": 0, "orphans": 0})
+        if "RETURN count(n)" in cypher or "RETURN count(r)" in cypher or "isolated" in cypher:
+            return _Single({"total": 0, "isolated": 0})
         if "index_name" in params:
             return list(self._d.pair_rows)
         return list(self._d.node_rows)

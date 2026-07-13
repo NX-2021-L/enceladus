@@ -349,11 +349,11 @@ function card(o){
     {name:"graph_health_metrics", cad:`heavy + hourly · CloudWatch`, state:"anom", badge:"volatile",
       metric:`<b>${num(fied.filter(v=>v>0).at(-1),2)}</b><small>Fiedler algebraic connectivity λ₂</small>`,
       body:`${fiedChart}<div class="legend"><span><i style="background:var(--accent)"></i>λ₂ over ${fied.length} readings</span></div>`,
-      note:`Connectivity is a real structural signal, but it <b>swings between regimes</b> (2.15 → 3.7 → 1.7 → 4.0) and drops to <b>0.0 twice</b> — almost certainly degenerate/failed computations, not a disconnecting graph. Orphan-ratio meanwhile holds ~0.0001. Worth hardening the λ₂ computation before trusting the trend.`},
+      note:`Connectivity is a real structural signal, but it <b>swings between regimes</b> (2.15 → 3.7 → 1.7 → 4.0) and drops to <b>0.0 twice</b> — almost certainly degenerate/failed computations, not a disconnecting graph. IsolatedNodeRatio meanwhile holds ~0.0001. Worth hardening the λ₂ computation before trusting the trend.`},
     {name:"corpus_entropy_engine", cad:`heavy · 5 categories`, state:"signal", badge:"~26s / run",
       metric:`<b>${Object.values(cee).reduce((a,b)=>a+b,0).toLocaleString()}</b><small>entropy findings this window</small>`,
       body:`<div class="bars">${ceeBars}</div>`,
-      note:`Rich, varying detection across 5 categories — genuine signal. Two flags: <b>relational (5,280)</b> dominates, and it reports <b>1,527 orphans</b> while GraphHealth's orphan-ratio is ~0. Different definitions of "orphan," worth reconciling. Also the slowest tenant at <b>~26s</b>/run.`},
+      note:`Rich, varying detection across 5 categories — genuine signal. <b>relational (5,280)</b> dominates; <b>lineage_unanchored (~1,527)</b> counts tracker records missing parent/plan anchors — distinct from GraphHealth <b>IsolatedNodeRatio (~0.0001)</b> (zero-degree Neo4j nodes). Also the slowest tenant at <b>~26s</b>/run.`},
     {name:"percolation_monitor", cad:`heavy · telemetry table`, state:"signal", badge:"phase-tracking",
       metric:`<b>${perc.at(-1).e.toFixed(2)}</b><small>empirical p_c (analytical ${perc.at(-1).a.toFixed(3)})</small>`,
       body:`${percChart}<div class="legend"><span><i style="background:var(--accent)"></i>empirical (Monte-Carlo)</span><span><i style="background:var(--accent-2)"></i>analytical (Molloy-Reed)</span></div>`,
@@ -374,14 +374,14 @@ function card(o){
      p:"<code>backlog_open_leaves = 0</code> on every captured beat — the Lyapunov never has anything to minimize. Either the backlog feed isn't wired to real open work, or 3h is far too frequent for a zero-pressure queue. Cheapest win: lengthen cadence until there's signal."},
     {cls:"c",tag:"data-quality",h:"Fiedler λ₂ drops to 0.0 and jumps regimes",
      p:"Connectivity reads <code>0.0</code> twice among otherwise 2–4 values. A zero algebraic-connectivity means a disconnected graph — implausible here, so the estimator is failing on some runs. Trend is untrustworthy until the computation is hardened / guarded."},
-    {cls:"c",tag:"reconcile",h:"Two different “orphans” disagree by 10,000×",
-     p:"CEE reports <code>1,527 orphan</code> findings; GraphHealth reports <code>OrphanNodeRatio ≈ 0.0001</code>. They measure different things (unlinked docs vs. graph nodes), but surfaced side-by-side they'll mislead — define each explicitly or unify the term."},
+    {cls:"g",tag:"resolved",h:"Orphan metric collision disambiguated (ENC-ISS-555)",
+     p:"CEE now emits <code>lineage_unanchored</code> (tracker records missing <code>parent_task_id</code>/<code>related_task_ids</code> or wave <code>plan_anchor_id</code>). GraphHealth now emits <code>IsolatedNodeRatio</code> (Neo4j nodes with zero incident edges). Same corpus, different quantities — no longer one overloaded word."},
     {cls:"w",tag:"performance",h:"corpus_entropy_engine ~26s per run",
      p:"By far the slowest tenant (vs 1–6s for the others). Fine at 2×/day, but it's the first thing that will strain if the heavy cadence tightens or the corpus grows — worth a scan-scope or incremental pass."},
     {cls:"w",tag:"observability",h:"CEE per-category metrics now in CloudWatch",
      p:"<code>Enceladus/CEE EntropyFindingCount</code> is dimensioned by <code>Category</code> (orphan, stagnation, relational, retention, compliance_semantic) plus <code>ScanDurationMs</code> for cost profiling. S3 beat-artifact retention for sense/decide is equalized to 7d (ENC-TSK-N49) so longitudinal harvests retain the tiers ISS-553 needs."},
     {cls:"g",tag:"healthy",h:"What's genuinely working",
-     p:"HCE is producing organic lesson candidates; percolation is tracking a real phase-transition with stable analytical p_c; orphan-ratio is near zero; the beat scheduler itself fired <code>312</code> times with zero errors. The heartbeat is alive — the open questions are about yield and tuning, not survival."},
+     p:"HCE is producing organic lesson candidates; percolation is tracking a real phase-transition with stable analytical p_c; IsolatedNodeRatio is near zero; the beat scheduler itself fired <code>312</code> times with zero errors. The heartbeat is alive — the open questions are about yield and tuning, not survival."},
   ];
   levers.forEach(l=>{
     const d=el("div","lever "+l.cls);
@@ -424,7 +424,7 @@ def build_embed(data):
 
     return {
         "gh_fiedler": _rounded_series(gh.get("FiedlerAlgebraicConnectivity")),
-        "gh_orphan": _rounded_series(gh.get("OrphanNodeRatio")),
+        "gh_isolated_node_ratio": _rounded_series(gh.get("IsolatedNodeRatio")),
         "gh_density": _rounded_series(gh.get("GraphEdgeDensity")),
         "gh_nodes": _rounded_series(gh.get("GraphNodeCount")),
         "rh_dur": _rounded_series(rh.get("beat_duration_ms")),
