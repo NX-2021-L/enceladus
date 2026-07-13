@@ -61,7 +61,23 @@ Response schema:
       "dimensions": 256
     }
 
-Related: ENC-TSK-B62, ENC-TSK-B90, ENC-TSK-B94, ENC-FTR-062, ENC-PLN-006.
+Tenant mode (ENC-TSK-N32)
+-------------------------
+This Lambda also serves as the ``embedding_refresh`` rhythm heavy-beat tenant
+(backend/lambda/rhythm_cycle/tenant_invoker.py). When the invoke payload
+carries a non-empty ``result_key`` (only tenant_invoker.py's payload ever
+sets it), the handler: (a) applies EMBEDDING_REFRESH_MAX_PER_RUN as the
+effective ``limit`` when the event omits one, as a runaway-cost backstop for
+an unattended beat; and (b) writes a completion stanza to ``result_key``
+carrying {tenant, status, completed_at, detail: {processed, skipped, errors,
+missing_node}} so the beat's silent-tenant detector sees this tenant report.
+Because per-record skip_existing hash-gating already limits Titan calls to
+changed records, a per-heavy-window invocation is budget-safe. The one-shot
+/ io-dev-admin invocation path (no result_key) and the UAT probe
+short-circuit are unaffected.
+
+Related: ENC-TSK-B62, ENC-TSK-B90, ENC-TSK-B94, ENC-FTR-062, ENC-PLN-006,
+ENC-TSK-N18, ENC-TSK-N32.
 """
 
 from __future__ import annotations
@@ -70,6 +86,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger()
@@ -117,6 +134,20 @@ RECORD_TYPE_TO_LABEL: Dict[str, str] = {
 
 # Allow-list used for label validation before Cypher substitution.
 ALLOWED_LABELS = set(RECORD_TYPE_TO_LABEL.values())
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-N32: rhythm heavy-beat tenant-mode config (embedding_refresh
+# tenant). Mirrors the RHYTHM_RESULTS_BUCKET / completion-stanza contract
+# ENC-TSK-N23 wired into backend/lambda/memory_consolidation/lambda_function.py.
+# ---------------------------------------------------------------------------
+RHYTHM_TENANT_NAME = "embedding_refresh"
+RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
+
+# Runaway-cost backstop: per-run hard cap applied as event.limit when invoked
+# in tenant-mode (rhythm beat) and no explicit event.limit was given. The
+# one-shot / io-dev-admin invocation path is unaffected — it never carries a
+# result_key, so tenant_mode is False and this cap does not apply.
+EMBEDDING_REFRESH_MAX_PER_RUN = int(os.environ.get("EMBEDDING_REFRESH_MAX_PER_RUN", "500"))
 
 
 # ---------------------------------------------------------------------------
@@ -391,11 +422,74 @@ def _is_uat_probe(event: Dict[str, Any]) -> bool:
     return str(event.get("rawPath") or "") == "/__uat_probe__"
 
 
+# --- ENC-TSK-N32: rhythm heavy-beat completion-stanza contract --------------
+# When invoked as a rhythm tenant (backend/lambda/rhythm_cycle/tenant_invoker
+# .py), the invoke payload always carries beat_id/beat_type/beat_at/
+# predecessor_artifact_key/expected_output_contract/session_identity/
+# result_key — the one-shot event schema (limit/labels/dry_run/skip_existing)
+# never sets result_key. Scheduled/one-shot invocations carry no result_key
+# and skip the stanza write. Stanza shape mirrors
+# tenant_invoker.write_completion_stanza / memory_consolidation's
+# _write_rhythm_stanza (ENC-TSK-N23); a write failure is logged, never
+# raised — the beat's silent-tenant detection treats a missing stanza as
+# silence, which is the honest signal.
+
+
+def _is_tenant_invoke(event: Dict[str, Any]) -> bool:
+    """Return True when invoked as a rhythm-beat tenant (ENC-TSK-N32).
+
+    A non-empty ``result_key`` is the same signal
+    memory_consolidation._write_rhythm_stanza uses to gate its own stanza
+    write — only tenant_invoker.py's payload ever sets it.
+    """
+    if not isinstance(event, dict):
+        return False
+    return bool(str(event.get("result_key") or "").strip())
+
+
+def _write_rhythm_stanza(
+    event: Dict[str, Any], status: str, detail: Optional[Dict[str, Any]] = None
+) -> bool:
+    """Write the tenant completion stanza to the beat's per-tenant result_key.
+
+    Mirrors memory_consolidation._write_rhythm_stanza (ENC-TSK-N23) so the
+    heavy-beat silent-tenant detector (tenant_invoker.check_silent_tenants)
+    sees this tenant report the same way the other wired tenants do. Never
+    raises — a stanza-write failure must not surface as a backfill failure.
+    """
+    result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
+    if not result_key:
+        return False
+    body = {
+        "tenant": RHYTHM_TENANT_NAME,
+        "status": status,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail or {},
+    }
+    try:
+        import boto3  # lazy, mirrors module idiom — keeps module import AWS-free
+
+        boto3.client("s3", region_name=DDB_REGION).put_object(
+            Bucket=RHYTHM_RESULTS_BUCKET,
+            Key=result_key,
+            Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — stanza failure must never break the run
+        logger.warning("[ERROR] rhythm stanza write failed key=%s: %s", result_key, exc)
+        return False
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """One-shot backfill entrypoint. See module docstring for event / response."""
+    """Entrypoint: one-shot backfill, honoring the rhythm completion-stanza
+    contract when invoked as a heavy-beat tenant (ENC-TSK-N32). See module
+    docstring for the event / response schema."""
     logger.info("[START] Titan V2 backfill invoked event=%s", json.dumps(event or {}))
 
-    # UAT health probe short-circuit (see _is_uat_probe docstring).
+    # UAT health probe short-circuit (see _is_uat_probe docstring). Must stay
+    # ahead of tenant-mode detection — the probe payload never carries
+    # result_key, but the short-circuit response must be unconditional.
     if _is_uat_probe(event or {}):
         logger.info("[INFO] UAT probe detected; returning health response without scan")
         return {
@@ -407,9 +501,44 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "helper_module": "embedding",
         }
 
+    event = event or {}
+    tenant_mode = _is_tenant_invoke(event)
+
+    try:
+        result = _run_backfill(event, tenant_mode)
+    except Exception:
+        if tenant_mode:
+            _write_rhythm_stanza(event, "failed", {})
+        raise
+
+    if tenant_mode:
+        _write_rhythm_stanza(
+            event,
+            "completed",
+            {
+                "processed": result.get("processed"),
+                "skipped": result.get("skipped"),
+                "errors": result.get("errors"),
+                "missing_node": result.get("missing_node"),
+            },
+        )
+    return result
+
+
+def _run_backfill(event: Dict[str, Any], tenant_mode: bool) -> Dict[str, Any]:
+    """Core scan/embed/write loop shared by the one-shot and tenant-mode
+    invocation paths. See module docstring for event / response schema."""
     started_at = time.time()
     event = event or {}
-    limit = int(event.get("limit") or 0)
+    raw_limit = event.get("limit")
+    if raw_limit:
+        limit = int(raw_limit)
+    elif tenant_mode:
+        # ENC-TSK-N32 runaway-cost backstop: a rhythm beat fires unattended,
+        # so an unbounded tenant-mode invocation is capped by default.
+        limit = EMBEDDING_REFRESH_MAX_PER_RUN
+    else:
+        limit = 0
     dry_run = bool(event.get("dry_run"))
     skip_existing = bool(event.get("skip_existing", True))
     requested_labels = event.get("labels")
