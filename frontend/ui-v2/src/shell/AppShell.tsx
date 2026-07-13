@@ -7,13 +7,14 @@ import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
 import { refreshApp } from '../offline/swUpdate'
 import { CommandPalette } from './CommandPalette'
-import { FeedPane } from './FeedPane'
+import { useCommandNavigation } from './useCommandNavigation'
 import { ConflictMergeModal, MutationErrorFlashbar, OfflinePendingFlashbar } from '../components/OfflineLayer'
 import enceladusMarkUrl from '../../../design-system-2/assets/logos/enceladus-mark.svg'
 import './shell.css'
 
 const LOGOUT_HREF = '__logout__'
 const REFRESH_APP_HREF = '__refresh_app__'
+const DESKTOP_QUERY = '(min-width: 48.0625rem)'
 
 const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
@@ -52,13 +53,20 @@ function resolveActiveHref(pathname: string): string {
 
 /**
  * Cockpit shell on design-system-2 AppLayout: TopNavigation + SideNavigation
- * tray + Feed tools rail.
+ * tray.
  *
  * ENC-TSK-M75 (io UAT 2026-07-12): the mobile bottom nav bar
  * (Home/Projects/Feed/Docs) was removed. Per io decision the TopNavigation
  * "Menu" button + SideNavigation drawer is now the single primary navigation
  * on ALL viewports, so the redundant bottom bar (which rendered inside the
  * scroll flow on record detail pages) no longer exists.
+ *
+ * ENC-TSK-N46 (ENC-ISS-552): the top-nav "Feed" toggle + its FeedPane tools
+ * rail were removed as a stale duplicate of the dedicated /feed page (still
+ * reachable via the drawer link above, untouched). The nav's utilities row
+ * is now just Menu, rightmost; a thin search box sits before it and opens
+ * CommandPalette -- full-screen on mobile (tap-to-expand), anchored under
+ * the box on desktop (widen-in-place), per viewport at focus time.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
@@ -68,13 +76,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   const navigationOpen = useUiStore((s) => s.sidebarOpen)
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)
+  const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen)
+  const commandQuery = useUiStore((s) => s.commandQuery)
+  const setCommandQuery = useUiStore((s) => s.setCommandQuery)
   const openCommandPalette = useUiStore((s) => s.openCommandPalette)
-  const toolsOpen = useUiStore((s) => s.feedRailOpen)
-  const toggleFeedRail = useUiStore((s) => s.toggleFeedRail)
-  const setFeedRailOpen = useUiStore((s) => s.setFeedRailOpen)
+  const closeCommandPalette = useUiStore((s) => s.closeCommandPalette)
+  // Only used for the desktop anchored search box's own Enter handling --
+  // the mobile full-screen overlay has its own input + submit binding
+  // inside CommandPalette, untouched here.
+  const { submit: submitCommand } = useCommandNavigation(commandQuery)
 
   useEffect(() => {
-    const desktop = window.matchMedia('(min-width: 48.0625rem)')
+    const desktop = window.matchMedia(DESKTOP_QUERY)
     const syncSidebar = () => setSidebarOpen(desktop.matches)
     syncSidebar()
     desktop.addEventListener('change', syncSidebar)
@@ -111,7 +124,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
     if (href) {
       navigate({ to: href })
-      if (!window.matchMedia('(min-width: 48.0625rem)').matches) {
+      if (!window.matchMedia(DESKTOP_QUERY).matches) {
         setSidebarOpen(false)
       }
     }
@@ -133,11 +146,32 @@ export function AppShell({ children }: { children: ReactNode }) {
         topNavigation={
           <TopNavigation
             identity={{ title: 'ENCELADUS', href: '/', iconSrc: enceladusMarkUrl, version: __APP_VERSION__ }}
-            utilities={[
-              { text: 'Menu', onClick: toggleSidebar },
-              { text: 'Search', onClick: openCommandPalette },
-              { text: toolsOpen ? 'Hide feed' : 'Feed', onClick: toggleFeedRail },
-            ]}
+            search={{
+              value: commandQuery,
+              onChange: setCommandQuery,
+              placeholder: 'Search…',
+              // Mobile taps expand to the existing full-screen overlay;
+              // desktop focus widens the box in place and opens the
+              // anchored dropdown instead (ENC-TSK-N46).
+              onFocus: () => openCommandPalette(window.matchMedia(DESKTOP_QUERY).matches),
+              onBlur: () => {
+                // Only the anchored (desktop) mode should close on blur --
+                // on mobile, focus moving into CommandPalette's own
+                // full-screen input fires this same blur and would
+                // otherwise close the overlay the instant it opens.
+                if (commandPaletteOpen && window.matchMedia(DESKTOP_QUERY).matches) {
+                  closeCommandPalette()
+                }
+              },
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') submitCommand()
+                if (event.key === 'Escape') {
+                  closeCommandPalette()
+                  event.currentTarget.blur()
+                }
+              },
+            }}
+            utilities={[{ text: 'Menu', onClick: toggleSidebar }]}
           />
         }
         navigation={
@@ -156,8 +190,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div className="ev2-shell__main">{children}</div>
           </div>
         }
-        tools={<FeedPane onClose={() => setFeedRailOpen(false)} />}
-        toolsOpen={toolsOpen}
       />
       <CommandPalette />
       <OfflinePendingFlashbar />

@@ -17,9 +17,21 @@ export interface TopNavUtility {
   onClick?: () => void;
 }
 
+export interface TopNavSearch {
+  value?: string;
+  onChange?: (value: string) => void;
+  onFocus?: React.FocusEventHandler<HTMLInputElement>;
+  onBlur?: React.FocusEventHandler<HTMLInputElement>;
+  onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>;
+  placeholder?: string;
+}
+
 export interface TopNavigationProps {
   identity?: TopNavIdentity;
   utilities?: TopNavUtility[];
+  /** Thin, focus-to-widen search input rendered between the spacer and the
+   * utilities row. Omit to render no search box at all. */
+  search?: TopNavSearch | null;
 }
 
 /** Cloudscape TopNavigation → Enceladus: blurred void bar, orbital-mark wordmark, mono utility badges. */
