@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-09.1",
-  "updated_at": "2026-07-09T02:00:00Z",
-  "last_change_summary": "ENC-TSK-M45 (FTR-121 registry entry, DOC-B716E8FB10B6 COE, M44 sibling): backport the ENC-FTR-121 Escalations request/applier/watch/notify surface from v4/main onto main. The 2026-07-08T22:25:44Z main-ref v3-prod Lambda deploy had reverted the escalation.request/get/list surface (ENC-TSK-J68), the applyEscalatedMutation applier (ENC-TSK-J69), coordination_api's approve/deny/feed handlers (ENC-TSK-J70 backend portion only -- PWA/CFN already landed via ENC-TSK-J82/J80), the agent-side escalation.watch cursor poll (ENC-TSK-J71, with the ENC-TSK-J89 base-relative-path fix folded in), and the SNS [ESCALATION] notify hook (ENC-TSK-J72), leaving execute() unable to resolve action 'escalation.request'. Extraction was surgical by function/hunk, NOT by commit: v4/main's J68/J69/J71 commits are git-history-entangled with the unrelated ENC-TSK-I07 supersession primitive and ENC-TSK-I08/I09 dedup-review surfaces (neither present on main), and J70/J71's coordination_api hunks are similarly entangled with the unrelated ENC-TSK-J46/FTR-096 lesson-candidate curation surface (also not on main) -- those were excluded by isolating function-boundary content within each 3-way-merge conflict block rather than accepting the whole hunk. New entities: tracker.escalation (the escalation item type + FSM + mutation-handler registry + applier + waiver semantics, tracker_mutation), mcp_server.escalation_actions (escalation.request/get/list/watch code-mode actions), coordination.escalations (coordination_api's feed/approve/deny/watch routes -- the base ENC-TSK-J70 in-Lambda _is_cognito_session check only; the additional ENC-TSK-L92/M12 allowlist + human-principal gates remain exclusively in the standalone escalation_decision_authorizer Lambda per that entity's existing prod-vs-gamma split, unchanged by this task). CFN routes/env (ENC-TSK-J80) and the PWA Escalations page (ENC-TSK-J82) were already on main prior to this task and are unmodified here.",
+  "version": "2026-07-13.1",
+  "updated_at": "2026-07-13T05:26:00Z",
+  "last_change_summary": "ENC-TSK-N45: document_api's documents/search endpoint (_handle_search, backing document.query_response) now defaults to sorting results by updated_at descending (newest first) before slicing to PAGE_SIZE, matching the default already used by feed_query, changelog_api, and the document candidate-curation list. Previously results were returned in unsorted DynamoDB scan order. No new/renamed/removed fields -- ordering-only behavior change, documented on document.query_response.documents.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1168,7 +1168,7 @@
         "documents": {
           "type": "array",
           "item_type": "object",
-          "definition": "Document metadata records for list/search results."
+          "definition": "Document metadata records for list/search results. Default order (ENC-TSK-N45): sorted by updated_at descending (newest first); no explicit sort param is currently supported on this endpoint."
         },
         "count": {
           "type": "number",
@@ -6180,6 +6180,11 @@
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-07-13.1",
+      "date": "2026-07-13",
+      "summary": "ENC-TSK-N45: document_api's documents/search endpoint (_handle_search, backing document.query_response) now defaults to sorting results by updated_at descending (newest first) before slicing to PAGE_SIZE, matching the default already used by feed_query, changelog_api, and the document candidate-curation list. Previously results were returned in unsorted DynamoDB scan order. No new/renamed/removed fields -- ordering-only behavior change, documented on document.query_response.documents."
+    },
     {
       "version": "2026-07-08.1",
       "date": "2026-07-08",
