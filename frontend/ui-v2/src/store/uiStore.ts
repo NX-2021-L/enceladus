@@ -23,13 +23,6 @@ interface UiState {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
 
-  // Feed rail (ENC-ISS-513 / FND-01): opt-in, dismissible tools panel.
-  // Closed by default -- it echoes the /feed destination's own content, so
-  // it should only show when the operator asks for it, not on every page.
-  feedRailOpen: boolean
-  toggleFeedRail: () => void
-  setFeedRailOpen: (open: boolean) => void
-
   // Selected record (drives feed highlight / deep-link affordances)
   selectedRecordId: string | null
   selectRecord: (recordId: string | null) => void
@@ -43,10 +36,14 @@ interface UiState {
   recentItems: RecentlyViewedEntry[]
   setRecentItems: (items: RecentlyViewedEntry[]) => void
 
-  // Command palette
+  // Command palette. `commandPaletteAnchored` selects the render mode: false
+  // (default) is the full-screen mobile overlay; true is the small dropdown
+  // anchored under the top-nav search box (desktop widen-in-place), opened
+  // by AppShell based on viewport width at focus time (ENC-TSK-N46).
   commandPaletteOpen: boolean
+  commandPaletteAnchored: boolean
   commandQuery: string
-  openCommandPalette: () => void
+  openCommandPalette: (anchored?: boolean) => void
   closeCommandPalette: () => void
   setCommandQuery: (query: string) => void
 
@@ -64,10 +61,6 @@ export const useUiStore = create<UiState>((set) => ({
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
-  feedRailOpen: false,
-  toggleFeedRail: () => set((s) => ({ feedRailOpen: !s.feedRailOpen })),
-  setFeedRailOpen: (open) => set({ feedRailOpen: open }),
-
   selectedRecordId: null,
   selectRecord: (recordId) => set({ selectedRecordId: recordId }),
 
@@ -75,9 +68,10 @@ export const useUiStore = create<UiState>((set) => ({
   setRecentItems: (items) => set({ recentItems: items }),
 
   commandPaletteOpen: false,
+  commandPaletteAnchored: false,
   commandQuery: '',
-  openCommandPalette: () => set({ commandPaletteOpen: true }),
-  closeCommandPalette: () => set({ commandPaletteOpen: false, commandQuery: '' }),
+  openCommandPalette: (anchored = false) => set({ commandPaletteOpen: true, commandPaletteAnchored: anchored }),
+  closeCommandPalette: () => set({ commandPaletteOpen: false, commandPaletteAnchored: false, commandQuery: '' }),
   setCommandQuery: (query) => set({ commandQuery: query }),
 
   filters: EMPTY_FILTERS,

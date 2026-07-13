@@ -1,42 +1,77 @@
-import { useNavigate } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
 import { Search } from 'lucide-react'
-import { projectRegistryQueryOptions, inferRecordNavigation } from '../api/projectRegistry'
 import { useUiStore } from '../store/uiStore'
-import { DOCUMENT_ROUTE_PATH, trackerRoutePath } from '../routes/recordLink'
+import { useCommandNavigation } from './useCommandNavigation'
 
 /**
- * Command palette. Open-state and query string live in the Zustand UI store
- * (AC-13). Given a `TYPE-...` record id it routes to that record's detail page
- * using the project registry (ENC-TSK-L17 / ENC-ISS-487).
+ * Command palette. Open-state, anchor mode, and query string live in the
+ * Zustand UI store (AC-13). Given a `TYPE-...` record id it routes to that
+ * record's detail page using the project registry (ENC-TSK-L17 / ENC-ISS-487).
+ *
+ * Two render modes, both driven by `commandPaletteAnchored` (ENC-TSK-N46):
+ *  - false (mobile tap target): full-screen centered modal with its own
+ *    input, unchanged from the original design.
+ *  - true (desktop widen-in-place): a small dropdown anchored under the
+ *    top-nav search box. Typing happens in that nav input (AppShell owns
+ *    it, sharing `commandQuery`/`setCommandQuery`), so this mode renders
+ *    only the results/hint row, not a second input.
  */
 export function CommandPalette() {
   const open = useUiStore((s) => s.commandPaletteOpen)
+  const anchored = useUiStore((s) => s.commandPaletteAnchored)
   const query = useUiStore((s) => s.commandQuery)
   const setCommandQuery = useUiStore((s) => s.setCommandQuery)
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette)
-  const selectRecord = useUiStore((s) => s.selectRecord)
-  const navigate = useNavigate()
-
-  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
+  const { nav, canGo, submit } = useCommandNavigation(query)
 
   if (!open) return null
 
-  const nav = inferRecordNavigation(query, projects)
-  const canGo = nav !== null && (nav.type === 'document' || nav.projectId !== null)
+  const hint = canGo && nav ? (
+    <span>
+      Enter to open{' '}
+      <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
+        {nav.id}
+      </span>{' '}
+      as {nav.type}
+      {nav.projectId ? (
+        <>
+          {' '}
+          in{' '}
+          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
+            {nav.projectId}
+          </span>
+        </>
+      ) : null}
+    </span>
+  ) : nav && nav.type !== 'document' && !nav.projectId ? (
+    <span>Unknown project prefix — check GET /api/v1/projects registry</span>
+  ) : (
+    <span>Type a record id (TSK / ISS / FTR / PLN / LSN / DOC)</span>
+  )
 
-  function submit() {
-    if (!nav || !canGo) return
-    selectRecord(nav.id)
-    closeCommandPalette()
-    if (nav.type === 'document') {
-      navigate({ to: DOCUMENT_ROUTE_PATH, params: { id: nav.id } })
-      return
-    }
-    navigate({
-      to: trackerRoutePath(nav.type),
-      params: { project: nav.projectId as string, id: nav.id },
-    })
+  if (anchored) {
+    return (
+      <div
+        role="listbox"
+        aria-label="Search results"
+        style={{
+          position: 'fixed',
+          top: '60px',
+          right: '20px',
+          width: 'min(360px, calc(100vw - 40px))',
+          background: 'var(--bg-surface)',
+          border: 'var(--border-hover)',
+          borderRadius: 'var(--radius-lg)',
+          boxShadow: 'var(--shadow-lg), var(--glow-teal)',
+          padding: 'var(--space-3) var(--space-4)',
+          fontSize: 'var(--text-xs)',
+          color: 'var(--fg-muted)',
+          fontFamily: 'var(--font-body)',
+          zIndex: 50,
+        }}
+      >
+        {hint}
+      </div>
+    )
   }
 
   return (
@@ -98,28 +133,7 @@ export function CommandPalette() {
             fontFamily: 'var(--font-body)',
           }}
         >
-          {canGo && nav ? (
-            <span>
-              Enter to open{' '}
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
-                {nav.id}
-              </span>{' '}
-              as {nav.type}
-              {nav.projectId ? (
-                <>
-                  {' '}
-                  in{' '}
-                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
-                    {nav.projectId}
-                  </span>
-                </>
-              ) : null}
-            </span>
-          ) : nav && nav.type !== 'document' && !nav.projectId ? (
-            <span>Unknown project prefix — check GET /api/v1/projects registry</span>
-          ) : (
-            <span>Type a record id (TSK / ISS / FTR / PLN / LSN / DOC)</span>
-          )}
+          {hint}
         </div>
       </div>
     </div>
