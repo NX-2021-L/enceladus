@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-13.4",
-  "updated_at": "2026-07-13T07:16:00Z",
-  "last_change_summary": "ENC-ISS-555 / ENC-TSK-N52: CEE Category orphan→lineage_unanchored; GraphHealth OrphanNodeRatio→IsolatedNodeRatio; observability.orphan_metric_disambiguation entity. Merged atop ENC-TSK-N51 (percolation susceptibility-peak estimator) and prior N49/N54 entries.",
+  "version": "2026-07-13.5",
+  "updated_at": "2026-07-13T07:24:00Z",
+  "last_change_summary": "ENC-TSK-N45 (v4/main port): document_api's documents/search endpoint (_handle_search, backing document.query_response) now defaults to sorting results by updated_at descending (newest first) before slicing to PAGE_SIZE, matching the default already used by feed_query, changelog_api, and _list_by_project's candidate-curation list. Previously results were returned in unsorted DynamoDB scan order. No new/renamed/removed fields -- ordering-only behavior change, documented on document.query_response.documents.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1338,7 +1338,7 @@
         "documents": {
           "type": "array",
           "item_type": "object",
-          "definition": "Document metadata records for list/search results."
+          "definition": "Document metadata records for list/search results. Default order (ENC-TSK-N45): sorted by updated_at descending (newest first); no explicit sort param is currently supported on this endpoint."
         },
         "count": {
           "type": "number",
@@ -7983,6 +7983,11 @@
   },
   "change_summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "change_log": [
+    {
+      "version": "2026-07-13.5",
+      "date": "2026-07-13",
+      "summary": "ENC-TSK-N45 (v4/main port): document_api's documents/search endpoint (_handle_search, backing document.query_response) now defaults to sorting results by updated_at descending (newest first) before slicing to PAGE_SIZE, matching the default already used by feed_query, changelog_api, and _list_by_project's candidate-curation list. Previously results were returned in unsorted DynamoDB scan order. No new/renamed/removed fields -- ordering-only behavior change, documented on document.query_response.documents."
+    },
     {
       "version": "2026-07-12.4",
       "date": "2026-07-12",

@@ -3128,6 +3128,10 @@ def _handle_search(qs: Dict) -> Dict:
     for d in docs:
         d.pop("content", None)
 
+    # Default sort: updated_at descending (newest first), matching the
+    # default used by feed_query and the document candidate-list endpoint.
+    docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+
     return _response(200, {
         "success": True,
         "documents": docs[:PAGE_SIZE],
