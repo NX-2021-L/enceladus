@@ -482,6 +482,78 @@ Resources:
             Resource:
               - "arn:aws:s3:::enceladus-ui-v2*/*"
 
+  # ENC-TSK-N31 codify: enceladus-cfn-deploy-appconfig-governance-v1 was
+  # attached out-of-band by io (PLN-078 worklog 2026-07-12) after the
+  # CloudFormationDeployRole inline-policy quota (10,240B) was exhausted.
+  # DISTINCT ManagedPolicyName (not "-v1") is deliberate -- a name
+  # collision with the manual policy would fail the apply. io detaches
+  # and deletes the manual v1 policy only after this CFN-managed policy
+  # is confirmed attached via list-attached-role-policies; detaching
+  # first would drop the live AppConfig deploy grant mid-flight. Same
+  # attached-managed-policy pattern as UiCdnDeployPolicy above. Mirrored
+  # from main verbatim (name, grants, resources) for cutover parity --
+  # the live roles stack deploys from main; this copy lands here so the
+  # eventual v4/main cutover carries an identically-named managed policy.
+  # Statement 2 resources are scoped to the gamma application id
+  # (fhhcl7m), not a cross-application wildcard: bootstrap run
+  # 29201683093 proved AWS authorizes appconfig:CreateHostedConfiguration
+  # Version against the specific APPLICATION arn, not configurationprofile/*
+  # or application/*. deploymentstrategy/AppConfig.AllAtOnce is included
+  # because the CFN deployment handler tags the deployment ARN on
+  # read-back (ENC-TSK-N31 intent, superseding an earlier description
+  # draft that omitted it).
+  # ENC-TSK-N34 (PITR rollout) separately proposes widening this same
+  # role's DynamoDB grant via a new ManagedPolicy in this neighborhood --
+  # no shared resource name, but flagged here for merge adjacency.
+  AppConfigGovernanceDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-appconfig-governance-cfn
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AppConfigApplicationProfileEnvironmentCrud
+            Effect: Allow
+            Action:
+              - appconfig:GetApplication
+              - appconfig:UpdateApplication
+              - appconfig:DeleteApplication
+              - appconfig:CreateConfigurationProfile
+              - appconfig:GetConfigurationProfile
+              - appconfig:UpdateConfigurationProfile
+              - appconfig:DeleteConfigurationProfile
+              - appconfig:ListConfigurationProfiles
+              - appconfig:CreateEnvironment
+              - appconfig:GetEnvironment
+              - appconfig:UpdateEnvironment
+              - appconfig:DeleteEnvironment
+              - appconfig:ListEnvironments
+            Resource:
+              - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m"
+              - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m/*"
+          - Sid: AppConfigHostedVersionAndDeployment
+            Effect: Allow
+            Action:
+              - appconfig:CreateHostedConfigurationVersion
+              - appconfig:GetHostedConfigurationVersion
+              - appconfig:DeleteHostedConfigurationVersion
+              - appconfig:ListHostedConfigurationVersions
+              - appconfig:StartDeployment
+              - appconfig:GetDeployment
+              - appconfig:StopDeployment
+              - appconfig:ListDeployments
+              - appconfig:ListTagsForResource
+              - appconfig:TagResource
+              - appconfig:UntagResource
+            Resource:
+              - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m"
+              - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m/*"
+              - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:deploymentstrategy/AppConfig.AllAtOnce"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
