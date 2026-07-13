@@ -133,7 +133,7 @@ def build_dashboard(out_dir):
 
     # --- CloudWatch series for charts ---
     data["cloudwatch"]["GraphHealth"] = {m: series_by_metric(cw_gh, m) for m in
-        ["FiedlerAlgebraicConnectivity", "GraphEdgeDensity", "OrphanNodeRatio", "GraphNodeCount"]}
+        ["FiedlerAlgebraicConnectivity", "GraphEdgeDensity", "IsolatedNodeRatio", "GraphNodeCount"]}
     data["cloudwatch"]["Rhythm"] = {m: series_by_metric(cw_rh, m) for m in
         ["beat_duration_ms", "beat_cost_estimate", "backlog_open_leaves"]}
     data["cloudwatch"]["CEE"] = {m["metric"] + "|" + json.dumps(m["dimensions"]): m["points"] for m in cw_cee["metrics"]}
@@ -164,7 +164,7 @@ def print_key_signals(data):
     print("\n=== KEY SIGNALS ===")
     print("decide backlog_open_leaves:", [v for _, v in data['tiers']['decide']['series']['backlog_open_leaves']])
     print("GraphHealth Fiedler:", [round(v, 4) if v else v for _, v in data['cloudwatch']['GraphHealth']['FiedlerAlgebraicConnectivity']][-8:])
-    print("GraphHealth OrphanNodeRatio:", [round(v, 4) if v else v for _, v in data['cloudwatch']['GraphHealth']['OrphanNodeRatio']][-8:])
+    print("GraphHealth IsolatedNodeRatio:", [round(v, 4) if v else v for _, v in data['cloudwatch']['GraphHealth']['IsolatedNodeRatio']][-8:])
     print("Percolation analytical_pc:", [r['analytical_pc'] for r in data['percolation']['rows']])
     print("Percolation empirical_pc:", [r['empirical_pc'] for r in data['percolation']['rows']])
     print("tenants:", {k: v['detail'] for k, v in data['tenants'].items()})

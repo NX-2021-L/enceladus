@@ -266,7 +266,7 @@ def test_hard_disabled_false_when_unset_or_zero():
 # ---------------------------------------------------------------------------
 
 def test_build_category_metric_data_shape():
-    counts = {"orphan": 3, "stagnation": 1}
+    counts = {"lineage_unanchored": 3, "stagnation": 1}
     data = core.build_category_metric_data(counts, function_name="cee-fn", timestamp="T")
     assert len(data) == 2
     for datum in data:
@@ -318,9 +318,9 @@ def test_handler_publishes_all_five_category_counts(monkeypatch):
     assert body["success"] is True
     counts = body["counts"]
     assert set(counts.keys()) == {
-        "orphan", "stagnation", "relational", "retention", "compliance_semantic",
+        "lineage_unanchored", "stagnation", "relational", "retention", "compliance_semantic",
     }
-    assert counts["orphan"] >= 1  # the orphan task has no parent/related
+    assert counts["lineage_unanchored"] >= 1  # unanchored task has no parent/related
     assert counts["stagnation"] == 1
     assert counts["retention"] == 1
     assert counts["compliance_semantic"] == 1
@@ -438,7 +438,7 @@ def test_rhythm_stanza_result_key_writes_contract_stanza():
 
     key = "gamma/rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/corpus_entropy_engine.json"
     with mock.patch("boto3.client") as client:
-        ok = mod._write_rhythm_stanza({"result_key": key}, "completed", {"counts": {"orphan": 1}})
+        ok = mod._write_rhythm_stanza({"result_key": key}, "completed", {"counts": {"lineage_unanchored": 1}})
     assert ok is True
     kwargs = client.return_value.put_object.call_args.kwargs
     assert kwargs["Bucket"] == mod.RHYTHM_RESULTS_BUCKET
@@ -447,7 +447,7 @@ def test_rhythm_stanza_result_key_writes_contract_stanza():
     assert stanza["tenant"] == "corpus_entropy_engine"
     assert stanza["status"] == "completed"
     assert "completed_at" in stanza
-    assert stanza["detail"] == {"counts": {"orphan": 1}}
+    assert stanza["detail"] == {"counts": {"lineage_unanchored": 1}}
 
 
 def test_rhythm_stanza_hard_disabled_reports_skipped():

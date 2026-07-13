@@ -18,7 +18,7 @@ Covers:
     on a successful invoke (and is NOT equal to the GraphEdgeDensity proxy
     when the two values differ), and falls back to the GraphEdgeDensity
     proxy when the invoke fails -- preserving the pre-K43 degrade behavior
-    exactly (never blocks GraphNodeCount/GraphEdgeDensity/OrphanNodeRatio).
+    exactly (never blocks GraphNodeCount/GraphEdgeDensity/IsolatedNodeRatio).
 """
 from __future__ import annotations
 
@@ -138,8 +138,8 @@ class _Sess:
         return False
 
     def run(self, cypher, **params):
-        if "orphans" in cypher:
-            return _Single({"orphans": self._d.orphan_count})
+        if "isolated" in cypher:
+            return _Single({"isolated": self._d.isolated_count})
         if "count(n)" in cypher:
             return _Single({"total": self._d.node_count})
         if "count(r)" in cypher:
@@ -156,10 +156,10 @@ class _Single:
 
 
 class _Driver:
-    def __init__(self, node_count=10, edge_count=20, orphan_count=1):
+    def __init__(self, node_count=10, edge_count=20, isolated_count=1):
         self.node_count = node_count
         self.edge_count = edge_count
-        self.orphan_count = orphan_count
+        self.isolated_count = isolated_count
 
     def session(self):
         return _Sess(self)
@@ -170,7 +170,7 @@ class ComputeMetricsTests(unittest.TestCase):
         lf._lambda_client = None
 
     def test_fiedler_algebraic_connectivity_uses_real_value_on_success(self):
-        driver = _Driver(node_count=10, edge_count=20, orphan_count=1)  # GraphEdgeDensity = 2.0
+        driver = _Driver(node_count=10, edge_count=20, isolated_count=1)  # GraphEdgeDensity = 2.0
         lf._fetch_real_fiedler_value = lambda: {"ok": True, "lambda2": 0.37}
         metrics = lf._compute_metrics(driver)
         self.assertEqual(metrics["FiedlerAlgebraicConnectivity"], 0.37)
@@ -180,19 +180,19 @@ class ComputeMetricsTests(unittest.TestCase):
         self.assertNotEqual(metrics["FiedlerAlgebraicConnectivity"], metrics["GraphEdgeDensity"])
 
     def test_fiedler_algebraic_connectivity_falls_back_to_proxy_on_failure(self):
-        driver = _Driver(node_count=10, edge_count=20, orphan_count=1)  # GraphEdgeDensity = 2.0
+        driver = _Driver(node_count=10, edge_count=20, isolated_count=1)  # GraphEdgeDensity = 2.0
         lf._fetch_real_fiedler_value = lambda: {"ok": False, "error": "graph_query_api unavailable"}
         metrics = lf._compute_metrics(driver)
         self.assertEqual(metrics["FiedlerAlgebraicConnectivity"], metrics["GraphEdgeDensity"])
         self.assertEqual(metrics["FiedlerAlgebraicConnectivity"], 2.0)
 
     def test_other_metrics_unaffected_by_fiedler_fetch(self):
-        driver = _Driver(node_count=50, edge_count=75, orphan_count=3)
+        driver = _Driver(node_count=50, edge_count=75, isolated_count=3)
         lf._fetch_real_fiedler_value = lambda: {"ok": True, "lambda2": 0.15}
         metrics = lf._compute_metrics(driver)
         self.assertEqual(metrics["GraphNodeCount"], 50.0)
         self.assertEqual(metrics["GraphEdgeDensity"], 1.5)
-        self.assertEqual(metrics["OrphanNodeRatio"], 0.06)
+        self.assertEqual(metrics["IsolatedNodeRatio"], 0.06)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ back to the original GraphEdgeDensity proxy only if that invoke fails.
 
 Metrics published:
   - GraphEdgeDensity (edges / nodes) in Enceladus/GraphHealth
-  - OrphanNodeRatio (orphan nodes / total nodes) in Enceladus/GraphHealth
+  - IsolatedNodeRatio (zero-degree Neo4j nodes / total nodes) in Enceladus/GraphHealth
   - GraphNodeCount (total node count) in Enceladus/GraphHealth
   - FiedlerAlgebraicConnectivity (real lambda2 via graph_query_api; proxy
     GraphEdgeDensity value on invoke failure) in Enceladus/GraphHealth
@@ -181,15 +181,16 @@ def _compute_metrics(driver) -> Dict[str, float]:
         else:
             metrics["GraphEdgeDensity"] = 0.0
 
-        # Orphan node ratio = nodes with no relationships / total nodes
+        # Isolated-node ratio = Neo4j nodes with zero incident edges / total nodes.
+        # Distinct from CEE lineage_unanchored (tracker parent/plan field anchors).
         result = session.run(
-            "MATCH (n) WHERE NOT (n)-[]-() RETURN count(n) AS orphans"
+            "MATCH (n) WHERE NOT (n)-[]-() RETURN count(n) AS isolated"
         )
-        orphan_count = result.single()["orphans"]
+        isolated_count = result.single()["isolated"]
         if node_count > 0:
-            metrics["OrphanNodeRatio"] = float(orphan_count) / float(node_count)
+            metrics["IsolatedNodeRatio"] = float(isolated_count) / float(node_count)
         else:
-            metrics["OrphanNodeRatio"] = 0.0
+            metrics["IsolatedNodeRatio"] = 0.0
 
         # ENC-TSK-K43 (B66 Ph5): real Fiedler lambda2 via the FTR-088 CSR/
         # Fiedler path (cross-Lambda invoke into graph_query_api, see

@@ -5,7 +5,8 @@ Five telemetry-only entropy detectors, each a pure function over already-fetched
 governed records (no AWS/HTTP calls in this module — those live in
 lambda_function.py so this module stays network-free and unit-testable):
 
-  (a) Orphan Entropy       — tracker records with no parent/plan linkage.
+  (a) Lineage-unanchored entropy — tracker records with no parent/plan linkage
+      (CloudWatch Category=lineage_unanchored; not Neo4j zero-degree isolation).
   (b) Stagnation Entropy   — open tasks with no worklog entry above threshold.
   (c) Relational Entropy   — declared relational field with no corresponding
                               graph edge.
@@ -38,17 +39,18 @@ DEFAULT_STAGNATION_DAYS = 14
 
 
 # ---------------------------------------------------------------------------
-# (a) Orphan Entropy — no parent/plan linkage
+# (a) Lineage-unanchored entropy — no parent/plan linkage in tracker fields
 # ---------------------------------------------------------------------------
 
 def detect_orphan_entropy(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flag tracker records with no parent/plan linkage.
+    """Flag tracker records lacking parent/plan lineage anchors.
 
-    A task is orphaned if it has no `parent_task_id` AND no non-empty
-    `related_task_ids`. A document is orphaned if its `document_subtype` is
-    "wave" (the subtype that anchors to a Plan) and it has no `plan_anchor_id`.
-    Records that are themselves top-level plans are never orphaned (a plan has
-    no parent by definition).
+    Emitted as EntropyFindingCount Category=lineage_unanchored (ENC-ISS-555).
+    This is NOT the GraphHealth IsolatedNodeRatio (Neo4j nodes with zero edges).
+
+    A task/issue/feature is unanchored if it has no `parent_task_id` AND no
+    non-empty `related_task_ids`. A wave document is unanchored if it has no
+    `plan_anchor_id`. Top-level plans are excluded (no parent by definition).
     """
     findings: List[Dict[str, Any]] = []
     for rec in records:
