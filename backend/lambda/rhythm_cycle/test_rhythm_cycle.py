@@ -103,10 +103,16 @@ class SenseConstraintTests(unittest.TestCase):
 
 
 class TrackerUrlShapeTests(unittest.TestCase):
-    """ENC-TSK-N28: tracker reads must use /records?project_id=, and the
-    dispatch-plan URL must not double the /api/v1 prefix."""
+    """ENC-ISS-553 (supersedes ENC-TSK-N28): N28's /records?project_id=...
+    shape (#1016) live-probed a 200 response but never checked the payload —
+    tracker_mutation's _RE_PROJECT regex matches the literal "records"
+    segment as {projectId}, so it silently queried a nonexistent project and
+    always returned {"records": [], "count": 0}. The real route (confirmed
+    live against gamma) is {TRACKER_API_BASE}/{PROJECT_ID} with query param
+    "type" (the handler reads "type", not "record_type"). The dispatch-plan
+    URL must not double the /api/v1 prefix."""
 
-    @mock.patch("tiers.sense.get_json", return_value={"total": 7})
+    @mock.patch("tiers.sense.get_json", return_value={"count": 7})
     def test_sense_open_task_count_url_shape(self, get_json):
         import tiers.sense as sense
 
@@ -114,8 +120,12 @@ class TrackerUrlShapeTests(unittest.TestCase):
             count = sense._open_task_count()
         self.assertEqual(count, 7)
         url, params = get_json.call_args[0]
-        self.assertEqual(url, "https://x/api/v1/tracker/records")
-        self.assertEqual(params["project_id"], sense.PROJECT_ID)
+        self.assertEqual(url, f"https://x/api/v1/tracker/{sense.PROJECT_ID}")
+        self.assertEqual(params["type"], "task")
+        self.assertEqual(params["status"], "open")
+        self.assertEqual(params["page_size"], 200)
+        self.assertNotIn("record_type", params)
+        self.assertNotIn("project_id", params)
 
     @mock.patch("tiers.decide.get_json", return_value={"records": []})
     def test_decide_open_leaf_tasks_url_shape(self, get_json):
@@ -128,8 +138,11 @@ class TrackerUrlShapeTests(unittest.TestCase):
         self.assertIsNone(backlog["cursor_terminus"])
         self.assertFalse(backlog["truncated"])
         url, params = get_json.call_args[0]
-        self.assertEqual(url, "https://x/api/v1/tracker/records")
-        self.assertEqual(params["project_id"], decide.PROJECT_ID)
+        self.assertEqual(url, f"https://x/api/v1/tracker/{decide.PROJECT_ID}")
+        self.assertEqual(params["type"], "task")
+        self.assertEqual(params["status"], "open")
+        self.assertNotIn("record_type", params)
+        self.assertNotIn("project_id", params)
 
     @mock.patch("tiers.decide.post_json", return_value={"dispatches": []})
     def test_decide_dispatch_plan_no_double_prefix(self, post_json):

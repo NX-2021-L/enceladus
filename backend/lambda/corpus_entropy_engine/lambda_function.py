@@ -332,7 +332,7 @@ def _run_scan(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
         )
 
         counts = {
-            "orphan": len(orphan_findings),
+            "lineage_unanchored": len(orphan_findings),
             "stagnation": len(stagnation_findings),
             "relational": len(relational_findings),
             "retention": len(retention_findings),

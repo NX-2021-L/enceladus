@@ -5,17 +5,39 @@ nightly measurement of the knowledge-graph percolation threshold p_c, feeding th
 Budget Hierarchy Controller's corpus-scale percolation-margin alert ladder
 (DOC-C6584044BEEB Primitive 4).
 
-Two independent estimates are computed every run:
+Two estimates are computed every run. They deliberately measure DIFFERENT
+features of the percolation transition and are NOT expected to coincide — see
+the "Why analytical and empirical differ" note below (ENC-TSK-N51).
 
   * Analytical p_c (Molloy-Reed). On the configuration model a giant component
     exists iff <k^2>/<k> > 2. The critical occupation probability reported here is
     p_c = <k> / <k^2>, computed directly from the live degree sequence (task AC-2).
+    This is the THERMODYNAMIC-LIMIT (N→∞), locally-tree-like EMERGENCE threshold:
+    the occupation fraction at which a macroscopic component first appears.
 
-  * Empirical p_c (Monte Carlo site percolation). Each node is occupied with
-    probability p; an edge is active iff both endpoints are occupied. For a grid
-    of 30 p-values the mean largest-connected-component (LCC) ratio is measured
-    over several trials, and p_c is taken as the p that maximizes the discrete
-    second derivative of the LCC-ratio curve — the percolation onset (task AC-3).
+  * Empirical p_c (Monte Carlo site percolation, susceptibility-peak estimator).
+    Each node is occupied with probability p; an edge is active iff both endpoints
+    are occupied. Over a grid of MC_NUM_P p-values, MC_TRIALS trials measure the
+    mean largest-connected-component (LCC) ratio AND the mean second-largest-cluster
+    ratio at each p. Empirical p_c is the p that MAXIMIZES the mean second-largest
+    cluster ratio — the finite-size percolation susceptibility peak, the standard
+    stable estimator of the transition location (ENC-TSK-N51). The legacy
+    argmax-of-second-derivative-of-LCC estimate is retained for continuity as
+    ``empirical_pc_curvature`` but is NOT the primary signal: it has a high,
+    n-insensitive variance floor (2nd-difference argmax amplifies MC noise) and
+    on a smeared heavy-tailed transition it floats on tail noise regardless of
+    trial count. The susceptibility peak resolves p_c to within one grid cell at
+    MC_TRIALS≈160 (SE ∝ 1/√n crosses the 0.02 grid spacing there).
+
+Why analytical and empirical differ (ENC-TSK-N51 verdict). On a real, finite
+(N ~ 10^3), clustered, degree-correlated governance graph the two numbers sit an
+order of magnitude apart (empirical ~0.1–0.3, analytical ~0.02–0.06) BY DESIGN,
+not because of drift or a bug: (1) analytical is the N→∞ emergence threshold,
+while the finite graph's LCC does not visibly lift off until ~3–4× that value
+(finite-size scaling); and (2) the empirical estimator locates the susceptibility
+peak / dominance region of the transition, which sits above emergence. A large
+gap is therefore EXPECTED and stable; a sudden CHANGE in either series — not the
+gap itself — is the drift signal worth alerting on.
 
 OGTM (task AC-5): the graph is read EXCLUSIVELY through the graph_query_api
 read endpoint (search_type=adjacency). The Lambda performs no direct Neo4j
@@ -38,7 +60,10 @@ Environment variables:
   CLOUDWATCH_NAMESPACE          metric namespace (default: Enceladus/Percolation)
   PROJECT_ID                    graph project scope (default: enceladus)
   AWS_REGION                    region (provided by the Lambda runtime)
-  MC_TRIALS                     Monte Carlo trials per p-value (default: 40)
+  MC_TRIALS                     Monte Carlo trials per p-value (default: 160 —
+                                ENC-TSK-N51: the SE of the susceptibility-peak
+                                estimator crosses the 0.02 p-grid resolution here;
+                                more trials buy nothing without a finer p-grid)
   MC_NUM_P                      number of p-values in the sweep (default: 30)
   MC_P_MIN / MC_P_MAX           sweep range (defaults: 0.02 / 0.60)
   ADJACENCY_PAGE_LIMIT          edges per graph_query_api page (default: 20000)
@@ -70,7 +95,7 @@ PERCOLATION_TABLE = os.environ.get("PERCOLATION_TABLE", "enceladus-percolation-t
 CLOUDWATCH_NAMESPACE = os.environ.get("CLOUDWATCH_NAMESPACE", "Enceladus/Percolation")
 PROJECT_ID = os.environ.get("PROJECT_ID", "enceladus")
 
-MC_TRIALS = int(os.environ.get("MC_TRIALS", "40"))
+MC_TRIALS = int(os.environ.get("MC_TRIALS", "160"))
 MC_NUM_P = int(os.environ.get("MC_NUM_P", "30"))
 MC_P_MIN = float(os.environ.get("MC_P_MIN", "0.02"))
 MC_P_MAX = float(os.environ.get("MC_P_MAX", "0.60"))
@@ -241,6 +266,40 @@ def _largest_component_ratio(
     return largest / n_total
 
 
+def _component_ratios(
+    edges: List[Tuple[str, str]], occupied: set, n_total: int
+) -> Tuple[float, float]:
+    """(largest, second-largest) component sizes as fractions of n_total.
+
+    ENC-TSK-N51: the second-largest cluster is the percolation-susceptibility
+    proxy — it peaks at the transition, giving a low-variance p_c estimator that
+    (unlike the argmax-of-second-derivative of the LCC curve) is stable at modest
+    trial counts. Computed in a single union-find pass, so this is essentially
+    free relative to the existing LCC-only sweep.
+    """
+    if n_total <= 0:
+        return 0.0, 0.0
+    uf = _UnionFind()
+    for s, t in edges:
+        if s in occupied and t in occupied:
+            uf.add(s)
+            uf.add(t)
+            uf.union(s, t)
+    if not uf.size:
+        # no active edge: every occupied node is its own singleton component
+        return (1.0 / n_total if occupied else 0.0), 0.0
+    # collapse to per-root component sizes; uf.size is only reliable at roots, so
+    # re-derive cluster sizes by find()-grouping every participating node.
+    root_sizes: Dict[str, int] = {}
+    for node in uf.parent:
+        r = uf.find(node)
+        root_sizes[r] = root_sizes.get(r, 0) + 1
+    ordered = sorted(root_sizes.values(), reverse=True)
+    largest = ordered[0]
+    second = ordered[1] if len(ordered) > 1 else 0
+    return largest / n_total, second / n_total
+
+
 def _monte_carlo_sweep(
     node_universe: List[str],
     edges: List[Tuple[str, str]],
@@ -261,8 +320,47 @@ def _monte_carlo_sweep(
     return lcc_ratios
 
 
+def _monte_carlo_sweep_full(
+    node_universe: List[str],
+    edges: List[Tuple[str, str]],
+    n_total: int,
+    p_grid: List[float],
+    trials: int,
+    seed: int = 12345,
+) -> Tuple[List[float], List[float]]:
+    """Mean (LCC ratio, second-largest-cluster ratio) at each p over `trials`.
+
+    ENC-TSK-N51: extends _monte_carlo_sweep to also return the susceptibility
+    proxy (second-largest cluster). Same occupation model and RNG walk, one
+    union-find pass per trial — the second curve is nearly free. The LCC curve it
+    returns is identical in methodology to _monte_carlo_sweep (retained for the
+    legacy curvature estimate and its unit tests).
+    """
+    rng = random.Random(seed)
+    lcc_ratios: List[float] = []
+    second_ratios: List[float] = []
+    for p in p_grid:
+        acc1 = 0.0
+        acc2 = 0.0
+        for _ in range(trials):
+            occupied = {v for v in node_universe if rng.random() < p}
+            largest, second = _component_ratios(edges, occupied, n_total)
+            acc1 += largest
+            acc2 += second
+        lcc_ratios.append(acc1 / trials if trials > 0 else 0.0)
+        second_ratios.append(acc2 / trials if trials > 0 else 0.0)
+    return lcc_ratios, second_ratios
+
+
 def _empirical_pc(p_grid: List[float], lcc_ratios: List[float]) -> float:
-    """p that maximizes the discrete second derivative of the LCC-ratio curve."""
+    """p that maximizes the discrete second derivative of the LCC-ratio curve.
+
+    LEGACY estimator (retained as empirical_pc_curvature). ENC-TSK-N51 found this
+    has a high, trial-count-insensitive variance floor (2nd-difference argmax
+    amplifies Monte-Carlo noise ~6x) and floats on tail noise on smeared
+    heavy-tailed transitions. Prefer _empirical_pc_susceptibility for the primary
+    signal.
+    """
     if len(p_grid) < 3:
         return p_grid[len(p_grid) // 2] if p_grid else 0.0
     best_idx = 1
@@ -272,6 +370,21 @@ def _empirical_pc(p_grid: List[float], lcc_ratios: List[float]) -> float:
         if d2 > best_d2:
             best_d2 = d2
             best_idx = i
+    return p_grid[best_idx]
+
+
+def _empirical_pc_susceptibility(p_grid: List[float], second_ratios: List[float]) -> float:
+    """p that maximizes the mean second-largest-cluster ratio (susceptibility peak).
+
+    ENC-TSK-N51 primary empirical estimator. The second-largest cluster is
+    maximal at the percolation transition (it is consumed by the giant component
+    above threshold), so its argmax is a low-variance, finite-size-consistent
+    estimate of p_c. Stable to within one p-grid cell at MC_TRIALS≈160, versus the
+    legacy curvature estimator whose spread stays ~0.1 even at n=1280.
+    """
+    if not p_grid or not second_ratios:
+        return 0.0
+    best_idx = max(range(len(second_ratios)), key=lambda i: second_ratios[i])
     return p_grid[best_idx]
 
 
@@ -299,6 +412,7 @@ def _publish_cloudwatch(
     empirical_pc: float,
     mean_degree: float,
     flow_weight_entropy: Optional[float] = None,
+    empirical_pc_curvature: Optional[float] = None,
 ) -> None:
     cw = boto3.client("cloudwatch", region_name=REGION)
     now = datetime.now(timezone.utc)
@@ -308,6 +422,17 @@ def _publish_cloudwatch(
         {"MetricName": "empirical_pc", "Value": float(empirical_pc), "Unit": "None", "Timestamp": now, "Dimensions": dims},
         {"MetricName": "mean_degree", "Value": float(mean_degree), "Unit": "None", "Timestamp": now, "Dimensions": dims},
     ]
+    # ENC-TSK-N51: keep publishing the legacy curvature estimate so the flatten
+    # (its variance dropping once the estimator/trial-count change lands) is
+    # visible against the new stable empirical_pc series.
+    if empirical_pc_curvature is not None:
+        metric_data.append({
+            "MetricName": "empirical_pc_curvature",
+            "Value": float(empirical_pc_curvature),
+            "Unit": "None",
+            "Timestamp": now,
+            "Dimensions": dims,
+        })
     if flow_weight_entropy is not None:
         metric_data.append({
             "MetricName": "flow_weight_entropy",
@@ -413,8 +538,14 @@ def _run_percolation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         n_total = max(node_count, len(node_universe))
 
         p_grid = _linspace(MC_P_MIN, MC_P_MAX, MC_NUM_P)
-        lcc_ratios = _monte_carlo_sweep(node_universe, edges, n_total, p_grid, MC_TRIALS)
-        empirical_pc = _empirical_pc(p_grid, lcc_ratios)
+        lcc_ratios, second_ratios = _monte_carlo_sweep_full(
+            node_universe, edges, n_total, p_grid, MC_TRIALS
+        )
+        # ENC-TSK-N51: primary empirical p_c is the low-variance susceptibility
+        # peak. The legacy curvature estimate is retained for series continuity
+        # and audit, but is not the alerting signal.
+        empirical_pc = _empirical_pc_susceptibility(p_grid, second_ratios)
+        empirical_pc_curvature = _empirical_pc(p_grid, lcc_ratios)
 
         computed_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         date_str = computed_at[:10]
@@ -427,7 +558,15 @@ def _run_percolation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "mean_degree": mean_degree,
             "mean_degree_sq": stats["mean_degree_sq"],
             "analytical_pc": analytical_pc,
+            # ENC-TSK-N51: empirical_pc is now the susceptibility-peak estimate
+            # (stable). The legacy argmax-2nd-derivative estimate is preserved as
+            # empirical_pc_curvature so the historical series stays comparable and
+            # the estimator change is auditable. empirical_pc_method names the
+            # active estimator for downstream consumers.
             "empirical_pc": empirical_pc,
+            "empirical_pc_curvature": empirical_pc_curvature,
+            "empirical_pc_method": "susceptibility_peak",
+            "sweep_second_cluster_ratio": [round(r, 6) for r in second_ratios],
             # ENC-FTR-105 AC-7 / ENC-TSK-I91: nullable, backward-compatible
             # schema addition -- recent spurious_attractor_rate aggregate
             # sourced from graph_query_api's adjacency response (see
@@ -452,11 +591,16 @@ def _run_percolation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         row["analytical_pc_in_range"] = analytical_in_range
 
         _write_ddb(row)
-        _publish_cloudwatch(analytical_pc, empirical_pc, mean_degree, flow_weight_entropy)
+        _publish_cloudwatch(
+            analytical_pc, empirical_pc, mean_degree, flow_weight_entropy,
+            empirical_pc_curvature=empirical_pc_curvature,
+        )
 
         logger.info(
-            "[END] node_count=%d edge_count=%d analytical_pc=%.5f empirical_pc=%.5f in %dms",
-            n_total, len(edges), analytical_pc, empirical_pc, row["duration_ms"],
+            "[END] node_count=%d edge_count=%d analytical_pc=%.5f empirical_pc=%.5f "
+            "empirical_pc_curvature=%.5f (method=susceptibility_peak) in %dms",
+            n_total, len(edges), analytical_pc, empirical_pc, empirical_pc_curvature,
+            row["duration_ms"],
         )
         return {
             "statusCode": 200,
@@ -467,6 +611,8 @@ def _run_percolation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "mean_degree": round(mean_degree, 6),
                 "analytical_pc": round(analytical_pc, 6),
                 "empirical_pc": round(empirical_pc, 6),
+                "empirical_pc_curvature": round(empirical_pc_curvature, 6),
+                "empirical_pc_method": "susceptibility_peak",
                 "analytical_pc_in_range": analytical_in_range,
                 "spurious_attractor_rate": (
                     round(spurious_attractor_rate, 6) if spurious_attractor_rate is not None else None

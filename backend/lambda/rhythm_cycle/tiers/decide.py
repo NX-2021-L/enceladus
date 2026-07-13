@@ -53,9 +53,15 @@ def _open_leaf_tasks() -> Dict[str, Any]:
     if not TRACKER_API_BASE:
         return {"leaves": [], "page_count": 0, "cursor_terminus": None, "truncated": False}
 
-    # ENC-TSK-N28: gamma tracker API serves /records?project_id=... (the
-    # /{project_id}/records path shape 404s).
-    url = f"{TRACKER_API_BASE}/records"
+    # ENC-ISS-553: N28's /records?project_id=... shape (#1016) live-probed a
+    # 200 response but never checked the payload -- tracker_mutation's
+    # _RE_PROJECT regex matches the literal "records" segment as {projectId},
+    # so it silently queried a nonexistent project and always returned
+    # {"records": [], "count": 0}, exhausting the cursor after one empty
+    # page. The real route is {TRACKER_API_BASE}/{PROJECT_ID} with query
+    # param "type" (the handler reads "type", not "record_type" -- confirmed
+    # live).
+    url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
     leaves: List[Dict[str, Any]] = []
     cursor = ""
     page_count = 0
@@ -63,9 +69,8 @@ def _open_leaf_tasks() -> Dict[str, Any]:
 
     for _ in range(_MAX_PAGES):
         params: Dict[str, Any] = {
-            "project_id": PROJECT_ID,
             "status": "open",
-            "record_type": "task",
+            "type": "task",
             "page_size": 100,
         }
         if cursor:
