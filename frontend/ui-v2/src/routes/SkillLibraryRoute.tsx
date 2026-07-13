@@ -69,7 +69,14 @@ export function buildSkillLibraryColumns(): TableColumnDefinition<SkillListItem>
 
 type SortState = { sortingField: string; isDescending: boolean }
 
-const DEFAULT_SORT: SortState = { sortingField: 'title', isDescending: false }
+// ENC-TSK-N57 (ENC-TSK-N45/N56 UAT follow-up): the Skill Library table defaults
+// to most-recently-updated first on initial load, matching the N45 intent that
+// every feed defaults to time-last-updated, newest to oldest. updated_at is an
+// ISO-8601 string, so sortSkillLibraryRows' lexicographic compare + reverse is a
+// correct chronological descending sort (blank timestamps sort last). The
+// click-to-toggle asc/desc behavior on any column header (onSortingChange) is
+// preserved untouched for user-initiated re-sorts.
+export const DEFAULT_SORT: SortState = { sortingField: 'updated_at', isDescending: true }
 
 export function sortSkillLibraryRows(rows: SkillListItem[], sort: SortState): SkillListItem[] {
   const field = sort.sortingField as keyof SkillListItem
