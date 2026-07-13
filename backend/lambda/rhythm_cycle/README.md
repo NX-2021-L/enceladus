@@ -13,6 +13,13 @@ All cycle artifacts live under:
 
 Gamma uses `S3_ENV_PREFIX=gamma/` so keys become `gamma/rhythm-cycle/sense/latest.json`.
 
+## Artifact retention (ENC-TSK-N49)
+
+Timestamped beat artifacts under each tier prefix expire after **7 days** (equalized
+across sense/decide/light/heavy/coherence). Rules are applied idempotently by
+`tools/apply_rhythm_artifact_lifecycle.py` during the gamma compute-stack deploy.
+`latest.json` pointers are rewritten each beat and are not lifecycle-gated separately.
+
 ## Tiers
 
 | Tier | Cadence | EventBridge Scheduler group |

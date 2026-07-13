@@ -302,3 +302,21 @@ def build_category_metric_data(
             ],
         })
     return metric_data
+
+
+def build_scan_duration_metric_data(
+    duration_ms: float,
+    *,
+    function_name: str,
+    timestamp,
+) -> Dict[str, Any]:
+    """Single ScanDurationMs datapoint for cost/perf profiling (ENC-TSK-N49)."""
+    return {
+        "MetricName": "ScanDurationMs",
+        "Value": float(duration_ms),
+        "Unit": "Milliseconds",
+        "Timestamp": timestamp,
+        "Dimensions": [
+            {"Name": "FunctionName", "Value": function_name},
+        ],
+    }
