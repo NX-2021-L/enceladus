@@ -12,15 +12,23 @@ devops-graph-query-api's action='publish_graph_health' entrypoint (see
 _fetch_real_fiedler_value) -- that entrypoint uses a BOUNDED induced subgraph
 + scipy.sparse.linalg.eigsh, which is the only tractable eigensolver at
 Enceladus's ~1,500-node scale (dense Jacobi over the unbounded full graph this
-Lambda already queries would be O(n^3) and infeasible in pure Python). Falls
-back to the original GraphEdgeDensity proxy only if that invoke fails.
+Lambda already queries would be O(n^3) and infeasible in pure Python).
+
+ENC-ISS-554: the real Fiedler path is estimator-gated (graph_query_api's
+compute_fiedler_value rejects a degenerate/non-positive lambda2 -- likely a
+LAPLACIAN_MAX_VERTICES sampling artifact at corpus scale -- as an explicit
+failure rather than a confident zero). On any failure of that invoke
+(estimator-rejected or otherwise), FiedlerAlgebraicConnectivity is simply
+omitted from this interval's published batch. It no longer silently
+aliases the GraphEdgeDensity value under the Fiedler metric name.
 
 Metrics published:
   - GraphEdgeDensity (edges / nodes) in Enceladus/GraphHealth
   - OrphanNodeRatio (orphan nodes / total nodes) in Enceladus/GraphHealth
   - GraphNodeCount (total node count) in Enceladus/GraphHealth
-  - FiedlerAlgebraicConnectivity (real lambda2 via graph_query_api; proxy
-    GraphEdgeDensity value on invoke failure) in Enceladus/GraphHealth
+  - FiedlerAlgebraicConnectivity (real lambda2 via graph_query_api; omitted
+    this interval on any failure -- never a proxy substitute) in
+    Enceladus/GraphHealth
 
 Triggered by EventBridge on a daily schedule.
 
@@ -193,19 +201,29 @@ def _compute_metrics(driver) -> Dict[str, float]:
 
         # ENC-TSK-K43 (B66 Ph5): real Fiedler lambda2 via the FTR-088 CSR/
         # Fiedler path (cross-Lambda invoke into graph_query_api, see
-        # _fetch_real_fiedler_value). Falls back to the original GraphEdgeDensity
-        # proxy (the pre-K43 ENC-TSK-C10 placeholder, documented above) only if
-        # the invoke fails -- never blocks the rest of this Lambda's metrics.
+        # _fetch_real_fiedler_value).
+        #
+        # ENC-ISS-554: this used to fall back to the GraphEdgeDensity proxy
+        # (the pre-K43 ENC-TSK-C10 placeholder) under the FiedlerAlgebraicConnectivity
+        # name whenever the invoke failed -- but a different metric's value
+        # silently relabeled as lambda2 is exactly the "confident lie" pattern
+        # this issue quarantines, not just the degenerate-zero case. On any
+        # failure (invoke error, or the estimator itself reporting an
+        # explicit invalid_reason for a degenerate/untrustworthy lambda2) this
+        # metric is simply omitted from the published batch for this interval
+        # -- silence beats a confident-but-wrong reading, matching the
+        # skip-on-failure behavior graph_query_api's own FiedlerValue metric
+        # already has via run_publish_graph_health.
         fiedler = _fetch_real_fiedler_value()
         if fiedler.get("ok"):
             metrics["FiedlerAlgebraicConnectivity"] = fiedler["lambda2"]
         else:
             logger.warning(
-                "[WARNING] real Fiedler lambda2 unavailable (%s); falling back to "
-                "GraphEdgeDensity proxy for FiedlerAlgebraicConnectivity",
+                "[WARNING] real Fiedler lambda2 unavailable (%s); omitting "
+                "FiedlerAlgebraicConnectivity this interval rather than "
+                "publishing a mislabeled proxy value",
                 fiedler.get("error"),
             )
-            metrics["FiedlerAlgebraicConnectivity"] = metrics["GraphEdgeDensity"]
 
     return metrics
 
