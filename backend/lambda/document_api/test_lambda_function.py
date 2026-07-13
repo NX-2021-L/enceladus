@@ -481,6 +481,54 @@ class ListDocumentsTests(unittest.TestCase):
         self.assertNotIn("full_description", body_alias["documents"][0])
 
 
+class SearchDocumentsTests(unittest.TestCase):
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    @patch.object(document_api, "_get_ddb")
+    def test_search_defaults_to_updated_at_desc(self, mock_ddb, _mock_auth):
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.scan.return_value = {
+            "Items": [
+                {
+                    "document_id": {"S": "DOC-OLD"},
+                    "title": {"S": "Old Doc"},
+                    "project_id": {"S": "devops"},
+                    "status": {"S": "active"},
+                    "created_at": {"S": "2026-01-01T00:00:00Z"},
+                    "updated_at": {"S": "2026-01-01T00:00:00Z"},
+                },
+                {
+                    "document_id": {"S": "DOC-NEW"},
+                    "title": {"S": "New Doc"},
+                    "project_id": {"S": "devops"},
+                    "status": {"S": "active"},
+                    "created_at": {"S": "2026-01-02T00:00:00Z"},
+                    "updated_at": {"S": "2026-03-01T00:00:00Z"},
+                },
+                {
+                    "document_id": {"S": "DOC-MID"},
+                    "title": {"S": "Mid Doc"},
+                    "project_id": {"S": "devops"},
+                    "status": {"S": "active"},
+                    "created_at": {"S": "2026-01-03T00:00:00Z"},
+                    "updated_at": {"S": "2026-02-01T00:00:00Z"},
+                },
+            ],
+        }
+
+        event = _make_event(
+            method="GET",
+            path="/api/v1/documents/search",
+            query_params={"project": "devops"},
+        )
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        ids = [d["document_id"] for d in body["documents"]]
+        self.assertEqual(ids, ["DOC-NEW", "DOC-MID", "DOC-OLD"])
+
+
 class S3HelperTests(unittest.TestCase):
     def test_s3_key_construction(self):
         key = document_api._s3_key("devops", "DOC-123")
