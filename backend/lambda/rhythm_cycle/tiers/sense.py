@@ -69,10 +69,18 @@ def _checkout_census() -> List[Dict[str, Any]]:
 def _open_task_count() -> int:
     if not TRACKER_API_BASE:
         return 0
-    # ENC-TSK-N28: gamma tracker API serves /records?project_id=... (the
-    # /{project_id}/records path shape 404s).
-    url = f"{TRACKER_API_BASE}/records"
-    data = get_json(url, {"project_id": PROJECT_ID, "status": "open", "record_type": "task", "page_size": 1})
+    # ENC-ISS-553: N28's /records?project_id=... shape (#1016) live-probed a
+    # 200 response but never checked the payload -- tracker_mutation's
+    # _RE_PROJECT regex matches the literal "records" segment as {projectId},
+    # so it silently queried a nonexistent project and always returned
+    # {"records": [], "count": 0}. The real route is {TRACKER_API_BASE}/
+    # {PROJECT_ID} with query param "type" (the handler reads "type", not
+    # "record_type" -- confirmed live). The raw list handler has no
+    # page-independent "total" field, only "count" (items in this page), so
+    # page_size is raised to 200 -- tracker_mutation's documented page_size
+    # cap -- rather than 1, which always undercounted to at most 1.
+    url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
+    data = get_json(url, {"status": "open", "type": "task", "page_size": 200})
     return int(data.get("total") or data.get("count") or 0)
 
 
