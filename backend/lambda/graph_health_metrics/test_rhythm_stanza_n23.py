@@ -33,6 +33,7 @@ class RhythmStanzaTests(unittest.TestCase):
         stanza = json.loads(kwargs["Body"].decode("utf-8"))
         self.assertEqual(stanza["tenant"], "graph_health_metrics")
         self.assertEqual(stanza["status"], "completed")
+        self.assertTrue(stanza["did_work"])  # ENC-TSK-N48: completed => did_work True
         self.assertIn("completed_at", stanza)
 
     def test_stanza_write_failure_never_raises(self):

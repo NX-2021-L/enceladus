@@ -2559,7 +2559,13 @@ Resources:
           # (K02) / UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
           # Cleared 2026-07-02 per io: telemetry-only detector, no corpus
           # mutation -- safe to run on its initial nightly schedule (ENC-TSK-K41).
-          CEE_HARD_DISABLED: "0"
+          # ENC-TSK-N48 (TEMPORARY, io-approved): re-armed to "1" for the did_work
+          # AC-4 proof window. Hard-disabled, CEE's heavy-beat stanza reports
+          # did_work=false while still returning 200 -- the live "lying-zero" the
+          # did_work contract must make visible (>=1 false on the proof window).
+          # REVERT to "0" once the heavy window captures the true/false pair; a
+          # follow-up task restores CEE cognition (do not leave CEE disabled).
+          CEE_HARD_DISABLED: "1"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]

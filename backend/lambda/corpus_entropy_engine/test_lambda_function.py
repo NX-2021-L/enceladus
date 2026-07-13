@@ -458,6 +458,9 @@ def test_rhythm_stanza_result_key_writes_contract_stanza():
     assert stanza["status"] == "completed"
     assert "completed_at" in stanza
     assert stanza["detail"] == {"counts": {"orphan": 1}}
+    # ENC-TSK-N48: completed => did_work True; no output_count passed => None.
+    assert stanza["did_work"] is True
+    assert stanza["output_count"] is None
 
 
 def test_rhythm_stanza_hard_disabled_reports_skipped():
@@ -472,6 +475,48 @@ def test_rhythm_stanza_hard_disabled_reports_skipped():
             resp = mod.lambda_handler({"result_key": "k"}, None)
     assert resp["statusCode"] == 200
     assert stanza.call_args.args[1] == "skipped"
+
+
+def test_rhythm_stanza_hard_disabled_did_work_false():
+    """ENC-TSK-N48 AC-2 proof case: CEE_HARD_DISABLED returns 200 but the
+    completion stanza reports did_work=false — the lying-zero made visible."""
+    from unittest import mock
+
+    skipped = {
+        "statusCode": 200,
+        "body": json.dumps({"success": True, "skipped": True, "reason": "CEE_HARD_DISABLED"}),
+    }
+    with mock.patch.object(mod, "_run_scan", return_value=skipped):
+        with mock.patch("boto3.client") as client:
+            resp = mod.lambda_handler({"result_key": "k"}, None)
+    assert resp["statusCode"] == 200
+    stanza = json.loads(client.return_value.put_object.call_args.kwargs["Body"].decode("utf-8"))
+    assert stanza["status"] == "skipped"
+    assert stanza["did_work"] is False
+    assert stanza["output_count"] is None
+
+
+def test_rhythm_stanza_produced_did_work_true_output_count_sum():
+    """ENC-TSK-N48: a real scan reports did_work=true and output_count equal to
+    the total findings across the five detectors (0 total is a correct-zero)."""
+    from unittest import mock
+
+    produced = {
+        "statusCode": 200,
+        "body": json.dumps(
+            {
+                "success": True,
+                "counts": {"orphan": 2, "stagnation": 1, "relational": 0, "retention": 3, "compliance_semantic": 0},
+            }
+        ),
+    }
+    with mock.patch.object(mod, "_run_scan", return_value=produced):
+        with mock.patch("boto3.client") as client:
+            mod.lambda_handler({"result_key": "k"}, None)
+    stanza = json.loads(client.return_value.put_object.call_args.kwargs["Body"].decode("utf-8"))
+    assert stanza["status"] == "completed"
+    assert stanza["did_work"] is True
+    assert stanza["output_count"] == 6
 
 
 def test_rhythm_stanza_write_failure_never_raises():

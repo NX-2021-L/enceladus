@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -245,6 +246,124 @@ class RunTenantOrchestrationTests(unittest.TestCase):
             "heavy_integrate", beat_ts, "rhythm-cycle/decide/2026/07/12/060000.json"
         )
         self.assertEqual(result["tenant_silence_streaks"], {"alpha": 0})
+
+
+# --- ENC-TSK-N48 / BRD DOC-44230223DD1C §4.1: did_work / output_count contract ---
+
+
+class DidWorkStanzaContractTests(unittest.TestCase):
+    """write_completion_stanza asserts on OUTPUT, not execution."""
+
+    @mock.patch.object(tenant_invoker, "_s3")
+    def test_completed_yields_did_work_true_and_output_count(self, mock_s3):
+        tenant_invoker.write_completion_stanza(
+            "prefix/alpha.json", "alpha", "completed", {"x": 1}, output_count=7
+        )
+        body = json.loads(mock_s3.put_object.call_args[1]["Body"])
+        self.assertTrue(body["did_work"])
+        self.assertEqual(body["output_count"], 7)
+        self.assertEqual(body["status"], "completed")
+
+    @mock.patch.object(tenant_invoker, "_s3")
+    def test_correct_zero_is_did_work_true_count_zero(self, mock_s3):
+        # (b) ran and correctly produced nothing — honest, must NOT be a lying-zero.
+        tenant_invoker.write_completion_stanza("p/mc.json", "memory_consolidation", "completed", output_count=0)
+        body = json.loads(mock_s3.put_object.call_args[1]["Body"])
+        self.assertTrue(body["did_work"])
+        self.assertEqual(body["output_count"], 0)
+
+    @mock.patch.object(tenant_invoker, "_s3")
+    def test_skipped_yields_did_work_false(self, mock_s3):
+        # (c) internally disabled while returning healthy — the lying-zero.
+        tenant_invoker.write_completion_stanza("p/cee.json", "corpus_entropy_engine", "skipped")
+        body = json.loads(mock_s3.put_object.call_args[1]["Body"])
+        self.assertFalse(body["did_work"])
+        self.assertIsNone(body["output_count"])
+
+    @mock.patch.object(tenant_invoker, "_s3")
+    def test_failed_yields_did_work_false(self, mock_s3):
+        tenant_invoker.write_completion_stanza("p/x.json", "x", "failed")
+        body = json.loads(mock_s3.put_object.call_args[1]["Body"])
+        self.assertFalse(body["did_work"])
+
+    @mock.patch.object(tenant_invoker, "_s3")
+    def test_explicit_did_work_override_wins(self, mock_s3):
+        tenant_invoker.write_completion_stanza("p/x.json", "x", "completed", did_work=False)
+        body = json.loads(mock_s3.put_object.call_args[1]["Body"])
+        self.assertFalse(body["did_work"])
+
+
+class NoWorkDetectionTests(unittest.TestCase):
+    """check_silent_tenants reads stanza content three-valued and classifies."""
+
+    @mock.patch.object(tenant_invoker, "_read_stanza")
+    @mock.patch.object(tenant_invoker, "_list_stanza_tenants", return_value=["alpha", "beta", "gamma"])
+    def test_separates_produced_correct_zero_and_no_work(self, _list, mock_read):
+        stanzas = {
+            "alpha": {"status": "completed", "did_work": True, "output_count": 5},   # (a)
+            "beta": {"status": "completed", "did_work": True, "output_count": 0},    # (b)
+            "gamma": {"status": "skipped", "did_work": False, "output_count": None},  # (c)
+        }
+        mock_read.side_effect = lambda _prefix, name: stanzas[name]
+        result = tenant_invoker.check_silent_tenants(
+            prior_invoked_names=["alpha", "beta", "gamma"], prior_result_prefix="p", prior_streaks={}
+        )
+        self.assertEqual(result["no_work_tenants"], ["gamma"])
+        self.assertEqual(result["silent_tenants"], [])
+        self.assertTrue(result["tenant_output"]["alpha"]["did_work"])
+        self.assertEqual(result["tenant_output"]["beta"]["output_count"], 0)
+        self.assertFalse(result["tenant_output"]["gamma"]["did_work"])
+
+    @mock.patch.object(tenant_invoker, "_read_stanza", return_value={"status": "completed"})
+    @mock.patch.object(tenant_invoker, "_list_stanza_tenants", return_value=["legacy"])
+    def test_old_shape_stanza_missing_did_work_is_unknown_not_no_work(self, _list, _read):
+        # Backward compat: a stanza that predates the contract must NOT alarm.
+        result = tenant_invoker.check_silent_tenants(
+            prior_invoked_names=["legacy"], prior_result_prefix="p", prior_streaks={}
+        )
+        self.assertEqual(result["no_work_tenants"], [])
+        self.assertIn("legacy", result["reporting_tenants"])
+        self.assertIsNone(result["tenant_output"]["legacy"]["did_work"])
+
+    @mock.patch.object(tenant_invoker, "_read_stanza", return_value=None)
+    @mock.patch.object(tenant_invoker, "_list_stanza_tenants", return_value=["x"])
+    def test_unreadable_stanza_is_unknown_not_no_work(self, _list, _read):
+        result = tenant_invoker.check_silent_tenants(
+            prior_invoked_names=["x"], prior_result_prefix="p", prior_streaks={}
+        )
+        self.assertEqual(result["no_work_tenants"], [])
+
+    @mock.patch.object(tenant_invoker, "_read_stanza")
+    @mock.patch.object(tenant_invoker, "_list_stanza_tenants", return_value=[])
+    def test_absent_stanza_is_silent_not_no_work_and_not_read(self, _list, mock_read):
+        result = tenant_invoker.check_silent_tenants(
+            prior_invoked_names=["x"], prior_result_prefix="p", prior_streaks={}
+        )
+        self.assertEqual(result["silent_tenants"], ["x"])
+        self.assertEqual(result["no_work_tenants"], [])
+        mock_read.assert_not_called()
+
+
+class NoWorkMetricTests(unittest.TestCase):
+    @mock.patch.object(tenant_invoker, "_cw")
+    def test_emits_one_metric_per_no_work_tenant(self, mock_cw):
+        tenant_invoker.emit_no_work_metrics("heavy_integrate", ["corpus_entropy_engine"])
+        self.assertEqual(mock_cw.put_metric_data.call_count, 1)
+        kwargs = mock_cw.put_metric_data.call_args[1]
+        self.assertEqual(kwargs["Namespace"], tenant_invoker.CLOUDWATCH_NAMESPACE)
+        self.assertEqual(kwargs["MetricData"][0]["MetricName"], "tenant_no_work")
+        dims = {d["Name"]: d["Value"] for d in kwargs["MetricData"][0]["Dimensions"]}
+        self.assertEqual(dims["Tenant"], "corpus_entropy_engine")
+
+    @mock.patch.object(tenant_invoker, "_cw")
+    def test_no_no_work_tenants_emits_nothing(self, mock_cw):
+        tenant_invoker.emit_no_work_metrics("heavy_integrate", [])
+        mock_cw.put_metric_data.assert_not_called()
+
+    @mock.patch.object(tenant_invoker, "_cw")
+    def test_metric_emission_failure_does_not_raise(self, mock_cw):
+        mock_cw.put_metric_data.side_effect = Exception("cw down")
+        tenant_invoker.emit_no_work_metrics("heavy_integrate", ["x"])  # must not raise
 
 
 if __name__ == "__main__":

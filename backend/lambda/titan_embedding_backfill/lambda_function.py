@@ -448,7 +448,10 @@ def _is_tenant_invoke(event: Dict[str, Any]) -> bool:
 
 
 def _write_rhythm_stanza(
-    event: Dict[str, Any], status: str, detail: Optional[Dict[str, Any]] = None
+    event: Dict[str, Any],
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    output_count: Optional[int] = None,
 ) -> bool:
     """Write the tenant completion stanza to the beat's per-tenant result_key.
 
@@ -463,6 +466,11 @@ def _write_rhythm_stanza(
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -521,6 +529,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "errors": result.get("errors"),
                 "missing_node": result.get("missing_node"),
             },
+            # ENC-TSK-N48: output_count = embeddings written this run. 0 with
+            # did_work=True is a correct-zero (nothing to backfill this window).
+            output_count=result.get("processed"),
         )
     return result
 

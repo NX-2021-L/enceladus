@@ -224,18 +224,40 @@ def invoke_tenants(
 
 
 def write_completion_stanza(
-    result_key: str, tenant_name: str, status: str, detail: Optional[Dict[str, Any]] = None
+    result_key: str,
+    tenant_name: str,
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    *,
+    output_count: Optional[int] = None,
+    did_work: Optional[bool] = None,
 ) -> None:
     """Contract helper for tenant Lambdas: write their completion stanza.
 
-    Not yet called by any tenant in this repo (ENC-TSK-N23/N24 wires real
-    tenants) — the shape is fixed now so the contract doesn't move under
-    them later. ``result_key`` is the value the beat sent as
-    ``payload["result_key"]``.
+    ENC-TSK-N48 / BRD DOC-44230223DD1C §4.1: the stanza asserts on OUTPUT,
+    not execution. Two fields carry that assertion:
+
+    - ``did_work``: did the tenant perform its substantive function this
+      window, or no-op while returning healthy? Defaults to
+      ``status == "completed"`` — every wired tenant's disable/defer path
+      reports ``status="skipped"`` (e.g. CEE_HARD_DISABLED) and errors report
+      ``"failed"``, so "completed" is exactly "the real work ran". Pass an
+      explicit value only for a tenant that can return "completed" while
+      having done nothing (none of the wired tenants do today).
+    - ``output_count``: count of the tenant's primary produced unit. ``0``
+      with ``did_work=True`` is an honest correct-zero; ``None`` for a tenant
+      with no natural single count.
+
+    The three states the beat must separate (AC-3):
+      (a) ran and produced      -> did_work=True,  output_count>0
+      (b) ran, correct-zero     -> did_work=True,  output_count=0
+      (c) lying-zero / disabled  -> did_work=False (status usually "skipped")
     """
     body = {
         "tenant": tenant_name,
         "status": status,
+        "did_work": (status == "completed") if did_work is None else bool(did_work),
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -275,37 +297,86 @@ def _list_stanza_tenants(result_prefix: str) -> List[str]:
     return found
 
 
+def _read_stanza(result_prefix: Optional[str], tenant_name: str) -> Optional[Dict[str, Any]]:
+    """Fetch and parse one tenant's completion stanza body.
+
+    Returns the parsed dict, or ``None`` when the object is absent,
+    unreadable, or unparseable. ENC-TSK-N48: the caller treats ``None`` — and
+    a stanza that predates the did_work contract — as UNKNOWN, never as a
+    lying-zero, so old-shape stanzas and transient S3 read failures can never
+    raise a false tenant_no_work alarm."""
+    if not result_prefix or not tenant_name:
+        return None
+    key = f"{result_prefix.rstrip('/')}/{tenant_name}.json"
+    try:
+        resp = _s3.get_object(Bucket=S3_BUCKET, Key=key)
+        body = json.loads(resp["Body"].read())
+        return body if isinstance(body, dict) else None
+    except Exception as exc:  # noqa: BLE001 - a read miss must degrade to UNKNOWN, never raise
+        logger.warning("stanza read failed key=%s: %s", key, exc)
+        return None
+
+
 def check_silent_tenants(
     prior_invoked_names: List[str],
     prior_result_prefix: Optional[str],
     prior_streaks: Dict[str, int],
 ) -> Dict[str, Any]:
     """Compare the previous window's invoked tenants against the completion
-    stanzas actually found under its result prefix.
+    stanzas actually found under its result prefix, asserting on OUTPUT.
 
-    Returns updated per-tenant consecutive-silence streaks plus which
-    tenants just reached/crossed ``STALL_THRESHOLD``.
+    ENC-TSK-N48 / BRD §4.1: a stanza that merely EXISTS is no longer proof of
+    work. For each reporting tenant the stanza body's ``did_work`` is read
+    three-valued:
+
+    - ``did_work is False``            -> NO_WORK (lying-zero); raises tenant_no_work
+    - ``did_work is True``             -> healthy (produced or correct-zero)
+    - missing / unreadable / unparsed  -> UNKNOWN; falls back to the legacy
+      presence-only semantics (reporting, no output assertion), so old-shape
+      stanzas and mixed rollout windows never trip a false alarm.
+
+    Absence of the stanza entirely remains SILENT (the tenant_stall path,
+    unchanged) — a distinct signal from NO_WORK (present but did no work).
+
+    Also returns ``tenant_output``: per-tenant ``{status, did_work,
+    output_count}`` so all three states are visible in the beat artifact.
     """
     reported = set(_list_stanza_tenants(prior_result_prefix)) if prior_result_prefix else set()
     invoked_set = set(prior_invoked_names)
     streaks = {k: v for k, v in (prior_streaks or {}).items() if k in invoked_set}
     silent: List[str] = []
     stalled: List[str] = []
+    no_work: List[str] = []
+    tenant_output: Dict[str, Any] = {}
 
     for name in prior_invoked_names:
         if name in reported:
             streaks[name] = 0
+            stanza = _read_stanza(prior_result_prefix, name)
+            did_work = stanza.get("did_work") if isinstance(stanza, dict) else None
+            tenant_output[name] = {
+                "status": stanza.get("status") if isinstance(stanza, dict) else None,
+                "did_work": did_work,
+                "output_count": stanza.get("output_count") if isinstance(stanza, dict) else None,
+            }
+            # Three-valued: ONLY an explicit did_work is False is a lying-zero.
+            # None (absent / old-shape / read failure) is UNKNOWN, not a false.
+            if did_work is False:
+                no_work.append(name)
         else:
             streaks[name] = int(streaks.get(name, 0)) + 1
             silent.append(name)
             if streaks[name] >= STALL_THRESHOLD:
                 stalled.append(name)
+            tenant_output[name] = {"status": None, "did_work": None, "output_count": None}
 
     return {
         "silent_tenants": silent,
         "stalled_tenants": stalled,
+        "no_work_tenants": no_work,
         "tenant_silence_streaks": streaks,
         "reporting_tenants": sorted(reported & invoked_set),
+        "tenant_output": tenant_output,
     }
 
 
@@ -333,6 +404,36 @@ def emit_stall_metrics(beat_type: str, stalled_tenants: List[str]) -> None:
             logger.warning("tenant_stall metric emission failed tenant=%s: %s", name, exc)
 
 
+def emit_no_work_metrics(beat_type: str, no_work_tenants: List[str]) -> None:
+    """Emit an Enceladus/Rhythm CloudWatch metric per tenant whose prior-window
+    stanza reported ``did_work=False`` — enabled and invoked, returned healthy,
+    but did no substantive work (ENC-TSK-N48 / BRD §4.1). Distinct from
+    ``tenant_stall`` (absence of any stanza): this is the assert-on-OUTPUT
+    signal that a Layer-1 (AppConfig) stall alarm structurally cannot see.
+    Metric only — the paging alarm is a separate, deferred resource so the
+    AC-4 proof window (a deliberately induced false via CEE_HARD_DISABLED) is
+    not read as an incident."""
+    for name in no_work_tenants:
+        try:
+            _cw.put_metric_data(
+                Namespace=CLOUDWATCH_NAMESPACE,
+                MetricData=[
+                    {
+                        "MetricName": "tenant_no_work",
+                        "Dimensions": [
+                            {"Name": "Tier", "Value": beat_type},
+                            {"Name": "ProjectId", "Value": PROJECT_ID},
+                            {"Name": "Tenant", "Value": name},
+                        ],
+                        "Value": 1.0,
+                        "Unit": "Count",
+                    }
+                ],
+            )
+        except Exception as exc:
+            logger.warning("tenant_no_work metric emission failed tenant=%s: %s", name, exc)
+
+
 def run_tenant_orchestration(beat_type: str, beat_ts: datetime) -> Dict[str, Any]:
     """Single entry point tier beats call: aggregate the previous window's
     tenant reports (silent-tenant + stall detection), then fire this
@@ -353,6 +454,7 @@ def run_tenant_orchestration(beat_type: str, beat_ts: datetime) -> Dict[str, Any
         prior_streaks=prior_orch.get("tenant_silence_streaks") or {},
     )
     emit_stall_metrics(beat_type, silence["stalled_tenants"])
+    emit_no_work_metrics(beat_type, silence.get("no_work_tenants", []))
 
     invocation = invoke_tenants(beat_type, beat_ts, predecessor_key)
     invocation.update(
@@ -360,7 +462,9 @@ def run_tenant_orchestration(beat_type: str, beat_ts: datetime) -> Dict[str, Any
             "tenant_silence_streaks": silence["tenant_silence_streaks"],
             "silent_tenants_last_window": silence["silent_tenants"],
             "stalled_tenants": silence["stalled_tenants"],
+            "no_work_tenants_last_window": silence.get("no_work_tenants", []),
             "reporting_tenants_last_window": silence["reporting_tenants"],
+            "tenant_output_last_window": silence.get("tenant_output", {}),
         }
     )
     return invocation
