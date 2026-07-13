@@ -376,13 +376,18 @@ RHYTHM_TENANT_NAME = "graph_health_metrics"
 RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
 
 
-def _write_rhythm_stanza(event: Any, status: str, detail: Dict[str, Any] = None) -> bool:
+def _write_rhythm_stanza(event: Any, status: str, detail: Dict[str, Any] = None, output_count=None) -> bool:
     result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
     if not result_key:
         return False
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -413,8 +418,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         body = json.loads(resp.get("body") or "{}")
     except (TypeError, ValueError):
         body = {}
+    # ENC-TSK-N48: output_count = number of graph-health metrics published this
+    # run (len of the body "metrics" block). Does NOT touch the Fiedler lambda2
+    # estimator (ENC-ISS-554's surface). None when no metrics block is present.
+    metrics = body.get("metrics")
+    output_count = len(metrics) if isinstance(metrics, dict) else None
     _write_rhythm_stanza(
-        event, status, {"statusCode": resp.get("statusCode"), "success": body.get("success")}
+        event,
+        status,
+        {"statusCode": resp.get("statusCode"), "success": body.get("success")},
+        output_count=output_count,
     )
     return resp
 

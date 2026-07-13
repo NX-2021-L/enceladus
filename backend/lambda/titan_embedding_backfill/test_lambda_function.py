@@ -386,6 +386,7 @@ def test_write_rhythm_stanza_writes_expected_body(monkeypatch):
     body = json.loads(put_calls[0]["Body"])
     assert body["tenant"] == "embedding_refresh"
     assert body["status"] == "completed"
+    assert body["did_work"] is True  # ENC-TSK-N48: completed => did_work True
     assert body["detail"] == {"processed": 3, "skipped": 1, "errors": 0, "missing_node": 0}
     assert "completed_at" in body
 
@@ -459,6 +460,8 @@ def test_handler_tenant_mode_writes_completion_stanza(monkeypatch):
     assert put_calls[0]["Key"] == event["result_key"]
     body = json.loads(put_calls[0]["Body"])
     assert body["status"] == "completed"
+    assert body["did_work"] is True  # ENC-TSK-N48: completed => did_work True
+    assert body["output_count"] == 1  # ENC-TSK-N48: handler passes processed as output_count
     assert body["tenant"] == "embedding_refresh"
     assert body["detail"]["processed"] == 1
     assert body["detail"]["errors"] == 0

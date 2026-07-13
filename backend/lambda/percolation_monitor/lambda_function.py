@@ -465,13 +465,23 @@ RHYTHM_TENANT_NAME = "percolation_monitor"
 RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
 
 
-def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+def _write_rhythm_stanza(
+    event: Any,
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    output_count: Optional[int] = None,
+) -> bool:
     result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
     if not result_key:
         return False
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -506,7 +516,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     detail.update(
         {k: body.get(k) for k in ("analytical_pc", "empirical_pc", "node_count", "edge_count") if k in body}
     )
-    _write_rhythm_stanza(event, status, detail)
+    # ENC-TSK-N48: percolation writes exactly one telemetry row per successful
+    # measurement — output_count=1 when completed, None otherwise. It has no
+    # correct-zero: a run always produces a row (did_work=True/count=1) or fails.
+    output_count = 1 if status == "completed" else None
+    _write_rhythm_stanza(event, status, detail, output_count=output_count)
     return resp
 
 

@@ -613,13 +613,23 @@ RHYTHM_TENANT_NAME = "handoff_consolidation_engine"
 RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
 
 
-def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+def _write_rhythm_stanza(
+    event: Any,
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    output_count: Optional[int] = None,
+) -> bool:
     result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
     if not result_key:
         return False
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": _iso(_now()),
         "detail": detail or {},
     }
@@ -661,7 +671,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             if k in body
         }
     )
-    _write_rhythm_stanza(event, status, detail)
+    # ENC-TSK-N48: output_count = lesson-candidate docs proposed this cycle.
+    # None on the adaptive-trigger / feature-flag skip path (did_work=False).
+    output_count = body.get("candidates_proposed")
+    _write_rhythm_stanza(event, status, detail, output_count=output_count)
     return resp
 
 

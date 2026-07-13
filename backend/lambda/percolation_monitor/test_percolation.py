@@ -277,6 +277,7 @@ class RhythmStanzaTests(unittest.TestCase):
         stanza = json.loads(kwargs["Body"].decode("utf-8"))
         self.assertEqual(stanza["tenant"], "percolation_monitor")
         self.assertEqual(stanza["status"], "completed")
+        self.assertTrue(stanza["did_work"])  # ENC-TSK-N48: completed => did_work True
         self.assertIn("completed_at", stanza)
         self.assertEqual(stanza["detail"], {"analytical_pc": 0.31})
 

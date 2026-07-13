@@ -233,13 +233,23 @@ RHYTHM_TENANT_NAME = "corpus_entropy_engine"
 RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
 
 
-def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+def _write_rhythm_stanza(
+    event: Any,
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    output_count: Optional[int] = None,
+) -> bool:
     result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
     if not result_key:
         return False
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -277,7 +287,11 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
         status = "skipped"
     detail = {"statusCode": resp.get("statusCode")}
     detail.update({k: body.get(k) for k in ("counts", "reason") if k in body})
-    _write_rhythm_stanza(event, status, detail)
+    # ENC-TSK-N48: output_count = total entropy findings across the 5 detectors.
+    # None on the skip/disable path (CEE_HARD_DISABLED) where no counts exist.
+    counts = body.get("counts")
+    output_count = sum(counts.values()) if isinstance(counts, dict) else None
+    _write_rhythm_stanza(event, status, detail, output_count=output_count)
     return resp
 
 

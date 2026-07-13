@@ -586,13 +586,23 @@ RHYTHM_TENANT_NAME = "memory_consolidation"
 RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
 
 
-def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+def _write_rhythm_stanza(
+    event: Any,
+    status: str,
+    detail: Optional[Dict[str, Any]] = None,
+    output_count: Optional[int] = None,
+) -> bool:
     result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
     if not result_key:
         return False
     body = {
         "tenant": RHYTHM_TENANT_NAME,
         "status": status,
+        # ENC-TSK-N48 / BRD §4.1: assert on OUTPUT, not execution. did_work is
+        # False on the skip/disable path (status != "completed"); output_count
+        # exposes correct-zero (did_work=True, count=0) vs produced (count>0).
+        "did_work": status == "completed",
+        "output_count": output_count,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
@@ -627,6 +637,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             k: result.get(k)
             for k in ("handoffs_scanned", "clusters_found", "candidates_created", "candidates_existing")
         },
+        # ENC-TSK-N48: output_count = lesson-candidate documents created this
+        # window. 0 with did_work=True is the honest correct-zero (an empty
+        # lookback window), distinct from a disabled tenant's did_work=False.
+        output_count=result.get("candidates_created"),
     )
     return result
 

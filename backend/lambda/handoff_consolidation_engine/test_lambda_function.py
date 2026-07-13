@@ -204,6 +204,7 @@ class RhythmStanzaTests(unittest.TestCase):
         stanza = json.loads(kwargs["Body"].decode("utf-8"))
         self.assertEqual(stanza["tenant"], "handoff_consolidation_engine")
         self.assertEqual(stanza["status"], "skipped")
+        self.assertFalse(stanza["did_work"])  # ENC-TSK-N48: skipped => did_work False
         self.assertEqual(stanza["detail"], {"reason": "adaptive"})
 
     def test_handler_reports_skip_as_explicit_stanza(self):
