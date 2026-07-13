@@ -60,6 +60,20 @@ def series_by_metric(cw, metric):
     return pts
 
 
+def cee_series_by_category(cw_cee: dict) -> dict:
+    """Per-category EntropyFindingCount series — do not collapse dimensions (N49)."""
+    out: dict = {}
+    for m in cw_cee.get("metrics", []):
+        if m.get("metric") != "EntropyFindingCount":
+            continue
+        category = (m.get("dimensions") or {}).get("Category")
+        if not category:
+            continue
+        pts = sorted((p["t"], p.get("avg")) for p in m.get("points", []))
+        out[category] = pts
+    return out
+
+
 def cadence_minutes(bl):
     """Median inter-beat interval, in minutes, for a list of beats (or None)."""
     ts = sorted(b.get("beat_at") or b.get("alignment_point_utc") or "" for b in bl)
@@ -136,7 +150,11 @@ def build_dashboard(out_dir):
         ["FiedlerAlgebraicConnectivity", "GraphEdgeDensity", "IsolatedNodeRatio", "GraphNodeCount"]}
     data["cloudwatch"]["Rhythm"] = {m: series_by_metric(cw_rh, m) for m in
         ["beat_duration_ms", "beat_cost_estimate", "backlog_open_leaves"]}
-    data["cloudwatch"]["CEE"] = {m["metric"] + "|" + json.dumps(m["dimensions"]): m["points"] for m in cw_cee["metrics"]}
+    data["cloudwatch"]["CEE"] = cee_series_by_category(cw_cee)
+    data["cloudwatch"]["CEE_raw"] = {
+        m["metric"] + "|" + json.dumps(m["dimensions"]): m["points"]
+        for m in cw_cee["metrics"]
+    }
     data["cloudwatch"]["Percolation"] = {m: series_by_metric(cw_perc, m) for m in ["analytical_pc", "empirical_pc", "mean_degree"]}
 
     # --- Percolation DDB rows (rich) ---

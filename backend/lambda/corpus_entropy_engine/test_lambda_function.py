@@ -276,6 +276,14 @@ def test_build_category_metric_data_shape():
         assert names == {"FunctionName", "Category"}
 
 
+def test_build_scan_duration_metric_data_shape():
+    datum = core.build_scan_duration_metric_data(26000.5, function_name="cee-fn", timestamp="T")
+    assert datum["MetricName"] == "ScanDurationMs"
+    assert datum["Value"] == 26000.5
+    assert datum["Unit"] == "Milliseconds"
+    assert {d["Name"] for d in datum["Dimensions"]} == {"FunctionName"}
+
+
 # ---------------------------------------------------------------------------
 # Handler-level tests (mock HTTP + CloudWatch, never touch AWS/network)
 # ---------------------------------------------------------------------------
@@ -325,7 +333,9 @@ def test_handler_publishes_all_five_category_counts(monkeypatch):
     assert counts["retention"] == 1
     assert counts["compliance_semantic"] == 1
     assert len(fake_cw.calls) == 1
-    assert len(fake_cw.calls[0]["MetricData"]) == 5
+    assert len(fake_cw.calls[0]["MetricData"]) == 6
+    metric_names = {m["MetricName"] for m in fake_cw.calls[0]["MetricData"]}
+    assert metric_names == {"EntropyFindingCount", "ScanDurationMs"}
     assert fake_cw.calls[0]["Namespace"] == "Enceladus/CEE"
 
 

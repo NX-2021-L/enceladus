@@ -56,6 +56,18 @@ DEFAULT_K = 3
 # CloudWatch PutMetricData accepts at most 20 MetricDatum entries per call.
 _CLOUDWATCH_BATCH_SIZE = 20
 
+# ENC-ISS-554: floor below which a computed eigenvalue is treated as
+# degenerate rather than a trustworthy positive lambda2. eigsh/eigh on an
+# INDUCED SUBGRAPH capped at LAPLACIAN_MAX_VERTICES vertices can legitimately
+# compute a near-zero second eigenvalue when the cap truncates the true graph
+# short (real neighbors of a selected vertex fall outside the sample, leaving
+# it isolated within the induced subgraph even though it is well-connected in
+# the full graph) -- a real number, not an exception or a hardcoded default,
+# but not a trustworthy reading of the full graph's algebraic connectivity
+# either. Treating any lambda2 at or below this floor as ok=False (rather
+# than a confident zero) is the quarantine.
+_LAMBDA2_DEGENERATE_EPSILON = 1e-9
+
 
 def compute_fiedler_value(
     driver: Any,
@@ -107,11 +119,46 @@ def compute_fiedler_value(
 
     lambda2 = float(eigenvalues[1])
     laplacian_meta = result.get("laplacian") or {}
+    n = laplacian_meta.get("n")
+
+    if lambda2 <= _LAMBDA2_DEGENERATE_EPSILON:
+        # ENC-ISS-554 quarantine: a degenerate lambda2 must never be reported
+        # as ok=True. Distinguish (for the error message only -- both cases
+        # return ok=False identically) a capped/non-representative sample
+        # from a full vertex set that came back genuinely disconnected.
+        capped = isinstance(n, int) and isinstance(limit, int) and n >= limit
+        if capped:
+            reason = (
+                f"lambda2={lambda2!r} is degenerate for an induced subgraph capped at "
+                f"n={n} vertices (limit={limit}); this is very likely a sampling artifact "
+                "-- the vertex cap truncates the corpus, stranding real neighbors outside "
+                "the sample and producing spurious isolated components even though the "
+                "full graph is connected -- not a measurement of the full graph's "
+                "algebraic connectivity"
+            )
+            invalid_reason = "sample_capped_degenerate"
+        else:
+            reason = (
+                f"lambda2={lambda2!r} is degenerate for a full (uncapped, n={n}) vertex "
+                "set; this would indicate genuine full-graph disconnection and needs "
+                "manual review rather than being published as a routine reading"
+            )
+            invalid_reason = "genuine_disconnection_suspected"
+        return {
+            "ok": False,
+            "error": reason,
+            "invalid_reason": invalid_reason,
+            "lambda2_raw": lambda2,
+            "n": n,
+            "limit": limit,
+            "project_id": project_id,
+        }
+
     return {
         "ok": True,
         "lambda2": lambda2,
         "lambda0": float(eigenvalues[0]),
-        "n": laplacian_meta.get("n"),
+        "n": n,
         "edge_count": laplacian_meta.get("edge_count"),
         "eig_method": laplacian_meta.get("eig_method"),
         "normalization": laplacian_meta.get("normalization"),

@@ -378,8 +378,8 @@ function card(o){
      p:"CEE now emits <code>lineage_unanchored</code> (tracker records missing <code>parent_task_id</code>/<code>related_task_ids</code> or wave <code>plan_anchor_id</code>). GraphHealth now emits <code>IsolatedNodeRatio</code> (Neo4j nodes with zero incident edges). Same corpus, different quantities — no longer one overloaded word."},
     {cls:"w",tag:"performance",h:"corpus_entropy_engine ~26s per run",
      p:"By far the slowest tenant (vs 1–6s for the others). Fine at 2×/day, but it's the first thing that will strain if the heavy cadence tightens or the corpus grows — worth a scan-scope or incremental pass."},
-    {cls:"w",tag:"observability",h:"CEE's rich data never reaches CloudWatch",
-     p:"The 5-category counts live only in the S3 stanza; CloudWatch sees a single <code>EntropyFindingCount</code>. And sense/decide artifacts are retained ~1 day vs ~1 week for the others — longitudinal evaluation loses the short-retention tiers first."},
+    {cls:"w",tag:"observability",h:"CEE per-category metrics now in CloudWatch",
+     p:"<code>Enceladus/CEE EntropyFindingCount</code> is dimensioned by <code>Category</code> (orphan, stagnation, relational, retention, compliance_semantic) plus <code>ScanDurationMs</code> for cost profiling. S3 beat-artifact retention for sense/decide is equalized to 7d (ENC-TSK-N49) so longitudinal harvests retain the tiers ISS-553 needs."},
     {cls:"g",tag:"healthy",h:"What's genuinely working",
      p:"HCE is producing organic lesson candidates; percolation is tracking a real phase-transition with stable analytical p_c; IsolatedNodeRatio is near zero; the beat scheduler itself fired <code>312</code> times with zero errors. The heartbeat is alive — the open questions are about yield and tuning, not survival."},
   ];

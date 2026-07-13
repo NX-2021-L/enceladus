@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +43,7 @@ from typing import Any, Dict, List, Optional
 
 from corpus_entropy_core import (
     build_category_metric_data,
+    build_scan_duration_metric_data,
     detect_compliance_semantic_entropy,
     detect_orphan_entropy,
     detect_relational_entropy,
@@ -199,9 +201,13 @@ def _fetch_graph_edges() -> List[Any]:
 # CloudWatch emission
 # ---------------------------------------------------------------------------
 
-def _publish_metrics(counts: Dict[str, int]) -> None:
+def _publish_metrics(counts: Dict[str, int], *, duration_ms: Optional[float] = None) -> None:
     now = datetime.now(timezone.utc)
     metric_data = build_category_metric_data(counts, function_name=FUNCTION_NAME, timestamp=now)
+    if duration_ms is not None:
+        metric_data.append(
+            build_scan_duration_metric_data(duration_ms, function_name=FUNCTION_NAME, timestamp=now)
+        )
     cw = _get_cw()
     # Batch <=20 per put_metric_data call (CloudWatch API limit).
     for i in range(0, len(metric_data), 20):
@@ -287,6 +293,7 @@ def _run_scan(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
 
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     logger.info("[START] Corpus Entropy Engine scan: project=%s", PROJECT_ID)
+    started = time.perf_counter()
 
     try:
         tasks = _fetch_tracker_records("task")
@@ -318,12 +325,14 @@ def _run_scan(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
             "compliance_semantic": len(compliance_findings),
         }
 
-        _publish_metrics(counts)
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        _publish_metrics(counts, duration_ms=duration_ms)
 
         result = {
             "success": True,
             "project_id": PROJECT_ID,
             "scanned_at": now_iso,
+            "scan_duration_ms": round(duration_ms, 2),
             "counts": counts,
             "corpus_scanned": {
                 "tasks": len(tasks),

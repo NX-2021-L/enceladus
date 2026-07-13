@@ -28,6 +28,7 @@ on:
     paths:
       - "infrastructure/cloudformation/01-data.yaml"
       - "infrastructure/cloudformation/02-compute.yaml"
+      - "tools/apply_rhythm_artifact_lifecycle.py"
       - ".github/workflows/cloudformation-compute-stack-deploy.yml"
   workflow_dispatch:
     inputs:
@@ -473,7 +474,11 @@ jobs:
             --region "${AWS_REGION}" \
             --stack-name "${{ needs.plan.outputs.stack_name }}"
 
-      - name: Report stack events on failure
+      - name: Equalize rhythm-cycle S3 artifact retention (gamma, ENC-TSK-N49)
+        if: env.ENVIRONMENT_SUFFIX == '-gamma'
+        run: |
+          set -euo pipefail
+          python3 tools/apply_rhythm_artifact_lifecycle.py --env-prefix gamma
         if: failure()
         run: |
           for s in "${{ needs.plan.outputs.data_stack_name }}" "${{ needs.plan.outputs.stack_name }}"; do

@@ -6,8 +6,13 @@ GraphEdgeDensity (documented in the ENC-TSK-C10 module docstring as a stopgap
 while GDS was unavailable). K43 replaces it with the REAL Fiedler lambda2 via
 a cross-Lambda invoke into devops-graph-query-api's action='publish_graph_health'
 entrypoint (the FTR-088 CSR/Fiedler path, ISS-465-compliant -- no GDS
-projection), falling back to the GraphEdgeDensity proxy only if that invoke
-fails.
+projection).
+
+ENC-ISS-554: the GraphEdgeDensity-proxy fallback on invoke failure was
+removed -- a different metric's value silently relabeled as lambda2 is a
+confident-lie pattern in its own right. FiedlerAlgebraicConnectivity is now
+simply omitted from the published batch on any failure (invoke error, or the
+estimator's own explicit rejection of a degenerate lambda2).
 
 Covers:
   - _fetch_real_fiedler_value: successful invoke parses the nested
@@ -16,9 +21,9 @@ Covers:
     project_id result all degrade to {"ok": False, ...} rather than raising.
   - _compute_metrics: FiedlerAlgebraicConnectivity carries the REAL lambda2
     on a successful invoke (and is NOT equal to the GraphEdgeDensity proxy
-    when the two values differ), and falls back to the GraphEdgeDensity
-    proxy when the invoke fails -- preserving the pre-K43 degrade behavior
-    exactly (never blocks GraphNodeCount/GraphEdgeDensity/IsolatedNodeRatio).
+    when the two values differ), and is omitted entirely (not a proxy
+    substitute) when the invoke fails or the estimator rejects a degenerate
+    value -- never blocks GraphNodeCount/GraphEdgeDensity/IsolatedNodeRatio.
 """
 from __future__ import annotations
 
@@ -179,12 +184,31 @@ class ComputeMetricsTests(unittest.TestCase):
         # proving this is no longer the GraphEdgeDensity alias.
         self.assertNotEqual(metrics["FiedlerAlgebraicConnectivity"], metrics["GraphEdgeDensity"])
 
-    def test_fiedler_algebraic_connectivity_falls_back_to_proxy_on_failure(self):
+    def test_fiedler_algebraic_connectivity_omitted_on_failure(self):
+        # ENC-ISS-554: no more silent GraphEdgeDensity-under-Fiedler-name
+        # substitution -- a failed/degenerate real-lambda2 fetch means the
+        # metric is simply absent from this interval's batch (silence beats
+        # a confident-but-mislabeled reading), and the other metrics are
+        # still published normally.
         driver = _Driver(node_count=10, edge_count=20, isolated_count=1)  # GraphEdgeDensity = 2.0
         lf._fetch_real_fiedler_value = lambda: {"ok": False, "error": "graph_query_api unavailable"}
         metrics = lf._compute_metrics(driver)
-        self.assertEqual(metrics["FiedlerAlgebraicConnectivity"], metrics["GraphEdgeDensity"])
-        self.assertEqual(metrics["FiedlerAlgebraicConnectivity"], 2.0)
+        self.assertNotIn("FiedlerAlgebraicConnectivity", metrics)
+        self.assertEqual(metrics["GraphEdgeDensity"], 2.0)
+
+    def test_fiedler_algebraic_connectivity_omitted_on_estimator_rejected_degenerate_value(self):
+        # The estimator itself (graph_query_api.compute_fiedler_value) now
+        # rejects a degenerate lambda2 as ok=False with an invalid_reason
+        # rather than ok=True/lambda2=0.0 -- confirm that flows through here
+        # as an omission too, not a published zero.
+        driver = _Driver(node_count=10, edge_count=20, isolated_count=1)
+        lf._fetch_real_fiedler_value = lambda: {
+            "ok": False,
+            "error": "lambda2=0.0 is degenerate for an induced subgraph capped at n=500 vertices (limit=500)",
+            "invalid_reason": "sample_capped_degenerate",
+        }
+        metrics = lf._compute_metrics(driver)
+        self.assertNotIn("FiedlerAlgebraicConnectivity", metrics)
 
     def test_other_metrics_unaffected_by_fiedler_fetch(self):
         driver = _Driver(node_count=50, edge_count=75, isolated_count=3)
