@@ -18,8 +18,16 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { SearchResultHit } from '../types/search'
 import './docs.css'
 
-const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
-  { value: 'tier', label: 'Relevance (default)' },
+// ENC-TSK-N57 (ENC-TSK-N45/N56 UAT follow-up): /docs defaults to most-recently
+// updated first, matching the N45 intent that every feed defaults to
+// time-last-updated, newest to oldest. Reuses the shared 'updated' FeedSort +
+// sortSearchHits('updated') ordering shipped by the N56 /feed fix — records with
+// no timestamp sort last so they never masquerade as the newest.
+export const DEFAULT_DOCS_SORT: FeedSort = 'updated'
+
+export const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
+  { value: 'updated', label: 'Last Updated (default)' },
+  { value: 'tier', label: 'Relevance' },
   { value: 'title', label: 'Title' },
   { value: 'id', label: 'Document ID' },
 ]
@@ -38,7 +46,7 @@ export function DocsRoute() {
   useDocumentTitle('Docs')
   const [query, setQuery] = useState('')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>({ tokens: [] })
-  const [sort, setSort] = useState<FeedSort>('tier')
+  const [sort, setSort] = useState<FeedSort>(DEFAULT_DOCS_SORT)
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const events = useRealtimeFeedEvents()

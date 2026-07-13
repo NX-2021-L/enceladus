@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ReactElement } from 'react'
 import type { SkillListItem } from '../api/skillLibrary'
-import { buildSkillLibraryColumns, sortSkillLibraryRows } from './SkillLibraryRoute'
+import { DEFAULT_SORT, buildSkillLibraryColumns, sortSkillLibraryRows } from './SkillLibraryRoute'
 
 const ITEMS: SkillListItem[] = [
   {
@@ -38,6 +38,30 @@ describe('sortSkillLibraryRows', () => {
   it('sorts by updated_at', () => {
     const sorted = sortSkillLibraryRows(ITEMS, { sortingField: 'updated_at', isDescending: false })
     expect(sorted.map((r) => r.document_id)).toEqual(['DOC-B', 'DOC-A'])
+  })
+
+  // ENC-TSK-N57: rows with a blank updated_at must sort LAST under the new
+  // default (updated_at descending) so they never masquerade as newest —
+  // mirroring sortSearchHits' missing-timestamp policy on /docs and /feed.
+  it('places blank updated_at rows last under updated_at descending', () => {
+    const withBlank: SkillListItem[] = [
+      ...ITEMS,
+      { ...ITEMS[0]!, document_id: 'DOC-BLANK', updated_at: '' },
+    ]
+    const sorted = sortSkillLibraryRows(withBlank, { sortingField: 'updated_at', isDescending: true })
+    expect(sorted.map((r) => r.document_id)).toEqual(['DOC-A', 'DOC-B', 'DOC-BLANK'])
+  })
+})
+
+describe('DEFAULT_SORT', () => {
+  it('defaults the Skill Library to Updated, newest-first (descending)', () => {
+    expect(DEFAULT_SORT).toEqual({ sortingField: 'updated_at', isDescending: true })
+  })
+
+  it('resolves the default to newest-updated-first row order', () => {
+    // DOC-A is updated 2026-07-03, DOC-B 2026-07-01 → DOC-A first under the default.
+    const sorted = sortSkillLibraryRows(ITEMS, DEFAULT_SORT)
+    expect(sorted.map((r) => r.document_id)).toEqual(['DOC-A', 'DOC-B'])
   })
 })
 
