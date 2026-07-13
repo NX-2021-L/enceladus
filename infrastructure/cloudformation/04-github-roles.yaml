@@ -904,6 +904,55 @@ Resources:
               - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m/*"
               - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:deploymentstrategy/AppConfig.AllAtOnce"
 
+  # ENC-TSK-N34 -- DynamoDB PITR pre-flight (AC-1). CloudFormationDeployRole's
+  # DynamoDBTableOps grant is scoped to table/enceladus-*, table/devops-* only;
+  # 9 prod tables (11 incl. gamma-only names) fall outside both prefixes.
+  # Same failure class as every other ManagedPolicy in this file: inline quota
+  # exhausted, and CloudFormationDeployRole has no iam:CreatePolicy so this
+  # resource cannot be created fresh by the deploy workflow. The live policy
+  # (enceladus-cfn-deploy-ddb-pitr-ops, PolicyId ANPAVF6H3ZWYQRAFAVJLK) was
+  # created and attached out-of-band by io on 2026-07-13; this resource is
+  # brought under CFN management via --change-set-type IMPORT (see the
+  # BackendDeployRole import precedent above), same name, no manual/CFN
+  # name-collision handling needed since the import targets this exact ARN.
+  DynamoDbPitrOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-ddb-pitr-ops
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoDbContinuousBackupsOps
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:UpdateContinuousBackups
+            Resource:
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-policies"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-policies-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/component-registry"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/component-registry-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-compliance-violations"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-compliance-violations-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-sessions"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-sessions-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-types"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-types-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-credentials-gamma"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/user-preferences-gamma"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
