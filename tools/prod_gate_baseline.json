@@ -254,6 +254,13 @@
         "patch-role"
       ],
       "notes": "ENC-TSK-L83: environment: v3-prod — grants appconfig profile/hosted-version/deployment ops on application fhhcl7m to the SHARED CFN deploy role (rhythm-tenants + appconfig-governance stack unblock)"
+    },
+    "iam-cfn-deploy-role-s3-lifecycle-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-N70: environment: v3-prod — patches the SHARED CFN deploy role object with s3:Get/PutLifecycleConfiguration on jreese-net (ENC-TSK-N49 rhythm-cycle artifact retention unblock); same pattern as iam-cfn-deploy-role-gamma-patch.yml"
     }
   }
 }
