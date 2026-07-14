@@ -63,6 +63,24 @@ Parameters:
     Type: String
     Default: "112392089"
     Description: GitHub App installation ID for NX-2021-L org.
+  # ENC-TSK-N68: aws_bedrock_agent coordination provider config. Confirmed operational
+  # 2026-04-06 (DOC-649C1FB90947 / DISPATCH-GAMMA probe) but only ever set out-of-band
+  # on the live Lambda -- a later compute-stack deploy (Environment is a full replace)
+  # silently wiped them, regressing capabilities.get to status=misconfigured even
+  # though the Bedrock agent/alias/IAM grant were never touched. Codifying here so a
+  # future deploy can no longer strip it.
+  BedrockAgentId:
+    Type: String
+    Default: CMSD8RSEHG
+    Description: AWS Bedrock Agent ID for the aws_bedrock_agent coordination provider.
+  BedrockAgentAliasId:
+    Type: String
+    Default: YQHCD7GRWO
+    Description: AWS Bedrock Agent alias ID ("enceladus-prod") for coordination dispatch.
+  BedrockAgentRuntimeRegion:
+    Type: String
+    Default: us-west-2
+    Description: Region hosting the Bedrock agent runtime (agent itself lives in us-west-2, not the coordination Lambda's default us-east-1).
   # ENC-TSK-F57 AC-2 / ENC-ISS-280: CoordinationInternalApiKey{,Previous} must be referenceable
   # by CFN env vars so that stack deploys don't strip the out-of-band live values. Deploy
   # workflow is expected to pass real values via --parameter-overrides (empty defaults would
@@ -186,6 +204,10 @@ Resources:
           # tracker_mutation; the Cognito approval flow invokes it directly.
           TRACKER_MUTATION_LAMBDA_NAME: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-N68: aws_bedrock_agent provider config (see Parameters block for context).
+          BEDROCK_AGENT_ID: !Ref BedrockAgentId
+          BEDROCK_AGENT_ALIAS_ID: !Ref BedrockAgentAliasId
+          BEDROCK_AGENT_RUNTIME_REGION: !Ref BedrockAgentRuntimeRegion
           # ENC-TSK-I37 / ENC-FTR-117: Agent ID v3 identity stores (server-side allocator path)
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
           AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
