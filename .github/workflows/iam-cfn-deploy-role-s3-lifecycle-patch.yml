@@ -38,7 +38,14 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — S3 lifecycle configuration read/write on jreese-net
+      # ENC-TSK-N70: the role's aggregate inline-policy size is already at AWS's 10,240-byte
+      # ceiling (8 existing inline policies from prior one-off patches) -- a first attempt at
+      # this fix via put-role-policy failed LimitExceeded (run 29316730253, no mutation occurred).
+      # Several sibling permissions (e.g. enceladus-cfn-deploy-appconfig-governance-v1) are live
+      # as standalone customer-managed policies for the same reason, so this follows that
+      # established, already-working pattern instead: create-policy + attach-role-policy, which
+      # draws from the separate (much larger) managed-policy quota and touches nothing existing.
+      - name: Create managed policy — S3 lifecycle configuration read/write on jreese-net
         run: |
           set -euo pipefail
           cat > /tmp/cfn-deploy-role-s3-lifecycle-policy.json <<'JSON'
@@ -58,15 +65,22 @@ jobs:
           }
           JSON
 
-          aws iam put-role-policy \
-            --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-s3-lifecycle-v1" \
-            --policy-document "file:///tmp/cfn-deploy-role-s3-lifecycle-policy.json"
+          if aws iam get-policy --policy-arn "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1" >/dev/null 2>&1; then
+            echo "Managed policy already exists, skipping create-policy."
+          else
+            aws iam create-policy \
+              --policy-name "enceladus-cfn-deploy-s3-lifecycle-v1" \
+              --policy-document "file:///tmp/cfn-deploy-role-s3-lifecycle-policy.json" \
+              --description "s3:Get/PutLifecycleConfiguration on jreese-net for the CFN deploy role (ENC-TSK-N70 / ENC-TSK-N49 rhythm-cycle unblock)"
+          fi
 
-      - name: Verify inline policy attached
-        run: |
-          aws iam get-role-policy \
+          aws iam attach-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-s3-lifecycle-v1" \
-            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --policy-arn "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1"
+
+      - name: Verify managed policy attached
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query "AttachedPolicies[?PolicyName=='enceladus-cfn-deploy-s3-lifecycle-v1']" \
             --output table
