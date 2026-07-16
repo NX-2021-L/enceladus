@@ -953,6 +953,39 @@ Resources:
               - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-credentials-gamma"
               - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/user-preferences-gamma"
 
+  # ENC-ISS-556 / ENC-TSK-N60 -- cloudformation-compute-stack-deploy.yml's
+  # post-apply "Equalize rhythm-cycle S3 artifact retention (gamma, ENC-TSK-N49)"
+  # step calls s3:GetLifecycleConfiguration / s3:PutLifecycleConfiguration on
+  # arn:aws:s3:::jreese-net, but CloudFormationDeployRole was never granted
+  # either action -- the CFN change-sets still reach UPDATE_COMPLETE, only the
+  # post-apply step AccessDenieds, failing the Apply job on an otherwise-
+  # successful deploy. Same failure class as every other ManagedPolicy in this
+  # file: inline quota exhausted, and CloudFormationDeployRole has no
+  # iam:CreatePolicy so this resource cannot be created fresh by the deploy
+  # workflow (ENC-TSK-N34 hit the identical wall creating DynamoDbPitrOpsPolicy
+  # and its later policy-version widening -- this agent's AWS identity has an
+  # explicit deny on policy mutations). The live policy must be created and
+  # attached out-of-band by io, then brought under CFN management via
+  # --change-set-type IMPORT (DynamoDbPitrOpsPolicy precedent above), same
+  # ManagedPolicyName, before a normal stack update will reconcile cleanly.
+  S3RhythmCycleLifecyclePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-s3-lifecycle-ops
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3RhythmCycleLifecycleOps
+            Effect: Allow
+            Action:
+              - s3:GetLifecycleConfiguration
+              - s3:PutLifecycleConfiguration
+            Resource: "arn:aws:s3:::jreese-net"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
