@@ -180,6 +180,19 @@ Parameters:
       ENC-TSK-N19: when true (and RhythmActive), re-enable the absorbed legacy
       consolidation-arc schedules (RhythmAbsorbed condition). Default false.
 
+  # ENC-TSK-N78: io cost-stop pause switch for the rhythm pacemaker. When false,
+  # all five beat schedules go State=DISABLED (definitions and groups preserved;
+  # one-parameter resume). Independent of RhythmAbsorbLegacy on purpose: pausing
+  # the beats must NOT resurrect the seven absorbed legacy crons, so the two
+  # flags are separate axes (beats on/off vs legacy-absorption on/off).
+  RhythmBeatsEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-TSK-N78: when false, all five rhythm beat schedules (sense/light/
+      decide/heavy/coherence) are DISABLED. Default true.
+
   # ENC-FTR-106 / ENC-TSK-N19 (C3): codifies the standing io-HOLD on the nightly
   # Crick-Mitchison unlearning pass as IaC, independent of the Rhythm conditions.
   # UNLEARNING_MUTATION_ENABLED env flag on UnlearningFunction is untouched (layer 2).
@@ -277,6 +290,13 @@ Conditions:
     - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
     - !Equals [!Ref RhythmCycleEnabled, "true"]
     - !Equals [!Ref RhythmAbsorbLegacy, "true"]
+  # ENC-TSK-N78: beats run only when the rhythm substrate is active AND the
+  # pause switch is open. Inlines RhythmActive's sub-expressions for the same
+  # cfn_env_resolver.py reason documented on RhythmAbsorbed above (no !Condition).
+  RhythmBeatsActive: !And
+    - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref RhythmCycleEnabled, "true"]
+    - !Equals [!Ref RhythmBeatsEnabled, "true"]
   # ENC-TSK-N19 (C3): independent of the Rhythm conditions -- codifies the
   # standing io-HOLD on the unlearning nightly pass (ENC-FTR-106).
   UnlearningEnabledCond: !Equals [!Ref UnlearningEnabled, "true"]
@@ -7829,7 +7849,8 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      # ENC-TSK-N78: io cost-stop pause switch — DISABLED preserves the schedule.
+      State: !If [RhythmBeatsActive, ENABLED, DISABLED]
       Target:
         Arn: !GetAtt RhythmCycleFunction.Arn
         RoleArn: !GetAtt RhythmSchedulerRole.Arn
@@ -7845,7 +7866,8 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      # ENC-TSK-N78: io cost-stop pause switch — DISABLED preserves the schedule.
+      State: !If [RhythmBeatsActive, ENABLED, DISABLED]
       Target:
         Arn: !GetAtt RhythmCycleFunction.Arn
         RoleArn: !GetAtt RhythmSchedulerRole.Arn
@@ -7861,7 +7883,8 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      # ENC-TSK-N78: io cost-stop pause switch — DISABLED preserves the schedule.
+      State: !If [RhythmBeatsActive, ENABLED, DISABLED]
       Target:
         Arn: !GetAtt RhythmCycleFunction.Arn
         RoleArn: !GetAtt RhythmSchedulerRole.Arn
@@ -7877,7 +7900,8 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      # ENC-TSK-N78: io cost-stop pause switch — DISABLED preserves the schedule.
+      State: !If [RhythmBeatsActive, ENABLED, DISABLED]
       Target:
         Arn: !GetAtt RhythmCycleFunction.Arn
         RoleArn: !GetAtt RhythmSchedulerRole.Arn
@@ -7893,7 +7917,8 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      # ENC-TSK-N78: io cost-stop pause switch — DISABLED preserves the schedule.
+      State: !If [RhythmBeatsActive, ENABLED, DISABLED]
       Target:
         Arn: !GetAtt RhythmCycleFunction.Arn
         RoleArn: !GetAtt RhythmSchedulerRole.Arn

@@ -379,12 +379,22 @@ jobs:
             # heavy_integrate, so this ends legacy+beat double-execution without
             # silencing the consolidation arc (DOC-0D9D3C2E62F3 section 5).
             RHYTHM_ABSORB_LEGACY="true"
+            # ENC-TSK-N78: io cost-stop directive 2026-08-01 — pause all five rhythm
+            # beat schedules on gamma (State=DISABLED, definitions preserved). Passed
+            # explicitly for the same stored-param reason as above. Deliberately NOT
+            # done via RHYTHM_CYCLE_ENABLED=false: that would flip RhythmAbsorbed
+            # false and resurrect the seven legacy crons (incl. gdmp-nightly under
+            # the armed GDMP mutation flag). Flip back to "true" to resume the mind.
+            RHYTHM_BEATS_ENABLED="false"
           else
             APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
             RHYTHM_CYCLE_ENABLED="true"
             # ENC-TSK-N22: prod keeps the template default; RhythmAbsorbed additionally
             # requires a non-empty EnvironmentSuffix, so prod rules stay ENABLED either way.
             RHYTHM_ABSORB_LEGACY="false"
+            # ENC-TSK-N78: prod has no rhythm schedules (RhythmActive requires a
+            # non-empty suffix); explicit true keeps the stored param non-drifting.
+            RHYTHM_BEATS_ENABLED="true"
           fi
 
           aws cloudformation deploy \
@@ -405,6 +415,7 @@ jobs:
               SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
               RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
               RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
+              RhythmBeatsEnabled="${RHYTHM_BEATS_ENABLED}" \
               CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}" 2>&1 | tee /tmp/plan-compute.log
               # ADE Component C (ENC-FTR-118): pass the Cursor webhook HMAC secret as a NoEcho
               # param so `aws cloudformation deploy` does not reuse/zero it (same value-strip class
