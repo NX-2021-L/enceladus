@@ -371,9 +371,20 @@ jobs:
             APPCFG_APP="fhhcl7m"; APPCFG_ENV="zecfu42"
             # ENC-TSK-L54: scheduler IAM landed (enceladus-cfn-deploy-scheduler-v1 on CFN deploy role).
             RHYTHM_CYCLE_ENABLED="true"
+            # ENC-TSK-N22 / ENC-PLN-078 W1e: absorb the seven legacy consolidation-arc
+            # EventBridge rules into the Rhythm Cycle (RhythmAbsorbed => State=DISABLED).
+            # Must be passed explicitly: the gamma stack stores the N19 value (false) and
+            # `aws cloudformation deploy` reuses stored params over template Defaults
+            # (ENC-LSN-053 AXIS-2 / ENC-TSK-H28). Tenant invocation is unconditional in
+            # heavy_integrate, so this ends legacy+beat double-execution without
+            # silencing the consolidation arc (DOC-0D9D3C2E62F3 section 5).
+            RHYTHM_ABSORB_LEGACY="true"
           else
             APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
             RHYTHM_CYCLE_ENABLED="true"
+            # ENC-TSK-N22: prod keeps the template default; RhythmAbsorbed additionally
+            # requires a non-empty EnvironmentSuffix, so prod rules stay ENABLED either way.
+            RHYTHM_ABSORB_LEGACY="false"
           fi
 
           aws cloudformation deploy \
@@ -393,6 +404,7 @@ jobs:
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
               SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
               RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
+              RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
               CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}" 2>&1 | tee /tmp/plan-compute.log
               # ADE Component C (ENC-FTR-118): pass the Cursor webhook HMAC secret as a NoEcho
               # param so `aws cloudformation deploy` does not reuse/zero it (same value-strip class
