@@ -99,6 +99,7 @@ jobs:
       function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
       environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
+      enable_snapstart:      ${{ steps.manifest.outputs.enable_snapstart }}
       full_scope:            ${{ steps.affected.outputs.full_scope }}
       affected_functions_json: ${{ steps.affected.outputs.affected_functions_json }}
 
@@ -131,6 +132,12 @@ jobs:
           # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy fields
           ENV_SUFFIX=$(_parse environment_suffix)
           CODEDEPLOY_APP=$(_parse codedeploy_app_name)
+          # ENC-TSK-N79 / ENC-ISS-591: SnapStart intent from the manifest, enforced at
+          # deploy time. Empty/missing defaults to "false" — snapshot cache bills per
+          # retained published version with zero invocations, so absent intent must
+          # fail toward no-cache.
+          SNAPSTART=$(_parse enable_snapstart)
+          [[ -n "$SNAPSTART" ]] || SNAPSTART="false"
 
           [[ -n "$ROLE" ]] || { echo "::error::deploy_role_arn missing in $MANIFEST"; exit 1; }
 
@@ -162,6 +169,7 @@ jobs:
             echo "function_name_map_json=$FNMAP_JSON"
             echo "environment_suffix=${ENV_SUFFIX}"
             echo "codedeploy_app_name=${CODEDEPLOY_APP}"
+            echo "enable_snapstart=${SNAPSTART}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Target=$TARGET  Arch=$ARCH  Runtime=$RUNTIME  Role=$ROLE"
@@ -367,6 +375,8 @@ jobs:
           # Empty string → direct alias update (AllAtOnce). Non-empty → CodeDeploy traffic shift.
           CANARY_PREFERENCE: ${{ needs.resolve.outputs.canary_preference }}
           ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
+          # ENC-TSK-N79 / ENC-ISS-591: manifest SnapStart intent, enforced pre-publish.
+          ENABLE_SNAPSTART: ${{ needs.resolve.outputs.enable_snapstart }}
         run: |
           set -euo pipefail
           python3 -u - <<'PY'
@@ -393,6 +403,9 @@ jobs:
           region = 'us-west-2'
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
+          # ENC-TSK-N79 / ENC-ISS-591: manifest SnapStart intent. Anything but the
+          # literal "true" means no snapshots (fail toward no-cache).
+          enable_snapstart = os.environ.get('ENABLE_SNAPSTART', 'false').strip().lower() == 'true'
 
           CODEDEPLOY_CONFIG_MAP = {
               'Canary10Percent5Minutes':        'CodeDeployDefault.LambdaCanary10Percent5Minutes',
@@ -477,6 +490,47 @@ jobs:
                   time.sleep(back)
               return last
 
+          def prune_versions(mapped_name, keep_explicit):
+              """ENC-TSK-N79 / ENC-ISS-591: delete stale published versions after the
+              :live alias advances, so SnapStart snapshot cache and version clutter
+              cannot accumulate (each retained version bills cache per GB-second with
+              zero invocations). Keeps the three highest version numbers plus every
+              explicitly-kept version (newly published; pre-deploy alias target /
+              CodeDeploy CurrentVersion, so in-flight canaries stay intact). Versions
+              referenced by any alias are additionally protected server-side — Lambda
+              rejects their deletion, which lands in the warn path. Strictly
+              non-fatal: cost hygiene must never fail a deploy."""
+              try:
+                  r = subprocess.run(
+                      ['aws', 'lambda', 'list-versions-by-function',
+                       '--function-name', mapped_name, '--region', region,
+                       '--query', "Versions[?Version!='$LATEST'].Version",
+                       '--output', 'json'],
+                      capture_output=True, text=True)
+                  if r.returncode != 0:
+                      log(f'  [warn] prune {mapped_name}: list-versions failed: {(r.stderr or "").strip().splitlines()[-1] if r.stderr else r.returncode}')
+                      return
+                  versions = sorted((int(v) for v in json.loads(r.stdout)), reverse=True)
+                  keep = {str(v) for v in versions[:3]}
+                  keep |= {v for v in keep_explicit if v and v != '$LATEST'}
+                  stale = [str(v) for v in versions if str(v) not in keep]
+                  if not stale:
+                      return
+                  deleted = 0
+                  for v in stale:
+                      d = subprocess.run(
+                          ['aws', 'lambda', 'delete-function',
+                           '--function-name', mapped_name, '--qualifier', v,
+                           '--region', region],
+                          capture_output=True, text=True)
+                      if d.returncode == 0:
+                          deleted += 1
+                      else:
+                          log(f'  [warn] prune {mapped_name}: version {v} not deleted: {(d.stderr or "").strip().splitlines()[-1] if d.stderr else d.returncode}')
+                  log(f'  ~ {mapped_name}: pruned {deleted}/{len(stale)} stale version(s); kept {{{", ".join(sorted(keep, key=int))}}}')
+              except Exception as e:
+                  log(f'  [warn] prune {mapped_name}: {e}')
+
           def deploy_one(fn, mapped_name, version_id):
               """Per-target pipeline: download artifact, update code, publish version,
               kick off CodeDeploy canary (or fall back to direct alias). Returns:
@@ -489,6 +543,35 @@ jobs:
                   return {'fn': fn, 'status': 'skip'}
               s3_key = f"{prefix}/{fn}-{sha}.zip"
               log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id} (stage->{staging_bucket})')
+
+              # ENC-TSK-N79 / ENC-ISS-591: enforce manifest SnapStart intent BEFORE
+              # publish — update-function-code --publish bakes $LATEST's config into
+              # the new version, and a SnapStart version bills snapshot cache per
+              # GB-second continuously with zero invocations (the $13/day Aug-2026
+              # incident: 209 drifted versions on enceladus-mcp-code-gamma). Heals
+              # out-of-band drift on every deploy. Non-fatal: a failed heal costs one
+              # bounded version-cache until the next prune, never a blocked deploy.
+              if not enable_snapstart:
+                  cfg = subprocess.run(
+                      ['aws', 'lambda', 'get-function-configuration',
+                       '--function-name', mapped_name, '--region', region,
+                       '--query', 'SnapStart.ApplyOn', '--output', 'text'],
+                      capture_output=True, text=True)
+                  if cfg.returncode == 0 and cfg.stdout.strip() == 'PublishedVersions':
+                      log(f'  ! {mapped_name}: SnapStart drift vs manifest enable_snapstart=false — healing to ApplyOn=None')
+                      heal = run_with_retry(
+                          ['aws', 'lambda', 'update-function-configuration',
+                           '--function-name', mapped_name, '--region', region,
+                           '--snap-start', 'ApplyOn=None'],
+                          what=f'snapstart-heal {mapped_name}')
+                      if heal is None or heal.returncode != 0:
+                          detail = (heal.stderr.strip().splitlines()[-1] if heal and heal.stderr else 'skip marker')
+                          log(f'  [warn] {mapped_name}: SnapStart heal failed ({detail}) — new version will snapshot, bounded by prune')
+                      else:
+                          subprocess.run(
+                              ['aws', 'lambda', 'wait', 'function-updated-v2',
+                               '--region', region, '--function-name', mapped_name],
+                              check=False)
 
               # ENC-ISS-454: stage the exact same-run artifact version into the
               # us-west-2 staging bucket (server-side cross-region copy), then deploy
@@ -594,6 +677,9 @@ jobs:
                               dep_id = json.loads(cd_r.stdout).get('deploymentId', '')
                               log(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
                               if dep_id:
+                                  # ENC-TSK-N79: prune keeps Current+Target, so the
+                                  # in-flight canary shift is untouched.
+                                  prune_versions(mapped_name, {new_version, current_version})
                                   return {'fn': fn, 'mapped_name': mapped_name,
                                           'status': 'codedeploy', 'dep_id': dep_id}
                               use_cd_succeeded = False
@@ -631,6 +717,7 @@ jobs:
                           f'{mapped_name}: failed to advance :live alias to {new_version}: {err}'
                       )
               log(f'  + {mapped_name} → live:{new_version} (direct)')
+              prune_versions(mapped_name, {new_version})
               return {'fn': fn, 'mapped_name': mapped_name, 'status': 'direct'}
 
           # ============================================================
