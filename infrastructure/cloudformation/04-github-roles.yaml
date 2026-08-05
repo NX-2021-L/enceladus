@@ -1032,6 +1032,24 @@ Resources:
                   - lambda:CreateAlias
                   - lambda:UpdateAlias
                 Resource: "*"
+              # ENC-TSK-N80 / ENC-ISS-591: lifecycle hygiene verbs for _deploy.yml's
+              # SnapStart heal + version prune. UpdateFunctionConfiguration on the
+              # bare gamma function ARNs only; DeleteFunction on VERSION-QUALIFIED
+              # gamma ARNs only — the role can delete stale versions but is
+              # structurally unable to delete a whole function (an unqualified
+              # delete-function targets the bare ARN, which this does not grant).
+              # One-off live application ahead of the next roles-stack deploy:
+              # .github/workflows/iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml
+              - Sid: V4GammaLambdaLifecycle
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionConfiguration
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-gamma"
+              - Sid: V4GammaLambdaVersionPrune
+                Effect: Allow
+                Action:
+                  - lambda:DeleteFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-gamma:*"
               # S3 read for artifact version probing (belt-and-suspenders;
               # update-function-code fetches via Lambda service role, but
               # the resolve-job S3 probe runs under this env's job context
