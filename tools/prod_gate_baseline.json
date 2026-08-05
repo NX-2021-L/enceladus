@@ -142,6 +142,13 @@
       ],
       "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
     },
+    "iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-N80 / ENC-ISS-591: environment: v3-prod — grants lambda:UpdateFunctionConfiguration (function:*-gamma) + lambda:DeleteFunction (VERSION-QUALIFIED function:*-gamma:* only) to GitHubActions-V4Gamma-DeployRole for the _deploy.yml SnapStart heal + version prune. Gamma-scoped grant on a gamma-dedicated role object, but executes under the shared backend admin role — io-gated and classed prod-mutating per the iam-*-patch precedent family."
+    },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [

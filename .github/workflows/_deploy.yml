@@ -407,6 +407,18 @@ jobs:
           # literal "true" means no snapshots (fail toward no-cache).
           enable_snapstart = os.environ.get('ENABLE_SNAPSTART', 'false').strip().lower() == 'true'
 
+          # ENC-TSK-N80: hygiene must never re-approach the 1h OIDC credential
+          # lifetime (run 30974760724: 3,939 denied deletes stretched the job to
+          # 65 min and user_preferences_api died on ExpiredToken). Three bounds:
+          # deny-trip breakers (a missing IAM verb is role-wide — one denial
+          # proves every later attempt futile this run), a per-function delete
+          # cap, and a global prune wall-clock budget measured from script start.
+          _script_t0 = time.monotonic()
+          PRUNE_MAX_PER_FN = 25
+          PRUNE_TIME_BUDGET_S = 300
+          _prune_denied = threading.Event()
+          _heal_denied = threading.Event()
+
           CODEDEPLOY_CONFIG_MAP = {
               'Canary10Percent5Minutes':        'CodeDeployDefault.LambdaCanary10Percent5Minutes',
               'Canary10Percent10Minutes':       'CodeDeployDefault.LambdaCanary10Percent10Minutes',
@@ -499,7 +511,16 @@ jobs:
               CodeDeploy CurrentVersion, so in-flight canaries stay intact). Versions
               referenced by any alias are additionally protected server-side — Lambda
               rejects their deletion, which lands in the warn path. Strictly
-              non-fatal: cost hygiene must never fail a deploy."""
+              non-fatal: cost hygiene must never fail a deploy.
+              ENC-TSK-N80: deny-tripped, capped at PRUNE_MAX_PER_FN deletions per
+              function, and skipped entirely once PRUNE_TIME_BUDGET_S has elapsed
+              since script start — the backlog drains across deploys instead of
+              one run racing the credential lifetime."""
+              if _prune_denied.is_set():
+                  return
+              if time.monotonic() - _script_t0 > PRUNE_TIME_BUDGET_S:
+                  log(f'  ~ {mapped_name}: prune skipped (run past {PRUNE_TIME_BUDGET_S}s prune budget)')
+                  return
               try:
                   r = subprocess.run(
                       ['aws', 'lambda', 'list-versions-by-function',
@@ -516,8 +537,13 @@ jobs:
                   stale = [str(v) for v in versions if str(v) not in keep]
                   if not stale:
                       return
+                  # ENC-TSK-N80: bounded drain — at most PRUNE_MAX_PER_FN per run.
+                  deferred = max(0, len(stale) - PRUNE_MAX_PER_FN)
+                  stale = stale[:PRUNE_MAX_PER_FN]
                   deleted = 0
                   for v in stale:
+                      if _prune_denied.is_set():
+                          return
                       d = subprocess.run(
                           ['aws', 'lambda', 'delete-function',
                            '--function-name', mapped_name, '--qualifier', v,
@@ -525,9 +551,18 @@ jobs:
                           capture_output=True, text=True)
                       if d.returncode == 0:
                           deleted += 1
+                      elif 'AccessDeniedException' in (d.stderr or ''):
+                          # Role-wide gap: one denial proves all later attempts futile.
+                          _prune_denied.set()
+                          log(f'::warning::prune disabled for this run — deploy role lacks lambda:DeleteFunction '
+                              f'(version-qualified). Apply the grant via iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml '
+                              f'(durable fix: 04-github-roles.yaml V4GammaLambdaLifecycle). First denial: {mapped_name}:{v}')
+                          return
                       else:
                           log(f'  [warn] prune {mapped_name}: version {v} not deleted: {(d.stderr or "").strip().splitlines()[-1] if d.stderr else d.returncode}')
-                  log(f'  ~ {mapped_name}: pruned {deleted}/{len(stale)} stale version(s); kept {{{", ".join(sorted(keep, key=int))}}}')
+                  log(f'  ~ {mapped_name}: pruned {deleted}/{len(stale)} stale version(s)'
+                      + (f' ({deferred} deferred to later runs)' if deferred else '')
+                      + f'; kept {{{", ".join(sorted(keep, key=int))}}}')
               except Exception as e:
                   log(f'  [warn] prune {mapped_name}: {e}')
 
@@ -551,7 +586,7 @@ jobs:
               # incident: 209 drifted versions on enceladus-mcp-code-gamma). Heals
               # out-of-band drift on every deploy. Non-fatal: a failed heal costs one
               # bounded version-cache until the next prune, never a blocked deploy.
-              if not enable_snapstart:
+              if not enable_snapstart and not _heal_denied.is_set():
                   cfg = subprocess.run(
                       ['aws', 'lambda', 'get-function-configuration',
                        '--function-name', mapped_name, '--region', region,
@@ -566,7 +601,14 @@ jobs:
                           what=f'snapstart-heal {mapped_name}')
                       if heal is None or heal.returncode != 0:
                           detail = (heal.stderr.strip().splitlines()[-1] if heal and heal.stderr else 'skip marker')
-                          log(f'  [warn] {mapped_name}: SnapStart heal failed ({detail}) — new version will snapshot, bounded by prune')
+                          if heal is not None and 'AccessDeniedException' in (heal.stderr or ''):
+                              # ENC-TSK-N80: role-wide gap — trip once, warn once.
+                              _heal_denied.set()
+                              log(f'::warning::SnapStart heal disabled for this run — deploy role lacks '
+                                  f'lambda:UpdateFunctionConfiguration. Apply the grant via '
+                                  f'iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml. First denial: {mapped_name}')
+                          else:
+                              log(f'  [warn] {mapped_name}: SnapStart heal failed ({detail}) — new version will snapshot, bounded by prune')
                       else:
                           subprocess.run(
                               ['aws', 'lambda', 'wait', 'function-updated-v2',
