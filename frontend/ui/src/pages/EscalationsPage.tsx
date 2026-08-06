@@ -1,12 +1,14 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   approveEscalation,
   denyEscalation,
   escalationKeys,
   fetchEscalations,
+  fetchEscalationsInbox,
 } from '../api/escalations'
 import type { EscalationDiff, EscalationItem } from '../api/escalations'
+import { useProjects } from '../hooks/useProjects'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { EmptyState } from '../components/shared/EmptyState'
@@ -17,8 +19,16 @@ import { EmptyState } from '../components/shared/EmptyState'
 // a prominent drift warning when expected_version mismatches; io may still
 // approve (informed consent) or deny. Terminal escalations stay browsable in
 // a collapsed audit section.
+//
+// ENC-TSK-N81 (ENC-ISS-594): Pending is an ALL-PROJECTS inbox. This page used
+// to pin every call to a `PROJECT_ID = 'enceladus'` constant, so escalations
+// minted under any other project (INT-ESC-001..004) never rendered and — with
+// approval Cognito-human-only and non-delegable — were unapprovable forever.
+// Pending now fans out across the project list and each decision routes to the
+// escalation's OWN project_id. History stays project-scoped behind a selector:
+// one inbox is worth 25 requests, 25 full audit histories are not.
 
-const PROJECT_ID = 'enceladus'
+const HOME_PROJECT_ID = 'enceladus'
 
 const STATUS_COLORS: Record<string, string> = {
   requested: 'bg-amber-500/20 text-amber-300',
@@ -74,6 +84,17 @@ function DiffBlock({ diff }: { diff: EscalationDiff }) {
   )
 }
 
+function ProjectBadge({ projectId }: { projectId: string }) {
+  return (
+    <span
+      className="px-2 py-0.5 rounded text-xs font-medium bg-indigo-500/20 text-indigo-300"
+      data-testid="escalation-project"
+    >
+      {projectId}
+    </span>
+  )
+}
+
 function PendingCard({
   escalation,
   onApprove,
@@ -81,8 +102,8 @@ function PendingCard({
   busy,
 }: {
   escalation: EscalationItem
-  onApprove: (id: string) => void
-  onDeny: (id: string, guidanceNote?: string) => void
+  onApprove: (escalation: EscalationItem) => void
+  onDeny: (escalation: EscalationItem, guidanceNote?: string) => void
   busy: boolean
 }) {
   const [showGuidance, setShowGuidance] = useState(false)
@@ -95,8 +116,9 @@ function PendingCard({
       data-testid={`escalation-card-${escalation.item_id}`}
     >
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-sm text-slate-200">{escalation.item_id}</span>
+          <ProjectBadge projectId={escalation.project_id} />
           <StatusBadge status={escalation.status} />
         </div>
         <span className="text-xs text-slate-500">{escalation.created_at}</span>
@@ -144,7 +166,7 @@ function PendingCard({
           />
           <div className="flex gap-2">
             <button
-              onClick={() => onDeny(escalation.item_id, guidanceNote.trim() || undefined)}
+              onClick={() => onDeny(escalation, guidanceNote.trim() || undefined)}
               disabled={busy}
               className="px-3 py-1.5 rounded bg-rose-600/80 hover:bg-rose-600 text-sm text-white disabled:opacity-50"
             >
@@ -161,14 +183,14 @@ function PendingCard({
       ) : (
         <div className="flex gap-2">
           <button
-            onClick={() => onApprove(escalation.item_id)}
+            onClick={() => onApprove(escalation)}
             disabled={busy}
             className="px-3 py-1.5 rounded bg-emerald-600/80 hover:bg-emerald-600 text-sm text-white disabled:opacity-50"
           >
             Approve
           </button>
           <button
-            onClick={() => onDeny(escalation.item_id)}
+            onClick={() => onDeny(escalation)}
             disabled={busy}
             className="px-3 py-1.5 rounded bg-rose-600/80 hover:bg-rose-600 text-sm text-white disabled:opacity-50"
           >
@@ -191,18 +213,41 @@ export function EscalationsPage() {
   const queryClient = useQueryClient()
   const [actionError, setActionError] = useState('')
   const [lastOutcome, setLastOutcome] = useState('')
+  const [historyProject, setHistoryProject] = useState(HOME_PROJECT_ID)
 
-  const { data, isPending, isError } = useQuery({
-    queryKey: escalationKeys.feed(PROJECT_ID),
-    queryFn: () => fetchEscalations(PROJECT_ID),
+  // Project list drives the pending fan-out. It rides the static projects feed
+  // (CDN, no Lambda), and if it is unavailable we still show the home project
+  // rather than an empty inbox.
+  const { projects, isError: projectsError } = useProjects()
+  const projectIds = useMemo(() => {
+    const ids = projects.map((p) => p.project_id).filter(Boolean)
+    return ids.length ? Array.from(new Set([...ids, HOME_PROJECT_ID])).sort() : [HOME_PROJECT_ID]
+  }, [projects])
+
+  const {
+    data: inbox,
+    isPending,
+    isError,
+  } = useQuery({
+    queryKey: escalationKeys.inbox(projectIds),
+    queryFn: () => fetchEscalationsInbox(projectIds),
     refetchInterval: 30_000,
   })
 
-  const refresh = () =>
-    queryClient.invalidateQueries({ queryKey: escalationKeys.feed(PROJECT_ID) })
+  const { data: history } = useQuery({
+    queryKey: escalationKeys.feed(historyProject),
+    queryFn: () => fetchEscalations(historyProject),
+    refetchInterval: 30_000,
+  })
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: escalationKeys.inbox(projectIds) })
+    queryClient.invalidateQueries({ queryKey: escalationKeys.feed(historyProject) })
+  }
 
   const approveMutation = useMutation({
-    mutationFn: (escalationId: string) => approveEscalation(PROJECT_ID, escalationId),
+    mutationFn: (escalation: EscalationItem) =>
+      approveEscalation(escalation.project_id, escalation.item_id),
     onSuccess: (result) => {
       setActionError('')
       setLastOutcome(
@@ -216,8 +261,13 @@ export function EscalationsPage() {
   })
 
   const denyMutation = useMutation({
-    mutationFn: ({ escalationId, guidanceNote }: { escalationId: string; guidanceNote?: string }) =>
-      denyEscalation(PROJECT_ID, escalationId, guidanceNote),
+    mutationFn: ({
+      escalation,
+      guidanceNote,
+    }: {
+      escalation: EscalationItem
+      guidanceNote?: string
+    }) => denyEscalation(escalation.project_id, escalation.item_id, guidanceNote),
     onSuccess: (result) => {
       setActionError('')
       setLastOutcome(`${result.escalation_id} ${result.status}.`)
@@ -227,11 +277,11 @@ export function EscalationsPage() {
   })
 
   if (isPending) return <LoadingState />
-  if (isError || !data) return <ErrorState />
+  if (isError || !inbox) return <ErrorState />
 
   const busy = approveMutation.isPending || denyMutation.isPending
-  const pending = data.pending ?? []
-  const terminal = data.terminal ?? []
+  const pending = inbox.pending
+  const terminal = history?.terminal ?? []
 
   return (
     <div className="p-4 space-y-4">
@@ -239,6 +289,25 @@ export function EscalationsPage() {
         Human-gated mutation overrides (ENC-FTR-121). Approval is non-delegable: decisions
         here are the sole origin of override authorization.
       </p>
+
+      {/* State the coverage rather than implying it. A queue that silently
+          scopes itself is how ENC-ISS-594 hid four escalations for a month. */}
+      <p className="text-xs text-slate-500" data-testid="inbox-coverage">
+        Pending across {inbox.scanned.length} project
+        {inbox.scanned.length === 1 ? '' : 's'}
+        {projectsError && ' (project list unavailable — showing enceladus only)'}
+      </p>
+
+      {inbox.failed.length > 0 && (
+        <div
+          className="bg-amber-500/10 border border-amber-500/40 rounded px-3 py-2 text-sm text-amber-300"
+          data-testid="partial-failure-warning"
+        >
+          ⚠ Could not read escalations for: {inbox.failed.join(', ')}. Any pending
+          escalation in {inbox.failed.length === 1 ? 'that project' : 'those projects'} is
+          not shown below.
+        </div>
+      )}
 
       {actionError && (
         <div className="bg-rose-500/10 border border-rose-500/40 rounded px-3 py-2 text-sm text-rose-300">
@@ -263,8 +332,10 @@ export function EscalationsPage() {
               key={escalation.item_id}
               escalation={escalation}
               busy={busy}
-              onApprove={(id) => approveMutation.mutate(id)}
-              onDeny={(id, guidanceNote) => denyMutation.mutate({ escalationId: id, guidanceNote })}
+              onApprove={(item) => approveMutation.mutate(item)}
+              onDeny={(item, guidanceNote) =>
+                denyMutation.mutate({ escalation: item, guidanceNote })
+              }
             />
           ))
         )}
@@ -274,6 +345,23 @@ export function EscalationsPage() {
         <summary className="text-sm font-semibold text-slate-400 cursor-pointer select-none">
           History ({terminal.length})
         </summary>
+        {/* Project-scoped on purpose: the audit trail is unbounded and pulling
+            every project's history on every poll is not worth it on mobile. */}
+        <label className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+          Project
+          <select
+            value={historyProject}
+            onChange={(e) => setHistoryProject(e.target.value)}
+            aria-label="History project"
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+          >
+            {projectIds.map((projectId) => (
+              <option key={projectId} value={projectId}>
+                {projectId}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="mt-3 space-y-2">
           {terminal.map((escalation) => (
             <div
