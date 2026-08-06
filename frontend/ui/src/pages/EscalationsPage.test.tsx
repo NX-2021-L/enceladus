@@ -8,8 +8,14 @@
  *   - Approve / Deny / Deny-with-guidance wire to the API module.
  *   - Terminal escalations render inside the collapsed History section.
  *
+ * ENC-TSK-N81 / ENC-ISS-594 additionally covers:
+ *   - Pending merges every project's queue into one inbox (non-ENC included).
+ *   - Approve/deny route to the escalation's OWN project_id.
+ *   - A failing project degrades to a partial-result warning, not ErrorState.
+ *
  * Mocks: the api/escalations module is stubbed at the import boundary so the
  * page renders without the network; approval calls are asserted on the mock.
+ * The projects feed is stubbed too — it drives the pending fan-out.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -20,20 +26,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { EscalationItem, EscalationsFeedResponse } from '../api/escalations'
 
-const { mockFetchEscalations, mockApprove, mockDeny } = vi.hoisted(() => ({
-  mockFetchEscalations: vi.fn(),
-  mockApprove: vi.fn(),
-  mockDeny: vi.fn(),
-}))
+const { mockFetchEscalations, mockFetchInbox, mockApprove, mockDeny, mockFetchProjects } =
+  vi.hoisted(() => ({
+    mockFetchEscalations: vi.fn(),
+    mockFetchInbox: vi.fn(),
+    mockApprove: vi.fn(),
+    mockDeny: vi.fn(),
+    mockFetchProjects: vi.fn(),
+  }))
 
 vi.mock('../api/escalations', async (importOriginal) => {
   const original = await importOriginal<typeof import('../api/escalations')>()
   return {
     ...original,
     fetchEscalations: mockFetchEscalations,
+    fetchEscalationsInbox: mockFetchInbox,
     approveEscalation: mockApprove,
     denyEscalation: mockDeny,
   }
+})
+
+// The projects feed drives the pending fan-out (ENC-TSK-N81).
+vi.mock('../api/feeds', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../api/feeds')>()
+  return { ...original, fetchProjects: mockFetchProjects }
 })
 
 import { EscalationsPage } from './EscalationsPage'
@@ -95,8 +111,26 @@ function renderPage() {
   return render(<EscalationsPage />, { wrapper })
 }
 
+function inbox(overrides: Partial<{
+  pending: EscalationItem[]
+  scanned: string[]
+  failed: string[]
+}> = {}) {
+  return {
+    pending: [pendingEscalation()],
+    scanned: ['enceladus', 'intelligence'],
+    failed: [],
+    ...overrides,
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  mockFetchProjects.mockResolvedValue({
+    generated_at: '2026-08-06T07:00:00Z',
+    projects: [{ project_id: 'enceladus' }, { project_id: 'intelligence' }],
+  })
+  mockFetchInbox.mockResolvedValue(inbox())
   mockFetchEscalations.mockResolvedValue(feed())
   mockApprove.mockResolvedValue({
     success: true,
@@ -127,8 +161,8 @@ describe('EscalationsPage', () => {
   })
 
   it('shows a prominent drift warning when expected_version mismatches', async () => {
-    mockFetchEscalations.mockResolvedValue(
-      feed({
+    mockFetchInbox.mockResolvedValue(
+      inbox({
         pending: [
           pendingEscalation({
             diff: {
@@ -199,8 +233,98 @@ describe('EscalationsPage', () => {
   })
 
   it('renders the empty state when nothing is pending', async () => {
+    mockFetchInbox.mockResolvedValue(inbox({ pending: [] }))
     mockFetchEscalations.mockResolvedValue(feed({ pending: [], terminal: [] }))
     renderPage()
     expect(await screen.findByText('No pending escalations.')).toBeInTheDocument()
+  })
+
+  // ENC-TSK-N81 / ENC-ISS-594 — the all-projects inbox.
+
+  it('fans the pending queue out across every project from the projects feed', async () => {
+    renderPage()
+    await screen.findByTestId('escalation-card-ENC-ESC-001')
+    expect(mockFetchInbox).toHaveBeenCalledWith(['enceladus', 'intelligence'])
+  })
+
+  it('renders non-ENC escalations in the same pending inbox, labelled by project', async () => {
+    mockFetchInbox.mockResolvedValue(
+      inbox({
+        pending: [
+          pendingEscalation({
+            item_id: 'INT-ESC-001',
+            project_id: 'intelligence',
+            target_record_id: 'INT-TSK-182',
+            mutation_type: 'direct_state_override',
+          }),
+          pendingEscalation(),
+        ],
+      }),
+    )
+    renderPage()
+    const card = await screen.findByTestId('escalation-card-INT-ESC-001')
+    expect(within(card).getByTestId('escalation-project').textContent).toBe('intelligence')
+    expect(within(card).getByText('INT-TSK-182')).toBeInTheDocument()
+    // The ENC item still renders alongside it — one inbox, not a swap.
+    expect(screen.getByTestId('escalation-card-ENC-ESC-001')).toBeInTheDocument()
+  })
+
+  it('approves a non-ENC escalation against its OWN project_id', async () => {
+    mockFetchInbox.mockResolvedValue(
+      inbox({
+        pending: [pendingEscalation({ item_id: 'INT-ESC-001', project_id: 'intelligence' })],
+      }),
+    )
+    renderPage()
+    await screen.findByTestId('escalation-card-INT-ESC-001')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    expect(mockApprove).toHaveBeenCalledWith('intelligence', 'INT-ESC-001')
+  })
+
+  it('denies a non-ENC escalation against its OWN project_id', async () => {
+    mockFetchInbox.mockResolvedValue(
+      inbox({
+        pending: [pendingEscalation({ item_id: 'INT-ESC-004', project_id: 'intelligence' })],
+      }),
+    )
+    renderPage()
+    await screen.findByTestId('escalation-card-INT-ESC-004')
+    await userEvent.click(screen.getByRole('button', { name: 'Deny with guidance' }))
+    await userEvent.type(screen.getByLabelText('Guidance note'), 'Descope instead.')
+    await userEvent.click(screen.getByRole('button', { name: 'Send denial' }))
+    expect(mockDeny).toHaveBeenCalledWith('intelligence', 'INT-ESC-004', 'Descope instead.')
+  })
+
+  it('warns about unreadable projects instead of blanking the whole queue', async () => {
+    mockFetchInbox.mockResolvedValue(
+      inbox({ scanned: ['enceladus'], failed: ['intelligence'] }),
+    )
+    renderPage()
+    const warning = await screen.findByTestId('partial-failure-warning')
+    expect(warning.textContent).toContain('intelligence')
+    // The escalations that DID load are still decidable.
+    expect(screen.getByTestId('escalation-card-ENC-ESC-001')).toBeInTheDocument()
+    expect(screen.queryByText('Something went wrong')).toBeNull()
+  })
+
+  it('states the coverage it actually achieved', async () => {
+    renderPage()
+    const coverage = await screen.findByTestId('inbox-coverage')
+    expect(coverage.textContent).toContain('2 projects')
+  })
+
+  it('keeps History project-scoped and switchable', async () => {
+    renderPage()
+    await screen.findByTestId('escalation-card-ENC-ESC-001')
+    expect(mockFetchEscalations).toHaveBeenCalledWith('enceladus')
+    await userEvent.selectOptions(screen.getByLabelText('History project'), 'intelligence')
+    expect(mockFetchEscalations).toHaveBeenCalledWith('intelligence')
+  })
+
+  it('falls back to the home project when the projects feed is unavailable', async () => {
+    mockFetchProjects.mockRejectedValue(new Error('feed down'))
+    renderPage()
+    await screen.findByTestId('escalation-card-ENC-ESC-001')
+    expect(mockFetchInbox).toHaveBeenCalledWith(['enceladus'])
   })
 })
