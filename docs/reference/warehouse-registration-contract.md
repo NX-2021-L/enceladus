@@ -17,13 +17,29 @@ against `describe_contract()` over quoting this page.
 
 ## 1. Who calls it
 
-| Caller | Requirement | Status |
-| --- | --- | --- |
-| Project export jobs (`finance` first) | B2-R2 | reference implementation; see `tools/warehouse_export_finance.py` |
-| Governance analytics mart refresh job | B3-R3 | future caller |
-| Project mart onboarding | B4 | future caller |
-| Ad-hoc promotion transform | B5-R2 | future caller |
-| **Superset native file upload** | B5-R3 | **not a caller** — owns its own Trino DDL path, held to the same conventions |
+This is the single most reused artifact in `DVP-PLN-001`: four downstream consumers depend on it,
+which is why it is a shared library rather than four independently-correct copies of the same idea.
+
+| Caller | Requirement | What it passes | Status |
+| --- | --- | --- | --- |
+| **Project export jobs** (`finance` first) | B2-R2 | rows from the project's T1 store, its declared schema, `stamp_freshness=False` where the freshness column is business data | reference implementation — `tools/warehouse_export_finance.py`; 18/18 tables reconcile |
+| **Governance analytics mart refresh** | B3-R3 | the governance record store projected to grain, on a schedule | future caller — B3-R3 names "write Parquet → register via B2-R2" as its path, and every failure mode it lists as eliminated (crawler concurrency, partition explosion, silent stop) is eliminated *by this library*, not by the job |
+| **Project mart onboarding** | B4 | a new project's first tables | future caller — onboarding is then a T0 Glue-database creation plus calls to this function, with **zero** Trino config changes |
+| **Ad-hoc promotion transform** | B5-R2 | a quarantined `hive.adhoc` table plus an io-declared target schema and type map | future caller — this is where declared typing re-enters, and `ContractViolation` naming the offending row is exactly B5-R2's all-or-nothing failure mode |
+| **Superset native file upload** | B5-R3 | — | **NOT a caller.** Superset owns its own Trino DDL path and cannot be made to call this. It is held to the same conventions instead — see §4 |
+
+The asymmetry in that last row is the whole reason §4 exists. Everything a non-caller must agree
+with is exported as an importable constant or a validator, so agreement can be enforced by
+configuration and permission rather than by convention.
+
+Two properties matter specifically *because* the callers are plural:
+
+- **Onboarding a project touches no shared infrastructure.** Finance shipped 13 features to
+  production with zero Trino configuration changes (`DOC-63BA1B4812C7`). A project onboards by
+  receiving a Glue database once (a T0 action) and calling this function; the shared Trino and
+  Superset layer never changes.
+- **The registration record is uniform across callers.** The B6-R2 health monitor reads one record
+  shape regardless of which of the four wrote the table, so monitoring does not fan out per caller.
 
 Superset uploads land in the isolated `hive.adhoc` quarantine namespace and are **untyped by
 construction** (`pandas.read_csv` dtypes; `DECIMAL` is unreachable through that dialog). They
