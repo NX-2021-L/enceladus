@@ -130,6 +130,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date as _date
@@ -148,6 +150,10 @@ WAREHOUSE_PREFIX = "warehouse"
 #: The single deterministic object name under a table prefix. A constant key is
 #: what makes full-refresh overwrite produce an invariant file count of 1.
 DATA_OBJECT_NAME = "data.parquet"
+
+#: Suffix that turns a table base prefix into its registration-record sibling:
+#: ``warehouse/`` -> ``warehouse-registrations/``.
+REGISTRATION_SUFFIX = "registrations"
 
 #: Storage format. Declared explicitly, never inherited from Trino defaults.
 STORAGE_FORMAT = "parquet"
@@ -401,6 +407,24 @@ class TableContract:
     def location(self) -> str:
         """Glue ``StorageDescriptor.Location`` -- the PREFIX, not the object."""
         return "s3://%s/%s" % (self.bucket, self.s3_prefix)
+
+    @property
+    def registration_prefix(self) -> str:
+        """Sibling of the table prefix, never a child of it.
+
+        ``warehouse/`` -> ``warehouse-registrations/``. Derived from
+        ``base_prefix`` rather than pinned to the bucket root, so a record always
+        stays inside whatever namespace its table lives in -- which matters for
+        the quarantine prefix, where escaping the namespace would defeat the
+        isolation the quarantine exists to provide. A child prefix is not an
+        option: everything under a table prefix is table data by definition, and
+        a JSON sidecar there would be read as a corrupt Parquet file.
+        """
+        return "%s-%s" % (self.base_prefix.strip("/"), REGISTRATION_SUFFIX)
+
+    @property
+    def registration_key(self) -> str:
+        return registration_record_key(self.project, self.table, self.registration_prefix)
 
     @property
     def trino_identifier(self) -> str:
@@ -916,9 +940,31 @@ def register_or_update_glue_table(glue_client, contract: TableContract) -> Tuple
 # ---------------------------------------------------------------------------
 
 
+#: Registration records for the governed warehouse. A SIBLING of the table tree,
+#: never a child of it -- see ``TableContract.registration_prefix``.
+REGISTRATION_PREFIX = "%s-%s" % (WAREHOUSE_PREFIX, REGISTRATION_SUFFIX)
+
+#: Schema version of the emitted record, so the B6-R2 monitor can evolve with it.
+REGISTRATION_RECORD_VERSION = 1
+
+LOGGER = logging.getLogger(__name__)
+
+
+def registration_record_key(project: str, table: str, prefix: str = REGISTRATION_PREFIX) -> str:
+    """``warehouse-registrations/<project>/<table>.json`` -- latest generation only."""
+    return "%s/%s/%s.json" % (prefix.strip("/"), project, table)
+
+
 @dataclass
 class RegistrationRecord:
-    """What one invocation of ``register_table`` did (BRD B2-R2 ``properties``)."""
+    """What one invocation of ``register_table`` did (BRD B2-R2 ``properties``).
+
+    Carries table, row count, byte count, and write timestamp -- and, because
+    the B6-R2 health monitor compares SUCCESSIVE observations, it also carries
+    the previous generation's counts and a monotonic ``write_seq``. That is what
+    lets the monitor answer checks 1 and 5 from a single GetObject instead of
+    re-listing S3 (DOC-1E1EC5B7CE02).
+    """
 
     project: str
     table: str
@@ -936,6 +982,119 @@ class RegistrationRecord:
     created: bool
     governed_layout: bool
     pruned_objects: Tuple[str, ...] = ()
+    prefix_byte_count: int = 0
+    write_seq: int = 1
+    previous_write_timestamp: str = ""
+    previous_row_count: Optional[int] = None
+    previous_byte_count: Optional[int] = None
+    previous_file_count: Optional[int] = None
+    previous_content_sha256: str = ""
+    record_version: int = REGISTRATION_RECORD_VERSION
+
+    #: Fields that describe the INVOCATION rather than the generation. They are
+    #: returned to the caller and logged, but excluded from the persisted
+    #: sidecar -- otherwise a no-op replay would still rewrite the record, and
+    #: the record would become the one piece of state that idempotency misses.
+    INVOCATION_FIELDS = ("storage_changed", "catalog_changed", "created", "pruned_objects")
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = dict(self.__dict__)
+        payload["pruned_objects"] = list(self.pruned_objects)
+        return payload
+
+    def generation_payload(self) -> Dict[str, Any]:
+        """The persisted view: the state of the TABLE, not the outcome of the call."""
+        return {
+            key: value
+            for key, value in self.to_dict().items()
+            if key not in self.INVOCATION_FIELDS
+        }
+
+    # -- the two B6-R2 questions, answerable from this record alone ----------
+
+    @property
+    def bytes_per_file(self) -> float:
+        """Mean object size. The signature check 5 is built on."""
+        return float(self.prefix_byte_count) / self.file_count if self.file_count else 0.0
+
+    def full_refresh_violation(self, sharding_constant: int = 1) -> Optional[str]:
+        """B6-R2 check 4/5. Returns a reason string, or None when conformant.
+
+        The violation this detects is the specific one: file count growing while
+        bytes-per-file stays flat or shrinks, which is snapshot-per-mutation
+        partitioning rather than genuine data growth. A table that legitimately
+        got bigger shows file count steady and bytes UP.
+        """
+        if self.file_count > sharding_constant:
+            return (
+                "file_count=%d exceeds the declared sharding constant %d for %s; "
+                "full-refresh overwrite should hold it invariant"
+                % (self.file_count, sharding_constant, self.trino_identifier)
+            )
+        if self.previous_file_count is not None and self.file_count > self.previous_file_count:
+            previous_bytes = self.previous_byte_count or 0
+            if self.byte_count <= previous_bytes:
+                return (
+                    "file_count grew %d -> %d for %s while byte_count did not (%d -> %d): "
+                    "the signature of snapshot-per-mutation partitioning"
+                    % (
+                        self.previous_file_count,
+                        self.file_count,
+                        self.trino_identifier,
+                        previous_bytes,
+                        self.byte_count,
+                    )
+                )
+        return None
+
+
+def read_registration_record(
+    s3_client, bucket: str, project: str, table: str, prefix: str = REGISTRATION_PREFIX
+) -> Optional[Dict[str, Any]]:
+    """Fetch the latest registration record. The B6-R2 monitor's read path.
+
+    One GetObject answers both the freshness question (check 1) and the
+    file-count-versus-data-size question (check 5). Returns None when the table
+    has never been registered by this library.
+    """
+    key = registration_record_key(project, table, prefix)
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001
+        if _is_not_found(exc):
+            return None
+        raise StorageWriteError("get_object failed for s3://%s/%s: %s" % (bucket, key, exc))
+    return json.loads(response["Body"].read().decode("utf-8"))
+
+
+def emit_registration_record(
+    s3_client, bucket: str, record: RegistrationRecord, prefix: str = REGISTRATION_PREFIX
+) -> str:
+    """Persist the record and log it. Returns the key it was written to.
+
+    Two channels on purpose: the S3 object is the durable signal the health
+    monitor polls, and the structured log line is what makes a single refresh
+    traceable in CloudWatch without a catalog round trip.
+    """
+    key = registration_record_key(record.project, record.table, prefix)
+    payload = json.dumps(
+        record.generation_payload(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    try:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=payload,
+            ContentType="application/json",
+            ServerSideEncryption="AES256",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise StorageWriteError(
+            "failed to emit the registration record to s3://%s/%s: %s. The table data and "
+            "catalog are both written; retry is safe." % (bucket, key, exc)
+        )
+    LOGGER.info("warehouse_registration %s", json.dumps(record.to_dict(), sort_keys=True))
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +1114,7 @@ def register_table(
     write_timestamp: Optional[datetime] = None,
     base_prefix: str = WAREHOUSE_PREFIX,
     table_comment: str = "",
+    emit_record: bool = True,
     prune_stale: bool = False,
     s3_client: Any = None,
     glue_client: Any = None,
@@ -990,6 +1150,10 @@ def register_table(
     s3_client = s3_client or _default_client("s3", region)
     glue_client = glue_client or _default_client("glue", region)
 
+    previous = read_registration_record(
+        s3_client, contract.bucket, contract.project, contract.table, contract.registration_prefix
+    )
+
     # -- 2. data first, as a single atomic overwrite of the canonical key. ----
     storage_changed = write_table_object(s3_client, contract, payload, digest)
 
@@ -1000,7 +1164,32 @@ def register_table(
     # -- 3. catalog only after the data it describes is known to exist. ------
     catalog_changed, created = register_or_update_glue_table(glue_client, contract)
 
-    return RegistrationRecord(
+    # -- 4. measure what is actually on the prefix, then emit the record. ----
+    # Measured, not assumed: a file_count the library asserted would be useless
+    # to the very check it exists to feed.
+    stored = list_table_objects(s3_client, contract)
+
+    # A GENERATION is a change to storage or catalog, not an invocation. A
+    # replay that changed nothing must not advance write_seq or rewrite the
+    # previous-generation fields -- otherwise the record would be the one piece
+    # of state that a no-op still mutates, and "repeated invocation leaves
+    # storage state unchanged" would stop being literally true.
+    previous = previous or {}
+    new_generation = storage_changed or catalog_changed
+    if new_generation:
+        write_seq = int(previous.get("write_seq") or 0) + 1
+        prior = previous
+    else:
+        write_seq = int(previous.get("write_seq") or 1)
+        prior = {
+            "write_timestamp": previous.get("previous_write_timestamp") or "",
+            "row_count": previous.get("previous_row_count"),
+            "byte_count": previous.get("previous_byte_count"),
+            "file_count": previous.get("previous_file_count"),
+            "content_sha256": previous.get("previous_content_sha256") or "",
+        }
+
+    record = RegistrationRecord(
         project=contract.project,
         table=contract.table,
         database=contract.database,
@@ -1009,7 +1198,7 @@ def register_table(
         location=contract.location,
         row_count=row_count,
         byte_count=len(payload),
-        file_count=1,
+        file_count=len(stored),
         write_timestamp=stamp,
         content_sha256=digest,
         storage_changed=storage_changed,
@@ -1017,7 +1206,21 @@ def register_table(
         created=created,
         governed_layout=contract.is_governed_layout,
         pruned_objects=tuple(pruned),
+        prefix_byte_count=sum(int(obj.get("Size") or 0) for obj in stored),
+        write_seq=write_seq,
+        previous_write_timestamp=prior.get("write_timestamp") or "",
+        previous_row_count=prior.get("row_count"),
+        previous_byte_count=prior.get("byte_count"),
+        previous_file_count=prior.get("file_count"),
+        previous_content_sha256=prior.get("content_sha256") or "",
     )
+
+    if emit_record:
+        emit_registration_record(
+            s3_client, contract.bucket, record, contract.registration_prefix
+        )
+
+    return record
 
 
 __all__ = [
@@ -1034,6 +1237,8 @@ __all__ = [
     "HIVE_SERDE_LIBRARY",
     "PARQUET_COMPRESSION",
     "PROJECT_NAME_PATTERN",
+    "REGISTRATION_PREFIX",
+    "REGISTRATION_RECORD_VERSION",
     "RESERVED_COLUMN_NAMES",
     "STORAGE_FORMAT",
     "TABLE_NAME_PATTERN",
@@ -1050,10 +1255,13 @@ __all__ = [
     "build_contract",
     "columns_from_pairs",
     "describe_contract",
+    "emit_registration_record",
     "freshness_column_spec",
     "glue_database_for",
     "list_table_objects",
     "project_rows",
+    "read_registration_record",
+    "registration_record_key",
     "prune_stale_objects",
     "register_or_update_glue_table",
     "register_table",

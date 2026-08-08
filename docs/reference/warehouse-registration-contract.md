@@ -189,14 +189,42 @@ scheduled refresh *should* produce a new stamp; a replay *should not*.
 
 ### 3.3 The registration record
 
-Every invocation emits a `RegistrationRecord`: table identity, row count, byte count, file count,
-write timestamp, content digest, and the previous generation's counts. It is written to
-`s3://<bucket>/warehouse-registrations/<project>/<table>.json` (outside the warehouse tree, so it
-is never mistaken for table data) and returned to the caller.
+Every invocation emits a `RegistrationRecord`: table identity, row count, byte count, **measured**
+file count, write timestamp, content digest, and the previous generation's counts. It is written to
 
-This is what makes the B6-R2 health monitor's checks 1 and 5 answerable **without re-scanning S3**:
-freshness comes from `write_timestamp`, and the file-count-versus-data-size inconsistency comes
-from comparing `file_count` against `row_count`/`byte_count` movement.
+```
+s3://<bucket>/warehouse-registrations/<project>/<table>.json
+```
+
+a **sibling** of the warehouse tree, never a child of it — everything under a table prefix is table
+data by definition, and a JSON sidecar there would be read as a corrupt Parquet file. The prefix is
+derived from `base_prefix` (`warehouse/` → `warehouse-registrations/`), so a record always stays
+inside whatever namespace its table lives in. That matters for the quarantine prefix, where
+escaping the namespace would defeat the isolation quarantine exists to provide.
+
+`file_count` is **measured** by listing the prefix, not asserted — a count the library merely
+claimed would be useless to the check it exists to feed.
+
+This makes the B6-R2 health monitor's checks 1 and 5 answerable from a **single `GetObject`, with
+no S3 re-scan**:
+
+| Check | Answered by |
+| --- | --- |
+| 1 — freshness | `write_timestamp` vs `previous_write_timestamp` |
+| 5 — size vs count | `file_count` vs `previous_file_count`, against `byte_count` movement |
+
+`RegistrationRecord.full_refresh_violation(sharding_constant=1)` implements the verdict directly:
+it flags a file count above the declared sharding constant, and — the specific signature — a file
+count that grew while bytes did not.
+
+#### Generation vs invocation
+
+A **generation** is a change to storage or catalog, not an invocation. A replay that changed
+nothing does not advance `write_seq` or rewrite the previous-generation fields, and the persisted
+sidecar excludes the invocation-scoped flags (`storage_changed`, `catalog_changed`, `created`,
+`pruned_objects`) entirely. Those are returned to the caller and logged, but not stored — otherwise
+the record would be the one piece of state that a no-op still mutates, and §3.1's guarantee would
+stop being literally true.
 
 ## 4. Holding a non-caller against this
 
