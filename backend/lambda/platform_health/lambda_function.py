@@ -38,6 +38,12 @@ import boto3
 
 import health_issues
 import health_surface
+from checks_platform import (
+    check_adhoc_quota,
+    check_container_health,
+    check_cpu_credit,
+    check_dependency_drift,
+)
 from checks_contract import check_crawlers, check_namespace_isolation, check_storage_format
 from checks_freshness import check_freshness, check_full_refresh
 from health_finding import CheckResult, overall_severity
@@ -122,6 +128,38 @@ def run_checks(
                 "check_5_full_refresh",
                 "Warehouse file counts against full-refresh semantics",
                 lambda: check_full_refresh(s3),
+            )
+        )
+    if want("check_6_container_health"):
+        results.append(
+            _guarded(
+                "check_6_container_health",
+                "Trino and Superset container health, with OOM read from the kernel log",
+                lambda: check_container_health(client("ssm"), now=now),
+            )
+        )
+    if want("check_7_adhoc_quota"):
+        results.append(
+            _guarded(
+                "check_7_adhoc_quota",
+                "Ad-hoc namespace size and table count against quota",
+                lambda: check_adhoc_quota(s3, glue),
+            )
+        )
+    if want("check_8_cpu_credit"):
+        results.append(
+            _guarded(
+                "check_8_cpu_credit",
+                "CPUCreditBalance while the host is burstable",
+                lambda: check_cpu_credit(client("cloudwatch"), client("ec2"), now=now),
+            )
+        )
+    if want("check_9_dependency_drift"):
+        results.append(
+            _guarded(
+                "check_9_dependency_drift",
+                "Declared IAM and configuration dependency surface against live AWS",
+                lambda: check_dependency_drift(client("iam"), client("ec2")),
             )
         )
     return results
