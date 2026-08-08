@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-13.1",
-  "updated_at": "2026-07-13T05:26:00Z",
-  "last_change_summary": "ENC-TSK-N45: document_api's documents/search endpoint (_handle_search, backing document.query_response) now defaults to sorting results by updated_at descending (newest first) before slicing to PAGE_SIZE, matching the default already used by feed_query, changelog_api, and the document candidate-curation list. Previously results were returned in unsorted DynamoDB scan order. No new/renamed/removed fields -- ordering-only behavior change, documented on document.query_response.documents.",
+  "version": "2026-08-08.1",
+  "updated_at": "2026-08-08T01:20:00Z",
+  "last_change_summary": "DVP-TSK-648 / DVP-TSK-649 (BRD B3, DVP-PLN-001): added entity warehouse.governance_mart documenting the seven-table governance analytics mart -- its declared columns, per-table grain, the metadata-only substitution test that CI enforces, the daily-grain rule, the scheduled full-refresh contract, and the devops/enceladus ownership split. The mart is a T2 projection at hive.devops.*, written through the B2-R2 shared registration library with a DECLARED schema (never a Glue crawler) and full-refresh overwrite (never per-mutation snapshots). No existing entity was modified.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6176,6 +6176,150 @@
       },
       "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
       "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
+    },
+    "warehouse.governance_mart": {
+      "description": "DVP-TSK-648 / DVP-TSK-649 (BRD B3, plan DVP-PLN-001): the governance analytics mart -- a T2 warehouse projection of the governed record store, addressed as hive.devops.<table>. Seven DECLARED tables built by backend/lambda/governance_mart on a scheduled full refresh (EventBridge cron(0 6 * * ? *), never a per-mutation trigger) and registered through the B2-R2 shared library enceladus_shared.warehouse_registration. The mart holds METADATA ONLY, governed by DOC-3391173F2A5C: counts, statuses, durations, transitions, timestamps and identifiers -- never record bodies, titles, descriptions, intents, acceptance-criteria text, worklog prose, or document content. The standing test is 'if a column would let a reader substitute the mart for the record store, it does not belong', and it is enforced in CI over all seven tables rather than left to review, because per the grain contract the appearance of a free-text column IS the Risk R-4 drift signal. Also governed by DOC-04AF8A02A8F7 (four-tier architecture), DOC-5E35E14DAD05 (crawler prohibition -- schema is declared in code, never inferred by a Glue crawler), and DOC-1E1EC5B7CE02 (full-refresh partitioning discipline -- no partition keys, exactly one Parquet object per table at a constant key, so file count tracks data size and never write count). Ownership per BRD B3-R4: devops owns the platform tier and the contract; enceladus owns the projection logic and schema, because the schema is a projection of the governance ontology (ENC-FTR-053) and must evolve with it.",
+      "addressing": "hive.devops.<table>",
+      "storage": "s3://devops-agentcli-compute/warehouse/devops/<table>/data.parquet (Parquet, snappy, full-refresh overwrite)",
+      "required_column": {
+        "ingest_ts": {
+          "type": "string",
+          "definition": "Mandatory T2 freshness stamp (DOC-04AF8A02A8F7): UTC ISO-8601 warehouse write time, library-owned (stamp_freshness=True) because the mart is derived data. One shared value across all seven tables per refresh."
+        }
+      },
+      "daily_grain_rule": {
+        "type": "rule",
+        "definition": "Every fact table carries snapshot_date at daily grain FROM THE OUTSET, not as a later upgrade. Enforced by mart_schema.assert_daily_grain() at module import and re-checked in CI. This is what makes a refresh failure show up as a series that STOPS DRAWING rather than a current value that persists and looks healthy while being arbitrarily stale (OBJ-6). The *_daily aggregates lead their grain with snapshot_date; fact_record_transition is an EVENT table whose grain is one row per transition and which carries snapshot_date as the day bucket."
+      },
+      "tables": {
+        "dim_record": {
+          "grain": "one row per governed tracker record, current state",
+          "task": "DVP-TSK-672",
+          "columns": [
+            "record_id",
+            "project_id",
+            "record_type",
+            "status",
+            "priority",
+            "category",
+            "parent_id",
+            "component_ids",
+            "created_at",
+            "updated_at",
+            "closed_at",
+            "checkout_count",
+            "closed_count",
+            "ontology_completeness_score",
+            "transition_type",
+            "ingest_ts"
+          ],
+          "notes": "status is projected VERBATIM, not normalised -- the live corpus carries Completed/Complete/complete as distinct values and folding them is a judgement the mart is not entitled to make on the record store's behalf. ontology_completeness_score is RECOMPUTED from the record store's own ENC-FTR-011 rubric because it is computed at read time by the MCP server and never persisted to DynamoDB. component_ids is a JSON-array string because the shared library declares array<> writable only by flattening."
+        },
+        "fact_record_daily": {
+          "grain": "(snapshot_date, project_id, record_type, status)",
+          "task": "DVP-TSK-673",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "record_type",
+            "status",
+            "record_count",
+            "opened_count",
+            "closed_count",
+            "ingest_ts"
+          ],
+          "notes": "record_count partitions the record set: several transitions on one day collapse to one row holding the day's LAST status."
+        },
+        "fact_record_transition": {
+          "grain": "one row per lifecycle transition",
+          "task": "DVP-TSK-674",
+          "columns": [
+            "record_id",
+            "project_id",
+            "record_type",
+            "from_status",
+            "to_status",
+            "transitioned_at",
+            "days_in_prior_status",
+            "transition_type",
+            "snapshot_date",
+            "ingest_ts"
+          ],
+          "notes": "The tracker stores NO structural status transition: history[].status is an entry KIND (created|worklog) and the transition lives inside the entry's free-text description. The projection parses that prose to recover two status tokens and a timestamp and DISCARDS the prose -- the substitution test applied to a source that is mostly free text. Re-homes the ENC-TSK-989 corpus-with-history extraction rather than re-deriving it."
+        },
+        "dim_document": {
+          "grain": "one row per docstore document",
+          "task": "DVP-TSK-675",
+          "columns": [
+            "document_id",
+            "project_id",
+            "document_subtype",
+            "subtypepattern",
+            "status",
+            "document_maturity_state",
+            "compliance_score",
+            "compliance_warning_count",
+            "size_bytes",
+            "version",
+            "related_item_count",
+            "created_at",
+            "updated_at",
+            "ingest_ts"
+          ],
+          "notes": "No document content. Where substance was available a COUNT was projected instead: compliance_warning_count not the warning text, related_item_count not the ids, size_bytes as the metadata shadow of the body -- how much, never what."
+        },
+        "fact_document_daily": {
+          "grain": "(snapshot_date, project_id, document_subtype, document_maturity_state)",
+          "task": "DVP-TSK-676",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "document_subtype",
+            "document_maturity_state",
+            "document_count",
+            "created_count",
+            "mean_compliance_score",
+            "ingest_ts"
+          ],
+          "notes": "Type-1 dimension limitation, recorded rather than hidden: the docstore keeps no maturity HISTORY, so subtype and maturity are current attributes projected across each document's lifetime. Document production per day is exact; maturity movement reads from the current distribution."
+        },
+        "fact_session_daily": {
+          "grain": "(snapshot_date, project_id, agent_type, model)",
+          "task": "DVP-TSK-677",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "agent_type",
+            "model",
+            "session_count",
+            "records_touched",
+            "ingest_ts"
+          ],
+          "notes": "model is a DATA column describing observed agent sessions, never configuration. agent_type carries agent_types.surface joined from the session's agent_type_id. There is NO stored session-to-record edge, so records_touched is obtained by inverting the tracker side: every ENC-SES-* named in a record's history plus active_agent_session_id. Sessions that touched nothing are retained under project_id='unattributed'."
+        },
+        "fact_graph_health_daily": {
+          "grain": "one row per snapshot_date",
+          "task": "DVP-TSK-678",
+          "columns": [
+            "snapshot_date",
+            "node_count",
+            "edge_count",
+            "orphan_node_count",
+            "unresolved_edge_count",
+            "hot_tier_fraction",
+            "percolation_margin",
+            "fiedler_value",
+            "demand_centroid_drift",
+            "ingest_ts"
+          ],
+          "notes": "Risk R-11 discipline. hot_tier_fraction, percolation_margin, fiedler_value and demand_centroid_drift have no upstream computation today (graph_health_metrics publishes CloudWatch proxies and says so in its own docstring), so they are DECLARED NOW and written NULL, to be filled by ENC-FTR-063 / comp-percolation-monitor as an UPDATE rather than a schema change against a live table. The first four columns are computed today from the governed graph (records + documents as nodes; parent, subtask_ids, related_*_ids, related_items, informed_by as edges), so the table is never empty while it waits. This table PROJECTS, it does not compute."
+        }
+      },
+      "refresh_contract": {
+        "type": "rule",
+        "definition": "Scheduled FULL REFRESH, daily minimum, never event-driven. No EventBridge per-mutation trigger, no Glue crawler and no crawler launcher, no partition keys. Each run rebuilds every table from scratch and overwrites a single object per table at a constant key, so crawler concurrency is unreachable, partition explosion is impossible by construction, and the new-project sync gap cannot recur because the refresh scans ALL projects. The handler re-raises on error rather than returning 200: the daily series must stop drawing AND the invocation must fail, not one without the other."
+      },
+      "change_governance": "Mart schema changes (adding a column, adding a table, widening a grain) are governed changes reviewed against the substitution test -- never incidental edits folded into an unrelated ETL change. devops owns the test; enceladus applies it."
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6241,6 +6385,11 @@
       "version": "2026-07-09.1",
       "date": "2026-07-09",
       "summary": "ENC-TSK-M45 (FTR-121 registry entry, DOC-B716E8FB10B6 COE, M44 sibling): backport the ENC-FTR-121 Escalations request/applier/watch/notify surface from v4/main onto main. The 2026-07-08T22:25:44Z main-ref v3-prod Lambda deploy had reverted the escalation.request/get/list surface (ENC-TSK-J68), the applyEscalatedMutation applier (ENC-TSK-J69), coordination_api's approve/deny/feed handlers (ENC-TSK-J70 backend portion only -- PWA/CFN already landed via ENC-TSK-J82/J80), the agent-side escalation.watch cursor poll (ENC-TSK-J71, with the ENC-TSK-J89 base-relative-path fix folded in), and the SNS [ESCALATION] notify hook (ENC-TSK-J72), leaving execute() unable to resolve action 'escalation.request'. Extraction was surgical by function/hunk, NOT by commit: v4/main's J68/J69/J71 commits are git-history-entangled with the unrelated ENC-TSK-I07 supersession primitive and ENC-TSK-I08/I09 dedup-review surfaces (neither present on main), and J70/J71's coordination_api hunks are similarly entangled with the unrelated ENC-TSK-J46/FTR-096 lesson-candidate curation surface (also not on main) -- those were excluded by isolating function-boundary content within each 3-way-merge conflict block rather than accepting the whole hunk. New entities: tracker.escalation (the escalation item type + FSM + mutation-handler registry + applier + waiver semantics, tracker_mutation), mcp_server.escalation_actions (escalation.request/get/list/watch code-mode actions), coordination.escalations (coordination_api's feed/approve/deny/watch routes -- the base ENC-TSK-J70 in-Lambda _is_cognito_session check only; the additional ENC-TSK-L92/M12 allowlist + human-principal gates remain exclusively in the standalone escalation_decision_authorizer Lambda per that entity's existing prod-vs-gamma split, unchanged by this task). CFN routes/env (ENC-TSK-J80) and the PWA Escalations page (ENC-TSK-J82) were already on main prior to this task and are unmodified here."
+    },
+    {
+      "version": "2026-08-08.1",
+      "date": "2026-08-08",
+      "summary": "DVP-TSK-648 / DVP-TSK-649 (BRD B3, DVP-PLN-001): added entity warehouse.governance_mart documenting the seven-table governance analytics mart -- its declared columns, per-table grain, the metadata-only substitution test that CI enforces, the daily-grain rule, the scheduled full-refresh contract, and the devops/enceladus ownership split. The mart is a T2 projection at hive.devops.*, written through the B2-R2 shared registration library with a DECLARED schema (never a Glue crawler) and full-refresh overwrite (never per-mutation snapshots). No existing entity was modified."
     }
   ]
 }
