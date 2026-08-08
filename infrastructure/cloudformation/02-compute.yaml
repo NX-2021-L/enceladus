@@ -1070,6 +1070,67 @@ Resources:
         - Key: Component
           Value: platform-health
 
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-661 / DVP-PLN-001: the ad-hoc promotion transform (BRD B5-R2).
+  #
+  # The ONE gate out of the `hive.adhoc` quarantine namespace. Reads a
+  # quarantined table, applies the SQL types io declared, and writes the result
+  # through the same B2-R2 shared library the mart and the export jobs use
+  # (enceladus_shared.warehouse_registration) so a promoted table is not merely
+  # similar to an export-job table — it is produced by the same function.
+  #
+  # THERE IS NO SCHEDULE RULE FOR THIS FUNCTION, and there must never be one.
+  # Promotion is a user action against a fixed contract: io triggers it from
+  # Superset or the io-graph PWA, selecting the target schema and the type map
+  # (DOC-FF843F9F0E2C, decision D-4). No agent session initiates or completes a
+  # promotion — the handler refuses any invocation that does not present a human
+  # actor, so the constraint is enforced in code rather than asserted in a doc.
+  # Adding an EventBridge rule, stream subscription or S3 notification here would
+  # convert a human gate into an automatic pipeline and void the entire
+  # quarantine-and-promote policy.
+  #
+  # No AppConfig extension layer and no SnapStart, for the same reasons as
+  # GovernanceMartFunction: no runtime feature flags, and an interactive
+  # once-in-a-while invocation gains nothing from a restored snapshot.
+  # ---------------------------------------------------------------------------
+  AdhocPromotionFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-adhoc-promotion${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      # 2048 MB / 300 s: promotion reads EVERY row of the quarantined table into
+      # memory (a sampled all-or-nothing gate is not an all-or-nothing gate) and
+      # serialises the typed result with pyarrow before anything is written.
+      # Memory is sized for those two buffers coexisting. The 50 GB namespace
+      # quota (DVP-TSK-663) bounds the source; individual ad-hoc CSV uploads are
+      # orders of magnitude smaller.
+      MemorySize: 2048
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt AdhocPromotionRole.Arn
+      Description: "DVP-TSK-661 ad-hoc promotion transform: hive.adhoc -> governed schema (DVP-PLN-001)"
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          # Quarantine coordinates (DVP-TSK-627): own Glue database, own S3
+          # prefix, never shared with a governed project.
+          ADHOC_DATABASE: adhoc
+          ADHOC_BUCKET: devops-agentcli-compute
+          ADHOC_PREFIX: adhoc
+          # Governed T2 destination. Same bucket, different prefix.
+          WAREHOUSE_BUCKET: devops-agentcli-compute
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: adhoc-promotion
+
   DocPrepFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -3391,6 +3452,125 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: platform-health
+  # DVP-TSK-661 / DVP-PLN-001: least-privilege role for the ad-hoc promotion
+  # transform. Reads the quarantine namespace, writes the governed warehouse
+  # prefix, and can do neither in the opposite direction.
+  #
+  # The asymmetry is the point and is worth stating: this role can READ
+  # `adhoc` and WRITE `devops`, and has no grant that would let it write into
+  # `adhoc` or read outside the two prefixes it owns. Promotion moves data one
+  # way, out of quarantine, and the IAM shape says so independently of the code.
+  AdhocPromotionRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-adhoc-promotion-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: QuarantineRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only over the quarantine prefix. Deliberately NO PutObject
+              # and NO DeleteObject: promotion never writes to or tidies up
+              # `adhoc/`. Retention and quota enforcement over that prefix is
+              # DVP-TSK-663's job and runs under its own identity, so a bug in
+              # the promotion transform cannot delete a quarantined table.
+              - Sid: QuarantineObjectRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource: "arn:aws:s3:::devops-agentcli-compute/adhoc/*"
+              - Sid: QuarantinePrefixList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::devops-agentcli-compute"
+                Condition:
+                  StringLike:
+                    "s3:prefix":
+                      - "adhoc/*"
+                      - "warehouse/devops/*"
+                      - "warehouse-registrations/devops/*"
+        - PolicyName: WarehouseObjectWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Identical shape to GovernanceMartRole's grant, because it is the
+              # same library call doing the same write. GetObject covers the
+              # HeadObject digest probe that makes register_table idempotent.
+              # No s3:DeleteObject: prune_stale_objects() is opt-in and the
+              # promotion path never asks for it.
+              - Sid: WarehouseObjectReadWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse-registrations/devops/*"
+        - PolicyName: GlueQuarantineReadAndDeclaredSchemaRegister
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read the quarantined table's INFERRED schema. This is the input
+              # to the pre-populated type map (DVP-TSK-685) — read-only, and
+              # scoped to the adhoc database so promotion cannot mutate the
+              # quarantine catalog.
+              - Sid: GlueQuarantineRead
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/adhoc"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/adhoc/*"
+              # Register the DECLARED schema in the governed database. Same five
+              # actions register_table needs, same exclusions as the mart role:
+              #   * no glue:DeleteTable — register-or-update never drops
+              #   * no glue:*Crawler* — a crawler in a production data path is a
+              #     governed contract violation (DOC-5E35E14DAD05), and the whole
+              #     point of promotion is that the schema is DECLARED by io
+              #     rather than discovered by sampling.
+              - Sid: GlueDeclaredSchemaRegistration
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: adhoc-promotion
+
 
   DocPrepRole:
     Type: AWS::IAM::Role

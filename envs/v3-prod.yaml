@@ -63,6 +63,7 @@ artifact_version_ids: {}
 # deploy_parity_validator: provisioned by CFN stack update; included here so
 # Gen2 covers it immediately post-provision without a manifest update.
 function_name_map:
+  adhoc_promotion: devops-adhoc-promotion
   auth_refresh: auth-refresh
   bedrock_agent_actions: enceladus-bedrock-agent-actions
   changelog_api: devops-changelog-api
