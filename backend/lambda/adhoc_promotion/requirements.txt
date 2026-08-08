@@ -1,0 +1,16 @@
+# DVP-TSK-661 — the ad-hoc promotion transform.
+#
+# pyarrow is used twice here: to READ the quarantined table's Parquet
+# (promotion_source.read_rows) and, inside
+# enceladus_shared.warehouse_registration.serialize_parquet, to WRITE the
+# governed table. It is the only third-party dependency.
+#
+# Bound identically to backend/lambda/governance_mart/requirements.txt, and for
+# the same reason: _build.yml installs with
+#   --platform manylinux2014_{x86_64,aarch64} --only-binary=:all: --upgrade
+# so an unbounded spec would silently float onto the first pyarrow release that
+# stops publishing a manylinux2014 (manylinux_2_17) wheel and hard-fail the build.
+pyarrow>=17.0.0,<21.0.0
+
+# boto3 is intentionally NOT declared: it is provided by the Lambda runtime.
+# lambda_function._clients() imports it lazily for the same reason.
