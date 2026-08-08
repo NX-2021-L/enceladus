@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-08.1",
-  "updated_at": "2026-08-08T01:20:00Z",
-  "last_change_summary": "DVP-TSK-648 / DVP-TSK-649 (BRD B3, DVP-PLN-001): added entity warehouse.governance_mart documenting the seven-table governance analytics mart -- its declared columns, per-table grain, the metadata-only substitution test that CI enforces, the daily-grain rule, the scheduled full-refresh contract, and the devops/enceladus ownership split. The mart is a T2 projection at hive.devops.*, written through the B2-R2 shared registration library with a DECLARED schema (never a Glue crawler) and full-refresh overwrite (never per-mutation snapshots). No existing entity was modified.",
+  "version": "2026-08-08.3",
+  "updated_at": "2026-08-08T02:55:00Z",
+  "last_change_summary": "DVP-TSK-694 / DVP-TSK-665 (BRD B6-R2, DVP-PLN-001): added entity warehouse.platform_health documenting the source-agnostic platform health monitor -- its schedule-only invocation contract, the observe-never-remediate posture its IAM shape enforces, the error-as-a-third-state rule, the platform-health/ surface and its two T2 daily-grain projections, and checks 1 (freshness against a declared SLA) and 5 (full-refresh consistency). No existing entity was modified. PREVIOUS: DVP-TSK-661 / 685 / 686 / 687 (BRD B5-R2, DVP-PLN-001) added entity warehouse.adhoc_promotion documenting the ad-hoc promotion transform -- the single gate out of the hive.adhoc quarantine namespace into a governed schema. Records the contract for its two actions (plan, promote), the mandatory human actor block enforcing decision D-4, the all-or-nothing coercion semantics including the lossy-coercion rule, and the offending-row report shape. No existing entity was modified.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6320,6 +6320,66 @@
         "definition": "Scheduled FULL REFRESH, daily minimum, never event-driven. No EventBridge per-mutation trigger, no Glue crawler and no crawler launcher, no partition keys. Each run rebuilds every table from scratch and overwrites a single object per table at a constant key, so crawler concurrency is unreachable, partition explosion is impossible by construction, and the new-project sync gap cannot recur because the refresh scans ALL projects. The handler re-raises on error rather than returning 200: the daily series must stop drawing AND the invocation must fail, not one without the other."
       },
       "change_governance": "Mart schema changes (adding a column, adding a table, widening a grain) are governed changes reviewed against the substitution test -- never incidental edits folded into an unrelated ETL change. devops owns the test; enceladus applies it."
+    },
+    "warehouse.adhoc_promotion": {
+      "description": "DVP-TSK-661 (BRD B5-R2, plan DVP-PLN-001): the ad-hoc promotion transform, the ONE gate by which a table leaves the hive.adhoc quarantine namespace and enters a governed schema at hive.<project>.<table>. Implemented by backend/lambda/adhoc_promotion and invoked by io from Superset or the io-graph PWA -- never on a schedule, never by an agent. Ad-hoc uploads land UNTYPED because Superset's 'Column data types' field feeds pandas.read_csv(dtype=) and accepts pandas dtypes, not SQL types: DATE, TIMESTAMP and DECIMAL are unreachable there at any level of user diligence, which is why decision D-7 (DOC-FF843F9F0E2C) moves type declaration to this boundary rather than to the upload dialog. The governed write goes through the B2-R2 shared library enceladus_shared.warehouse_registration -- the same function the export jobs and the governance mart call -- so a promoted table is not merely similar to an export-job table, it is produced by identical code. Governed additionally by DOC-04AF8A02A8F7 (four-tier architecture) and DOC-5E35E14DAD05 (crawler prohibition: the promoted schema is DECLARED by io, never inferred by a Glue crawler).",
+      "source_namespace": "hive.adhoc.<table> (Glue database `adhoc`, s3://devops-agentcli-compute/adhoc/)",
+      "target_addressing": "hive.<project>.<table>",
+      "target_storage": "s3://devops-agentcli-compute/warehouse/<project>/<table>/data.parquet (Parquet, snappy, full-refresh overwrite)",
+      "actions": {
+        "plan": {
+          "type": "request",
+          "definition": "DVP-TSK-685, the risk R-6 mitigation. Read-only. Returns a type map PRE-POPULATED from the quarantined table's inferred types plus sampled values, so promotion is a REVIEW rather than an authoring exercise. Every column carries a non-empty proposed_type, a reason, alternatives and sample values -- nothing is ever blank, because a promotion screen that asks io to fill in a blank form is worse than the dialog it replaced and io would keep charting straight off the quarantined table, leaving the gate correct and never used. Upgrades are evidential: proposed only when EVERY sampled non-null value supports the stronger type, so one counterexample withdraws the proposal and an untouched plan always promotes."
+        },
+        "promote": {
+          "type": "request",
+          "definition": "DVP-TSK-686 / 687. Applies the reviewed type map to EVERY row, never a sample, then writes and registers through the shared library. The whole table is read because a sampled all-or-nothing gate is not an all-or-nothing gate."
+        }
+      },
+      "required_request_field": {
+        "actor": {
+          "type": "object",
+          "definition": "Mandatory {kind, id, surface}. Enforces decision D-4, the no-agent constraint: promotion is a user action against a fixed contract, so the handler REFUSES with HTTP 403 -- before the source table is read -- when the block carries an ENC-SES-* agent session id, when kind is anything other than 'human', when id is empty (promotion is an attributable act), or when surface is outside {superset, pwa, io-graph}. An absent actor defaults to refusal, not to permission. This keeps an agent from ever being the entity that decides a value is 'close enough' to coerce."
+        }
+      },
+      "required_column": {
+        "ingest_ts": {
+          "type": "string",
+          "definition": "Mandatory T2 freshness stamp (DOC-04AF8A02A8F7). Unlike the mart, this column is CALLER-OWNED here (stamp_freshness=False): it carries the quarantined source's upload time rather than the promotion run's write time, so the promoted table reports when the DATA arrived. A promoted table claiming the data is as fresh as its promotion would mislead every downstream staleness check."
+        }
+      },
+      "all_or_nothing_rule": {
+        "type": "rule",
+        "definition": "A single value that cannot be coerced to its declared type FAILS THE ENTIRE PROMOTION and reports the offending rows; no partially typed governed table is ever produced. A half-typed table is worse than a quarantined untyped one because it LOOKS governed while carrying unverified data, whereas a quarantined table's untyped status is legible from its namespace alone. This is control flow rather than rollback: coercion completes in memory and no AWS client is reached on the failing path, so a partial write is not representable. A LOSSY coercion counts as a failure even though it does not raise -- int('01234') returns 1234 and silently destroys an identifier -- so a value is accepted only when it round-trips to the text it came from."
+      },
+      "offending_row_report": {
+        "type": "response",
+        "definition": "Returned with HTTP 422. Fields: promoted (false), table, offending_row_count (always exact), truncated, and offending_rows[] where each entry carries table, column, row_index, row_number (1-based and offset for the CSV header so it points at the spreadsheet line io is looking at), raw_value, declared_type, reason and lossy. ALL offenders are collected rather than the first, because fix-one-resubmit-find-the-next reproduces the very R-6 unpleasantness this design avoids. The detail list is capped at 50 while the count stays exact."
+      }
+    },
+    "warehouse.platform_health": {
+      "description": "DVP-TSK-665 / DVP-TSK-694 (BRD B6-R2, plan DVP-PLN-001): the source-agnostic platform health monitor, implemented by backend/lambda/platform_health and invoked by an EventBridge SCHEDULE only. Each run is a complete observation of current state, so there is nothing for a mutation event to incrementally maintain and no per-mutation trigger exists. The monitor OBSERVES and REPORTS: it has no remediation grant of any kind, which is why its IAM role is almost entirely read -- it cannot delete a crawler it flags, restart a container it finds OOM-killed, or edit an IAM policy whose drift it detects, because those are decisions and this function is an instrument. It exists because of DVP-ISS-087: a projection stopped refreshing and nobody noticed for five months, since a frozen table still returns rows and a chart drawn from it still looks correct. The only observable difference between a healthy table and that one was the AGE of its last write, and no surface reported it.",
+      "handler_contract": {
+        "type": "rule",
+        "definition": "The handler knows three verbs -- run the checks, write the surface, emit the breaches -- and nothing about what any individual check means. Each check returns CheckResult objects and the handler serialises them, so adding a check is a predicate plus one line in run_checks. Event fields are all optional (checks[] for a targeted subset, dry_run, publish); a bare scheduled event needs none of them."
+      },
+      "error_is_a_third_state": {
+        "type": "rule",
+        "definition": "A check that raises does NOT abort the run. Independent observations of a live estate will eventually have one fail on a transient AWS error, and a monitor that reports nothing because one check timed out has converted a partial signal into NO signal. The failure is captured on that check's error field, which is a THIRD state distinct from both healthy and breaching, and the surface records it as such. Severity ranks ok < warning < error < breach; only the issue-filing severities cause a governed issue to be filed."
+      },
+      "surface": {
+        "type": "object",
+        "definition": "Written to s3://devops-agentcli-compute/. platform-health/latest.json is the current snapshot; platform-health/history/<observed_at>.json is the append-only run history (no DeleteObject grant exists, so the history cannot be rewritten). The history is projected into two T2 daily-grain tables in the devops schema over a 400-day window -- hive.devops.fact_platform_health_daily (one row per check per day) and hive.devops.fact_table_freshness_daily (one row per registered table per day) -- written through the same B2-R2 shared library (enceladus_shared.warehouse_registration) the mart and the export jobs use, with a DECLARED schema and never a Glue crawler (DOC-5E35E14DAD05). A surface write failure never hides observations already made: they are still returned and still logged."
+      },
+      "check_1_freshness": {
+        "type": "check",
+        "definition": "DVP-TSK-694. Freshness of every registered warehouse table against its declared SLA (DEFAULT_FRESHNESS_SLA_HOURS = 26.0, per-table overrides in health_contract). Reads the B2-R2 registration record at warehouse-registrations/<project>/<table>.json rather than re-listing the data prefix -- not for speed, but because the record is written by the export job's own code path in the same transaction that wrote the Parquet, so it says what the WRITER believes it did, whereas a directory listing says only what survived. When the two disagree the disagreement is itself the finding, which is why the check reconciles the record against the Glue catalog rather than trusting either alone. Three conditions are distinguished: `stale` (record and data exist, write_timestamp older than the SLA -- the DVP-ISS-087 condition exactly), `missing_catalog` (a registration record exists but the Glue table does not, so a refresh job is succeeding into a void), and `missing_data` (a Glue table points at a prefix holding no objects, so every query returns zero rows silently and successfully -- the DVP-ISS-096 shape, where a chart with no data renders as a chart rather than as an error)."
+      },
+      "check_5_full_refresh": {
+        "type": "check",
+        "definition": "DVP-TSK-694. Warehouse file counts against full-refresh semantics (DEFAULT_SHARDING_CONSTANT = 1, per-table overrides in health_contract). The violation is NARROWER than 'file count went up', and the narrowing is the substance: a table that legitimately grew shows file count steady -- a constant key overwritten -- and BYTES up. The signature of snapshot-per-mutation partitioning, the DOC-1E1EC5B7CE02 failure, is file count growing while bytes do NOT. Both forms are evaluated, because a file count above the declared sharding constant is already a violation regardless of what the bytes did."
+      },
+      "change_governance": "Adding, removing or re-thresholding a check is a governed change to this entity, not an incidental edit: the declared SLAs, sharding constants and severity mappings in health_contract.py are the contract the monitor enforces, and a threshold quietly relaxed is indistinguishable at the surface from an estate that got healthier."
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
