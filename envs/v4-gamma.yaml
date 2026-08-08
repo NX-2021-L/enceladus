@@ -55,7 +55,6 @@ artifact_version_ids: {}
 # Functions absent from this map are silently skipped by the deploy step.
 # deploy_capability_auditor intentionally excluded — not provisioned in v4-gamma.
 function_name_map:
-  adhoc_promotion: devops-adhoc-promotion-gamma
   auth_refresh: auth-refresh-gamma
   bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
   changelog_api: devops-changelog-api-gamma
