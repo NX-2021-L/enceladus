@@ -1015,6 +1015,61 @@ Resources:
         - Key: Component
           Value: governance-mart
 
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-665 / DVP-PLN-001 (BRD B6-R2): the source-agnostic platform health
+  # monitor. Nine scheduled checks over the governed warehouse, the analytics
+  # host, and the declared dependency surface; a breach files a governed issue
+  # record and every run writes the health surface.
+  #
+  # SCHEDULE-ONLY, like GovernanceMartFunction and for the same reason: each run
+  # is a complete observation of current state, so there is nothing for a
+  # mutation event to incrementally maintain.
+  #
+  # 1024 MB / 600 s. The run is dominated by waiting on AWS APIs across two
+  # regions plus one SSM round trip to the analytics host, not by computation;
+  # the memory is sized for the pyarrow buffers that serialise the two
+  # daily-grain health tables, and the timeout for the SSM command wait.
+  #
+  # No AppConfig extension layer and no SnapStart, matching GovernanceMart: a
+  # scheduled batch job with no runtime feature flags gains nothing from either
+  # and SnapStart bills per-version snapshot storage by GB-second.
+  # ---------------------------------------------------------------------------
+  PlatformHealthFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-platform-health${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 1024
+      Timeout: 600
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt PlatformHealthRole.Arn
+      Description: DVP-TSK-665 B6-R2 platform health monitor — nine scheduled checks (DVP-PLN-001)
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          WAREHOUSE_BUCKET: devops-agentcli-compute
+          ANALYTICS_INSTANCE_ID: i-0f3a4d5aa1c11dd86
+          # Governed issues are filed into the `devops` project, alongside the
+          # records the checks are derived from.
+          ISSUE_PROJECT_ID: devops
+          # Literal, matching EnvDriftAuditorFunction below. The API id is not a
+          # template parameter anywhere in this file; inventing one here would
+          # make this the only resource that resolves it differently.
+          TRACKER_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          PUBLISH_TABLES: "true"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: platform-health
+
   DocPrepFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -1669,6 +1724,39 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GovernanceMartSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-665 / DVP-PLN-001: the ONLY trigger for the platform health monitor.
+  #
+  # cron(0 7 * * ? *) = 07:00 UTC daily — deliberately one hour AFTER
+  # GovernanceMartSchedule's 06:00 refresh. A freshness check that runs before
+  # the job it observes would measure yesterday's write every single day and
+  # would sit permanently one refresh behind the truth.
+  #
+  # DISABLED in gamma for the same reason GovernanceMartSchedule is: the bucket
+  # and Glue database are the unsuffixed production values, so a gamma copy
+  # firing on a schedule would overwrite PRODUCTION health tables and file
+  # PRODUCTION issue records. Manual invocation still works, deliberately and
+  # with someone watching.
+  # ---------------------------------------------------------------------------
+  PlatformHealthSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-platform-health-daily${EnvironmentSuffix}"
+      Description: "DVP-TSK-665: daily 07:00 UTC B6-R2 platform health run. One hour after the mart refresh it observes."
+      ScheduleExpression: "cron(0 7 * * ? *)"
+      State: !If [IsGamma, DISABLED, ENABLED]
+      Targets:
+        - Arn: !GetAtt PlatformHealthFunction.Arn
+          Id: platform-health-daily
+
+  PlatformHealthPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PlatformHealthFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PlatformHealthSchedule.Arn
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
@@ -3140,6 +3228,169 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: governance-mart
+
+  # DVP-TSK-665 / DVP-PLN-001: least-privilege role for the B6-R2 platform health
+  # monitor. The shape worth noticing is that it is almost entirely READ.
+  #
+  # A monitor is the wrong thing to give remediation power to. Every check here
+  # observes and reports; the two write grants are its own health surface
+  # (platform-health/* and the two warehouse tables it publishes) and nothing
+  # else. It cannot delete a crawler it flags, restart a container it finds
+  # OOM-killed, or edit the IAM policy whose drift it detects — those are
+  # decisions, and this function is an instrument.
+  PlatformHealthRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-platform-health-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: WarehouseObservation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Checks 1, 3, 4, 5 and 7 read registration records, table
+              # prefixes and the adhoc quarantine tree. Read-only.
+              - Sid: WarehouseRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute/*"
+                  - "arn:aws:s3:::finance-356364570033-us-west-2/*"
+              - Sid: WarehouseList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute"
+                  - "arn:aws:s3:::finance-356364570033-us-west-2"
+              # The health surface it owns: the JSON snapshots and the two
+              # daily-grain tables it publishes through the B2-R2 library.
+              # Deliberately NO s3:DeleteObject — the snapshot history is
+              # append-only and the tables are constant-key overwrites, so
+              # nothing this function writes ever needs removing.
+              - Sid: HealthSurfaceWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute/platform-health/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/fact_platform_health_daily/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/fact_table_freshness_daily/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse-registrations/devops/*"
+        - PolicyName: CatalogObservation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Checks 2, 3 and 4 enumerate databases, tables and CRAWLERS.
+              # GetCrawler/GetCrawlers are READ actions and are the only way to
+              # observe a crawler at all — note there is no StartCrawler,
+              # CreateCrawler or DeleteCrawler here. The monitor reports a
+              # crawler; removing one is a governed decision, not an automated
+              # reaction (DOC-5E35E14DAD05).
+              - Sid: GlueCatalogAndCrawlerRead
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:ListCrawlers
+                  - glue:GetCrawler
+                  - glue:GetCrawlers
+                Resource: "*"
+              # Check 1's health tables are registered through the same
+              # register-or-update path the mart uses: no DeleteTable, no
+              # crawler actions, scoped to the devops database.
+              - Sid: HealthTableRegistration
+                Effect: Allow
+                Action:
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/fact_platform_health_daily"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/fact_table_freshness_daily"
+        - PolicyName: PlatformObservation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Check 6 reads the kernel log on the analytics host over SSM.
+              # SendCommand is constrained to the ONE instance and the ONE
+              # document; the script it runs is read-only by construction and
+              # the check refuses any host but the declared one.
+              - Sid: HostKernelLogRead
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource:
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/i-0f3a4d5aa1c11dd86"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
+              - Sid: HostCommandResultRead
+                Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+              # Check 8 reads burstable CPU credit metrics; checks 6/7/8 publish
+              # their own gauges so the alarms in this stack have a metric to
+              # watch even between runs.
+              - Sid: MetricsReadAndPublish
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              # Check 9 compares the DECLARED dependency surface against live
+              # IAM and instance metadata. Every action is a Get/List — the
+              # drift detector has no power to correct the drift it finds, which
+              # is deliberate: the 2026-08-06 severance was an out-of-band write,
+              # and the answer to an unreviewed write is not a second one.
+              - Sid: DeclaredSurfaceRead
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:GetRolePolicy
+                Resource: "*"
+              - Sid: InstanceMetadataPostureRead
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceCreditSpecifications
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: platform-health
 
   DocPrepRole:
     Type: AWS::IAM::Role

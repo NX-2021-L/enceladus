@@ -103,6 +103,19 @@ jobs:
           python3 -m pip install --quiet pyarrow pytest
           python3 -m pytest backend/lambda/governance_mart -q
 
+      # DVP-TSK-694/695/696 (BRD B6-R2): the platform health monitor's own
+      # predicates. These tests carry the distinctions the checks exist to draw
+      # — legitimate data growth vs snapshot-per-mutation partitioning, a
+      # crawler on a warehouse prefix vs a crawler merely existing elsewhere in
+      # the estate, an OOM read from the kernel log vs a RestartCount that reads
+      # 0 through seven kills — and each of those distinctions is one an
+      # implementation could plausibly get backwards while still looking right.
+      - name: Platform health monitor tests (DVP-TSK-665)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest
+          python3 -m pytest backend/lambda/platform_health -q
+
       # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
       # computation, direction-lock refusal, counter-reset step (stdlib-only).
       - name: Gamma tracker mirror tests (ENC-TSK-M98)
