@@ -959,6 +959,62 @@ Resources:
         - Key: Component
           Value: governance
 
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-649 / DVP-PLN-001: governance analytics mart — SCHEDULED FULL REFRESH.
+  # Reads the five governed DynamoDB sources (full Scan), projects to daily grain,
+  # writes one Parquet object per table and registers the DECLARED schema through
+  # the B2-R2 shared library (enceladus_shared.warehouse_registration).
+  #
+  # Trigger is GovernanceMartSchedule (EventBridge cron) and nothing else — see
+  # the comment on that rule for why a per-mutation trigger is excluded by design.
+  #
+  # No AppConfig extension layer: a batch job with no runtime feature flags; it
+  # never calls appconfig_flags.flag(), so the layer and its APPCONFIG_* env vars
+  # would be dead weight.
+  # No SnapStart: a once-a-day invocation gains nothing from a restored snapshot,
+  # and per-published-version snapshot storage bills per GB-second (the 2026-04-22
+  # Sev-1 cost incident). EscalationDecisionAuthorizerFunction is the same opt-out.
+  # ---------------------------------------------------------------------------
+  GovernanceMartFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      # 2048 MB / 900 s: one run scans ~6.3k tracker records + ~1.4k documents
+      # (~25 MB corpus) and serialises seven Parquet tables in memory before any
+      # of them is written. Memory is sized for the pyarrow buffers, not the scan.
+      MemorySize: 2048
+      Timeout: 900
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt GovernanceMartRole.Arn
+      Description: DVP-TSK-649 scheduled full-refresh governance analytics mart job (DVP-PLN-001)
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          # T2 coordinates (BRD B3-R4). The Glue database `devops` was created as
+          # a T0 onboarding action WITH a LocationUri (DOC-04AF8A02A8F7).
+          MART_BUCKET: devops-agentcli-compute
+          MART_DATABASE: devops
+          # Read-only governed sources. Same env var names and the same
+          # ${EnvironmentSuffix} convention the owning Lambdas use, so the mart
+          # resolves gamma tables without inventing a second convention.
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
+          COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
   DocPrepFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -1567,6 +1623,52 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt Neo4jBackupSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-649 / DVP-PLN-001: the ONLY trigger for the governance analytics mart.
+  #
+  # THIS IS A SCHEDULE RULE AND NOTHING ELSE. It has no EventPattern, and there is
+  # deliberately no companion AWS::Lambda::EventSourceMapping, DynamoDB stream
+  # subscription, S3 event notification, EventBridge Pipe or tracker-mutation hook
+  # anywhere in this path. A per-mutation trigger is exactly the failure class this
+  # design exists to eliminate: the job is a FULL REFRESH, so every run rebuilds
+  # every table from current state and there is nothing for a mutation event to
+  # incrementally maintain (DOC-1E1EC5B7CE02). Adding one would reintroduce the
+  # crawler-concurrency and partition-explosion classes the full refresh makes
+  # structurally impossible. Do not add an EventPattern to this rule, and do not
+  # attach a Glue crawler to this path — a crawler in a production data path is a
+  # governed contract violation (DOC-5E35E14DAD05).
+  #
+  # cron(0 6 * * ? *) = 06:00 UTC daily. Cadence is a freshness choice only;
+  # changing it changes nothing structurally, because each run is idempotent.
+  # ---------------------------------------------------------------------------
+  GovernanceMartSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-governance-mart-daily${EnvironmentSuffix}"
+      Description: "DVP-TSK-649: daily 06:00 UTC full refresh of the governance analytics mart. Schedule-only by design — never per-mutation."
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      # DISABLED in gamma, on purpose. MART_BUCKET and MART_DATABASE are the
+      # unsuffixed production values (devops-agentcli-compute, devops) because the
+      # mart's warehouse is a single governed T2 namespace -- there is no gamma
+      # Glue database, and creating one is a T0 onboarding action, not something a
+      # deploy should do implicitly. So a gamma copy of this function firing on a
+      # schedule would overwrite PRODUCTION Parquet and re-register PRODUCTION Glue
+      # tables. Leaving the gamma rule disabled means the function can still be
+      # invoked by hand for testing, deliberately and with someone watching, but
+      # never fires itself into prod data.
+      State: !If [IsGamma, DISABLED, ENABLED]
+      Targets:
+        - Arn: !GetAtt GovernanceMartFunction.Arn
+          Id: governance-mart-daily
+
+  GovernanceMartPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GovernanceMartFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GovernanceMartSchedule.Arn
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
@@ -2915,6 +3017,129 @@ Resources:
                   - appconfig:GetLatestConfiguration
                   - appconfig:StartConfigurationSession
                 Resource: "*"
+
+  # DVP-TSK-649 / DVP-PLN-001: least-privilege role for the governance analytics
+  # mart refresh. Read-only against the five governed DynamoDB sources; writes are
+  # confined to the two warehouse prefixes this project owns. No AppConfigAccess
+  # statement — the function carries no AppConfig layer (see GovernanceMartFunction).
+  GovernanceMartRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-governance-mart-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: GovernedSourceRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scan + DescribeTable only. The refresh reads everything by
+              # contract, so there is no GetItem/Query path to grant — and there
+              # is deliberately no write action of any kind: the mart is a
+              # derived read of the governed record store, never a mutator of it.
+              - Sid: DynamoDBFullRefreshScan
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+        - PolicyName: WarehouseObjectWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # warehouse/<project>/<table>/data.parquet plus the registration
+              # record at warehouse-registrations/<project>/<table>.json. GetObject
+              # covers the HeadObject digest probe that makes the write idempotent.
+              # Deliberately NO s3:DeleteObject/DeleteObjects: prune_stale_objects()
+              # is opt-in and the scheduled path never asks for it — the constant
+              # canonical key means nothing accumulates to prune (DOC-1E1EC5B7CE02).
+              - Sid: WarehouseObjectReadWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse-registrations/devops/*"
+              # register_table() measures the prefix (list_objects_v2) rather than
+              # asserting a file count, so ListBucket is required — constrained to
+              # this project's two prefixes so it can never enumerate the bucket.
+              - Sid: WarehousePrefixList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::devops-agentcli-compute"
+                Condition:
+                  StringLike:
+                    "s3:prefix":
+                      - "warehouse/devops/*"
+                      - "warehouse-registrations/devops/*"
+        - PolicyName: GlueDeclaredSchemaRegister
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # NOTE: this is the FIRST glue:* grant anywhere in this repository —
+              # no other role in 02-compute.yaml (or any other template) holds one.
+              # Treat any future widening of it as a new-capability review, not a
+              # routine edit.
+              #
+              # Scoped to the catalog + the `devops` database + its tables only.
+              # register_table() calls exactly GetTable / CreateTable / UpdateTable;
+              # GetDatabase and GetTables are the read-side companions.
+              #
+              # Deliberately EXCLUDED and not to be added:
+              #   * glue:DeleteTable — the full-refresh contract is register-or-
+              #     update; a declared schema is never dropped by this path.
+              #   * every glue:*Crawler* action (CreateCrawler, StartCrawler,
+              #     UpdateCrawler, GetCrawler, ...) — a Glue crawler in a
+              #     production data path is a governed contract violation
+              #     (DOC-5E35E14DAD05). The schema is a committed value in
+              #     mart_schema.py, discovered by no one.
+              - Sid: GlueDeclaredSchemaRegistration
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
 
   DocPrepRole:
     Type: AWS::IAM::Role

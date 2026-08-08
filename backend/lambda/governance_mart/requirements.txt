@@ -1,0 +1,19 @@
+# DVP-TSK-649 — governance analytics mart.
+#
+# pyarrow is the Parquet writer behind enceladus_shared.warehouse_registration
+# (serialize_parquet / pq.write_table). It is the only third-party dependency.
+#
+# Bounded rather than exact, matching the repo's neo4j>=5.0,<6.0 style. The
+# upper bound matters: _build.yml installs with
+#   --platform manylinux2014_{x86_64,aarch64} --only-binary=:all: --upgrade
+# so an unbounded spec would silently float onto the first pyarrow release that
+# stops publishing a manylinux2014 (manylinux_2_17) wheel and hard-fail the
+# build. Verified resolvable on both matrix rows at pyarrow 20.0.0:
+#   cp311 -> pyarrow-20.0.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+#   cp312 -> pyarrow-20.0.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+# (~42 MB wheel, ~128 MB unzipped — well inside the 250 MB S3-deploy limit.)
+pyarrow>=17.0.0,<21.0.0
+
+# boto3 is intentionally NOT declared: it is provided by the Lambda runtime, and
+# every Lambda in this repo but one relies on that. mart_source.py imports it
+# lazily inside load_corpus() for the same reason.
