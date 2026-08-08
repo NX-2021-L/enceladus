@@ -10786,6 +10786,23 @@ def _handle_components_update(
         # F50/AC-7: include required_transition_type so validated PATCHes persist.
         "required_transition_type",
         "description", "github_repo", "status", "assistant_reason",
+        # DVP-TSK-621 / ENC-TSK-N86: traceability fields. Without these the
+        # I1-I5 invariants of DOC-157A790F9E8B §2.2 are UNDEFINED rather than
+        # satisfied — the invariants are properties of maps instantiated FROM
+        # the registry row, so an unset component_repo_dir means the map
+        # c -> component_repo_dir(c) does not exist and I2 has nothing to
+        # evaluate. comp-devops-trino and comp-devops-superset sat blocked on
+        # exactly this with the values already derived and published in
+        # NX-2021-L/devops docs/component-traceability-DVP-TSK-699.md.
+        #
+        # These are TRACEABILITY METADATA, not enforcement inputs, so they take
+        # the same auth path as description/github_repo. Only transition_type
+        # keeps the Cognito/assistant gate above, because that one drives
+        # checkout strictness (ENC-FTR-041); widening the gate to cover these
+        # would block the very write they exist to enable.
+        "component_repo", "component_repo_dir", "component_repo_branch",
+        "component_deploy_workflow", "component_deploy_target",
+        "component_address", "lifecycle_status",
     }
     # source_paths is a nested map — serialized via TypeSerializer, not as plain string
     updatable_map_fields = {"source_paths"}
