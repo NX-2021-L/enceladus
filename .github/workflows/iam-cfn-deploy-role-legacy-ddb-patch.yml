@@ -1,0 +1,136 @@
+name: IAM CFN Deploy Role — Legacy DynamoDB Table Patch
+
+# DVP-TSK-704 / DVP-PLN-001: CloudFormationDeployPolicy statement DynamoDBTableOps scoped
+# its Resource list to table/enceladus-* and table/devops-*. Nine of the eleven tables in
+# the 01-data stack predate that naming convention (agent-compliance-violations,
+# agent-sessions, agent-types, component-registry, coordination-requests, documents,
+# governance-policies, governance-version, projects), so the deploy role held NO
+# control-plane DynamoDB permission on them.
+#
+# Effect: every "CloudFormation Compute Stack Deploy" apply since the last green run on
+# 2026-07-08 failed at dynamodb:DescribeTable, rolled 01-data back to
+# UPDATE_ROLLBACK_COMPLETE, and skipped the 02-compute change-set — which is why
+# devops-governance-mart, and every other lambda added since, never existed in AWS despite
+# being merged to main. This was misread as "the pipeline is broken"; the pipeline was fine.
+#
+# Durable fix lives in infrastructure/cloudformation/04-github-roles.yaml. This one-off
+# dispatch applies the same grant live ahead of the next github-roles stack deploy, which is
+# the pattern established by iam-cfn-deploy-role-scheduler-patch.yml and its siblings.
+#
+# This patch EXTENDS the existing DynamoDBTableOps statement in place rather than appending a
+# new Sid, so the live policy and the template converge on one shape. A second statement
+# would be an equivalent grant but a divergent shape, and DVP-TSK-696 check 9 (IAM/config
+# drift) would then correctly flag this very fix as drift.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "DVP-TSK-704 — grant control-plane DynamoDB ops on the nine legacy 01-data tables"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with legacy 01-data table ARNs
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Extend DynamoDBTableOps with the legacy table ARNs
+        env:
+          ROLE_NAME: enceladus-cloudformation-deploy-github-role
+          POLICY_NAME: CloudFormationDeployPolicy
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+
+          aws iam get-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-name "${POLICY_NAME}" \
+            --query PolicyDocument \
+            --output json > /tmp/cfn-deploy-policy-current.json
+
+          ACCOUNT_ID="${ACCOUNT_ID}" python3 <<'PY'
+          import json, os
+          from pathlib import Path
+
+          account_id = os.environ["ACCOUNT_ID"]
+          legacy = [
+              "agent-compliance-violations",
+              "agent-sessions",
+              "agent-types",
+              "component-registry",
+              "coordination-requests",
+              "documents",
+              "governance-policies",
+              "governance-version",
+              "projects",
+          ]
+          wanted = [f"arn:aws:dynamodb:us-west-2:{account_id}:table/{t}" for t in legacy]
+
+          doc = json.loads(Path("/tmp/cfn-deploy-policy-current.json").read_text())
+          statements = doc.setdefault("Statement", [])
+          target = next((s for s in statements if s.get("Sid") == "DynamoDBTableOps"), None)
+          if target is None:
+              raise SystemExit("DynamoDBTableOps statement not found — refusing to guess where the grant belongs")
+
+          resources = target.get("Resource", [])
+          if isinstance(resources, str):
+              resources = [resources]
+
+          missing = [arn for arn in wanted if arn not in resources]
+          if not missing:
+              print("All nine legacy table ARNs already present — no merge needed")
+          else:
+              print(f"Adding {len(missing)} legacy table ARN(s): {missing}")
+              resources.extend(missing)
+              target["Resource"] = resources
+
+          size = len(json.dumps(doc, separators=(",", ":")))
+          print(f"Merged policy size: {size} / 10240 bytes")
+          if size > 10240:
+              raise SystemExit("Merged policy exceeds the 10,240-byte inline policy quota")
+
+          Path("/tmp/cfn-deploy-policy-merged.json").write_text(json.dumps(doc))
+          PY
+
+          aws iam put-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-name "${POLICY_NAME}" \
+            --policy-document "file:///tmp/cfn-deploy-policy-merged.json"
+
+      - name: Verify the grant with the IAM simulator
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/enceladus-cloudformation-deploy-github-role"
+          rc=0
+          for t in agent-compliance-violations agent-sessions agent-types component-registry \
+                   coordination-requests devops-deployment-manager documents governance-policies \
+                   governance-version projects devops-project-tracker; do
+            decisions="$(aws iam simulate-principal-policy \
+              --policy-source-arn "${ROLE_ARN}" \
+              --action-names dynamodb:DescribeTable dynamodb:UpdateTable dynamodb:ListTagsOfResource \
+              --resource-arns "arn:aws:dynamodb:us-west-2:${ACCOUNT_ID}:table/${t}" \
+              --query 'EvaluationResults[].EvalDecision' --output text)"
+            echo "${t}: ${decisions}"
+            case "${decisions}" in
+              *Deny*|*deny*) echo "::error::${t} still denied"; rc=1 ;;
+            esac
+          done
+          exit "${rc}"
