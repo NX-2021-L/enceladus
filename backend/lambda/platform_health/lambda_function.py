@@ -38,6 +38,7 @@ import boto3
 
 import health_issues
 import health_surface
+from checks_contract import check_crawlers, check_namespace_isolation, check_storage_format
 from checks_freshness import check_freshness, check_full_refresh
 from health_finding import CheckResult, overall_severity
 
@@ -85,6 +86,34 @@ def run_checks(
                 "check_1_freshness",
                 "Freshness of every registered warehouse table against its declared SLA",
                 lambda: check_freshness(s3, glue, now=now),
+            )
+        )
+    if want("check_2_crawler"):
+        results.append(
+            _guarded(
+                "check_2_crawler",
+                "Glue crawlers across every scanned region, against the crawler prohibition",
+                # The client FACTORY is passed, not a client: check 2 is the one
+                # check that must look outside the home region, and handing it a
+                # single pre-bound client is exactly how it would come to report
+                # a clean estate it never looked at.
+                lambda: check_crawlers(lambda region: client("glue", region)),
+            )
+        )
+    if want("check_3_namespace_isolation"):
+        results.append(
+            _guarded(
+                "check_3_namespace_isolation",
+                "Tables in a governed namespace without a registered export job",
+                lambda: check_namespace_isolation(s3, glue),
+            )
+        )
+    if want("check_4_storage_format"):
+        results.append(
+            _guarded(
+                "check_4_storage_format",
+                "Storage format of every table in a governed namespace",
+                lambda: check_storage_format(glue),
             )
         )
     if want("check_5_full_refresh"):
