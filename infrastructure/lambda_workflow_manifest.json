@@ -237,6 +237,18 @@
         "checks_contract.py",
         "checks_platform.py"
       ]
+    },
+    {
+      "function_name": "devops-adhoc-promotion",
+      "lambda_dir": "backend/lambda/adhoc_promotion",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/adhoc_promotion/deploy.sh",
+      "package_extra_files": [
+        "promotion_source.py",
+        "promotion_plan.py",
+        "promotion_coerce.py",
+        "promotion_run.py"
+      ]
     }
   ]
 }
