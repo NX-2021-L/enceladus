@@ -76,6 +76,18 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # DVP-TSK-671 (BRD B2-R2): the warehouse registration library claims
+      # idempotency, full-refresh correctness, schema evolution, and a
+      # transactional write ordering. The whole T2 contract rests on those
+      # claims, so they are tested rather than asserted. Needs pyarrow for the
+      # Parquet write path; the contract half of the suite runs without it.
+      - name: Warehouse registration contract tests (DVP-TSK-671)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyarrow
+          cd backend/lambda/shared_layer
+          PYTHONPATH=python python3 -m unittest test_warehouse_registration -v
+
       # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
       # computation, direction-lock refusal, counter-reset step (stdlib-only).
       - name: Gamma tracker mirror tests (ENC-TSK-M98)
