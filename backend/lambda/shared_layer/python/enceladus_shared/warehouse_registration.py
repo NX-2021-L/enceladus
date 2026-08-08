@@ -128,9 +128,14 @@ Exceptions
 
 from __future__ import annotations
 
+import hashlib
+import io
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import date as _date
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Contract constants. Everything the Superset upload path and the promotion
@@ -523,6 +528,498 @@ def describe_contract() -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Row normalisation and Parquet serialization
+#
+# Everything below happens in memory. Nothing here touches S3 or Glue -- that
+# separation is what makes step 1 of the failure contract true: a bad schema, a
+# bad identifier, or an unencodable value raises before anything is written.
+# ---------------------------------------------------------------------------
+
+#: S3 object metadata key carrying the content digest. Used to make repeated
+#: writes observably idempotent without downloading the object.
+CONTENT_DIGEST_METADATA_KEY = "content-sha256"
+
+_ISO_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def utc_timestamp(moment: Optional[datetime] = None) -> str:
+    """The one sanctioned freshness-stamp spelling: UTC ISO-8601, second grain.
+
+    Second grain rather than microsecond is deliberate -- it keeps the stamp
+    stable for callers that derive it once per refresh cycle, and a warehouse
+    projection has never needed sub-second write resolution.
+    """
+    moment = moment or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime(_ISO_TIMESTAMP_FORMAT)
+
+
+def _normalize_rows(rows: Any) -> List[Dict[str, Any]]:
+    """Accept the three sanctioned row sources and return list-of-dict.
+
+    Duck-typed on purpose: pandas and pyarrow are optional at import time, so
+    the library is importable (and its contract checkable) in a Lambda that
+    carries neither.
+    """
+    if rows is None:
+        return []
+    # pandas.DataFrame
+    to_dict = getattr(rows, "to_dict", None)
+    if to_dict is not None and hasattr(rows, "columns") and not isinstance(rows, Mapping):
+        return list(to_dict(orient="records"))
+    # pyarrow.Table
+    to_pylist = getattr(rows, "to_pylist", None)
+    if to_pylist is not None:
+        return list(to_pylist())
+    if isinstance(rows, Mapping):
+        raise ContractViolation(
+            "rows must be a sequence of mappings, a pandas DataFrame, or a pyarrow Table; "
+            "a single mapping was passed"
+        )
+    if isinstance(rows, Iterable):
+        normalized = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise ContractViolation("row %d is %s, expected a mapping" % (index, type(row).__name__))
+            normalized.append(dict(row))
+        return normalized
+    raise ContractViolation("unsupported rows type %s" % type(rows).__name__)
+
+
+def _decimal_params(sql_type: str) -> Tuple[int, int]:
+    match = re.match(r"^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$", sql_type)
+    if not match:  # pragma: no cover - guarded by ALLOWED_TYPE_PATTERN
+        raise ContractViolation("malformed decimal type %r" % sql_type)
+    return int(match.group(1)), int(match.group(2))
+
+
+def _arrow_type(sql_type: str):
+    """Map a DECLARED SQL type to its Arrow type. No inference anywhere."""
+    import pyarrow as pa  # local import: pyarrow is a heavy, optional dependency
+
+    simple = {
+        "boolean": pa.bool_(),
+        "tinyint": pa.int8(),
+        "smallint": pa.int16(),
+        "int": pa.int32(),
+        "integer": pa.int32(),
+        "bigint": pa.int64(),
+        "float": pa.float32(),
+        "real": pa.float32(),
+        "double": pa.float64(),
+        "string": pa.string(),
+        "binary": pa.binary(),
+        "date": pa.date32(),
+        "timestamp": pa.timestamp("us"),
+    }
+    if sql_type in simple:
+        return simple[sql_type]
+    if sql_type.startswith("decimal("):
+        precision, scale = _decimal_params(sql_type)
+        return pa.decimal128(precision, scale)
+    if sql_type.startswith("varchar(") or sql_type.startswith("char("):
+        return pa.string()
+    raise ContractViolation(
+        "type %r is declarable but not writable by this library. Flatten the column or "
+        "declare it as `string` holding JSON." % sql_type
+    )
+
+
+def _coerce_value(column: str, sql_type: str, value: Any) -> Any:
+    """Coerce one value to its DECLARED type, or raise naming the offender.
+
+    All-or-nothing, in the same spirit as the B5-R2 promotion transform: a
+    partially typed governed table is worse than no table.
+    """
+    if value is None:
+        return None
+    try:
+        if sql_type == "boolean":
+            return bool(value)
+        if sql_type in ("tinyint", "smallint", "int", "integer", "bigint"):
+            return int(value)
+        if sql_type in ("float", "real", "double"):
+            return float(value)
+        if sql_type.startswith("decimal("):
+            _, scale = _decimal_params(sql_type)
+            decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+            return decimal_value.quantize(Decimal(1).scaleb(-scale))
+        if sql_type == "date":
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, _date):
+                return value
+            return _date.fromisoformat(str(value)[:10])
+        if sql_type == "timestamp":
+            if isinstance(value, datetime):
+                return value
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if sql_type == "binary":
+            return value if isinstance(value, (bytes, bytearray)) else str(value).encode("utf-8")
+        return str(value)
+    except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+        raise ContractViolation(
+            "value %r in column %r cannot be coerced to declared type %r: %s"
+            % (value, column, sql_type, exc)
+        )
+
+
+def project_rows(
+    contract: TableContract, rows: Sequence[Mapping[str, Any]], stamp: str
+) -> Dict[str, List[Any]]:
+    """Project raw rows onto the DECLARED schema. Declaration always wins.
+
+    A declared column absent from the data becomes NULL. A data column absent
+    from the declaration is dropped. That asymmetry is precisely what makes
+    this a schema FUNCTION rather than a schema ESTIMATOR (DOC-5E35E14DAD05):
+    the output shape depends only on the declaration, never on the sample.
+    """
+    projected: Dict[str, List[Any]] = {name: [] for name in contract.column_names}
+    for row in rows:
+        for column in contract.columns:
+            if column.name == contract.freshness_column:
+                raw = stamp
+            else:
+                raw = row.get(column.name)
+            projected[column.name].append(
+                _coerce_value(column.name, column.type.strip().lower(), raw)
+            )
+    return projected
+
+
+def serialize_parquet(
+    contract: TableContract, rows: Sequence[Mapping[str, Any]], stamp: str
+) -> Tuple[bytes, int]:
+    """Serialize rows to Parquet bytes in memory. Returns ``(payload, row_count)``.
+
+    Deterministic: the Arrow schema comes from the declaration, the row order
+    comes from the caller, and the freshness stamp is a single value applied
+    uniformly -- so identical inputs produce byte-identical output.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    projected = project_rows(contract, rows, stamp)
+    schema = pa.schema(
+        [pa.field(column.name, _arrow_type(column.type.strip().lower())) for column in contract.columns]
+    )
+    try:
+        arrow_table = pa.Table.from_pydict(projected, schema=schema)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as exc:
+        raise ContractViolation("rows do not satisfy the declared schema: %s" % exc)
+
+    sink = io.BytesIO()
+    pq.write_table(arrow_table, sink, compression=PARQUET_COMPRESSION)
+    return sink.getvalue(), arrow_table.num_rows
+
+
+# ---------------------------------------------------------------------------
+# AWS clients (lazy; boto3 is provided by the Lambda runtime)
+# ---------------------------------------------------------------------------
+
+
+def _default_client(service: str, region: Optional[str] = None):
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        service,
+        region_name=region or "us-west-2",
+        config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Storage: single atomic, idempotent object write
+# ---------------------------------------------------------------------------
+
+
+def _existing_digest(s3_client, bucket: str, key: str) -> Optional[str]:
+    try:
+        head = s3_client.head_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001 - botocore raises a dynamic class
+        if _is_not_found(exc):
+            return None
+        raise StorageWriteError("head_object failed for s3://%s/%s: %s" % (bucket, key, exc))
+    metadata = head.get("Metadata") or {}
+    return metadata.get(CONTENT_DIGEST_METADATA_KEY)
+
+
+def _is_not_found(exc: Exception) -> bool:
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code") if hasattr(exc, "response") else None
+    return code in ("404", "NoSuchKey", "NotFound", "EntityNotFoundException") or (
+        exc.__class__.__name__ in ("EntityNotFoundException", "NoSuchKey", "ClientError404")
+    )
+
+
+def write_table_object(
+    s3_client, contract: TableContract, payload: bytes, digest: str
+) -> bool:
+    """Write the one canonical object for this table. Returns ``storage_changed``.
+
+    Full-refresh overwrite: the key is a constant, so this replaces the previous
+    generation in place and the table's file count stays at 1 no matter how many
+    refreshes have run (DOC-1E1EC5B7CE02). ``PutObject`` is atomic, so a failure
+    leaves the previous generation intact and readable rather than truncated.
+    """
+    if _existing_digest(s3_client, contract.bucket, contract.s3_key) == digest:
+        return False
+    try:
+        s3_client.put_object(
+            Bucket=contract.bucket,
+            Key=contract.s3_key,
+            Body=payload,
+            ContentType="application/octet-stream",
+            ServerSideEncryption="AES256",
+            Metadata={CONTENT_DIGEST_METADATA_KEY: digest},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise StorageWriteError(
+            "put_object failed for %s: %s. The previous generation of the table is "
+            "intact; retry is safe." % (contract.s3_uri, exc)
+        )
+    return True
+
+
+def list_table_objects(s3_client, contract: TableContract) -> List[Dict[str, Any]]:
+    """Enumerate objects under the table prefix -- the B6-R2 check-1 primitive."""
+    objects: List[Dict[str, Any]] = []
+    token = None
+    while True:
+        kwargs = {"Bucket": contract.bucket, "Prefix": contract.s3_prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        response = s3_client.list_objects_v2(**kwargs)
+        objects.extend(response.get("Contents") or [])
+        if not response.get("IsTruncated"):
+            break
+        token = response.get("NextContinuationToken")
+        if not token:
+            break
+    return objects
+
+
+def prune_stale_objects(s3_client, contract: TableContract) -> List[str]:
+    """Remove objects under the table prefix that are not the canonical key.
+
+    Opt-in only (``prune_stale=True``), and scoped to this table's own prefix.
+    Its single legitimate use is ADOPTING a legacy prefix that accumulated
+    snapshot objects under the pre-contract pattern. A table written only by
+    this library never needs it -- the constant key makes accumulation
+    impossible in the first place.
+    """
+    stale = [
+        obj["Key"]
+        for obj in list_table_objects(s3_client, contract)
+        if obj.get("Key") and obj["Key"] != contract.s3_key
+    ]
+    if not stale:
+        return []
+    for start in range(0, len(stale), 1000):
+        batch = stale[start : start + 1000]
+        s3_client.delete_objects(
+            Bucket=contract.bucket,
+            Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+        )
+    return stale
+
+
+# ---------------------------------------------------------------------------
+# Catalog: declared register-or-update
+# ---------------------------------------------------------------------------
+
+
+def _normalized_catalog_view(table_input: Mapping[str, Any]) -> Dict[str, Any]:
+    """The comparable subset of a Glue table definition.
+
+    Glue echoes back server-managed fields (CreateTime, VersionId, CatalogId,
+    CreatedBy). Comparing those would make every run report a difference and
+    turn a no-op into a write, so the comparison is restricted to the fields
+    this contract actually declares.
+    """
+    storage = table_input.get("StorageDescriptor") or {}
+    serde = storage.get("SerdeInfo") or {}
+    parameters = table_input.get("Parameters") or {}
+    return {
+        "TableType": table_input.get("TableType"),
+        "Parameters": {key: parameters.get(key) for key in sorted(GLUE_TABLE_PARAMETERS)},
+        "Description": table_input.get("Description", ""),
+        "Columns": [
+            {
+                "Name": column.get("Name"),
+                "Type": (column.get("Type") or "").strip().lower(),
+                "Comment": column.get("Comment", "") or "",
+            }
+            for column in (storage.get("Columns") or [])
+        ],
+        "Location": storage.get("Location"),
+        "InputFormat": storage.get("InputFormat"),
+        "OutputFormat": storage.get("OutputFormat"),
+        "SerializationLibrary": serde.get("SerializationLibrary"),
+        "SerdeParameters": dict(serde.get("Parameters") or {}),
+        "PartitionKeys": [
+            {"Name": key.get("Name"), "Type": key.get("Type")}
+            for key in (table_input.get("PartitionKeys") or [])
+        ],
+    }
+
+
+def register_or_update_glue_table(glue_client, contract: TableContract) -> Tuple[bool, bool]:
+    """Write the DECLARED schema to the Glue Data Catalog.
+
+    Returns ``(catalog_changed, created)``. Never invokes a crawler; there is
+    no inference path here at all (DOC-5E35E14DAD05). Idempotent: an unchanged
+    declaration produces no ``UpdateTable`` call.
+    """
+    table_input = contract.glue_table_input()
+    desired = _normalized_catalog_view(table_input)
+
+    existing = None
+    try:
+        existing = (glue_client.get_table(DatabaseName=contract.database, Name=contract.table) or {}).get(
+            "Table"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not _is_not_found(exc):
+            raise CatalogWriteError(
+                "get_table failed for %s: %s" % (contract.trino_identifier, exc)
+            )
+
+    if existing is None:
+        try:
+            glue_client.create_table(DatabaseName=contract.database, TableInput=table_input)
+        except Exception as exc:  # noqa: BLE001
+            raise CatalogWriteError(
+                "create_table failed for %s: %s. Data is written; retry is safe and "
+                "idempotent." % (contract.trino_identifier, exc)
+            )
+        return True, True
+
+    if _normalized_catalog_view(existing) == desired:
+        return False, False
+
+    try:
+        glue_client.update_table(DatabaseName=contract.database, TableInput=table_input)
+    except Exception as exc:  # noqa: BLE001
+        raise CatalogWriteError(
+            "update_table failed for %s: %s. Data is written and the catalog still "
+            "describes the previous generation; retry is safe."
+            % (contract.trino_identifier, exc)
+        )
+    return True, False
+
+
+# ---------------------------------------------------------------------------
+# The registration record
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RegistrationRecord:
+    """What one invocation of ``register_table`` did (BRD B2-R2 ``properties``)."""
+
+    project: str
+    table: str
+    database: str
+    trino_identifier: str
+    s3_uri: str
+    location: str
+    row_count: int
+    byte_count: int
+    file_count: int
+    write_timestamp: str
+    content_sha256: str
+    storage_changed: bool
+    catalog_changed: bool
+    created: bool
+    governed_layout: bool
+    pruned_objects: Tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# The one function
+# ---------------------------------------------------------------------------
+
+
+def register_table(
+    *,
+    project: str,
+    table: str,
+    rows: Any,
+    columns: Sequence[ColumnSpec],
+    bucket: str,
+    database: Optional[str] = None,
+    freshness_column: str = DEFAULT_FRESHNESS_COLUMN,
+    write_timestamp: Optional[datetime] = None,
+    base_prefix: str = WAREHOUSE_PREFIX,
+    table_comment: str = "",
+    prune_stale: bool = False,
+    s3_client: Any = None,
+    glue_client: Any = None,
+    region: Optional[str] = None,
+) -> RegistrationRecord:
+    """Write a table to the governed warehouse and register its declared schema.
+
+    One idempotent, deterministic operation. See the module docstring for the
+    full contract; the ordering below is the contract's transactional intent
+    made literal:
+
+        validate + serialize (memory)  ->  atomic PutObject  ->  Glue write
+
+    Nothing reaches AWS until the payload is fully materialised, and the
+    catalog is never written before the data it describes exists.
+    """
+    contract = build_contract(
+        project=project,
+        table=table,
+        columns=columns,
+        bucket=bucket,
+        database=database,
+        freshness_column=freshness_column,
+        base_prefix=base_prefix,
+        table_comment=table_comment,
+    )
+
+    # -- 1. in-memory: validate and serialize. Nothing has been touched yet. --
+    stamp = utc_timestamp(write_timestamp)
+    payload, row_count = serialize_parquet(contract, _normalize_rows(rows), stamp)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    s3_client = s3_client or _default_client("s3", region)
+    glue_client = glue_client or _default_client("glue", region)
+
+    # -- 2. data first, as a single atomic overwrite of the canonical key. ----
+    storage_changed = write_table_object(s3_client, contract, payload, digest)
+
+    pruned: List[str] = []
+    if prune_stale:
+        pruned = prune_stale_objects(s3_client, contract)
+
+    # -- 3. catalog only after the data it describes is known to exist. ------
+    catalog_changed, created = register_or_update_glue_table(glue_client, contract)
+
+    return RegistrationRecord(
+        project=contract.project,
+        table=contract.table,
+        database=contract.database,
+        trino_identifier=contract.trino_identifier,
+        s3_uri=contract.s3_uri,
+        location=contract.location,
+        row_count=row_count,
+        byte_count=len(payload),
+        file_count=1,
+        write_timestamp=stamp,
+        content_sha256=digest,
+        storage_changed=storage_changed,
+        catalog_changed=catalog_changed,
+        created=created,
+        governed_layout=contract.is_governed_layout,
+        pruned_objects=tuple(pruned),
+    )
+
+
 __all__ = [
     "ALLOWED_FRESHNESS_TYPES",
     "ALLOWED_TYPE_PATTERN",
@@ -542,9 +1039,11 @@ __all__ = [
     "TABLE_NAME_PATTERN",
     "TRINO_CATALOG",
     "WAREHOUSE_PREFIX",
+    "CONTENT_DIGEST_METADATA_KEY",
     "CatalogWriteError",
     "ColumnSpec",
     "ContractViolation",
+    "RegistrationRecord",
     "StorageWriteError",
     "TableContract",
     "WarehouseContractError",
@@ -553,6 +1052,14 @@ __all__ = [
     "describe_contract",
     "freshness_column_spec",
     "glue_database_for",
+    "list_table_objects",
+    "project_rows",
+    "prune_stale_objects",
+    "register_or_update_glue_table",
+    "register_table",
+    "serialize_parquet",
+    "utc_timestamp",
     "validate_project_name",
     "validate_table_name",
+    "write_table_object",
 ]
