@@ -240,3 +240,53 @@ assert observed_serde == describe_contract()["serde"]
 
 `build_contract()` performs the full validation and touches no AWS API, so the Superset path, the
 promotion transform, and the B6-R2 monitor can all use it as a pure conformance check.
+
+## 5. Finance — the reference implementation
+
+`tools/warehouse_export_finance.py` is the first caller and the standing conformance check:
+
+```
+python3 tools/warehouse_export_finance.py reconcile --profile product-lead
+```
+
+It reads the live `finance` Glue catalog and diffs every table against the definition the shared
+library would produce from the same declared columns. Read-only; exits non-zero on any divergence.
+
+**Result (2026-08-08): 18 tables, 18 match, 0 divergent, 0 rejected.** All 18 also hold exactly one
+S3 object, at exactly the library's canonical key `warehouse/finance/<table>/data.parquet`.
+
+Finance was not adjusted to fit the library. The library was corrected to fit finance — twice, and
+both corrections are general rules rather than finance special cases:
+
+### 5.1 `date` is a Hive keyword but not a Trino reserved word
+
+The first reserved-column list rejected `date`, and four live finance tables (`cash_flow_ledger`,
+`compensation_events`, `scheduled_flows`, `statement_lines`) carry a `date` column that Trino
+serves to dashboards 4 and 5 today. The list was wrong: it conflated the Hive keyword list with the
+Trino reserved-word list. `RESERVED_COLUMN_NAMES` is now the Trino set, so `date`, `timestamp`,
+`partition`, and `location` are all permitted as column names.
+
+A contract clause that the reference implementation violates is a bug in the clause.
+
+### 5.2 The freshness column can be caller-owned
+
+The library's default is `ingest_ts`, library-owned and stamped on every row. Finance's freshness
+stamp is `updated_at` (and `ingested_at` on `statements`) — **its own business data**, projected
+from the T1 SQLite store. Stamping a warehouse write time over it would corrupt the column.
+
+`stamp_freshness=False` is the general answer: the library validates that every row carries a
+non-null value in the freshness column instead of overwriting it, and raises `ContractViolation`
+naming the offending row index when one does not. The B5-R2 promotion transform will need exactly
+this, since promoted rows carry their original ingest time.
+
+| Mode | Who owns the column | Library behaviour |
+| --- | --- | --- |
+| `stamp_freshness=True` (default) | library | overwrites every row with the write timestamp |
+| `stamp_freshness=False` | caller | validates non-null per row; never overwrites |
+
+### 5.3 Cross-repo status
+
+The finance export **job** lives in `NX-2021-L/finance`, not in this repo. `export_table()` here is
+the canonical call site it adopts — verified end-to-end against finance's real declared schema,
+including that `updated_at` survives the round trip unmodified. Replacing the finance repo's own
+registration code with a call to this function is a follow-up change in that repository.

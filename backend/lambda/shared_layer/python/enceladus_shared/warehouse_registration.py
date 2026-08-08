@@ -41,8 +41,12 @@ Refresh     Full-refresh overwrite per table. No snapshot-per-mutation
             envelope must carry a recorded per-table governed exception.
 Required column
             Every table carries a freshness stamp -- MANDATORY, not optional.
-            Default ``ingest_ts``. It must appear in the declared schema; the
-            library injects the value on every row of every write.
+            Default ``ingest_ts``, library-owned: it must appear in the declared
+            schema, and the library stamps its value on every row of every
+            write. A caller whose freshness column is its OWN business data
+            (finance's ``updated_at``) passes ``stamp_freshness=False``, and the
+            library then validates that every row carries a non-null value
+            instead of overwriting it.
 Naming      project, table, and column identifiers are lowercase
             ``snake_case`` matching the patterns below. Mixed case is rejected
             rather than silently folded, because Glue folds and Trino does not,
@@ -70,6 +74,7 @@ THE FUNCTION (semantics; implementation in this module)
         write_timestamp: datetime | None = None,
         base_prefix: str = WAREHOUSE_PREFIX,
         table_comment: str = "",
+        stamp_freshness: bool = True,
         emit_record: bool = True,
         prune_stale: bool = False,
         s3_client=None,
@@ -204,26 +209,31 @@ ALLOWED_TYPE_PATTERN = re.compile(
     r")$"
 )
 
-#: Column names that break Hive/Trino DDL or collide with the partition
-#: machinery. Rejected up front rather than at query time.
+#: Column names that cannot appear unquoted in a Trino query. Rejected up front
+#: rather than at query time.
+#:
+#: This is the TRINO reserved-word list, not the (much larger) Hive keyword list.
+#: The distinction is load-bearing and was established empirically against the
+#: finance reference implementation: `date` is a Hive keyword but NOT a Trino
+#: reserved word, and four live finance production tables
+#: (cash_flow_ledger, compensation_events, scheduled_flows, statement_lines)
+#: carry a `date` column that Trino serves to dashboards 4 and 5 today. A list
+#: that rejected it would have failed the very implementation this contract was
+#: derived from. Type names that are not reserved words -- `date`, `timestamp`,
+#: and likewise `partition` and `location` -- are therefore permitted.
 RESERVED_COLUMN_NAMES = frozenset(
     {
-        "table",
-        "select",
-        "from",
-        "where",
-        "group",
-        "order",
-        "by",
-        "partition",
-        "location",
-        "timestamp",
-        "date",
-        "values",
-        "exists",
-        "current_date",
-        "current_time",
-        "current_timestamp",
+        "alter", "and", "as", "between", "by", "case", "cast", "constraint",
+        "create", "cross", "cube", "current_catalog", "current_date",
+        "current_path", "current_role", "current_schema", "current_time",
+        "current_timestamp", "current_user", "deallocate", "delete", "describe",
+        "distinct", "drop", "else", "end", "escape", "except", "execute",
+        "exists", "extract", "false", "for", "from", "full", "group", "grouping",
+        "having", "in", "inner", "insert", "intersect", "into", "is", "join",
+        "left", "like", "localtime", "localtimestamp", "natural", "normalize",
+        "not", "null", "on", "or", "order", "outer", "prepare", "recursive",
+        "right", "rollup", "select", "skip", "table", "then", "true", "uescape",
+        "union", "unnest", "using", "values", "when", "where", "with",
     }
 )
 
@@ -691,7 +701,10 @@ def _coerce_value(column: str, sql_type: str, value: Any) -> Any:
 
 
 def project_rows(
-    contract: TableContract, rows: Sequence[Mapping[str, Any]], stamp: str
+    contract: TableContract,
+    rows: Sequence[Mapping[str, Any]],
+    stamp: str,
+    stamp_freshness: bool = True,
 ) -> Dict[str, List[Any]]:
     """Project raw rows onto the DECLARED schema. Declaration always wins.
 
@@ -699,12 +712,30 @@ def project_rows(
     from the declaration is dropped. That asymmetry is precisely what makes
     this a schema FUNCTION rather than a schema ESTIMATOR (DOC-5E35E14DAD05):
     the output shape depends only on the declaration, never on the sample.
+
+    ``stamp_freshness`` decides who OWNS the freshness column. Default True: the
+    library stamps its own warehouse write timestamp over whatever was there.
+    False: the column is caller-owned business data (finance's ``updated_at``,
+    ``statements.ingested_at``) and every row must already carry a non-null
+    value -- the library validates rather than overwrites, because silently
+    overwriting a business timestamp with a warehouse write time would corrupt
+    the data it was supposed to be describing.
     """
     projected: Dict[str, List[Any]] = {name: [] for name in contract.column_names}
-    for row in rows:
+    for index, row in enumerate(rows):
         for column in contract.columns:
             if column.name == contract.freshness_column:
-                raw = stamp
+                if stamp_freshness:
+                    raw = stamp
+                else:
+                    raw = row.get(column.name)
+                    if raw is None:
+                        raise ContractViolation(
+                            "row %d has no value for the caller-owned freshness column %r on "
+                            "%s.%s. With stamp_freshness=False the caller owns that column, so "
+                            "every row must carry it."
+                            % (index, contract.freshness_column, contract.project, contract.table)
+                        )
             else:
                 raw = row.get(column.name)
             projected[column.name].append(
@@ -714,7 +745,10 @@ def project_rows(
 
 
 def serialize_parquet(
-    contract: TableContract, rows: Sequence[Mapping[str, Any]], stamp: str
+    contract: TableContract,
+    rows: Sequence[Mapping[str, Any]],
+    stamp: str,
+    stamp_freshness: bool = True,
 ) -> Tuple[bytes, int]:
     """Serialize rows to Parquet bytes in memory. Returns ``(payload, row_count)``.
 
@@ -725,7 +759,7 @@ def serialize_parquet(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    projected = project_rows(contract, rows, stamp)
+    projected = project_rows(contract, rows, stamp, stamp_freshness)
     schema = pa.schema(
         [pa.field(column.name, _arrow_type(column.type.strip().lower())) for column in contract.columns]
     )
@@ -1114,6 +1148,7 @@ def register_table(
     write_timestamp: Optional[datetime] = None,
     base_prefix: str = WAREHOUSE_PREFIX,
     table_comment: str = "",
+    stamp_freshness: bool = True,
     emit_record: bool = True,
     prune_stale: bool = False,
     s3_client: Any = None,
@@ -1144,7 +1179,9 @@ def register_table(
 
     # -- 1. in-memory: validate and serialize. Nothing has been touched yet. --
     stamp = utc_timestamp(write_timestamp)
-    payload, row_count = serialize_parquet(contract, _normalize_rows(rows), stamp)
+    payload, row_count = serialize_parquet(
+        contract, _normalize_rows(rows), stamp, stamp_freshness
+    )
     digest = hashlib.sha256(payload).hexdigest()
 
     s3_client = s3_client or _default_client("s3", region)
