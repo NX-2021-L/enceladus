@@ -257,6 +257,24 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/enceladus-*"
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/devops-*"
+                  # DVP-TSK-704: nine 01-data tables predate the enceladus-*/devops-* naming
+                  # convention, so the two prefix wildcards above never matched them. Every
+                  # "CloudFormation Compute Stack Deploy" apply since 2026-07-08 failed at
+                  # dynamodb:DescribeTable on these, rolled the data stack back to
+                  # UPDATE_ROLLBACK_COMPLETE, and skipped the compute change-set entirely —
+                  # which is why devops-governance-mart never existed in AWS despite being
+                  # merged to main. Enumerated rather than widened to table/*: this is a
+                  # closed legacy set, and a wildcard would hand the deploy role
+                  # control-plane authority over every table in the account.
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-compliance-violations"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-sessions"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-types"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/component-registry"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-policies"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
 
               - Sid: SnsTopicOps
                 Effect: Allow
