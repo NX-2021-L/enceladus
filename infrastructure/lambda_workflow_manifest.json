@@ -234,7 +234,8 @@
         "health_issues.py",
         "health_surface.py",
         "checks_freshness.py",
-        "checks_contract.py"
+        "checks_contract.py",
+        "checks_platform.py"
       ]
     },
     {

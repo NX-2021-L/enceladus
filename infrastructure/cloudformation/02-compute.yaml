@@ -1819,6 +1819,70 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PlatformHealthSchedule.Arn
 
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-696 / DVP-PLN-001: the two burstable-CPU alarms handed over by
+  # DVP-TSK-635, which measured the thresholds and deliberately did NOT install
+  # them — standing configuration belongs with the health-check surface.
+  #
+  # Before these, `describe-alarms` filtered on this instance returned an EMPTY
+  # LIST: the credit signal was visible only to whoever ran the query by hand.
+  #
+  # THE THRESHOLDS ARE ECONOMIC, NOT PERFORMANCE. This host runs
+  # CpuCredits=unlimited (verified live), so exhausting the credit balance does
+  # not throttle it — the balance converts to surplus credits that are BILLED.
+  # The t3.large failure mode is a cost event, which is why the primary alarm
+  # watches CPUSurplusCreditsCharged rather than CPUCreditBalance reaching zero.
+  #
+  # Condition IsProduction: gamma has no analytics host, so a gamma copy would
+  # alarm forever on a metric no instance publishes.
+  # ---------------------------------------------------------------------------
+  AnalyticsHostCpuCreditBalanceLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProduction
+    Properties:
+      AlarmName: analytics-host-cpu-credit-balance-low
+      AlarmDescription: >-
+        DVP-TSK-635 T2 LEADING INDICATOR. CPUCreditBalance <= 115 (20% of the 576
+        t3.large earned cap) for 3 consecutive 5-minute datapoints. Not itself a
+        cost event: this is the signal to investigate BEFORE
+        analytics-host-cpu-surplus-charged starts billing.
+      Namespace: AWS/EC2
+      MetricName: CPUCreditBalance
+      Statistic: Minimum
+      Period: 300
+      Threshold: 115
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: InstanceId
+          Value: i-0f3a4d5aa1c11dd86
+
+  AnalyticsHostCpuSurplusChargedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProduction
+    Properties:
+      AlarmName: analytics-host-cpu-surplus-charged
+      AlarmDescription: >-
+        DVP-TSK-635 T1 PRIMARY, ECONOMIC. CPUSurplusCreditsCharged > 0 in 3
+        separate hours per rolling 24h. CpuCredits=unlimited means credit
+        exhaustion converts to surplus credits that are BILLED rather than
+        throttling the host, so this is the economically meaningful trigger and
+        firing is the D-6 evidence of credit exhaustion.
+      Namespace: AWS/EC2
+      MetricName: CPUSurplusCreditsCharged
+      Statistic: Sum
+      Period: 3600
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: InstanceId
+          Value: i-0f3a4d5aa1c11dd86
+
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
     Condition: IsProduction
