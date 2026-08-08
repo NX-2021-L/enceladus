@@ -116,6 +116,24 @@ jobs:
           python3 -m pip install --quiet pytest
           python3 -m pytest backend/lambda/platform_health -q
 
+      # DVP-TSK-661 (BRD B5-R2): the ad-hoc promotion transform. The two
+      # guarantees that most need a build to defend them are all-or-nothing
+      # coercion and the D-4 no-agent constraint, because both are invisible on
+      # the happy path — a promotion that works looks identical whether or not
+      # a partial write is possible, and an agent-triggered promotion produces a
+      # perfectly good table. So the suite asserts the NEGATIVE cases directly:
+      # a failed promotion issues zero PutObject and zero CreateTable calls, and
+      # an invocation carrying an agent session id is refused before the source
+      # table is read. It also pins the three adhoc_probe_01.csv failure cases
+      # (leading-zero zip codes, a literal NULL in an integer column, currency
+      # requiring DECIMAL) and the R-6 invariant that no column ever arrives at
+      # the promotion screen blank.
+      - name: Ad-hoc promotion transform tests (DVP-TSK-661)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyarrow pytest
+          python3 -m pytest backend/lambda/adhoc_promotion -q
+
       # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
       # computation, direction-lock refusal, counter-reset step (stdlib-only).
       - name: Gamma tracker mirror tests (ENC-TSK-M98)
