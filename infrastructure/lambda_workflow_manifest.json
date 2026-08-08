@@ -224,6 +224,19 @@
       ]
     },
     {
+      "function_name": "devops-platform-health",
+      "lambda_dir": "backend/lambda/platform_health",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/platform_health/deploy.sh",
+      "package_extra_files": [
+        "health_contract.py",
+        "health_finding.py",
+        "health_issues.py",
+        "health_surface.py",
+        "checks_freshness.py"
+      ]
+    },
+    {
       "function_name": "devops-adhoc-promotion",
       "lambda_dir": "backend/lambda/adhoc_promotion",
       "workflow_file": ".github/workflows/_deploy.yml",
