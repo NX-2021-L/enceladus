@@ -754,5 +754,199 @@ class JreeseGPTRouteTests(unittest.TestCase):
         mock_get.assert_called_once_with("jreeseGPT", "feature", "JGP-FTR-201")
 
 
+class RelatedIdsCreateIntakeTests(unittest.TestCase):
+    """ENC-ISS-614 / ENC-TSK-N91: tracker.create must honor the typed
+    related_task_ids / related_issue_ids / related_feature_ids fields.
+
+    Prior to the fix _handle_create_record never read the three canonical
+    typed relation fields from the POST body — only the legacy "related"
+    comma-string — so the fields were silently dropped while the API
+    returned success. The fix unifies both spellings into one intake list
+    feeding the existing forward write and bidirectional back-link pass.
+    These tests pin persistence (DynamoDB L type, never S), coercion via
+    the ENC-ISS-059 helper, spelling equivalence, loud failure for
+    unnormalizable values, and warning surfacing for unclassifiable or
+    reclassified IDs.
+    """
+
+    def _create_event(self, body, record_type="task"):
+        path = f"/api/v1/tracker/enceladus/{record_type}"
+        return {
+            "requestContext": {"http": {"method": "POST", "path": path}},
+            "headers": {"x-coordination-internal-key": "valid-key", "host": "example.com"},
+            "body": json.dumps(body),
+            "rawPath": path,
+        }
+
+    def _run(self, body, record_type="task"):
+        with patch.object(tracker_mutation, "_validate_project_exists", return_value=None), \
+             patch.object(tracker_mutation, "_get_project_prefix", return_value="ENC"), \
+             patch.object(tracker_mutation, "_get_prefix_map_cached", return_value={"ENC": "enceladus"}), \
+             patch.object(tracker_mutation, "_get_ddb") as mock_get_ddb, \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            fake_ddb = MagicMock()
+            mock_get_ddb.return_value = fake_ddb
+            fake_ddb.query.return_value = {"Items": [], "Count": 0}
+            fake_ddb.put_item.return_value = {}
+            event = self._create_event(body, record_type=record_type)
+            resp = tracker_mutation.lambda_handler(event, None)
+            return resp, fake_ddb
+
+    def _task_body(self, **extra):
+        body = {
+            "title": "ISS-614 repro task",
+            "category": "implementation",
+            "acceptance_criteria": ["verify typed related ids persist"],
+        }
+        body.update(extra)
+        return body
+
+    def _feature_body(self, **extra):
+        body = {
+            "title": "ISS-614 repro feature",
+            "category": "capability",
+            "user_story": "As an agent I want typed relations to persist so the graph is real",
+            "acceptance_criteria": ["verify typed related ids persist on feature"],
+        }
+        body.update(extra)
+        return body
+
+    def test_create_task_persists_all_three_typed_fields_as_L(self):
+        resp, fake_ddb = self._run(self._task_body(
+            related_task_ids=["ENC-TSK-100"],
+            related_issue_ids=["ENC-ISS-200"],
+            related_feature_ids=["ENC-FTR-300"],
+        ))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["related_task_ids"], {"L": [{"S": "ENC-TSK-100"}]})
+        self.assertEqual(item["related_issue_ids"], {"L": [{"S": "ENC-ISS-200"}]})
+        self.assertEqual(item["related_feature_ids"], {"L": [{"S": "ENC-FTR-300"}]})
+
+    def test_create_feature_persists_typed_fields_record_type_agnostic(self):
+        """ENC-ISS-614 left record_type=feature unconfirmed; pin it here."""
+        resp, fake_ddb = self._run(self._feature_body(
+            related_task_ids=["ENC-TSK-100"],
+            related_issue_ids=["ENC-ISS-200"],
+        ), record_type="feature")
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["related_task_ids"], {"L": [{"S": "ENC-TSK-100"}]})
+        self.assertEqual(item["related_issue_ids"], {"L": [{"S": "ENC-ISS-200"}]})
+
+    def test_typed_and_legacy_spellings_produce_identical_writes(self):
+        """The two spellings must yield the same stored item fields AND the
+        same bidirectional back-link update calls."""
+        rel_fields = ("related_task_ids", "related_issue_ids", "related_feature_ids")
+        resp_a, ddb_a = self._run(self._task_body(
+            related="ENC-TSK-100,ENC-ISS-200,ENC-FTR-300"))
+        resp_b, ddb_b = self._run(self._task_body(
+            related_task_ids=["ENC-TSK-100"],
+            related_issue_ids=["ENC-ISS-200"],
+            related_feature_ids=["ENC-FTR-300"],
+        ))
+        self.assertEqual(resp_a["statusCode"], 201)
+        self.assertEqual(resp_b["statusCode"], 201)
+        item_a = ddb_a.put_item.call_args.kwargs["Item"]
+        item_b = ddb_b.put_item.call_args.kwargs["Item"]
+        for f in rel_fields:
+            self.assertEqual(item_a.get(f), item_b.get(f), f)
+        def _bidi_calls(ddb):
+            # The counter allocation also uses update_item; back-link calls are
+            # the ones addressing #rel.
+            return [(c.kwargs.get("Key"), c.kwargs.get("ExpressionAttributeNames"))
+                    for c in ddb.update_item.call_args_list
+                    if "#rel" in (c.kwargs.get("ExpressionAttributeNames") or {})]
+        # Back-link writes are independent update_item calls; their relative
+        # order is not part of the contract, so compare as unordered sets.
+        bidi_a = sorted(_bidi_calls(ddb_a), key=repr)
+        bidi_b = sorted(_bidi_calls(ddb_b), key=repr)
+        self.assertEqual(bidi_a, bidi_b)
+        self.assertEqual(len(bidi_b), 3)
+
+    def test_json_stringified_array_coerces_to_L(self):
+        """ENC-ISS-059 coercion applies on the create path, not only PATCH."""
+        resp, fake_ddb = self._run(self._task_body(
+            related_task_ids='["ENC-TSK-100", "ENC-TSK-101"]'))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["related_task_ids"],
+                         {"L": [{"S": "ENC-TSK-100"}, {"S": "ENC-TSK-101"}]})
+
+    def test_bare_id_string_coerces_to_single_element_L(self):
+        resp, fake_ddb = self._run(self._task_body(related_issue_ids="ENC-ISS-200"))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["related_issue_ids"], {"L": [{"S": "ENC-ISS-200"}]})
+
+    def test_unnormalizable_typed_value_returns_400_not_silent_drop(self):
+        resp, fake_ddb = self._run(self._task_body(related_task_ids={"not": "a list"}))
+        self.assertEqual(resp["statusCode"], 400)
+        body = json.loads(resp["body"])
+        self.assertIn("related_task_ids", body.get("error", "") or body.get("message", ""))
+        fake_ddb.put_item.assert_not_called()
+
+    def test_invalid_json_string_returns_400(self):
+        resp, fake_ddb = self._run(self._task_body(related_task_ids="[not-json"))
+        self.assertEqual(resp["statusCode"], 400)
+        fake_ddb.put_item.assert_not_called()
+
+    def test_unclassifiable_id_warns_instead_of_vanishing(self):
+        resp, fake_ddb = self._run(self._task_body(related_task_ids=["NOTANID"]))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        parsed = json.loads(resp["body"])
+        warnings = parsed.get("related_intake_warnings", [])
+        self.assertTrue(any("NOTANID" in w for w in warnings), warnings)
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertNotIn("related_task_ids", item)
+
+    def test_wrong_field_id_is_reclassified_and_reported(self):
+        """An ISS id filed under related_task_ids lands in related_issue_ids
+        (segment-derived, as the legacy path always did) — but now the
+        reclassification is reported instead of hidden."""
+        resp, fake_ddb = self._run(self._task_body(related_task_ids=["ENC-ISS-200"]))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertNotIn("related_task_ids", item)
+        self.assertEqual(item["related_issue_ids"], {"L": [{"S": "ENC-ISS-200"}]})
+        parsed = json.loads(resp["body"])
+        warnings = parsed.get("related_intake_warnings", [])
+        self.assertTrue(any("related_issue_ids" in w and "ENC-ISS-200" in w for w in warnings), warnings)
+
+    def test_duplicate_ids_across_spellings_dedupe_case_insensitively(self):
+        resp, fake_ddb = self._run(self._task_body(
+            related="ENC-TSK-100",
+            related_task_ids=["enc-tsk-100", "ENC-TSK-101"],
+        ))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["related_task_ids"],
+                         {"L": [{"S": "ENC-TSK-100"}, {"S": "ENC-TSK-101"}]})
+
+    def test_typed_fields_write_bidirectional_backlink(self):
+        resp, fake_ddb = self._run(self._task_body(related_task_ids=["ENC-TSK-100"]))
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        self.assertTrue(fake_ddb.update_item.called)
+        call = fake_ddb.update_item.call_args
+        self.assertEqual(call.kwargs["ExpressionAttributeNames"], {"#rel": "related_task_ids"})
+        self.assertEqual(call.kwargs["ConditionExpression"], "attribute_exists(record_id)")
+
+    def test_omitting_all_relation_fields_writes_none(self):
+        resp, fake_ddb = self._run(self._task_body())
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        for f in ("related_task_ids", "related_issue_ids", "related_feature_ids"):
+            self.assertNotIn(f, item)
+        parsed = json.loads(resp["body"])
+        self.assertNotIn("related_intake_warnings", parsed)
+        # No back-link writes (the counter allocation legitimately uses
+        # update_item, so filter to #rel-addressing calls).
+        bidi_calls = [c for c in fake_ddb.update_item.call_args_list
+                      if "#rel" in (c.kwargs.get("ExpressionAttributeNames") or {})]
+        self.assertEqual(bidi_calls, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
