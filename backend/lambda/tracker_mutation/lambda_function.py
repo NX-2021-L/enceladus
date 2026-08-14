@@ -2226,6 +2226,40 @@ def _handle_create_record(
     location_hint = str(body.get("location_hint") or "")
     success_metrics = body.get("success_metrics") or []
     related_str = body.get("related", "")
+    # ENC-ISS-614 / ENC-TSK-N91: unified relation intake. The canonical typed
+    # fields (related_task_ids / related_issue_ids / related_feature_ids) were
+    # silently dropped at create because only the legacy "related" comma-string
+    # was ever read. Both spellings now converge on one ordered, de-duplicated
+    # related_ids list consumed by the forward write and the bidirectional
+    # back-link pass below, so create-time semantics are spelling-independent.
+    # Typed values reuse the ENC-ISS-059 PATCH-path coercion; a value that
+    # cannot be normalized fails loudly (400) instead of silently dropping.
+    if isinstance(related_str, list):
+        related_ids = [str(r).strip() for r in related_str if str(r).strip()]
+    else:
+        related_ids = [r.strip() for r in str(related_str or "").split(",") if r.strip()]
+    related_id_sources = {}  # upper-cased ID -> typed source field, for reclassification reporting
+    for rel_field in sorted(_RELATION_ID_FIELDS):
+        raw_rel_value = body.get(rel_field)
+        if raw_rel_value is None:
+            continue
+        normalized_rel, rel_err = _normalize_related_ids_value(raw_rel_value)
+        if rel_err:
+            return _error(400, f"Field '{rel_field}' is invalid: {rel_err}")
+        for rid in normalized_rel:
+            related_id_sources.setdefault(rid.upper(), rel_field)
+            related_ids.append(rid)
+    # De-duplicate case-insensitively, preserving first-seen order.
+    seen_rel_ids = set()
+    deduped_rel_ids = []
+    for rid in related_ids:
+        rid_key = rid.upper()
+        if rid_key in seen_rel_ids:
+            continue
+        seen_rel_ids.add(rid_key)
+        deduped_rel_ids.append(rid)
+    related_ids = deduped_rel_ids
+    related_intake_warnings = []
     user_story = str(body.get("user_story") or "").strip()
     category = str(body.get("category") or "").strip()
     intent = str(body.get("intent") or "").strip()
@@ -2627,11 +2661,29 @@ def _handle_create_record(
         item["intent"] = _ser_s(intent)
     if primary_task and record_type in ("feature", "issue"):
         item["primary_task"] = _ser_s(primary_task)
-    if related_str:
-        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
-        for field_name, ids in _classify_related_ids(related_ids).items():
-            if ids:
-                item[field_name] = {"L": [_ser_s(i) for i in ids]}
+    if related_ids:
+        # ENC-ISS-614 / ENC-TSK-N91: forward write consumes the unified list.
+        # Unclassifiable IDs and cross-field reclassifications are reported in
+        # the 201 body (related_intake_warnings) instead of silently vanishing.
+        classified_rel = _classify_related_ids(related_ids)
+        classified_rel_flat = {rid for ids in classified_rel.values() for rid in ids}
+        for rid in related_ids:
+            if rid.upper() not in classified_rel_flat:
+                related_intake_warnings.append(
+                    f"Related ID '{rid}' is not classifiable to a tracker record "
+                    "type and was NOT persisted."
+                )
+        for field_name, ids in classified_rel.items():
+            if not ids:
+                continue
+            item[field_name] = {"L": [_ser_s(i) for i in ids]}
+            for rid in ids:
+                source_field = related_id_sources.get(rid)
+                if source_field and source_field != field_name:
+                    related_intake_warnings.append(
+                        f"Related ID '{rid}' was supplied under '{source_field}' "
+                        f"but classified to '{field_name}' by its ID type segment."
+                    )
 
     # ENC-ISS-132: Reject externally-provided record IDs — IDs are server-generated only
     for forbidden_field in ("item_id", "record_id"):
@@ -2705,9 +2757,10 @@ def _handle_create_record(
             logger.warning("Failed to update parent subtask_ids for %s: %s", parent_task_id, exc)
 
     # Best-effort bidirectional relationships
+    # ENC-ISS-614 / ENC-TSK-N91: driven by the unified related_ids list so the
+    # typed fields and the legacy "related" string write identical back-links.
     bidi_warnings = []
-    if related_str:
-        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
+    if related_ids:
         inverse_field = f"related_{record_type}_ids"
         for target_id in related_ids:
             try:
@@ -2743,6 +2796,10 @@ def _handle_create_record(
         result["warning"] = category_warning
     if bidi_warnings:
         result["bidi_warnings"] = bidi_warnings
+    # ENC-ISS-614 / ENC-TSK-N91: surface relation-intake warnings without
+    # blocking creation — a silent drop is the failure class this fixes.
+    if related_intake_warnings:
+        result["related_intake_warnings"] = related_intake_warnings
     # ENC-ISS-105: surface location context warnings without blocking creation
     if record_type == "issue" and location_context_warnings:
         result["location_context_warnings"] = location_context_warnings
