@@ -734,71 +734,6 @@ def _check_gds_available(driver) -> bool:
     return available
 
 
-def _check_graph_fallback_serviceable(driver) -> bool:
-    """Structural probe for the Cypher fallback graph-signal leg (INT-TSK-284).
-
-    ENC-ISS-465/J41 hard-disables GDS/AGA, so the Cypher fallback
-    (_hybrid_graph_ranks_cypher_fallback) is the ONLY live leg of the hybrid
-    graph signal in normal operation. A health check that only pings Bolt
-    would let that leg silently break (bad relationship union, CASE-expression
-    drift, schema change) while still reporting green — the same
-    red-probe-over-live-signal failure mode ENC-ISS-304 hid for weeks on the
-    vector signal. This runs the SAME weighted-hop query shape (relationship
-    union from GRAPH_EDGE_WEIGHTS, path_score CASE expression, depth-3 bound)
-    that the real query path uses, anchored on any single node in the
-    health-probe project rather than one hardcoded record_id — so the probe
-    is not brittle to that record being renamed, closed, or deleted. Success
-    is defined as "the query executes" (consume() raises nothing), not "it
-    returns rows" — a real anchor with zero neighbors within 3 hops is still
-    a serviceable leg; an empty health-probe project degrades to a trivial
-    but still-successful query rather than a false negative. Never raises.
-    Pure Bolt/Cypher — never opens a GDS/AGA session.
-    """
-    edge_union = "|".join(GRAPH_EDGE_WEIGHTS.keys())
-    weight_case_parts = [f"WHEN '{etype}' THEN {w}" for etype, w in GRAPH_EDGE_WEIGHTS.items()]
-    weight_case_sql = (
-        "CASE type(rel) " + " ".join(weight_case_parts)
-        + f" ELSE {GRAPH_FALLBACK_DEFAULT_WEIGHT} END"
-    )
-    cypher = (
-        "MATCH (anchor) WHERE anchor.project_id = $project_id AND anchor.record_id IS NOT NULL "
-        "WITH anchor LIMIT 1 "
-        f"MATCH path = (anchor)-[:{edge_union}*1..3]-(neighbor) "
-        "WHERE neighbor.project_id = $project_id AND neighbor.record_id <> anchor.record_id "
-        "WITH neighbor, "
-        f"  reduce(s = 0.0, rel IN relationships(path) | s + {weight_case_sql}) AS path_score "
-        "RETURN neighbor.record_id AS rid, path_score ORDER BY path_score DESC LIMIT 1"
-    )
-    try:
-        with driver.session() as session:
-            session.run(cypher, project_id=_HEALTH_PROBE_PROJECT).consume()
-        return True
-    except Exception:
-        logger.warning("[WARNING] health graph fallback-serviceability probe failed", exc_info=True)
-        return False
-
-
-def _check_graph_serviceable(driver) -> tuple[bool, str]:
-    """Resolve the graph signal's live availability + serving mode for health.
-
-    Mirrors the query path's own resolution order (see the _graph_signal
-    closure inside _query_hybrid): GDS/AGA first — never attempted while
-    GDS_HARD_DISABLED is set (ENC-ISS-465/J41), since _check_gds_available
-    short-circuits to False before touching a session — then the Cypher
-    fallback leg. Returns (graph_available, graph_mode) where graph_mode uses
-    the identical "gds_pagerank" | "cypher_fallback" | "unavailable"
-    vocabulary _query_hybrid reports as graph_algorithm, so a caller can tell
-    degraded-but-live graph service (cypher_fallback) apart from genuinely
-    dead (unavailable) instead of collapsing both into one boolean the way
-    the old GDS-only health probe did. Never raises.
-    """
-    if _check_gds_available(driver):
-        return True, "gds_pagerank"
-    if _check_graph_fallback_serviceable(driver):
-        return True, "cypher_fallback"
-    return False, "unavailable"
-
-
 def _compute_query_embedding(query_text: str) -> Optional[List[float]]:
     """Invoke Titan V2 via the canonical graph_sync/embedding.py contract.
 
@@ -1314,15 +1249,6 @@ def _standing_projection_status(driver, project_id: str) -> Dict[str, Any]:
     graph_name = _standing_projection_name(project_id)
     status: Dict[str, Any] = {"configured": bool(graph_name), "name": graph_name or None}
     if not graph_name:
-        # INT-TSK-284: say WHY it's unconfigured so "configured: false" reads as
-        # a deliberate cost-kill retirement, not an unexplained outage, when
-        # paired with graph:true / graph_mode:cypher_fallback in the health
-        # payload. Additive only — configured/name keep their existing shape.
-        if _GDS_HARD_DISABLED:
-            status["retired"] = True
-            status["reason"] = "GDS_HARD_DISABLED (ENC-ISS-465/J41 AGA cost kill)"
-        else:
-            status["reason"] = "GDS_STANDING_PROJECTION_PREFIX unset"
         return status
     try:
         with driver.session() as session:
@@ -2310,15 +2236,6 @@ def _handle_health(event: Dict) -> Dict:
     so a green health can no longer mask a dead retrieval pipeline — the failure
     mode that hid the ENC-ISS-304 vector outage for weeks. Probes are wrapped
     individually so one failing signal never fails the whole health response.
-
-    INT-TSK-284: signals.graph used to check GDS/AGA reachability ONLY, so once
-    ENC-ISS-465/J41 hard-disabled GDS it permanently read false — a red probe
-    over a graph signal that was still live via the Cypher fallback leg
-    (_hybrid_graph_ranks_cypher_fallback), which _query_hybrid serves in normal
-    operation. signals.graph now reflects actual query-path availability (GDS
-    OR a genuinely serviceable fallback leg) via _check_graph_serviceable, and
-    graph_mode names which leg is live, using the same vocabulary _query_hybrid
-    reports as graph_algorithm.
     """
     driver = _get_neo4j_driver()
     if driver is None:
@@ -2341,14 +2258,9 @@ def _handle_health(event: Dict) -> Dict:
             signals["vector"] = _compute_query_embedding(_HEALTH_PROBE_TOKEN) is not None
         except Exception:
             logger.warning("[WARNING] health vector probe failed", exc_info=True)
-        # graph (INT-TSK-284): actual query-path availability, not GDS-only —
-        # GDS/AGA first (never attempted while GDS_HARD_DISABLED is set, per
-        # ENC-ISS-465/J41), else the Cypher fallback leg _query_hybrid actually
-        # serves. graph_mode names the live leg so degraded-but-live (cypher_
-        # fallback) reads distinctly from genuinely dead (unavailable).
-        graph_mode = "unavailable"
+        # graph: GDS/AGA plugin reachable (cheap CALL gds.list; no projection build).
         try:
-            signals["graph"], graph_mode = _check_graph_serviceable(driver)
+            signals["graph"] = _check_gds_available(driver)
         except Exception:
             logger.warning("[WARNING] health graph probe failed", exc_info=True)
 
@@ -2366,7 +2278,6 @@ def _handle_health(event: Dict) -> Dict:
             "status": "healthy",
             "response_ms": duration_ms,
             "signals": signals,
-            "graph_mode": graph_mode,
             "graph_projection": graph_projection,
         })
     except Exception as e:
