@@ -15,6 +15,7 @@ from unittest import mock
 
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 _SPEC = importlib.util.spec_from_file_location(
     "checkout_lambda",
     os.path.join(os.path.dirname(__file__), "lambda_function.py"),

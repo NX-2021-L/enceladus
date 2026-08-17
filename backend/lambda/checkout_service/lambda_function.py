@@ -96,6 +96,13 @@ from urllib.parse import unquote
 import boto3
 from botocore.exceptions import ClientError
 
+from enceladus_shared.github_app_auth import (
+    GitHubAppConfig,
+    generate_app_jwt as _shared_generate_app_jwt,
+    get_installation_token as _shared_get_installation_token,
+    github_request as _shared_github_request,
+)
+
 from transition_type_matrix import (
     MATRIX_VERSION,
     MATRIX_DOCUMENT_ID,
@@ -213,15 +220,18 @@ _ddb = boto3.client("dynamodb", region_name=CHECKOUT_TOKENS_REGION)
 # ---------------------------------------------------------------------------
 # GitHub App installation token (ENC-TSK-B26)
 # Replaces static GITHUB_TOKEN PAT with runtime token generation from
-# GitHub App private key stored in Secrets Manager.
+# GitHub App private key stored in Secrets Manager. Minting/caching/retry
+# hardening lives in enceladus_shared.github_app_auth as of ENC-TSK-O07
+# (ENC-ISS-621 C4) — this module only carries its own config + thin
+# delegating wrappers so existing call sites and tests keep working.
 # ---------------------------------------------------------------------------
-_sm_client = None
-_private_key_cache: Optional[str] = None
-_private_key_fetched_at: float = 0.0
-_PRIVATE_KEY_TTL: float = 3600.0  # re-fetch private key from SM every hour
-
-_installation_token_cache: Optional[str] = None
-_installation_token_expires_at: float = 0.0
+_GITHUB_APP_CONFIG = GitHubAppConfig(
+    app_id=GITHUB_APP_ID,
+    installation_id=GITHUB_INSTALLATION_ID,
+    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
+    region=CHECKOUT_TOKENS_REGION,
+    api_base=GITHUB_API_BASE,
+)
 
 # ENC-TSK-C68 / ENC-ISS-183: cached set of 'owner/repo' full names accessible to
 # the GitHub App installation. Used by _validate_commit to self-diagnose
@@ -233,75 +243,14 @@ _installation_repos_expires_at: float = 0.0
 _INSTALLATION_REPOS_TTL: float = 300.0
 
 
-def _get_secretsmanager():
-    global _sm_client
-    if _sm_client is None:
-        _sm_client = boto3.client("secretsmanager", region_name=CHECKOUT_TOKENS_REGION)
-    return _sm_client
-
-
-def _get_github_private_key() -> str:
-    """Fetch GitHub App private key from Secrets Manager (cached with TTL)."""
-    global _private_key_cache, _private_key_fetched_at
-    now = time.time()
-    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
-        return _private_key_cache
-    sm = _get_secretsmanager()
-    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
-    _private_key_cache = resp["SecretString"]
-    _private_key_fetched_at = now
-    return _private_key_cache
-
-
 def _generate_app_jwt() -> str:
     """Generate a short-lived RS256 JWT for the GitHub App."""
-    if not _JWT_AVAILABLE:
-        raise ValueError("PyJWT library not available — cannot generate GitHub App JWT")
-    if not GITHUB_APP_ID:
-        raise ValueError("GITHUB_APP_ID environment variable not set")
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + (9 * 60),
-        "iss": str(GITHUB_APP_ID),
-    }
-    private_key = _get_github_private_key()
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
 
 
 def _get_installation_token() -> str:
     """Get a cached GitHub App installation token, refreshing when near expiry."""
-    global _installation_token_cache, _installation_token_expires_at
-    now = time.time()
-    # Refresh with 5-minute buffer before the 1-hour expiry
-    if _installation_token_cache and now < (_installation_token_expires_at - 300):
-        return _installation_token_cache
-
-    if not GITHUB_INSTALLATION_ID:
-        raise ValueError("GITHUB_INSTALLATION_ID environment variable not set")
-
-    app_jwt = _generate_app_jwt()
-    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {app_jwt}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            _installation_token_cache = data["token"]
-            # GitHub installation tokens expire in 1 hour
-            _installation_token_expires_at = now + 3600
-            return _installation_token_cache
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error("GitHub installation token exchange failed: %s %s", exc.code, body)
-        raise ValueError(f"GitHub token exchange failed ({exc.code}): {body}") from exc
+    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
 
 
 def _get_github_token() -> Optional[str]:
@@ -706,24 +655,44 @@ def _log_plan(
 # GitHub API helpers
 # ---------------------------------------------------------------------------
 
-def _github_request(path: str) -> Tuple[int, dict]:
-    url = f"{GITHUB_API_BASE}{path}"
-    headers = {"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
-    token = _get_github_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
+def _github_request(
+    path: str, *, repo: Optional[str] = None, sha: Optional[str] = None
+) -> Tuple[int, dict]:
+    """GET the GitHub REST API, authenticated when the App is configured.
+
+    ENC-TSK-O07 (ENC-ISS-621 C4): the authenticated path now runs through
+    enceladus_shared.github_app_auth.github_request(), which re-mints and
+    retries once on a 401/403 past the 60s token-age floor. When the App
+    isn't configured, preserves the pre-existing unauthenticated fallback
+    (no token to mint, so no hardening applies).
+    """
+    if not GITHUB_APP_ID or not GITHUB_INSTALLATION_ID:
+        logger.warning("GitHub App not configured — API calls will be unauthenticated")
+        url = f"{GITHUB_API_BASE}{path}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
+        )
         try:
-            body = json.loads(exc.read().decode())
-        except Exception:
-            body = {"error": str(exc)}
-        return exc.code, body
-    except Exception as exc:
-        return 503, {"error": str(exc)}
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read().decode())
+            except Exception:
+                body = {"error": str(exc)}
+            return exc.code, body
+        except Exception as exc:
+            return 503, {"error": str(exc)}
+
+    return _shared_github_request(
+        _GITHUB_APP_CONFIG,
+        "GET",
+        path,
+        timeout=8,
+        extra_headers={"User-Agent": "checkout-service/1.0"},
+        repo=repo,
+        sha=sha,
+    )
 
 
 def _list_installation_repos() -> set:
@@ -805,7 +774,9 @@ def _validate_commit(owner: str, repo: str, commit_sha: str) -> Tuple[bool, str]
     devops-project task stalled at coding-complete with the ambiguous
     "Commit <sha> not found in NX-2021-L/devops" message.
     """
-    status, body = _github_request(f"/repos/{owner}/{repo}/commits/{commit_sha}")
+    status, body = _github_request(
+        f"/repos/{owner}/{repo}/commits/{commit_sha}", repo=f"{owner}/{repo}", sha=commit_sha
+    )
     if status == 200:
         return True, ""
     if status == 404:
@@ -832,7 +803,7 @@ def _validate_pr_merged(
     owner: str, repo: str, pr_id: int, merged_at: str
 ) -> Tuple[bool, str]:
     """Verify PR is merged and merged_at matches. Returns (valid, reason)."""
-    status, body = _github_request(f"/repos/{owner}/{repo}/pulls/{pr_id}")
+    status, body = _github_request(f"/repos/{owner}/{repo}/pulls/{pr_id}", repo=f"{owner}/{repo}")
     if status == 404:
         return False, f"PR #{pr_id} not found in {owner}/{repo}"
     if status != 200:
@@ -2053,7 +2024,7 @@ def _validate_code_on_main_evidence(
     # ENC-ISS-161: status "ahead" means main has commits sha doesn't = sha is an ancestor.
     # status "identical" means sha IS main HEAD. Both are valid.
     compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...main"
-    status, body = _github_request(compare_path)
+    status, body = _github_request(compare_path, repo=f"{owner}/{repo}", sha=commit_sha)
     if status == 404:
         return False, (
             f"GitHub compare returned 404 — commit '{commit_sha}' or repo "

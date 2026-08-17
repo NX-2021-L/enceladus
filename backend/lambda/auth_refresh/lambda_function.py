@@ -43,16 +43,11 @@ from urllib.parse import unquote, urlencode
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-try:
-    import jwt
-    _JWT_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    import logging as _enc_lsn_020_logging
-    _enc_lsn_020_logging.getLogger(__name__).exception(
-        "PyJWT import failed at module load — github-token vending will be disabled "
-        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
-    )
-    _JWT_AVAILABLE = False
+from enceladus_shared.github_app_auth import (
+    GitHubAppConfig,
+    generate_app_jwt as _shared_generate_app_jwt,
+    get_installation_token as _shared_get_installation_token,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -100,7 +95,6 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 _cognito = None
-_secretsmanager = None
 
 
 def _get_cognito():
@@ -108,13 +102,6 @@ def _get_cognito():
     if _cognito is None:
         _cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
     return _cognito
-
-
-def _get_secretsmanager():
-    global _secretsmanager
-    if _secretsmanager is None:
-        _secretsmanager = boto3.client("secretsmanager", region_name=LAMBDA_REGION)
-    return _secretsmanager
 
 
 # ---------------------------------------------------------------------------
@@ -186,55 +173,24 @@ def _error(status_code: int, message: str) -> Dict:
 # GitHub App token vending
 # ---------------------------------------------------------------------------
 
-_private_key_cache: Optional[str] = None
-_private_key_fetched_at: float = 0.0
-_PRIVATE_KEY_TTL: float = 3600.0
-
-
-def _get_github_private_key() -> str:
-    global _private_key_cache, _private_key_fetched_at
-    now = time.time()
-    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
-        return _private_key_cache
-    sm = _get_secretsmanager()
-    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
-    _private_key_cache = resp["SecretString"]
-    _private_key_fetched_at = now
-    return _private_key_cache
+# ENC-TSK-O07 (ENC-ISS-621 C4): minting/caching/retry hardening now lives in
+# enceladus_shared.github_app_auth. These wrappers keep the local call
+# signatures call sites already use.
+_GITHUB_APP_CONFIG = GitHubAppConfig(
+    app_id=GITHUB_APP_ID,
+    installation_id=GITHUB_INSTALLATION_ID,
+    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
+    region=LAMBDA_REGION,
+    api_base=GITHUB_API_BASE,
+)
 
 
 def _generate_app_jwt() -> str:
-    if not _JWT_AVAILABLE:
-        raise ValueError("PyJWT library not available in Lambda package")
-    if not GITHUB_APP_ID:
-        raise ValueError("GITHUB_APP_ID not configured")
-    now = int(time.time())
-    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
-    return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
+    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
 
 
 def _get_installation_token() -> str:
-    if not GITHUB_INSTALLATION_ID:
-        raise ValueError("GITHUB_INSTALLATION_ID not configured")
-    app_jwt = _generate_app_jwt()
-    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {app_jwt}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data["token"]
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error("GitHub token exchange failed: %s %s", exc.code, body)
-        raise ValueError(f"GitHub token exchange failed ({exc.code})") from exc
+    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
 
 
 def _extract_id_token(event: Dict) -> Optional[str]:

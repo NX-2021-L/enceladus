@@ -5,7 +5,11 @@ The nudge is injected via _with_retirement_prompt at the two advance return site
 text and the presence/absence semantics per terminal state; the wire-level envelope
 is exercised on gamma (ENC-TSK-J98).
 """
+import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 
 import lambda_function as checkout_lambda
 
