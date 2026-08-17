@@ -215,6 +215,11 @@ _PRIVATE_KEY_TTL: float = 3600.0  # re-fetch private key from SM every hour
 
 _installation_token_cache: Optional[str] = None
 _installation_token_expires_at: float = 0.0
+# ENC-ISS-621: wall-clock time (time.time()) the currently cached token was
+# minted. Used both to age-gate the re-mint-on-401/403 retry in
+# _github_request (below) and to annotate the structured validation-failure
+# log line with token_age_s.
+_installation_token_minted_at: float = 0.0
 
 # ENC-TSK-C68 / ENC-ISS-183: cached set of 'owner/repo' full names accessible to
 # the GitHub App installation. Used by _validate_commit to self-diagnose
@@ -264,7 +269,7 @@ def _generate_app_jwt() -> str:
 
 def _get_installation_token() -> str:
     """Get a cached GitHub App installation token, refreshing when near expiry."""
-    global _installation_token_cache, _installation_token_expires_at
+    global _installation_token_cache, _installation_token_expires_at, _installation_token_minted_at
     now = time.time()
     # Refresh with 5-minute buffer before the 1-hour expiry
     if _installation_token_cache and now < (_installation_token_expires_at - 300):
@@ -288,8 +293,32 @@ def _get_installation_token() -> str:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
             _installation_token_cache = data["token"]
-            # GitHub installation tokens expire in 1 hour
-            _installation_token_expires_at = now + 3600
+            _installation_token_minted_at = now
+            # ENC-ISS-621: honor GitHub's own expires_at (ISO-8601) when present
+            # instead of assuming the documented 1-hour lifetime always holds.
+            # Falls back to now+3600 if the field is absent or unparseable.
+            expires_at_raw = data.get("expires_at")
+            expires_epoch = None
+            if expires_at_raw:
+                try:
+                    expires_epoch = datetime.fromisoformat(
+                        str(expires_at_raw).replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, TypeError):
+                    expires_epoch = None
+            _installation_token_expires_at = (
+                expires_epoch if expires_epoch is not None else now + 3600
+            )
+            # ENC-ISS-621: decisive diagnostic for the recurring 403-on-fresh-
+            # token incident — log expires_at and the *keys* (never values) of
+            # the permissions object GitHub actually granted this token. A
+            # mint missing 'contents' confirms a scope problem at source.
+            permission_keys = sorted((data.get("permissions") or {}).keys())
+            logger.info(
+                "[ISS-621] github_token_minted expires_at=%s permissions=%s",
+                expires_at_raw or "-",
+                ",".join(permission_keys) if permission_keys else "-",
+            )
             return _installation_token_cache
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -674,12 +703,49 @@ def _log_plan(
 # GitHub API helpers
 # ---------------------------------------------------------------------------
 
-def _github_request(path: str) -> Tuple[int, dict]:
-    url = f"{GITHUB_API_BASE}{path}"
-    headers = {"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
-    token = _get_github_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+# ENC-ISS-621: patterns used to classify _github_request paths for the
+# structured validation-failure log line. Only commit and PR lookups are
+# covered — those are the only two callers of _github_request today.
+_GITHUB_COMMIT_PATH_RE = re.compile(r'^/repos/([^/]+)/([^/]+)/commits/([0-9a-fA-F]+)$')
+_GITHUB_PULLS_PATH_RE = re.compile(r'^/repos/([^/]+)/([^/]+)/pulls/(\d+)$')
+
+
+def _installation_token_age() -> Optional[float]:
+    """Age in seconds of the currently cached installation token, or None if
+    no token has ever been minted this Lambda lifetime."""
+    if not _installation_token_minted_at:
+        return None
+    return time.time() - _installation_token_minted_at
+
+
+def _log_github_validation_failure(path: str, status: int, body: dict) -> None:
+    """ENC-ISS-621: emit exactly one structured line for a commit/PR
+    validation failure so a GitHub-side scope/token issue is diagnosable from
+    a single CloudWatch line instead of correlating several. No-op for paths
+    that are not a commit or PR lookup."""
+    m = _GITHUB_COMMIT_PATH_RE.match(path)
+    if m:
+        endpoint, owner, repo, sha = "commits", m.group(1), m.group(2), m.group(3)
+    else:
+        m = _GITHUB_PULLS_PATH_RE.match(path)
+        if not m:
+            return
+        endpoint, owner, repo, sha = "pulls", m.group(1), m.group(2), "-"
+
+    msg = body.get("message", "-") if isinstance(body, dict) else "-"
+    token_age = _installation_token_age()
+    token_age_s = f"{token_age:.0f}" if token_age is not None else "-"
+    logger.warning(
+        "[ISS-621] github_validation_fail endpoint=%s status=%s msg=%s "
+        "token_age_s=%s repo=%s sha=%s",
+        endpoint, status, msg, token_age_s, f"{owner}/{repo}", sha,
+    )
+
+
+def _do_github_get(url: str, headers: dict) -> Tuple[int, dict]:
+    """Single GET against the GitHub API. Split out of _github_request so the
+    ENC-ISS-621 re-mint retry can issue a second attempt without duplicating
+    the request/error-handling logic."""
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -692,6 +758,40 @@ def _github_request(path: str) -> Tuple[int, dict]:
         return exc.code, body
     except Exception as exc:
         return 503, {"error": str(exc)}
+
+
+def _github_request(path: str) -> Tuple[int, dict]:
+    global _installation_token_cache
+
+    url = f"{GITHUB_API_BASE}{path}"
+    headers = {"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
+    token = _get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    status, body = _do_github_get(url, headers)
+
+    # ENC-ISS-621: GitHub has been observed 401/403-ing installation tokens
+    # well inside their advertised lifetime. Re-mint and retry EXACTLY ONCE —
+    # never loop. The 60s token-age floor prevents a mint storm when GitHub is
+    # 403-ing even brand-new tokens (a scope/outage problem a re-mint cannot
+    # fix); in that case we just return this failure.
+    if status in (401, 403):
+        token_age = _installation_token_age()
+        if token_age is not None and token_age > 60:
+            _installation_token_cache = None
+            new_token = _get_github_token()
+            retry_headers = dict(headers)
+            if new_token:
+                retry_headers["Authorization"] = f"Bearer {new_token}"
+            else:
+                retry_headers.pop("Authorization", None)
+            status, body = _do_github_get(url, retry_headers)
+
+    if status != 200:
+        _log_github_validation_failure(path, status, body)
+
+    return status, body
 
 
 def _list_installation_repos() -> set:
