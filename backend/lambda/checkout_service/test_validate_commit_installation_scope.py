@@ -17,9 +17,11 @@ discoverable from the advance-task-status response body.
 
 import importlib.util
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 
 _SPEC = importlib.util.spec_from_file_location(
     "checkout_service",

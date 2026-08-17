@@ -13,10 +13,12 @@ to a bypass. Covers DOC-476D273C6566 Phase-2 gate #5 cases (a)-(d):
 import importlib.util
 import json
 import os
+import sys
 import unittest
 from datetime import datetime, timezone
 
 _HERE = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(_HERE, "..", "shared_layer", "python"))
 
 
 def _load(mod_name, rel_path):

@@ -33,6 +33,7 @@ os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 _SPEC = importlib.util.spec_from_file_location(
     "checkout_lambda_sci",
     os.path.join(os.path.dirname(__file__), "lambda_function.py"),

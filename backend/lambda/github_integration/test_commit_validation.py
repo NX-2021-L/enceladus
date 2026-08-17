@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 
 # Set required env vars before import
 os.environ.setdefault("GITHUB_APP_ID", "12345")

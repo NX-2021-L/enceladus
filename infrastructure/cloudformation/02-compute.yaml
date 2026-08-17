@@ -1069,7 +1069,11 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt AuthRefreshRole.Arn
+      # ENC-TSK-O07 (ENC-ISS-621 C4): SharedLayerArn added so auth_refresh can
+      # import enceladus_shared.github_app_auth (was previously the only one
+      # of the four GitHub-App-minting lambdas without the shared layer).
       Layers:
+        - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
           - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]

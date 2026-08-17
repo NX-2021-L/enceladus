@@ -30,6 +30,13 @@ from typing import Any, Dict, Optional, Tuple
 import boto3
 from botocore.config import Config
 
+from enceladus_shared.github_app_auth import (
+    GitHubAppConfig,
+    generate_app_jwt as _shared_generate_app_jwt,
+    get_installation_token as _shared_get_installation_token,
+    github_request as _shared_github_request,
+)
+
 try:
     import jwt
     _JWT_AVAILABLE = True
@@ -80,11 +87,17 @@ logger.setLevel(logging.INFO)
 _ddb_client = None
 _jwks_cache: Dict[str, Any] = {}
 _jwks_fetched_at: float = 0
-_github_private_key_cache: Optional[str] = None
-_github_private_key_fetched_at: float = 0
 
 JWKS_TTL = 3600  # 1 hour
-GITHUB_KEY_TTL = 3600  # 1 hour
+
+# ENC-TSK-O07 (ENC-ISS-621 C4): GitHub App JWT/installation-token minting +
+# caching + 401/403 retry hardening lives in enceladus_shared.github_app_auth.
+_GITHUB_APP_CONFIG = GitHubAppConfig(
+    app_id=GITHUB_APP_ID,
+    installation_id=GITHUB_INSTALLATION_ID,
+    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
+    region=DEPLOY_REGION,
+)
 
 # ---------------------------------------------------------------------------
 # CORS / Response helpers
@@ -346,76 +359,28 @@ def _extract_token(event: Dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _get_github_private_key() -> str:
-    global _github_private_key_cache, _github_private_key_fetched_at
-    now = time.time()
-    if _github_private_key_cache and (now - _github_private_key_fetched_at) < GITHUB_KEY_TTL:
-        return _github_private_key_cache
-
-    sm = boto3.client("secretsmanager", region_name=DEPLOY_REGION)
-    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
-    _github_private_key_cache = resp["SecretString"]
-    _github_private_key_fetched_at = now
-    return _github_private_key_cache
+# ENC-TSK-O07 (ENC-ISS-621 C4): minting/caching/retry hardening now lives in
+# enceladus_shared.github_app_auth. These wrappers keep the local call
+# signatures call sites already use.
 
 
 def _generate_app_jwt() -> str:
-    if not _JWT_AVAILABLE:
-        raise ValueError("PyJWT library not available in Lambda package (ENC-LSN-020)")
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + (9 * 60),
-        "iss": str(GITHUB_APP_ID),
-    }
-    private_key = _get_github_private_key()
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
 
 
 def _get_installation_token() -> str:
-    app_jwt = _generate_app_jwt()
-    url = f"https://api.github.com/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {app_jwt}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode())
-    return data["token"]
+    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
 
 
 def _github_api(
     method: str, path: str, body: Optional[Dict] = None
 ) -> Tuple[int, Dict]:
-    """Call GitHub REST API with installation token auth."""
-    token = _get_installation_token()
-    url = f"https://api.github.com{path}"
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        try:
-            body_text = e.read().decode()
-            return e.code, json.loads(body_text)
-        except Exception:
-            return e.code, {"error": str(e)}
-    except Exception as e:
-        return 0, {"error": str(e)}
+    """Call GitHub REST API with installation token auth.
+
+    Re-mints the token and retries once on a 401/403 past the 60s token-age
+    floor (enceladus_shared.github_app_auth.github_request).
+    """
+    return _shared_github_request(_GITHUB_APP_CONFIG, method, path, body=body, timeout=15)
 
 
 # ---------------------------------------------------------------------------
