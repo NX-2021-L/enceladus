@@ -1,12 +1,24 @@
 """enceladus_shared.github_app_auth — GitHub App JWT + installation-token auth.
 
-Centralizes GitHub App authentication for every Enceladus Lambda that calls
-the GitHub REST API using App-installation credentials (checkout_service,
-github_integration, deploy_decide, auth_refresh). Before ENC-TSK-O07 each of
-these four carried its own copy of ``_generate_app_jwt()`` /
+Centralizes GitHub App authentication for the Enceladus Lambdas that call
+the GitHub REST API using App-installation credentials and carry the shared
+layer (checkout_service, deploy_decide, auth_refresh). Before ENC-TSK-O07
+each of these carried its own copy of ``_generate_app_jwt()`` /
 ``_get_installation_token()`` (some cached, some minted fresh on every call,
 with drifting defaults) — this module is the single hardened implementation
-all four now import.
+they now import.
+
+NOT migrated: github_integration. It still carries its own local
+``_generate_app_jwt()`` / ``_get_installation_token()`` deliberately.
+``enceladus_shared`` only reaches a Lambda via an attached Lambda layer, and
+the live ``devops-github-integration`` function has zero layers attached —
+it is Gen2-managed with no CFN resource in this repo, and the Gen2 build
+workflow (.github/workflows/_build.yml) does not vendor this package into
+its artifact. Importing this module there today would fail at cold start
+with ``Runtime.ImportModuleError: No module named 'enceladus_shared'`` on
+every invocation (the ENC-ISS-566 crash-loop class). Migrating
+github_integration requires attaching the shared layer (or vendoring the
+package into its build) first — that is out of scope for ENC-TSK-O07.
 
 Hardened semantics (mirrors ENC-TSK-O03 / ENC-ISS-621 C4):
     - Installation-token cache expiry is derived from the mint response's

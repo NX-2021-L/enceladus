@@ -47,12 +47,6 @@ from urllib.parse import unquote
 import boto3
 from botocore.config import Config
 
-from enceladus_shared.github_app_auth import (
-    GitHubAppConfig,
-    generate_app_jwt as _shared_generate_app_jwt,
-    get_installation_token as _shared_get_installation_token,
-)
-
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -168,6 +162,29 @@ def _get_secretsmanager():
 
 
 # ---------------------------------------------------------------------------
+# GitHub App private key cache
+# ---------------------------------------------------------------------------
+
+_private_key_cache: Optional[str] = None
+_private_key_fetched_at: float = 0.0
+_PRIVATE_KEY_TTL: float = 3600.0  # re-fetch from Secrets Manager every hour
+
+
+def _get_github_private_key() -> str:
+    """Fetch GitHub App private key from Secrets Manager (cached)."""
+    global _private_key_cache, _private_key_fetched_at
+    now = time.time()
+    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
+        return _private_key_cache
+
+    sm = _get_secretsmanager()
+    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
+    _private_key_cache = resp["SecretString"]
+    _private_key_fetched_at = now
+    return _private_key_cache
+
+
+# ---------------------------------------------------------------------------
 # Webhook secret cache
 # ---------------------------------------------------------------------------
 
@@ -191,29 +208,63 @@ def _get_webhook_secret() -> str:
 
 
 # ---------------------------------------------------------------------------
-# GitHub App JWT and installation token (ENC-TSK-O07 / ENC-ISS-621 C4):
-# minting/caching/retry hardening lives in enceladus_shared.github_app_auth;
-# these are thin delegating wrappers so existing call sites and tests
-# (which patch _get_installation_token by name) keep working unchanged.
+# GitHub App JWT and installation token
 # ---------------------------------------------------------------------------
-
-_GITHUB_APP_CONFIG = GitHubAppConfig(
-    app_id=GITHUB_APP_ID,
-    installation_id=GITHUB_INSTALLATION_ID,
-    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
-    region=DYNAMODB_REGION,
-    api_base=GITHUB_API_BASE,
-)
 
 
 def _generate_app_jwt() -> str:
-    """Generate a short-lived RS256 JWT for the GitHub App."""
-    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
+    """Generate a short-lived RS256 JWT for the GitHub App.
+
+    GitHub requires:
+    - iat: issued at (max 60s in the past)
+    - exp: expiration (max 10 minutes from iat)
+    - iss: GitHub App ID
+    """
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT library not available")
+    if not GITHUB_APP_ID:
+        raise ValueError("GITHUB_APP_ID environment variable not set")
+
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,  # allow for clock skew
+        "exp": now + (9 * 60),  # 9 minutes (under 10-min max)
+        "iss": int(GITHUB_APP_ID),
+    }
+    private_key = _get_github_private_key()
+    return jwt.encode(payload, private_key, algorithm="RS256")
 
 
 def _get_installation_token() -> str:
-    """Get a cached GitHub App installation token, refreshing when near expiry."""
-    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
+    """Exchange App JWT for an installation access token.
+
+    POST /app/installations/{installation_id}/access_tokens
+    Returns a token valid for 1 hour.
+    """
+    if not GITHUB_INSTALLATION_ID:
+        raise ValueError("GITHUB_INSTALLATION_ID environment variable not set")
+
+    app_jwt = _generate_app_jwt()
+    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
+
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {app_jwt}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return data["token"]
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error("GitHub installation token exchange failed: %s %s", exc.code, body)
+        raise ValueError(f"GitHub token exchange failed ({exc.code}): {body}") from exc
 
 
 # ---------------------------------------------------------------------------
