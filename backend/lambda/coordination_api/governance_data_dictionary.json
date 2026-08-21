@@ -1733,22 +1733,22 @@
         },
         "include_tokens": {
           "type": "boolean",
-          "usage_guidance": "When true, response includes raw Cognito tokens. Use only for controlled diagnostics because token material is sensitive."
+          "usage_guidance": "When true, response includes raw Cognito tokens in the separate tokens object. When false (default), no token values are emitted anywhere in the response: the tokens object is omitted AND token-bearing cookie entries in session.cookies, session.playwright_cookies, and session.set_cookie_headers have their value fields redacted (empty string) while retaining cookie structure/metadata (name, path, secure, http_only, same_site, max_age). Non-token cookies (e.g. session timestamp) are unaffected. See ENC-ISS-559."
         },
         "session.cookies": {
           "type": "array",
           "item_type": "object",
-          "usage_guidance": "Canonical cookie objects returned by coordination API, including id token, refresh token (when available), and session timestamp cookie."
+          "usage_guidance": "Canonical cookie objects returned by coordination API, including id token, refresh token (when available), and session timestamp cookie. ENC-ISS-559: when include_tokens=false, the value field of token-bearing cookies (enceladus_id_token, enceladus_refresh_token) is redacted to an empty string; other fields (name, path, secure, http_only, same_site, max_age) are still returned."
         },
         "session.playwright_cookies": {
           "type": "array",
           "item_type": "object",
-          "usage_guidance": "Browser-context cookie entries consumable by Playwright automation for authenticated evidence capture."
+          "usage_guidance": "Browser-context cookie entries consumable by Playwright automation for authenticated evidence capture. ENC-ISS-559: mirrors session.cookies redaction — token-bearing entries have an empty value when include_tokens=false."
         },
         "session.set_cookie_headers": {
           "type": "array",
           "item_type": "string",
-          "usage_guidance": "Optional serialized Set-Cookie header values for external HTTP clients."
+          "usage_guidance": "Optional serialized Set-Cookie header values for external HTTP clients. ENC-ISS-559: when include_tokens=false, headers for token-bearing cookies are serialized with an empty value (e.g. \"enceladus_id_token=; Path=/; ...\") so no token material appears in the header line."
         },
         "session.tokens": {
           "type": "object",

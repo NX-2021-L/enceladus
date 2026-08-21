@@ -627,6 +627,97 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("set_cookie_headers", session)
         self.assertEqual(session["tokens"]["id_token"], "id-token-value")
 
+    @patch.object(
+        coordination_lambda,
+        "_load_terminal_cognito_credentials",
+        return_value={
+            "username": "svc-user",
+            "password": "svc-pass",
+            "client_id": "client-123",
+            "auth_flow": "USER_PASSWORD_AUTH",
+        },
+    )
+    @patch.object(coordination_lambda, "_get_cognito")
+    def test_handle_auth_cognito_terminal_session_include_tokens_false_suppresses_cookie_bundle(
+        self,
+        mock_get_cognito,
+        _mock_load_credentials,
+    ):
+        """ENC-ISS-559: include_tokens=false must suppress token values in
+        cookies / playwright_cookies / set_cookie_headers, not just withhold
+        the separate `tokens` object."""
+
+        class _FakeCognito:
+            class exceptions:
+                class NotAuthorizedException(Exception):
+                    pass
+
+                class UserNotConfirmedException(Exception):
+                    pass
+
+                class PasswordResetRequiredException(Exception):
+                    pass
+
+            def initiate_auth(self, **_kwargs):
+                return {
+                    "AuthenticationResult": {
+                        "IdToken": "id-token-value",
+                        "AccessToken": "access-token-value",
+                        "RefreshToken": "refresh-token-value",
+                        "ExpiresIn": 3600,
+                        "TokenType": "Bearer",
+                    }
+                }
+
+        mock_get_cognito.return_value = _FakeCognito()
+        event = {
+            "body": json.dumps(
+                {
+                    "target_origin": "https://jreese.net",
+                    "include_set_cookie_headers": True,
+                    "include_tokens": False,
+                }
+            )
+        }
+        claims = {"auth_mode": "internal-key"}
+        resp = coordination_lambda._handle_auth_cognito_terminal_session(event, claims)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        session = body["session"]
+
+        # No raw tokens object at all.
+        self.assertNotIn("tokens", session)
+
+        token_values = {"id-token-value", "access-token-value", "refresh-token-value"}
+
+        # cookies: token-bearing cookie values must be suppressed; non-token
+        # cookies (session timestamp) keep their real value and every cookie
+        # keeps its structural metadata (name/path/secure/etc).
+        cookie_by_name = {c["name"]: c for c in session["cookies"]}
+        self.assertIn("enceladus_id_token", cookie_by_name)
+        self.assertIn("enceladus_refresh_token", cookie_by_name)
+        self.assertEqual(cookie_by_name["enceladus_id_token"]["value"], "")
+        self.assertEqual(cookie_by_name["enceladus_refresh_token"]["value"], "")
+        self.assertTrue(cookie_by_name["enceladus_id_token"]["http_only"])
+        self.assertEqual(cookie_by_name["enceladus_id_token"]["path"], "/")
+        self.assertNotEqual(cookie_by_name["enceladus_session_at"]["value"], "")
+        for c in session["cookies"]:
+            self.assertNotIn(c["value"], token_values)
+
+        # playwright_cookies: same suppression.
+        pw_by_name = {c["name"]: c for c in session["playwright_cookies"]}
+        self.assertEqual(pw_by_name["enceladus_id_token"]["value"], "")
+        self.assertEqual(pw_by_name["enceladus_refresh_token"]["value"], "")
+        for c in session["playwright_cookies"]:
+            self.assertNotIn(c["value"], token_values)
+
+        # set_cookie_headers: no raw token value serialized into the header line.
+        self.assertIn("set_cookie_headers", session)
+        header_blob = "\n".join(session["set_cookie_headers"])
+        for tok in token_values:
+            self.assertNotIn(tok, header_blob)
+
     def test_handle_auth_cognito_terminal_session_requires_write_permission(self):
         event = {"body": "{}"}
         claims = {"auth_mode": "managed-token", "permissions": ["read"]}
