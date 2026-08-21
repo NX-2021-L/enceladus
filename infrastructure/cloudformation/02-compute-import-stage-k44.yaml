@@ -1380,7 +1380,15 @@ Resources:
           S3_BUCKET: !Ref S3Bucket
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           CONSOLIDATION_PROJECT_IDS: enceladus
-          CONSOLIDATION_LOOKBACK_HOURS: "24"
+          # ENC-TSK-N63 (FTR-096/ISS-563): 24h -> 168h (7d), kept in sync with
+          # 02-compute.yaml. Value calibrated to ~0.61 handoffs/day (N47
+          # measurement); at lambda=4.27/window P(<3)=20.1% vs ~98% at 24h.
+          # RATE-COUPLED, not a constant -- if the handoff arrival rate falls
+          # materially this window degrades to zero yield and MUST be
+          # re-derived; ENC-TSK-N57's pairs_evaluated tripwire detects that
+          # regression. See backend/lambda/memory_consolidation/lambda_function.py
+          # for the full derivation.
+          CONSOLIDATION_LOOKBACK_HOURS: "168"
           CONSOLIDATION_MIN_WAVES: "2"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
