@@ -281,6 +281,11 @@ TERMINAL_COGNITO_DEFAULT_ORIGIN = os.environ.get(
 TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS = int(
     os.environ.get("TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS", "2592000")
 )
+# ENC-ISS-559: cookie names in the terminal-session bundle that carry raw
+# Cognito token material. When include_tokens=false these must be redacted
+# from cookies / playwright_cookies / set_cookie_headers, not just withheld
+# from the separate "tokens" object.
+_COGNITO_TOKEN_COOKIE_NAMES = frozenset({"enceladus_id_token", "enceladus_refresh_token"})
 COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
@@ -16476,6 +16481,16 @@ def _handle_auth_cognito_terminal_session(event: Dict[str, Any], claims: Dict[st
                 "max_age": TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS,
             }
         )
+
+    # ENC-ISS-559: include_tokens=false must suppress token values everywhere
+    # a token could leak — not just the dedicated "tokens" object below, but
+    # also the cookie bundle (cookies / playwright_cookies / set_cookie_headers).
+    # Only cookie entries that actually carry token material are redacted;
+    # non-token cookies (e.g. the session timestamp) keep their real value.
+    if not include_tokens:
+        for c in cookies:
+            if c["name"] in _COGNITO_TOKEN_COOKIE_NAMES:
+                c["value"] = ""
 
     payload: Dict[str, Any] = {
         "success": True,
