@@ -14,7 +14,7 @@ name: PR Commit Gate
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
     branches:
       - main
       - 'v[0-9]*/main'

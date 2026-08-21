@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-21.1",
-  "updated_at": "2026-08-21T20:00:00Z",
-  "last_change_summary": "ENC-TSK-N63 (ENC-FTR-096, ENC-ISS-563): memory_consolidation's CONSOLIDATION_LOOKBACK_HOURS widened 24h -> 168h (7d) in backend/lambda/memory_consolidation/lambda_function.py and both infrastructure/cloudformation/02-compute.yaml and 02-compute-import-stage-k44.yaml. NO new, renamed or removed fields on any governed entity -- a single calibrated constant change, logged here solely because lambda_function.py is a schema-affecting path under agents.md section 3.11. Per ENC-TSK-N47's measured verdict (DOC-F61C85CD572B), the >=3-doc / >=2-wave co-citation threshold was never the defect; at the measured arrival rate of ~0.61 handoffs/day a 24h window yields P(<3 handoffs)~=98%, so the window was almost always empty before the co-citation logic could run. At 168h, lambda=4.27 arrivals/window, P(<3)=20.1%. The new value is documented at the config site as rate-coupled (not a constant) and names ENC-TSK-N57's pairs_evaluated tripwire as the regression detector if the arrival rate falls. Scope boundary: window only -- MIN_WAVES, the co-citation threshold, and the nightly cadence are unchanged.",
+  "version": "2026-08-21.2",
+  "updated_at": "2026-08-21T20:30:00Z",
+  "last_change_summary": "ENC-TSK-O34: checkout_service GitHub validation fixes. ISS-603 -- task.github_repo override and project-config repo resolution normalized through shared _split_owner_repo()/_normalize_owner_repo() helpers so a plain 'owner/repo' override (not just the full URL form) resolves correctly instead of doubling the owner; added _resolve_task_github_repo (ENC-FTR-119 pattern) to v4/main, which previously lacked it. ISS-630 -- code_only closed gate (_validate_code_on_main_evidence) accepts an optional task-level github_base_branch field (default 'main') instead of hardcoding the GitHub compare API's base ref, so v4/main-only work can close pre-cutover.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2647,7 +2647,7 @@
         },
         "PROJECTS_TABLE": {
           "type": "string",
-          "definition": "DynamoDB table name for project records. Used by _resolve_github_repo() to look up the project's GitHub repo URL for commit/PR validation (DVP-ISS-082).",
+          "definition": "DynamoDB table name for project records. Used by _resolve_github_repo() to look up the project's GitHub repo URL for commit/PR validation (DVP-ISS-082). ENC-TSK-O34/ENC-ISS-603: project-config repo values are parsed via the shared _split_owner_repo() helper (accepts both a full URL and a plain 'owner/repo' string) and normalized via _normalize_owner_repo() before use, so a value that already carries the owner never doubles it in the downstream GitHub API path.",
           "usage_guidance": "Default: 'projects'. The checkout service Lambda IAM role must have dynamodb:GetItem and dynamodb:Scan permissions on this table."
         },
         "GITHUB_APP_ID": {
@@ -2764,7 +2764,7 @@
         },
         "gate_matrix": {
           "type": "object",
-          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
+          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior). DVP-ISS-082: committed and merged-main resolve GitHub owner/repo dynamically. Resolution order: transition_evidence.owner/repo > task.github_repo override (ENC-FTR-119, checked via _resolve_task_github_repo) > project.repo field > parent project.repo > child project.repo. ENC-TSK-O34/ENC-ISS-603: every step in this chain is normalized through _split_owner_repo()/_normalize_owner_repo() so a task.github_repo override given in plain 'owner/repo' form (not just the full URL form) resolves correctly and never double-concatenates the owner.",
           "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI (skipped for no_code type). committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 8 required fields: id, name, run_id, head_sha, status, conclusion, started_at, completed_at) required for github_pr_deploy; web_deploy_evidence {url, http_status, checked_at} for web_deploy type; clears CAI+CCI; additionally external_deploy components require external_deploy_evidence. closed: live_validation_evidence (non-empty string) for github_pr_deploy/web_deploy; code_on_main_evidence {commit_sha} for code_only; no_code_evidence (non-empty string) for no_code; documentation components additionally require documentation_evidence; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
           "properties": {
             "committed": {
@@ -2775,7 +2775,7 @@
                 "owner",
                 "repo"
               ],
-              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082).",
+              "repo_resolution": "Auto-resolved via _resolve_task_github_repo(): task.github_repo override (plain 'owner/repo' or full URL, ENC-FTR-119) checked first, then the projects table (DVP-ISS-082), if owner/repo not provided in transition_evidence. ENC-TSK-O34: normalized so neither form doubles the owner.",
               "issues_token": "CCI"
             },
             "coding-complete": {
@@ -2792,7 +2792,7 @@
                 "repo",
                 "merge_evidence"
               ],
-              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082).",
+              "repo_resolution": "Auto-resolved via _resolve_task_github_repo(): task.github_repo override (plain 'owner/repo' or full URL, ENC-FTR-119) checked first, then the projects table (DVP-ISS-082), if owner/repo not provided in transition_evidence. ENC-TSK-O34: normalized so neither form doubles the owner.",
               "compat_note": "ENC-ISS-095: tracker_mutation has a legacy gate requiring a free-text merge_evidence string for merged-main. This gate is bypassed for checkout-service-authenticated requests (X-Checkout-Service-Key) since the checkout service validates pr_id+merged_at via GitHub API. For non-checkout-service PATCH requests, merge_evidence remains required for backward compat. When calling advance_task_status via MCP (which routes through the checkout service), only pr_id and merged_at are needed."
             },
             "deploy-success": {
@@ -2887,7 +2887,7 @@
             "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
-            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (ENC-ISS-161: compare {sha}...main status: ahead or identical); releases checkout"
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of the task's base branch (ENC-ISS-161: compare {sha}...{base_branch} status: ahead or identical); base_branch defaults to 'main' but honors an optional task-level github_base_branch field (ENC-TSK-O34/ENC-ISS-630, same override pattern as task.github_repo) so a v4/main-only commit can close a code_only task pre-cutover; releases checkout"
           },
           "skipped_statuses": [
             "deploy-init",
@@ -8476,6 +8476,11 @@
       "version": "2026-08-21.1",
       "date": "2026-08-21",
       "summary": "ENC-TSK-N63 (ENC-FTR-096, ENC-ISS-563): memory_consolidation's CONSOLIDATION_LOOKBACK_HOURS widened 24h -> 168h (7d) in backend/lambda/memory_consolidation/lambda_function.py and both infrastructure/cloudformation/02-compute.yaml and 02-compute-import-stage-k44.yaml. NO new, renamed or removed fields on any governed entity -- a single calibrated constant change, logged here solely because lambda_function.py is a schema-affecting path under agents.md section 3.11. Per ENC-TSK-N47's measured verdict (DOC-F61C85CD572B), the >=3-doc / >=2-wave co-citation threshold was never the defect; at the measured arrival rate of ~0.61 handoffs/day a 24h window yields P(<3 handoffs)~=98%, so the window was almost always empty before the co-citation logic could run. At 168h, lambda=4.27 arrivals/window, P(<3)=20.1%. The new value is documented at the config site as rate-coupled (not a constant) and names ENC-TSK-N57's pairs_evaluated tripwire as the regression detector if the arrival rate falls. Scope boundary: window only -- MIN_WAVES, the co-citation threshold, and the nightly cadence are unchanged."
+    },
+    {
+      "version": "2026-08-21.2",
+      "date": "2026-08-21",
+      "summary": "ENC-TSK-O34: checkout_service GitHub validation fixes. ISS-603 -- task.github_repo override and project-config repo resolution normalized through shared _split_owner_repo()/_normalize_owner_repo() helpers so a plain 'owner/repo' override (not just the full URL form) resolves correctly instead of doubling the owner; added _resolve_task_github_repo (ENC-FTR-119 pattern) to v4/main, which previously lacked it. ISS-630 -- code_only closed gate (_validate_code_on_main_evidence) accepts an optional task-level github_base_branch field (default 'main') instead of hardcoding the GitHub compare API's base ref, so v4/main-only work can close pre-cutover."
     }
   ]
 }

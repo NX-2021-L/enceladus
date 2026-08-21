@@ -841,6 +841,49 @@ def _parse_github_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _normalize_owner_repo(
+    owner: Optional[str], repo: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Strip a redundant leading '<owner>/' from repo.
+
+    ENC-TSK-O34 / ENC-ISS-603: every owner/repo resolution surface (task-level
+    override, project-config fallback) is funneled through here as a final
+    normalization step so f"{owner}/{repo}" can never double the owner when
+    repo already carries an owner-qualified value (e.g. owner='NX-2021-L',
+    repo='NX-2021-L/enceladus' -> repo='enceladus'). A no-op when repo is
+    already bare.
+    """
+    if owner and repo:
+        prefix = f"{owner}/"
+        if repo.startswith(prefix):
+            repo = repo[len(prefix):] or None
+    return owner, repo
+
+
+def _split_owner_repo(value: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse an owner/repo pair from either a full GitHub URL
+    (https://github.com/OWNER/REPO) or a plain 'OWNER/REPO' string.
+
+    ENC-TSK-O34 / ENC-ISS-603: single shared parsing path for every
+    github_repo resolution surface so a value is split into owner/repo
+    exactly once, then passed through _normalize_owner_repo, rather than
+    each call site re-implementing its own partition/parse logic that can
+    drift out of sync with the others.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None, None
+    if value.startswith("http://") or value.startswith("https://"):
+        owner, repo = _parse_github_url(value)
+    else:
+        owner, _, repo = value.partition("/")
+        owner = owner.strip() or None
+        repo = repo.strip() or None
+        if not repo:
+            return None, None
+    return _normalize_owner_repo(owner, repo)
+
+
 def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the GitHub owner/repo for a project from the projects table.
 
@@ -861,7 +904,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
 
         repo_url = item.get("repo", {}).get("S", "")
         if repo_url:
-            return _parse_github_url(repo_url)
+            return _split_owner_repo(repo_url)
 
         # Walk up to parent (one level)
         parent_id = item.get("parent", {}).get("S", "")
@@ -876,7 +919,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
                 if item2:
                     repo_url2 = item2.get("repo", {}).get("S", "")
                     if repo_url2:
-                        return _parse_github_url(repo_url2)
+                        return _split_owner_repo(repo_url2)
             except Exception as exc:
                 logger.warning("Failed to look up parent project '%s': %s", parent_id, exc)
 
@@ -892,7 +935,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
             for child in scan_resp.get("Items", []):
                 child_repo = child.get("repo", {}).get("S", "")
                 if child_repo:
-                    return _parse_github_url(child_repo)
+                    return _split_owner_repo(child_repo)
         except Exception as exc:
             logger.warning("Failed to scan child projects for '%s': %s", project_id, exc)
 
@@ -900,6 +943,40 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
     except Exception as exc:
         logger.warning("Failed to resolve GitHub repo for project '%s': %s", project_id, exc)
         return None, None
+
+
+def _resolve_task_github_repo(
+    task: dict, project_id: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the GitHub owner/repo to validate a task's commit/PR/merge against.
+
+    ENC-FTR-119: satellite repos host code for tasks that still live under the
+    primary project's project_id, so the project-level ``repo`` field alone
+    (``_resolve_github_repo``) cannot express "this one task's code is in a
+    different repo than its siblings." A task-level ``github_repo`` field (a
+    plain "owner/repo" string or a full https://github.com/owner/repo URL,
+    settable via the ordinary tracker.set field-update path) is checked first
+    and, once set, durably overrides the project default for every
+    subsequent advance on that task. Falls back to ``_resolve_github_repo``
+    when the task has no override.
+
+    ENC-TSK-O34 / ENC-ISS-603: both the override and project-fallback paths
+    are funneled through the shared ``_split_owner_repo`` / normalization
+    helpers so a plain-form or already-qualified repo value can never double
+    the owner when concatenated downstream (previously only the full-URL
+    override form worked reliably; the plain form and the project-config
+    fallback were the doubling-prone paths).
+    """
+    task_repo = (task.get("github_repo") or "").strip()
+    if task_repo:
+        owner, repo = _split_owner_repo(task_repo)
+        if owner and repo:
+            return owner, repo
+        logger.warning(
+            "Task github_repo override '%s' could not be parsed as owner/repo; "
+            "falling back to project-level resolution.", task_repo,
+        )
+    return _resolve_github_repo(project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2004,12 +2081,19 @@ def _validate_lambda_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
 
 
 def _validate_code_on_main_evidence(
-    owner: str, repo: str, evidence: dict
+    owner: str, repo: str, evidence: dict, base_branch: str = "main"
 ) -> Tuple[bool, str]:
     """Validate code_on_main_evidence for closed (code_only arc, ENC-ISS-092).
 
-    Calls GitHub compare API to verify commit_sha is an ancestor of main.
+    Calls GitHub compare API to verify commit_sha is an ancestor of base_branch.
     Sets evidence["github_verified"] = True on success.
+
+    ENC-TSK-O34 / ENC-ISS-630: base_branch defaults to 'main' (unchanged
+    behavior) but is overridable per-task -- see the closed-gate call site,
+    which reads an optional task-level 'github_base_branch' field (the same
+    override pattern as _resolve_task_github_repo's 'github_repo') -- so
+    pre-cutover v4/main-only work can close a code_only task without a commit
+    landing on 'main' itself.
     """
     commit_sha = (evidence.get("commit_sha") or "").strip()
     if not commit_sha:
@@ -2020,15 +2104,17 @@ def _validate_code_on_main_evidence(
             f"got: '{commit_sha}'"
         )
 
-    # Call GitHub compare API: {sha}...main (base=sha, head=main)
-    # ENC-ISS-161: status "ahead" means main has commits sha doesn't = sha is an ancestor.
-    # status "identical" means sha IS main HEAD. Both are valid.
-    compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...main"
+    base_branch = (base_branch or "main").strip() or "main"
+
+    # Call GitHub compare API: {sha}...{base_branch} (base=sha, head=base_branch)
+    # ENC-ISS-161: status "ahead" means base_branch has commits sha doesn't = sha is an ancestor.
+    # status "identical" means sha IS base_branch HEAD. Both are valid.
+    compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...{base_branch}"
     status, body = _github_request(compare_path, repo=f"{owner}/{repo}", sha=commit_sha)
     if status == 404:
         return False, (
             f"GitHub compare returned 404 — commit '{commit_sha}' or repo "
-            f"'{owner}/{repo}' not found"
+            f"'{owner}/{repo}' (base branch '{base_branch}') not found"
         )
     if status != 200:
         return False, (
@@ -2039,9 +2125,9 @@ def _validate_code_on_main_evidence(
     compare_status = body.get("status", "")
     if compare_status not in ("ahead", "identical"):
         return False, (
-            f"Commit '{commit_sha}' is not on main "
+            f"Commit '{commit_sha}' is not on {base_branch} "
             f"(GitHub compare status: '{compare_status}'). "
-            "Commit must be an ancestor of main (status 'ahead' or 'identical')."
+            f"Commit must be an ancestor of {base_branch} (status 'ahead' or 'identical')."
         )
 
     # Stamp verification flag for audit trail
@@ -3041,7 +3127,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
         if not owner or not repo:
-            resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+            resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
@@ -3170,7 +3256,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
         if not owner or not repo:
-            resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+            resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
@@ -3327,7 +3413,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     owner = transition_evidence.get("owner")
                     repo = transition_evidence.get("repo")
                     if not owner or not repo:
-                        resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+                        resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
                         owner = owner or resolved_owner
                         repo = repo or resolved_repo
                     if not owner or not repo:
@@ -3343,7 +3429,10 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             provider=provider or session_id,
                             required_fields=["transition_evidence.owner", "transition_evidence.repo"],
                         )
-                    valid, reason = _validate_code_on_main_evidence(owner, repo, evidence_obj)
+                    base_branch = (task.get("github_base_branch") or "main").strip() or "main"
+                    valid, reason = _validate_code_on_main_evidence(
+                        owner, repo, evidence_obj, base_branch=base_branch
+                    )
                     if not valid:
                         return _validation_error(
                             400, f"{ev_key} validation failed: {reason}",
