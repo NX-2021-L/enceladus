@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-21.2",
-  "updated_at": "2026-08-21T20:30:00Z",
-  "last_change_summary": "ENC-TSK-O34: checkout_service GitHub validation fixes. ISS-603 -- task.github_repo override and project-config repo resolution normalized through shared _split_owner_repo()/_normalize_owner_repo() helpers so a plain 'owner/repo' override (not just the full URL form) resolves correctly instead of doubling the owner; added _resolve_task_github_repo (ENC-FTR-119 pattern) to v4/main, which previously lacked it. ISS-630 -- code_only closed gate (_validate_code_on_main_evidence) accepts an optional task-level github_base_branch field (default 'main') instead of hardcoding the GitHub compare API's base ref, so v4/main-only work can close pre-cutover.",
+  "version": "2026-08-21.3",
+  "updated_at": "2026-08-21T20:41:05Z",
+  "last_change_summary": "ENC-TSK-O36 (ENC-ISS-604): port the intelligence-project corpus-governance namespace from frozen main onto v4/main -- new entities corpus.edge_taxonomy (the fourteen-type governed typed-edge taxonomy for the io-graph corpus, project_id=intelligence, DOC-4DD9C4E8B66C section 7.2) and corpus.graph_isolated_reason (the eight-value graph_isolated_reason enum, INT-TSK-197 / INT-PLN-012). Both entities are DOCUMENTATION ONLY -- verified 2026-08-08 that no Lambda in this repo reads governance-dictionary content for either entity; the enforcing allowlists (graph_sync.ALLOWED_EDGE_TYPES, graph_query_api._ALLOWED_EDGE_TYPES, graph_health_metrics.ALLOWED_EDGE_TYPES) and the graph_isolated_reason IS NULL read live in the SEPARATE intelligence-project repo, not in Enceladus's own same-named graph_sync/graph_query_api/graph_health_metrics Lambdas that govern Enceladus's own tracker/document graph (the ENC-ISS-604 second-hazard disambiguation: no name collision here, the two entities' governing_documents cite INT-* records exclusively). Ported verbatim, byte-for-byte, from origin/main's 2026-08-17.1 dictionary; no existing v4/main entity was modified, reordered, or removed. No Lambda code, handler, or test file exists in this repo for either entity -- there is nothing else to port.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8013,9 +8013,124 @@
           "definition": "Same lower-bound semantics as total_is_lower_bound, applied to orphan_tasks -- orphan detection has the identical undercount failure mode as total when only a partial page was fetched."
         }
       }
+    },
+    "corpus.edge_taxonomy": {
+      "description": "Governed typed-edge taxonomy for the io-graph corpus (project_id=intelligence), DOC-4DD9C4E8B66C section 7.2. Fourteen artifact-to-artifact relationship types across five families, written via corpus.edges.put/put_batch and projected to FalkorDB by graph_sync. DOCUMENTATION ONLY: this entry records the governed vocabulary, it is NOT read at runtime. The enforcing allowlists are hardcoded literals in three Lambdas and adding a type requires a code change plus deploy.",
+      "fields": {
+        "families": {
+          "type": "object",
+          "definition": "The fourteen types grouped by family.",
+          "structural": [
+            "PARTICIPANT",
+            "DERIVED_FROM",
+            "VARIANT_OF"
+          ],
+          "evidentiary": [
+            "EVIDENCES",
+            "MENTIONS",
+            "CONTRADICTS",
+            "SUPERSEDES"
+          ],
+          "topical": [
+            "INSTANTIATES",
+            "RESONATES_WITH"
+          ],
+          "temporal": [
+            "PRECEDES",
+            "CO_OCCURS",
+            "RECURS_WITH"
+          ],
+          "social": [
+            "REGISTER",
+            "ADDRESSED_TO"
+          ]
+        },
+        "enforcing_allowlists": {
+          "type": "array",
+          "definition": "The three code allowlists that actually gate the taxonomy. Invariant G2 requires all three to agree; backend/lambda/graph_sync/test_edge_taxonomy.py asserts the set difference is empty. A type registered in only some of them fails SILENTLY, because _merge_typed_edge drops unknown types after the write has already landed in DynamoDB.",
+          "items": [
+            {
+              "lambda": "graph_sync",
+              "symbol": "ALLOWED_EDGE_TYPES",
+              "gates": "projection to FalkorDB"
+            },
+            {
+              "lambda": "graph_query_api",
+              "symbol": "_ALLOWED_EDGE_TYPES",
+              "gates": "traversal via edge_types filter"
+            },
+            {
+              "lambda": "graph_health_metrics",
+              "symbol": "ALLOWED_EDGE_TYPES",
+              "gates": "per-edge-type CloudWatch metrics"
+            }
+          ]
+        },
+        "legacy_types": {
+          "type": "array",
+          "definition": "Pre-taxonomy generic relations retained so already-projected edges keep resolving. NOT part of the governed taxonomy and NOT writable via corpus.edges.",
+          "items": [
+            "RELATED_TO",
+            "INSPIRED_BY",
+            "BUILDS_ON"
+          ]
+        },
+        "write_invariants": {
+          "type": "object",
+          "definition": "Enforced at write time by corpus.edges.put, each with a distinct error code.",
+          "g2_type_validity": "edge_type must be one of the fourteen. This is the ONLY barrier between caller input and Cypher string construction, because Cypher cannot parameterize a relationship type — _merge_typed_edge interpolates it. Re-checked at projection time.",
+          "g3_referential_integrity": "both endpoints must resolve to live, non-placeholder artifacts. Placeholder-resolving endpoints are rejected as a distinct case: that is the INT-ISS-027 failure mode, where edges projected successfully and were invisible to every traversal.",
+          "g4_provenance": "confidence and derivation_method are required — an explicit epistemic commitment per DOC-4DD9C4E8B66C section 5.1."
+        },
+        "runtime_effect": {
+          "type": "string",
+          "value": "none",
+          "definition": "No Lambda reads this entity. Verified 2026-08-08: zero governance-dictionary references in graph_sync, graph_query_api or graph_health_metrics. Registering a type here does not make it writable, projectable or traversable."
+        },
+        "governing_documents": {
+          "type": "array",
+          "items": [
+            "DOC-4DD9C4E8B66C section 7.2",
+            "INT-TSK-192"
+          ]
+        }
+      }
+    },
+    "corpus.graph_isolated_reason": {
+      "description": "Governed standalone enum for the io-graph corpus (project_id=intelligence), sibling vocabulary to corpus.edge_taxonomy: names WHY a corpus artifact reached a terminal enrichment_status state (the per-artifact lifecycle status field, tracked in code only -- not itself a governed dictionary entity) while carrying zero taxonomy edges. Read defensively today by backend/lambda/graph_health_metrics's G1 invariant query (graph_isolated_reason IS NULL), which the code comments as landing in Phase 12 / INT-TSK-197 -- until this enum is populated by writers, every artifact satisfies IS NULL and G1 counts only the pre-existing orphan population. Exists to make G1 enforceable as a closed set rather than a free-text field: an artifact cannot go terminal-and-isolated without citing one of these eight named mechanisms.",
+      "fields": {
+        "graph_isolated_reason": {
+          "type": "enum",
+          "nullable": true,
+          "enum": [
+            "pending_derivation",
+            "no_participants_resolved",
+            "no_temporal_neighbors",
+            "no_topical_match",
+            "unsupported_source_type",
+            "extraction_failed",
+            "singleton_upload",
+            "operator_isolated"
+          ],
+          "definition": "pending_derivation: transient -- derivation passes have not yet run for this artifact. no_participants_resolved: comms artifact whose participants could not be resolved to comms_person nodes. no_temporal_neighbors: nothing fell inside the bounded temporal window. no_topical_match: candidate topical edges existed but all fell below the derivation confidence floor. unsupported_source_type: excluded from projection by design (e.g. comms_voice_exemplar under decision D4). extraction_failed: content extraction failed, so no derivable signal exists. singleton_upload: direct intake with no corpus adjacency at ingest time. operator_isolated: deliberately isolated by operator decision.",
+          "usage_guidance": "Set only when a corpus artifact reaches a terminal lifecycle state with zero taxonomy edges (see corpus.edge_taxonomy for the governed edge vocabulary); null in every other case, including all non-terminal states. Purpose is to make the G1 invariant enforceable -- an artifact cannot go terminal-and-isolated without a named mechanism recorded on it. Governs INT-TSK-197 AC-3."
+        },
+        "runtime_effect": {
+          "type": "string",
+          "value": "read-only, defensive",
+          "definition": "graph_health_metrics's G1 query already filters on graph_isolated_reason IS NULL (defensive read, pre-dates this registration). No writer sets the field yet; population is Phase 12 / INT-TSK-197 follow-on work. Registering the enum here does not by itself make it written."
+        },
+        "governing_documents": {
+          "type": "array",
+          "items": [
+            "INT-TSK-197",
+            "INT-PLN-012"
+          ]
+        }
+      }
     }
   },
-  "change_summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "change_summary": "ENC-TSK-O36 (ENC-ISS-604): port the intelligence-project corpus-governance namespace from frozen main onto v4/main -- new entities corpus.edge_taxonomy (the fourteen-type governed typed-edge taxonomy for the io-graph corpus, project_id=intelligence, DOC-4DD9C4E8B66C section 7.2) and corpus.graph_isolated_reason (the eight-value graph_isolated_reason enum, INT-TSK-197 / INT-PLN-012). Both entities are DOCUMENTATION ONLY -- verified 2026-08-08 that no Lambda in this repo reads governance-dictionary content for either entity; the enforcing allowlists (graph_sync.ALLOWED_EDGE_TYPES, graph_query_api._ALLOWED_EDGE_TYPES, graph_health_metrics.ALLOWED_EDGE_TYPES) and the graph_isolated_reason IS NULL read live in the SEPARATE intelligence-project repo, not in Enceladus's own same-named graph_sync/graph_query_api/graph_health_metrics Lambdas that govern Enceladus's own tracker/document graph (the ENC-ISS-604 second-hazard disambiguation: no name collision here, the two entities' governing_documents cite INT-* records exclusively). Ported verbatim, byte-for-byte, from origin/main's 2026-08-17.1 dictionary; no existing v4/main entity was modified, reordered, or removed. No Lambda code, handler, or test file exists in this repo for either entity -- there is nothing else to port.",
   "change_log": [
     {
       "version": "2026-08-17.2",
@@ -8481,6 +8596,13 @@
       "version": "2026-08-21.2",
       "date": "2026-08-21",
       "summary": "ENC-TSK-O34: checkout_service GitHub validation fixes. ISS-603 -- task.github_repo override and project-config repo resolution normalized through shared _split_owner_repo()/_normalize_owner_repo() helpers so a plain 'owner/repo' override (not just the full URL form) resolves correctly instead of doubling the owner; added _resolve_task_github_repo (ENC-FTR-119 pattern) to v4/main, which previously lacked it. ISS-630 -- code_only closed gate (_validate_code_on_main_evidence) accepts an optional task-level github_base_branch field (default 'main') instead of hardcoding the GitHub compare API's base ref, so v4/main-only work can close pre-cutover."
+    },
+    {
+      "version": "2026-08-21.3",
+      "date": "2026-08-21",
+      "summary": "ENC-TSK-O36 (ENC-ISS-604): port the intelligence-project corpus-governance namespace from frozen main onto v4/main -- new entities corpus.edge_taxonomy (the fourteen-type governed typed-edge taxonomy for the io-graph corpus, project_id=intelligence, DOC-4DD9C4E8B66C section 7.2) and corpus.graph_isolated_reason (the eight-value graph_isolated_reason enum, INT-TSK-197 / INT-PLN-012). Both entities are DOCUMENTATION ONLY -- verified 2026-08-08 that no Lambda in this repo reads governance-dictionary content for either entity; the enforcing allowlists (graph_sync.ALLOWED_EDGE_TYPES, graph_query_api._ALLOWED_EDGE_TYPES, graph_health_metrics.ALLOWED_EDGE_TYPES) and the graph_isolated_reason IS NULL read live in the SEPARATE intelligence-project repo, not in Enceladus's own same-named graph_sync/graph_query_api/graph_health_metrics Lambdas that govern Enceladus's own tracker/document graph (the ENC-ISS-604 second-hazard disambiguation: no name collision here, the two entities' governing_documents cite INT-* records exclusively). Ported verbatim, byte-for-byte, from origin/main's 2026-08-17.1 dictionary; no existing v4/main entity was modified, reordered, or removed. No Lambda code, handler, or test file exists in this repo for either entity -- there is nothing else to port.",
+      "task": "ENC-TSK-O36",
+      "issue": "ENC-ISS-604"
     }
   ]
 }
