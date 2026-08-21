@@ -3,7 +3,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 
@@ -355,6 +355,134 @@ class FailureClassificationTests(unittest.TestCase):
         env = json.loads(resp["body"])["error_envelope"]
         self.assertEqual(env["failure_classification"], "deterministic-governance")
         self.assertTrue(env["recommended_next_actions"])
+
+
+
+
+class TestIssue603OwnerDoubling(unittest.TestCase):
+    """ENC-TSK-O34 / ENC-ISS-603: task-level github_repo override and the
+    project-config fallback must never double the owner in the resolved
+    (owner, repo) pair, regardless of whether the override is given as a
+    plain 'owner/repo' string or a full https://github.com/owner/repo URL."""
+
+    def test_normalize_strips_redundant_owner_prefix(self):
+        owner, repo = checkout_service._normalize_owner_repo(
+            "NX-2021-L", "NX-2021-L/enceladus"
+        )
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+
+    def test_normalize_is_noop_for_bare_repo(self):
+        owner, repo = checkout_service._normalize_owner_repo("NX-2021-L", "enceladus")
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+
+    def test_split_owner_repo_plain_form(self):
+        owner, repo = checkout_service._split_owner_repo("NX-2021-L/enceladus")
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+
+    def test_split_owner_repo_url_form(self):
+        owner, repo = checkout_service._split_owner_repo(
+            "https://github.com/NX-2021-L/enceladus"
+        )
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+
+    def test_split_owner_repo_never_doubles_on_qualified_plain_value(self):
+        """A pathological already-doubled input never produces a doubled
+        full_name -- the redundant leading owner segment is stripped."""
+        owner, repo = checkout_service._split_owner_repo(
+            "NX-2021-L/NX-2021-L/enceladus"
+        )
+        self.assertEqual(owner, "NX-2021-L")
+        self.assertNotIn("/", repo)
+
+    @patch.object(checkout_service, "_resolve_github_repo")
+    def test_resolve_task_github_repo_plain_form_override_no_doubling(self, mock_resolve):
+        """ISS-603 deterministic repro: plain-form override must resolve to
+        the bare repo name, not the owner-qualified string (previously only
+        the full-URL override form worked)."""
+        task = {"github_repo": "NX-2021-L/enceladus"}
+        owner, repo = checkout_service._resolve_task_github_repo(task, "enceladus")
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+        mock_resolve.assert_not_called()
+
+    @patch.object(checkout_service, "_resolve_github_repo")
+    def test_resolve_task_github_repo_url_form_override(self, mock_resolve):
+        task = {"github_repo": "https://github.com/NX-2021-L/enceladus"}
+        owner, repo = checkout_service._resolve_task_github_repo(task, "enceladus")
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+        mock_resolve.assert_not_called()
+
+    @patch.object(checkout_service, "_resolve_github_repo")
+    def test_resolve_task_github_repo_no_override_falls_back_to_project(self, mock_resolve):
+        """ISS-603 default/no-override path: falls through to the
+        project-config resolver, which itself never doubles the owner."""
+        mock_resolve.return_value = ("NX-2021-L", "enceladus")
+        task = {}
+        owner, repo = checkout_service._resolve_task_github_repo(task, "enceladus")
+        self.assertEqual((owner, repo), ("NX-2021-L", "enceladus"))
+        mock_resolve.assert_called_once_with("enceladus")
+
+    def test_resolve_github_repo_project_fallback_accepts_plain_form(self):
+        """ISS-603 project-level fallback: a project 'repo' field stored as a
+        bare 'owner/repo' string (not a URL, e.g. the 'mod' project) resolves
+        cleanly instead of doubling or failing outright."""
+        fake_ddb = MagicMock()
+        fake_ddb.get_item.return_value = {"Item": {"repo": {"S": "NX-2021-L/mod"}}}
+        with patch.object(checkout_service, "_ddb", fake_ddb):
+            owner, repo = checkout_service._resolve_github_repo("mod")
+        self.assertEqual((owner, repo), ("NX-2021-L", "mod"))
+
+
+class TestIssue630BaseBranchOverride(unittest.TestCase):
+    """ENC-TSK-O34 / ENC-ISS-630: the code_only close gate must honor a
+    task-declared base branch instead of the hardcoded 'main'."""
+
+    @patch.object(checkout_service, "_github_request")
+    def test_default_base_branch_is_main(self, mock_gh):
+        mock_gh.return_value = (200, {"status": "identical"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+        )
+        self.assertTrue(valid, reason)
+        called_path = mock_gh.call_args[0][0]
+        self.assertTrue(called_path.endswith("...main"))
+
+    @patch.object(checkout_service, "_github_request")
+    def test_v4_main_base_branch_override_compares_against_v4_main(self, mock_gh):
+        """A v4/main-only commit (never landed on 'main' pre-cutover) closes a
+        code_only task when the task declares github_base_branch=v4/main."""
+        mock_gh.return_value = (200, {"status": "ahead", "ahead_by": 2})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+            base_branch="v4/main",
+        )
+        self.assertTrue(valid, reason)
+        called_path = mock_gh.call_args[0][0]
+        self.assertTrue(called_path.endswith("...v4/main"))
+
+    @patch.object(checkout_service, "_github_request")
+    def test_base_branch_rejection_message_names_the_branch(self, mock_gh):
+        mock_gh.return_value = (200, {"status": "behind"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+            base_branch="v4/main",
+        )
+        self.assertFalse(valid)
+        self.assertIn("not on v4/main", reason)
+
+    @patch.object(checkout_service, "_github_request")
+    def test_blank_base_branch_defaults_to_main(self, mock_gh):
+        mock_gh.return_value = (200, {"status": "identical"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+            base_branch="   ",
+        )
+        self.assertTrue(valid, reason)
+        called_path = mock_gh.call_args[0][0]
+        self.assertTrue(called_path.endswith("...main"))
 
 
 if __name__ == "__main__":
