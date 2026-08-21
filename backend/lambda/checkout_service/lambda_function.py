@@ -575,8 +575,17 @@ def _checkout_task(project_id: str, task_id: str, provider: str) -> Tuple[int, d
     )
 
 
-def _release_task(project_id: str, task_id: str) -> Tuple[int, dict]:
-    return _tracker_request("DELETE", f"/{project_id}/task/{task_id}/checkout", {})
+def _release_task(
+    project_id: str, task_id: str, provider: Optional[str] = None
+) -> Tuple[int, dict]:
+    """DELETE .../checkout. ``provider`` (ENC-TSK-O37) is optional and, when
+    given, is forwarded so tracker_mutation's release path attributes
+    checked_in_by to the ACTING caller rather than falling back to the prior
+    holder's active_agent_session_id — needed for an accurate audit trail on
+    third-party stale-holder recovery. Omitted, this preserves the pre-O37
+    self-release payload exactly (empty body)."""
+    payload: dict = {"provider": provider} if provider else {}
+    return _tracker_request("DELETE", f"/{project_id}/task/{task_id}/checkout", payload)
 
 
 def _log_task(
@@ -1155,7 +1164,12 @@ def _lookup_sci(sci_id: str) -> Optional[dict]:
 
 
 def _get_agent_session(session_id: str) -> Optional[dict]:
-    """Fetch an agent-session record (ENC-FTR-117 store; key session_id)."""
+    """Fetch an agent-session record (ENC-FTR-117 store; key session_id).
+
+    ENC-TSK-O37: also surfaces ``last_activity_at`` / ``claimed_at`` so callers
+    can compute an idle-reference timestamp (mirrors agent_id_alloc._idle_reference's
+    last_activity_at > claimed_at > created_at precedence) without a second read.
+    """
     try:
         resp = _ddb.get_item(
             TableName=AGENT_SESSIONS_TABLE,
@@ -1170,6 +1184,8 @@ def _get_agent_session(session_id: str) -> Optional[dict]:
     return {
         "session_id": item.get("session_id", {}).get("S", ""),
         "created_at": item.get("created_at", {}).get("S", ""),
+        "claimed_at": item.get("claimed_at", {}).get("S", ""),
+        "last_activity_at": item.get("last_activity_at", {}).get("S", ""),
         "status": item.get("status", {}).get("S", ""),
     }
 
@@ -1301,6 +1317,71 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
     # Valid SCI. The heartbeat/updated_at touch already ran at gate entry
     # (ENC-TSK-L35), so no further touch is needed here.
     return None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O37 / ENC-ISS-597: stale-holder checkout recovery
+# ---------------------------------------------------------------------------
+
+# Mirrors coordination_api/agent_id_alloc.SCI_TTL_SECONDS (86400 = 24h). The two
+# lambdas ship as separate packages, so this is a deliberately duplicated literal
+# rather than a cross-package import; keep in sync if the mint_sci TTL changes.
+_HOLDER_SCI_TTL_SECONDS = 86400
+
+_LIVE_SESSION_STATUSES = frozenset({"allocated", "claimed"})
+
+
+def _session_idle_reference(session: dict) -> str:
+    """Best-known last-activity timestamp for a session.
+
+    Mirrors agent_id_alloc._idle_reference's precedence (last_activity_at >
+    claimed_at > created_at) so a stale-holder determination here agrees with
+    what the scheduled idle-sweep would eventually conclude.
+    """
+    return str(
+        session.get("last_activity_at")
+        or session.get("claimed_at")
+        or session.get("created_at")
+        or ""
+    )
+
+
+def _session_terminal_state(session: Optional[dict]) -> Tuple[bool, str]:
+    """Determine whether a checkout holder's agent session is TERMINAL.
+
+    A session is terminal (ENC-ISS-597) when any of:
+      * the session record is absent (never existed, or hard-deleted) — ``absent``.
+      * its status is not live (``allocated``/``claimed``), i.e. already flipped to
+        ``retired`` by the idle-sweep or unclaim-sweep — ``retired``.
+      * its idle-reference timestamp (last_activity_at > claimed_at > created_at,
+        matching agent_id_alloc._idle_reference) is older than the SCI TTL
+        (86400s) — the session's bound SCI must have expired even though no
+        sweep has run yet to flip status — ``sci_ttl_elapsed``.
+
+    Returns (is_terminal, reason). reason is one of "absent", "retired",
+    "sci_ttl_elapsed", or "live" (not terminal).
+    """
+    if session is None:
+        return True, "absent"
+
+    status = str(session.get("status") or "").strip()
+    if status not in _LIVE_SESSION_STATUSES:
+        return True, "retired"
+
+    reference = _session_idle_reference(session)
+    if reference:
+        try:
+            ref_dt = datetime.strptime(reference, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            ref_dt = None
+        if ref_dt is not None:
+            elapsed = (datetime.now(timezone.utc) - ref_dt).total_seconds()
+            if elapsed >= _HOLDER_SCI_TTL_SECONDS:
+                return True, "sci_ttl_elapsed"
+
+    return False, "live"
 
 
 # ---------------------------------------------------------------------------
@@ -1517,6 +1598,127 @@ def _handle_release(project_id: str, task_id: str, body: dict) -> dict:
     if status not in (200, 201):
         return _error(status, result.get("error", f"Release failed (HTTP {status})"))
     return _response(200, {"success": True, "task_id": task_id})
+
+
+def _handle_release_recover(project_id: str, task_id: str, body: dict) -> dict:
+    """POST .../checkout/recover — ENC-TSK-O37 / ENC-ISS-597.
+
+    Governed recovery for a checkout wedged behind a dead agent session.
+    Unlike DELETE .../checkout (unconditional release — no ownership check
+    today), this endpoint authorizes a THIRD PARTY to clear someone else's
+    checkout ONLY when the current holder's agent session is server-verified
+    TERMINAL (see _session_terminal_state): the session record is absent,
+    already flipped to 'retired' (idle-sweep / unclaim-sweep), or its
+    idle-reference timestamp is already past the SCI TTL even though no sweep
+    has run yet. A LIVE holder's checkout is never touched by a third party —
+    this is a narrow recovery path, not a blanket force-release. Every
+    successful third-party recovery writes an audit worklog on the task naming
+    the prior holder and the terminality evidence BEFORE the checkout clears.
+
+    Body: {"provider": "<caller's own ENC-SES id>", "sci": "<caller's SCI>",
+    "governance_hash": "<optional>"}.
+    """
+    caller = (body.get("provider") or "").strip()
+    if not caller:
+        return _error(
+            400,
+            "provider (the recovering agent session's own ENC-SES id) is required",
+            code="INVALID_INPUT",
+            details={"task_id": task_id, "required_fields": ["provider"]},
+        )
+
+    # Recovery is an agent-origin governed mutation like advance/log, not an
+    # anonymous/system action — the caller must authenticate as a live agent
+    # session with a valid SCI before anything else is read or written.
+    if not _AGENT_SESSION_ID_RE.match(caller):
+        return _error(
+            403,
+            "checkout recovery requires an authenticated agent-session provider "
+            f"(ENC-SES-... id); got '{caller}'.",
+            code="PERMISSION_DENIED",
+        )
+    sci_err = _validate_sci_gate(caller, body.get("sci"))
+    if sci_err:
+        return sci_err
+
+    status, task = _get_task(project_id, task_id)
+    if status != 200:
+        return _error(status, task.get("error", f"Task not found: {task_id}"))
+
+    if not task.get("active_agent_session", False):
+        return _error(
+            400,
+            f"Task {task_id} is not currently checked out; nothing to recover.",
+            code="INVALID_INPUT",
+            details={"task_id": task_id},
+        )
+    holder = str(task.get("active_agent_session_id") or "").strip()
+
+    # Self-recovery: the caller already holds the checkout — this is an
+    # ordinary release, not a stale-holder takeover. No terminality check.
+    if holder == caller:
+        rel_status, rel_result = _release_task(project_id, task_id, provider=caller)
+        if rel_status not in (200, 201):
+            return _error(
+                rel_status,
+                rel_result.get("error", f"Release failed (HTTP {rel_status})"),
+            )
+        return _response(200, {
+            "success": True, "task_id": task_id,
+            "recovered": False, "reason": "self_release",
+        })
+
+    if not _AGENT_SESSION_ID_RE.match(holder):
+        # Non-agent holders (github, coordination_dispatch, PWA users, ...) are
+        # out of scope — "dead session" recovery only applies to minted
+        # ENC-SES holders (ENC-ISS-597). Reject rather than silently no-op.
+        return _error(
+            409,
+            f"Task {task_id} is held by a non-agent-session provider '{holder}'; "
+            "stale-session recovery does not apply.",
+            code="CONFLICT",
+            details={"holder": holder},
+        )
+
+    holder_session = _get_agent_session(holder)
+    is_terminal, reason = _session_terminal_state(holder_session)
+    if not is_terminal:
+        return _error(
+            409,
+            f"Task {task_id} is held by an active session '{holder}'; "
+            "third-party recovery denied. Ask the holder to release, or wait "
+            "for the session to become terminal.",
+            code="CONFLICT",
+            details={"holder": holder, "holder_state": reason},
+        )
+
+    # Terminal holder confirmed — write the audit worklog BEFORE clearing the
+    # checkout, so the record's history always carries the recovery evidence
+    # even if the release call below fails and must be retried.
+    audit_note = (
+        f"[RECOVERY] checkout.recover (ENC-TSK-O37/ENC-ISS-597): prior holder "
+        f"'{holder}' verified TERMINAL (reason={reason}); checkout cleared by "
+        f"'{caller}'."
+    )
+    _log_task(
+        project_id, task_id, audit_note,
+        provider=caller, governance_hash=body.get("governance_hash"),
+    )
+
+    rel_status, rel_result = _release_task(project_id, task_id, provider=caller)
+    if rel_status not in (200, 201):
+        return _error(
+            rel_status,
+            rel_result.get("error", f"Recovery release failed (HTTP {rel_status})"),
+        )
+    logger.info(
+        "[SUCCESS] checkout.recover project=%s task=%s prior_holder=%s reason=%s by=%s",
+        project_id, task_id, holder, reason, caller,
+    )
+    return _response(200, {
+        "success": True, "task_id": task_id,
+        "recovered": True, "prior_holder": holder, "reason": reason,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -4157,6 +4359,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
             elif method == "DELETE":
                 return _handle_release(project_id, task_id, body)
             return _error(405, f"Method {method} not allowed for checkout")
+
+        if action == "recover":
+            # ENC-TSK-O37 / ENC-ISS-597: governed stale-holder recovery.
+            if method == "POST":
+                return _handle_release_recover(project_id, task_id, body)
+            return _error(405, f"Method {method} not allowed for recover")
 
         if action == "advance":
             if method == "POST":

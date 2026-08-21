@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-21.2",
-  "updated_at": "2026-08-21T20:30:00Z",
-  "last_change_summary": "ENC-TSK-O34: checkout_service GitHub validation fixes. ISS-603 -- task.github_repo override and project-config repo resolution normalized through shared _split_owner_repo()/_normalize_owner_repo() helpers so a plain 'owner/repo' override (not just the full URL form) resolves correctly instead of doubling the owner; added _resolve_task_github_repo (ENC-FTR-119 pattern) to v4/main, which previously lacked it. ISS-630 -- code_only closed gate (_validate_code_on_main_evidence) accepts an optional task-level github_base_branch field (default 'main') instead of hardcoding the GitHub compare API's base ref, so v4/main-only work can close pre-cutover.",
+  "version": "2026-08-21.3",
+  "updated_at": "2026-08-21T21:15:00Z",
+  "last_change_summary": "ENC-TSK-O37 (ENC-ISS-597): added checkout_service.stale_holder_release documenting the new POST /{project}/task/{task_id}/recover route (_handle_release_recover) -- governed, audited recovery for a checkout wedged behind a dead agent session. Server-verifies the current holder's terminality against the live agent-sessions store (_session_terminal_state: absent / retired / sci_ttl_elapsed vs live) rather than trusting a client claim; a live holder still rejects third-party recovery (409, no write). A confirmed-terminal recovery writes an audit worklog naming the prior holder before clearing the checkout. Implementation-only change staged on a task worktree pending push/PR -- not yet merged or deployed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7383,6 +7383,27 @@
         "sci_failure_mode": {
           "type": "string",
           "definition": "403 detail naming the failure: missing_sci | unknown_sci | wrong_token_type | revoked_sci | expired_sci | session_mismatch | unknown_session."
+        }
+      }
+    },
+    "checkout_service.stale_holder_release": {
+      "description": "ENC-TSK-O37 / ENC-ISS-597: governed recovery for a checkout wedged behind a dead agent session. POST /{project}/task/{task_id}/recover (_handle_release_recover), distinct from DELETE .../checkout (_handle_release, unconditional self-release with no ownership check). The caller authenticates via the same ENC-ISS-441 SCI enforcement gate as checkout/advance/log (body.provider must be a live, SCI-valid ENC-SES session) BEFORE any task state is read. If body.provider already equals the task's active_agent_session_id this is an ordinary self-release (reason=self_release) with no terminality check. Otherwise (third-party recovery) the holder must be a minted ENC-SES session (non-agent holders such as github/coordination_dispatch/PWA users are out of scope and 409); its terminality is determined server-side by _session_terminal_state, which reads the live agent-sessions record (NOT a client-supplied claim) and returns terminal=true when ANY of: the session record is absent (reason=absent), its status has already flipped away from allocated/claimed to retired by the idle-sweep or unclaim-sweep (reason=retired), or its idle-reference timestamp (last_activity_at > claimed_at > created_at, mirroring agent_id_alloc._idle_reference's exact precedence) is already older than the 86400s SCI TTL even though no sweep has run yet (reason=sci_ttl_elapsed). A LIVE holder (reason=live) is NEVER released by a third party -- the endpoint returns 409 CONFLICT with details {holder, holder_state:'live'} and performs no write; there is no blanket force-release. On a confirmed-terminal recovery, an audit worklog naming the prior holder and the terminality reason is appended to the task's history BEFORE the checkout is cleared (_log_task with provider=caller, so the record always carries recovery evidence even if the subsequent release call must be retried), then _release_task clears active_agent_session/checkout_state and stamps checked_in_by=caller (via an explicit provider payload, so tracker_mutation attributes the release to the RECOVERING session, not the dead prior holder as the pre-O37 empty-body release path would).",
+      "fields": {
+        "route": {
+          "type": "string",
+          "definition": "POST /api/v1/checkout/{project}/task/{task_id}/recover. Body: {provider: '<recovering ENC-SES id>', sci: '<recovering session's SCI>', governance_hash?}."
+        },
+        "reason": {
+          "type": "string",
+          "definition": "Response field on both success and 409 paths. One of: self_release (caller==holder, no terminality check) | absent | retired | sci_ttl_elapsed (successful third-party recovery, holder_state values doubling as the terminality determination) | live (409, holder_state on the rejection envelope)."
+        },
+        "recovered": {
+          "type": "boolean",
+          "definition": "true only on a successful THIRD-PARTY recovery (prior_holder present in the response); false on self_release, since that path is an ordinary release rather than a stale-holder takeover."
+        },
+        "_session_terminal_state": {
+          "type": "function",
+          "definition": "checkout_service.lambda_function pure helper (session_dict) -> (is_terminal: bool, reason: str). Reused nowhere else yet; intentionally duplicates agent_id_alloc._idle_reference's last_activity_at/claimed_at/created_at precedence and the 86400s SCI TTL literal (coordination_api and checkout_service are separate Lambda packages, so this is a deliberate literal duplication, not a shared import -- keep in sync if agent_id_alloc.SCI_TTL_SECONDS changes)."
         }
       }
     },
