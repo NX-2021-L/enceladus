@@ -66,7 +66,31 @@ PROJECT_IDS = [
 ]
 
 # Scan window: Handoffs touched within the prior N hours.
-LOOKBACK_HOURS = int(os.environ.get("CONSOLIDATION_LOOKBACK_HOURS", "24"))
+#
+# ENC-TSK-N63 (ENC-FTR-096, ENC-ISS-563): widened 24h -> 168h (7d). The
+# co-citation threshold (>=3 docs / >=2 waves, see MIN_WAVES below) was never
+# the defect -- ENC-TSK-N47 measured it as reachable at io's real volume. The
+# defect was the window: at the measured arrival rate of ~0.61 handoffs/day
+# (N47, 90d gamma measurement), a 24h window yields lambda=0.61 arrivals/window,
+# so P(<3 handoffs in window) ~= 98% -- the window was empty or under-full
+# almost every single day, and the co-citation logic was never reached with
+# enough material to possibly clear the bar. At 168h, lambda=4.27
+# arrivals/window, P(<3)=20.1% (P(>=3)=79.9%) -- the window can now actually
+# hold enough handoffs to be evaluated.
+#
+# THIS VALUE IS RATE-COUPLED, NOT A CONSTANT. It is correct only relative to
+# an arrival rate of ~0.61 handoffs/day. If the handoff arrival rate falls
+# materially, a 168h window degrades back toward zero yield (the same failure
+# mode as the old 24h window at the old rate) and MUST be re-derived from a
+# fresh measurement -- do not assume 168h is permanently safe. ENC-TSK-N57's
+# pairs_evaluated tripwire is the mechanism that detects this regression: it
+# instruments the assumption so a silent decay to zero yield becomes visible
+# instead of invisible.
+#
+# Scope boundary: this constant is the ONLY thing ENC-TSK-N63 changes. The
+# >=3-doc co-citation threshold, MIN_WAVES (>=2), and the nightly cadence are
+# proven correct by N47 and MUST NOT be tuned alongside this window change.
+LOOKBACK_HOURS = int(os.environ.get("CONSOLIDATION_LOOKBACK_HOURS", "168"))
 
 # A co-citation must recur across at least this many distinct Handoffs (waves)
 # to qualify as a consolidation candidate (ENC-FTR-096 AC-2).

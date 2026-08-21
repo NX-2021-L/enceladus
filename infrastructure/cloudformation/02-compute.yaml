@@ -1993,7 +1993,15 @@ Resources:
           # (tenant_invoker.py sends the full result_key in the invoke payload).
           RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           CONSOLIDATION_PROJECT_IDS: enceladus
-          CONSOLIDATION_LOOKBACK_HOURS: "24"
+          # ENC-TSK-N63 (FTR-096/ISS-563): 24h -> 168h (7d). Value calibrated to
+          # ~0.61 handoffs/day (N47 measurement); at lambda=4.27/window
+          # P(<3)=20.1% vs ~98% at 24h. RATE-COUPLED, not a constant -- if the
+          # handoff arrival rate falls materially this window degrades to zero
+          # yield and MUST be re-derived; ENC-TSK-N57's pairs_evaluated
+          # tripwire detects that regression. See lambda_function.py for the
+          # full derivation. Do not tune MIN_WAVES or the >=3-doc threshold
+          # alongside this -- N47 proved those correct.
+          CONSOLIDATION_LOOKBACK_HOURS: "168"
           CONSOLIDATION_MIN_WAVES: "2"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
