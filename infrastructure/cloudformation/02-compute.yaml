@@ -5710,6 +5710,20 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-O32 / ENC-ISS-631: basic CloudWatch Logs so /aws/lambda/auth-refresh* populates.
+        # The missing grant masked the function's true invocation status during the ISS-631
+        # investigation (log group never created); scoped to this function's log groups only.
+        - PolicyName: CloudWatchLogsBasic
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LogsBasic
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/auth-refresh${EnvironmentSuffix}*"
         # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted the Cognito grant).
         - PolicyName: cognito-refresh-policy
           PolicyDocument:
