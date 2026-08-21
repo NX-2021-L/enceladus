@@ -11,6 +11,23 @@
 # If already inside a worktree, exits with success (idempotent).
 # Detects other active sessions and warns. Cleans up stale locks.
 #
+# ENC-TSK-O39: the "reuse" path for an existing $WORKTREE_PATH directory now
+# verifies the directory is a REGISTERED worktree (present in `git worktree
+# list --porcelain` with a resolving .git link) before reusing it. A path
+# that exists but isn't registered (e.g. left behind after `rm -rf` of a
+# worktree without `git worktree remove`/prune) is treated as an orphan: its
+# contents are preserved by renaming to "$WORKTREE_PATH.orphan-<UTC
+# timestamp>" (never deleted silently), `git worktree prune` is run, and a
+# fresh worktree is created in its place.
+#
+# ENC-TSK-O39: lock heartbeat. The lock file's mtime drives the
+# STALE_LOCK_AGE_SECONDS age gate below (ENC-ISS-632). A session doing
+# legitimate long-running work past that window may `touch` its own lock
+# file (`.claude/agent-locks/<session-id>.lock`) at any point to refresh the
+# mtime and avoid being swept by a later invocation's age gate -- this script
+# does so once after writing the lock, and a session may repeat it anytime
+# before it releases the worktree.
+#
 # Environment variables:
 #   ENCELADUS_AGENT_PROVIDER  — agent identity (default: "unknown")
 
@@ -158,17 +175,41 @@ fi
 WORKTREE_PATH="$WORKTREE_DIR/$SESSION_ID"
 
 # Fix D.3: Handle three cases to avoid exit-128 when branch already exists.
+# ENC-TSK-O39: the case where $WORKTREE_PATH already exists is split into
+# "registered worktree" (safe to reuse) vs. "orphan directory" (must be
+# preserved, never silently reused or deleted).
+create_fresh_worktree() {
+  if git -C "$REPO_ROOT" show-ref --verify "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
+    # Branch exists but worktree dir does not — stale branch from a killed session.
+    echo "[WARN] Branch '$BRANCH_NAME' already exists without a worktree directory."
+    echo "[INFO] Reusing existing branch for new worktree..."
+    git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+    echo "[SUCCESS] Worktree created at $WORKTREE_PATH (reusing existing branch)"
+  else
+    git -C "$REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" HEAD
+    echo "[SUCCESS] Worktree created at $WORKTREE_PATH"
+  fi
+}
+
 if [ -d "$WORKTREE_PATH" ]; then
-  echo "[INFO] Worktree directory already exists at $WORKTREE_PATH. Reusing."
-elif git -C "$REPO_ROOT" show-ref --verify "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
-  # Branch exists but worktree dir does not — stale branch from a killed session.
-  echo "[WARN] Branch '$BRANCH_NAME' already exists without a worktree directory."
-  echo "[INFO] Reusing existing branch for new worktree..."
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
-  echo "[SUCCESS] Worktree created at $WORKTREE_PATH (reusing existing branch)"
+  # ENC-TSK-O39, orphan-reuse detection: bare directory existence is not
+  # proof this is a live worktree. Verify it's registered with the main
+  # checkout's git AND that its .git link actually resolves before reusing.
+  if git -C "$REPO_ROOT" worktree list --porcelain | grep -Fxq "worktree $WORKTREE_PATH" \
+    && [ -f "$WORKTREE_PATH/.git" ] \
+    && git -C "$WORKTREE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "[INFO] Worktree directory already exists at $WORKTREE_PATH and is a registered worktree. Reusing."
+  else
+    ORPHAN_PATH="${WORKTREE_PATH}.orphan-$(date -u +%Y%m%dT%H%M%SZ)"
+    echo "[WARN] Directory exists at $WORKTREE_PATH but is NOT a registered git worktree (orphan left by a destroyed worktree, or a broken .git link)."
+    echo "[INFO] Preserving orphan contents (never deleting silently): $WORKTREE_PATH -> $ORPHAN_PATH"
+    mv "$WORKTREE_PATH" "$ORPHAN_PATH"
+    git -C "$REPO_ROOT" worktree prune
+    create_fresh_worktree
+    echo "[INFO] Orphan directory preserved at $ORPHAN_PATH for manual inspection/cleanup."
+  fi
 else
-  git -C "$REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" HEAD
-  echo "[SUCCESS] Worktree created at $WORKTREE_PATH"
+  create_fresh_worktree
 fi
 
 # ---------------------------------------------------------------------------
@@ -185,5 +226,12 @@ task_id=${1:-}
 EOF
 
 echo "[SUCCESS] Lock file written: $LOCK_DIR/$SESSION_ID.lock"
+
+# ENC-TSK-O39: lock heartbeat. Refresh the mtime now (redundant right after
+# the write above, but establishes the pattern) so long-running sessions know
+# they can re-run this same `touch` at any later point to stay outside the
+# STALE_LOCK_AGE_SECONDS age gate (ENC-ISS-632) without needing a live PID.
+touch "$LOCK_DIR/$SESSION_ID.lock"
+
 echo ""
 echo ">>> cd $WORKTREE_PATH"
