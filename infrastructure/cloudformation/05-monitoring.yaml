@@ -26,6 +26,55 @@ Conditions:
 
 Resources:
 
+  # ENC-TSK-O04 / ENC-ISS-621: surface checkout-service GitHub commit/PR
+  # validation failures, which previously returned 400 to the caller and logged
+  # nothing server-side. Matches the [ISS-621] github_validation_fail line
+  # emitted by backend/lambda/checkout_service/lambda_function.py (ENC-TSK-O03).
+  # The quoted filter pattern is required: an unquoted [ ... ] is CloudWatch's
+  # space-delimited pattern syntax, not a literal bracket. Verified with
+  # `aws logs test-metric-filter` against the real emitted lines - it matches the
+  # failure line and NOT the github_token_minted line, which shares the marker.
+  GitHubValidationFailMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-checkout-service${EnvironmentSuffix}"
+      FilterPattern: '"[ISS-621] github_validation_fail"'
+      MetricTransformations:
+        - MetricNamespace: Enceladus/Prod
+          MetricName: GitHubValidationFail
+          MetricValue: "1"
+          # DefaultValue 0 publishes a real datapoint when nothing matches, so the
+          # alarm always has data. This deliberately avoids the trap that leaves
+          # CodeSizeMinimumAlarm permanently in ALARM (breaching-on-missing against
+          # an unpublished metric) - see ENC-ISS-623.
+          DefaultValue: 0
+
+  # Fires when committed-gate GitHub validation fails repeatedly - the ENC-ISS-621
+  # signature. 3-in-15min sits above a single transient 403 but well inside the
+  # ~35-minute fleet-wide windows observed on 2026-08-17.
+  GitHubValidationFailAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-github-validation-fail${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-ISS-621: checkout-service GitHub commit/PR validation failed 3 or more
+        times in 15 minutes, blocking committed-gate advances. Check
+        githubstatus.com FIRST (a platform incident presents as a permission bug),
+        then the [ISS-621] github_token_minted permission keys in
+        /aws/lambda/enceladus-checkout-service. See ENC-LSN-074.
+      Namespace: Enceladus/Prod
+      MetricName: GitHubValidationFail
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
   # ---------------------------------------------------------------------------
   # Health Probe Lambda — ENC-TSK-K44 / ENC-FTR-071: the Lambda function
   # (AWS::Lambda::Function) + its execution role now live in
