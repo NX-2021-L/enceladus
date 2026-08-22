@@ -1896,6 +1896,31 @@ Resources:
       RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/checkout
       Target: !Sub integrations/${CheckoutApiIntegration}
 
+  # ENC-TSK-O49: the recovery endpoint route. Created LIVE during the ENC-TSK-O37 /
+  # ENC-ISS-640 remediation on 2026-08-22 and codified in no template, which put
+  # audit_cfn_drift.py (pre-deploy-health-gate CHECK 7/7) into permanent failure and
+  # blocked the gamma compute deploy lane for EVERY agent until an unrelated push
+  # tripped it.
+  #
+  # This declaration is paired with an IMPORT (resource-import-api-gamma-recover.json).
+  # Declaring it WITHOUT importing would be actively unsafe, not merely incomplete:
+  # cloudformation-api-stack-deploy.yml triggers on push to v4/** for this exact path
+  # and runs execute-change-set, so CloudFormation would try to CREATE a RouteKey that
+  # already exists live on hi0dzmvqrc. API Gateway rejects duplicate RouteKeys, and the
+  # API stack -- which fronts every governed write path -- would roll back.
+  #
+  # Verified live 2026-08-22: RouteId bd1r2f8 targets integration 7lr9qw7, which is
+  # AWS_PROXY / POST / payload 2.0 -> enceladus-checkout-service-gamma. That is the same
+  # integration CheckoutApiIntegration resolves to, so this declaration matches reality
+  # rather than asserting a new wiring.
+  RoutePostCheckoutByProjectTaskByTaskIdRecover:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/recover
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
   RoutePostCheckoutByProjectTaskByTaskIdLog:
     Type: AWS::ApiGatewayV2::Route
     DeletionPolicy: Retain
