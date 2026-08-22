@@ -129,6 +129,24 @@ Parameters:
       enceladus-mcp-code-gamma Lambda OAuth-direct path. Kept out of the repo; injected
       at deploy/IMPORT via --parameters.
 
+  # ENC-TSK-O43 / ENC-FTR-133 BR-1: explicit per-plane tracker API base.
+  # WHY A PARAMETER AND NOT A BARE !If [IsGamma, ...]: IsGamma is defined below as
+  # !Not [!Equals [EnvironmentSuffix, ""]], i.e. literally "not prod". A future third
+  # plane (BR-5's account-isolated staging) would therefore resolve to GAMMA endpoints
+  # -- silently, and on every site the idiom is propagated to. This parameter WINS when
+  # supplied, so onboarding a plane is a parameter population (O(1)) instead of a
+  # re-refactor of every routing site (O(159), the measured prod-defaulting class).
+  # It is left empty by default so that plane resolution stays derivable from
+  # EnvironmentSuffix ALONE -- which is what tools/cfn_env_resolver.py renders with,
+  # and what ENC-TSK-O43 AC-1 asserts against.
+  PlaneTrackerApiBase:
+    Type: String
+    Default: ""
+    Description: >
+      Explicit tracker API base URL for this plane, including scheme and path
+      (e.g. https://HOST/api/v1/tracker). When empty, the template falls back to the
+      prod/gamma pair derived from EnvironmentSuffix. A third plane MUST supply this.
+
   # ENC-TSK-F63 AC-1: AppConfig extension layer ARNs.
   # Arch-specific; separate params because AWS publishes distinct layer versions.
   # See: https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-integration-lambda-extensions.html
@@ -274,6 +292,8 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-O43: an explicitly supplied PlaneTrackerApiBase overrides plane inference.
+  HasPlaneTrackerApiBase: !Not [!Equals [!Ref PlaneTrackerApiBase, ""]]
   RhythmActive: !And
     - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
     - !Equals [!Ref RhythmCycleEnabled, "true"]
@@ -661,7 +681,25 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           CORS_ORIGIN: https://jreese.net
-          TRACKER_API_BASE: !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          # ENC-TSK-O43: was an unconditional GAMMA host on BOTH planes. The prod stack
+          # does not own this resource today (describe-stack-resource on enceladus-compute
+          # returns ValidationError), so the correct prod value is out-of-band drift rather
+          # than a template guarantee -- and the cutover applies THIS template to that stack.
+          TRACKER_API_BASE: !If
+            - HasPlaneTrackerApiBase
+            - !Ref PlaneTrackerApiBase
+            - !If
+              - IsGamma
+              - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+              - !Sub "https://8nkzqkmxqc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          # ENC-TSK-O43 AC-5 / ENC-ISS-637 defect #3: live-only on gamma until now. The code
+          # default in checkout_service/lambda_function.py:176 is the unsuffixed PROD table,
+          # so a stack apply that strips this silently repoints the gamma SCI gate at prod --
+          # the ENC-ISS-640 write path, re-armed by our own deploy.
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          # ENC-TSK-O43 AC-5: multi-key accept-list, live-only on gamma and byte-equal to the
+          # singular key above. Codified from the SAME parameter -- no new secret.
+          COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
       Tags:
         - Key: Project
           Value: enceladus
@@ -1601,9 +1639,43 @@ Resources:
           ENCELADUS_MCP_TRANSPORT: streamable_http
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          ENCELADUS_COORDINATION_API_URL: https://enceladus-gamma.jreese.net/api/v1
+          # ENC-TSK-O44: ENCELADUS_COORDINATION_API_URL was REMOVED here. Verified across both
+          # refs that NO code reads that name -- server.py:166 reads ENCELADUS_COORDINATION_API_BASE.
+          # It is the _URL-vs-_BASE naming-mismatch class: a key that looks like configuration,
+          # is set on the live function, and is read by nothing.
           ENCELADUS_TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
           ENCELADUS_GRAPH_QUERY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch
+          # ENC-TSK-O44 / ENC-ISS-640 / ENC-ISS-637: the six routing bases below plus the four
+          # internal-key vars existed ONLY as live drift -- hand-applied during the ENC-ISS-640
+          # SEV2 remediation. This function is the one MCP surface currently routed correctly,
+          # and CloudFormation replaces Environment.Variables WHOLESALE: any change-set touching
+          # this resource block would have wiped all ten, re-arming the ISS-640 routing condition
+          # on the only plane-correct surface and re-opening ISS-637.
+          #
+          # ON PLANE PARAMETERIZATION (deliberate deviation from the task's literal wording,
+          # reasoned rather than skipped): these are written as gamma literals, NOT routed through
+          # a plane parameter. This resource carries Condition: IsGamma, so it does not exist on
+          # any other plane -- parameterizing its URLs while leaving that Condition in place would
+          # be theater: a third plane gets no gateway at all, whatever the URLs say. Generalizing
+          # this surface to a third plane is a Condition change, not a URL change, and belongs to
+          # ENC-FTR-133 BR-5. Contrast CheckoutServiceFunction (ENC-TSK-O43), which is
+          # UNCONDITIONAL and therefore genuinely does need the PlaneTrackerApiBase escape hatch.
+          CHECKOUT_SERVICE_API_BASE: https://enceladus-gamma.jreese.net/api/v1/checkout
+          ENCELADUS_COORDINATION_API_BASE: https://enceladus-gamma.jreese.net/api/v1/coordination
+          ENCELADUS_GOVERNANCE_API_BASE: https://enceladus-gamma.jreese.net/api/v1/governance
+          ENCELADUS_GITHUB_API_BASE: https://enceladus-gamma.jreese.net/api/v1/github
+          ENCELADUS_PROJECTS_API_BASE: https://enceladus-gamma.jreese.net/api/v1/coordination/projects
+          ENCELADUS_DOCUMENT_API_BASE: https://enceladus-gamma.jreese.net/api/v1/documents
+          # NX-2021-L/enceladus is a PUBLIC repository. All three of these hold the SAME live
+          # 64-char secret today, so all three resolve from the existing CoordinationInternalApiKey
+          # NoEcho parameter -- already wired through the compute-deploy workflow's
+          # --parameter-overrides from secrets.COORDINATION_INTERNAL_API_KEY. No new secret, no
+          # workflow edit, and no literal ever reaches the repo.
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
+          TRACKER_API_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          COORDINATION_INTERNAL_API_KEY_SCOPES: ""
           CORS_ORIGIN: !Ref CorsOrigin
       Tags:
         - Key: Project
@@ -7220,7 +7292,8 @@ Resources:
           # live on enceladus-mcp-streamable-gamma; codified here so they survive a stack
           # deploy. All three resolve to the gamma gateway (enceladus-gamma.jreese.net) and
           # are values verified against the live function on 2026-06-25.
-          ENCELADUS_COORDINATION_API_URL: https://enceladus-gamma.jreese.net/api/v1
+          # ENC-TSK-O44: ENCELADUS_COORDINATION_API_URL removed here too -- same unread-key class.
+          # Zero code readers on either ref; removing an env var nothing reads is functionally inert.
           ENCELADUS_TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
           ENCELADUS_GRAPH_QUERY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch
           # ENC-TSK-F63 AC-1 / ENC-ISS-313 H02 audit: flags are migrating to AppConfig, but the
