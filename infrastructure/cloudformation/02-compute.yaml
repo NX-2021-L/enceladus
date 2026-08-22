@@ -732,6 +732,39 @@ Resources:
           # guaranteed-fresh property diff.
           Value: "ENC-TSK-B66-reconcile-20260707"
 
+  # ENC-ISS-640 remediation (2026-08-22, ENC-TSK-O46): AgentSessionsGammaAccess was applied by
+  # hand directly to the live enceladus-checkout-service-role-gamma role during the ENC-ISS-640
+  # SEV2 remediation and existed in no template (`git grep AgentSessionsGammaAccess` returned
+  # nothing prior to this change). Codified here as a standalone AWS::IAM::Policy attached to the
+  # role BY NAME rather than as a `Policies:` entry on an AWS::IAM::Role resource, because
+  # enceladus-checkout-service-role[-gamma] is intentionally NOT CFN-managed (see the comment
+  # above CheckoutServiceFunction) -- this agent identity is denied iam:GetRole/ListRolePolicies,
+  # so the role's full existing policy set cannot be read and must not be guessed at by declaring
+  # the whole Role resource. This declares only the one grant known verbatim from the remediation;
+  # it does not attempt to bring the rest of the role under CFN. Gamma-only: the ENC-ISS-640 fix
+  # was applied to the gamma role/table only, so this is scoped with Condition: IsGamma rather than
+  # via ${EnvironmentSuffix} substitution reaching into a prod role that was never granted this.
+  CheckoutServiceRoleAgentSessionsGammaAccess:
+    Type: AWS::IAM::Policy
+    Condition: IsGamma
+    Properties:
+      PolicyName: AgentSessionsGammaAccess
+      Roles:
+        - !Sub "enceladus-checkout-service-role${EnvironmentSuffix}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AgentSessionsGammaAccess
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+            # Base-table item access only -- GetItem/UpdateItem operate on the primary key, and
+            # the ENC-ISS-640 fix (checkout advancing an agent-sessions-gamma record) does not
+            # require Query/Scan, so no index ARN is included. Do not broaden without confirming
+            # the role actually needs index access.
+            Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
   # scoring_status: pending -> scored lifecycle. Subscribes to LessonScoringTopic; pure DynamoDB
