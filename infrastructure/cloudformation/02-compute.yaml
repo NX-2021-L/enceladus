@@ -129,6 +129,24 @@ Parameters:
       enceladus-mcp-code-gamma Lambda OAuth-direct path. Kept out of the repo; injected
       at deploy/IMPORT via --parameters.
 
+  # ENC-TSK-O43 / ENC-FTR-133 BR-1: explicit per-plane tracker API base.
+  # WHY A PARAMETER AND NOT A BARE !If [IsGamma, ...]: IsGamma is defined below as
+  # !Not [!Equals [EnvironmentSuffix, ""]], i.e. literally "not prod". A future third
+  # plane (BR-5's account-isolated staging) would therefore resolve to GAMMA endpoints
+  # -- silently, and on every site the idiom is propagated to. This parameter WINS when
+  # supplied, so onboarding a plane is a parameter population (O(1)) instead of a
+  # re-refactor of every routing site (O(159), the measured prod-defaulting class).
+  # It is left empty by default so that plane resolution stays derivable from
+  # EnvironmentSuffix ALONE -- which is what tools/cfn_env_resolver.py renders with,
+  # and what ENC-TSK-O43 AC-1 asserts against.
+  PlaneTrackerApiBase:
+    Type: String
+    Default: ""
+    Description: >
+      Explicit tracker API base URL for this plane, including scheme and path
+      (e.g. https://HOST/api/v1/tracker). When empty, the template falls back to the
+      prod/gamma pair derived from EnvironmentSuffix. A third plane MUST supply this.
+
   # ENC-TSK-F63 AC-1: AppConfig extension layer ARNs.
   # Arch-specific; separate params because AWS publishes distinct layer versions.
   # See: https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-integration-lambda-extensions.html
@@ -274,6 +292,8 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-O43: an explicitly supplied PlaneTrackerApiBase overrides plane inference.
+  HasPlaneTrackerApiBase: !Not [!Equals [!Ref PlaneTrackerApiBase, ""]]
   RhythmActive: !And
     - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
     - !Equals [!Ref RhythmCycleEnabled, "true"]
@@ -661,7 +681,25 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           CORS_ORIGIN: https://jreese.net
-          TRACKER_API_BASE: !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          # ENC-TSK-O43: was an unconditional GAMMA host on BOTH planes. The prod stack
+          # does not own this resource today (describe-stack-resource on enceladus-compute
+          # returns ValidationError), so the correct prod value is out-of-band drift rather
+          # than a template guarantee -- and the cutover applies THIS template to that stack.
+          TRACKER_API_BASE: !If
+            - HasPlaneTrackerApiBase
+            - !Ref PlaneTrackerApiBase
+            - !If
+              - IsGamma
+              - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+              - !Sub "https://8nkzqkmxqc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          # ENC-TSK-O43 AC-5 / ENC-ISS-637 defect #3: live-only on gamma until now. The code
+          # default in checkout_service/lambda_function.py:176 is the unsuffixed PROD table,
+          # so a stack apply that strips this silently repoints the gamma SCI gate at prod --
+          # the ENC-ISS-640 write path, re-armed by our own deploy.
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          # ENC-TSK-O43 AC-5: multi-key accept-list, live-only on gamma and byte-equal to the
+          # singular key above. Codified from the SAME parameter -- no new secret.
+          COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
       Tags:
         - Key: Project
           Value: enceladus
