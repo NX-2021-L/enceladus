@@ -62,17 +62,42 @@ risk the live gamma stack. Each must be codified by hand with the correct env ha
 
 ## Deploy mechanics — IMPORTANT (re-frames AC-5/AC-7/AC-10)
 
+> **Correction (2026-08-22, ENC-TSK-O46):** The bullet below asserting the prod stack "does not
+> exist" is **stale and now FALSE**. Verified directly via
+> `aws cloudformation describe-stacks --stack-name enceladus-compute` (profile
+> `enceladus-agent`): the stack **exists**, `StackStatus=UPDATE_COMPLETE`,
+> `CreationTime=2026-02-24T04:40:57Z`, `LastUpdatedTime=2026-08-08T05:56:41Z`, and currently
+> tracks 27 `AWS::Lambda::Function` resources. Its `CreationTime` predates the 2026-06-17 audit
+> date below, so the "does not exist" claim may already have been inaccurate when written, not
+> merely something that changed since — this correction does not attempt to establish which. The
+> practical upshot: prod `enceladus-compute` is a **normal existing stack now taking UPDATEs**
+> (most recently 2026-08-08), not a from-scratch CREATE target — the EntityAlreadyExists /
+> stomped-ZipFile CREATE risk described in the bullets below no longer applies to the stack as a
+> whole. `enceladus-checkout-service-role` (prod and `-gamma`) remains a documented **exception**:
+> it is intentionally kept out of CFN management (see `infrastructure/cloudformation/02-compute.yaml`
+> comment above `CheckoutServiceFunction`, ENC-TSK-K45/B66 Ph5) specifically because the agent
+> identity used for this kind of audit is denied `iam:GetRole`/`iam:ListRolePolicies`, so its live
+> policy body cannot be safely re-authored as a managed resource. See
+> `tools/iam-audit/live-role-inventory-20260822.json` (ENC-TSK-O46) for the current re-derived
+> attached-vs-declared role gap (7 roles, not 12).
+
 - The prod CloudFormation stack **`enceladus-compute` does not exist** (only `enceladus-compute-gamma`).
   Confirms ENC-ISS-174. The prod roles exist live, created by `deploy.sh`, under **no** stack.
+  ***(Stale — see correction above. As of 2026-08-22 the stack exists and most of these roles are
+  now declared/imported into it; `enceladus-checkout-service-role[-gamma]` is the documented
+  exception.)***
 - Therefore `aws cloudformation deploy` against prod is a **CREATE**, which would (a) fail
   `EntityAlreadyExists` on the fixed `RoleName`s already live, and (b) risk stomping live Lambda
   code via the template's placeholder `ZipFile`. **It is not a safe additive update.**
+  ***(Stale — see correction above; the stack now takes ordinary UPDATEs.)***
 - The safe path to bring the pre-existing fleet under CFN is a **resource import**
   (`create-change-set --change-set-type IMPORT`), scoped and reviewed, run under the
   `product-lead` terminal — `iam:CreateRole` is denied to the GHA deploy role (ENC-ISS-252).
 - **Landmine:** `.github/workflows/cloudformation-compute-stack-deploy.yml` triggers on push to
   `main` for this path. **Merging this PR would auto-trigger the (currently-failing) prod compute
   deploy.** Do not merge until the import strategy is in place / the workflow is guarded.
+  ***(Stale premise — the stack now updates successfully as of 2026-08-08; re-verify this landmine
+  claim before relying on it.)***
 
 ## Idempotency validation (AC-5)
 
