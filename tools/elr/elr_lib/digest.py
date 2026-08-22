@@ -10,11 +10,17 @@ anomalies.
 
 Optional keys (present only when the caller supplies a non-None value):
 content_hash, size_bytes, counts, record_ids, local_path,
-compliance_score, document_id, version, local_sha256, outline.
+compliance_score, document_id, version, local_sha256, outline, rows.
 
 No other keys are accepted -- passing anything else raises ValueError so
 a future caller cannot silently smuggle a full response body into a
 "digest" and defeat the digest-first contract.
+
+``rows`` (added for ENC-TSK-O52 / elr_batch_get.py) carries per-item
+COMPACT summary dicts for a batch operation -- e.g.
+{id, kind, ok, status_or_version, title} -- never full record bodies.
+It is still subject to the same digest-first discipline as every other
+field: small, stable, no raw payloads.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ _OPTIONAL_FIELDS = (
     "version",
     "local_sha256",
     "outline",
+    "rows",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
@@ -50,7 +57,7 @@ def build_digest(operation: str, ok: bool, status: int, **fields: Any) -> Dict[s
       identity_posture -- one of VALID_IDENTITY_POSTURES (default "unknown")
       anomalies         -- iterable of strings (default [])
       content_hash, size_bytes, counts, record_ids, local_path,
-      compliance_score -- optional, included only when not None.
+      compliance_score, rows -- optional, included only when not None.
 
     Any other keyword raises ValueError.
     """

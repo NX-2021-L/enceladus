@@ -45,6 +45,18 @@ class BuildDigestTests(unittest.TestCase):
         self.assertEqual(d["local_path"], "/tmp/out.json")
         self.assertEqual(d["compliance_score"], 0.97)
 
+    def test_rows_field_included_when_supplied(self):
+        """rows was added for ENC-TSK-O52 / elr_batch_get.py -- per-item
+        compact summaries for a batch operation.
+        """
+        rows = [{"id": "ENC-TSK-1", "kind": "tracker", "ok": True, "status_or_version": "open", "title": "A"}]
+        d = elr_digest.build_digest("op.test", True, 200, rows=rows)
+        self.assertEqual(d["rows"], rows)
+
+    def test_rows_field_omitted_when_not_supplied(self):
+        d = elr_digest.build_digest("op.test", True, 200)
+        self.assertNotIn("rows", d)
+
     def test_valid_identity_postures_accepted(self):
         for posture in elr_digest.VALID_IDENTITY_POSTURES:
             d = elr_digest.build_digest("op.test", True, 200, identity_posture=posture)
