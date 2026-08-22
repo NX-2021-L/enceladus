@@ -1,0 +1,9 @@
+[
+  {
+    "ResourceType": "AWS::IAM::ManagedPolicy",
+    "LogicalResourceId": "S3RhythmCycleLifecyclePolicy",
+    "ResourceIdentifier": {
+      "PolicyArn": "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-ops"
+    }
+  }
+]
