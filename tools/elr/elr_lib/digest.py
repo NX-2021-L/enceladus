@@ -10,7 +10,7 @@ anomalies.
 
 Optional keys (present only when the caller supplies a non-None value):
 content_hash, size_bytes, counts, record_ids, local_path,
-compliance_score.
+compliance_score, document_id, version, local_sha256, outline.
 
 No other keys are accepted -- passing anything else raises ValueError so
 a future caller cannot silently smuggle a full response body into a
@@ -31,6 +31,10 @@ _OPTIONAL_FIELDS = (
     "record_ids",
     "local_path",
     "compliance_score",
+    "document_id",
+    "version",
+    "local_sha256",
+    "outline",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
