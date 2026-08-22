@@ -1,0 +1,157 @@
+/* Escalations cockpit (ENC-TSK-O40). Design-system-2 tokens only — no raw hex
+   outside the documented fallbacks the DS itself uses. */
+
+.ev2-esc__notice {
+  margin: 12px 0 16px;
+}
+
+.ev2-esc__hint {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--enc-dust, #6b8a94);
+}
+
+.ev2-esc__mono {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--enc-starlight, #eef2f7);
+  font-variant-numeric: tabular-nums;
+}
+
+.ev2-esc__idlink {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--enc-teal, #3d9ba8);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ev2-esc__idlink:hover {
+  text-decoration: underline;
+}
+
+.ev2-esc__idlink:focus-visible {
+  outline: none;
+  box-shadow: var(--v2-focus-ring);
+  border-radius: 3px;
+}
+
+/* Drift marker — the target record moved after the escalation was filed. */
+.ev2-esc__drift {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--font-body, 'Inter', sans-serif);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--v2-status-warning, #c9a15c);
+  border: 1px solid rgba(201, 161, 92, 0.4);
+}
+
+.ev2-esc__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ev2-esc__prose {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--enc-starlight, #eef2f7);
+  white-space: pre-wrap;
+}
+
+.ev2-esc__payload {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--v2-control-radius, 6px);
+  background: var(--v2-field-bg, #0d1220);
+  border: 1px solid var(--v2-field-border, rgba(61, 155, 168, 0.25));
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--enc-seafoam, #c8ddd9);
+}
+
+.ev2-esc__deny {
+  margin-top: 16px;
+}
+
+.ev2-esc__textarea {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--v2-field-bg, #0d1220);
+  border: 1px solid var(--v2-field-border, rgba(61, 155, 168, 0.25));
+  border-radius: var(--v2-control-radius, 6px);
+  color: var(--enc-starlight, #eef2f7);
+  font-family: var(--font-body, 'Inter', sans-serif);
+  font-size: 13.5px;
+  line-height: 1.55;
+  resize: vertical;
+  transition: border-color var(--dur-base, 200ms) var(--ease-orbit, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.ev2-esc__textarea:hover:not(:disabled) {
+  border-color: var(--v2-field-border-hover, rgba(61, 155, 168, 0.45));
+}
+
+.ev2-esc__textarea:focus {
+  outline: none;
+  border-color: var(--v2-field-border-focus, #3d9ba8);
+  box-shadow: var(--v2-focus-ring);
+}
+
+.ev2-esc__textarea:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ev2-esc__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.ev2-esc__actions--closed {
+  justify-content: flex-start;
+  font-size: 13px;
+  color: var(--enc-dust, #6b8a94);
+}
+
+/* Mobile-first: the v4 PWA mandate. The decision controls must stay reachable
+   and full-width on a phone — io approves escalations from wherever io is. */
+@media (max-width: 600px) {
+  .ev2-esc__actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .ev2-esc__payload {
+    max-height: 200px;
+  }
+
+  /* KeyValuePairs sets grid-template-columns as an INLINE style, so a plain
+     rule cannot win — !important is load-bearing here, not laziness. Without
+     it the 3-column grid holds at 375px and the values overlap each other
+     (record ids and ISO timestamps are far wider than a 125px track). */
+  .ev2-esc__detail .ev2-kv {
+    grid-template-columns: 1fr !important;
+    gap: 12px !important;
+  }
+}
+
+/* Tablet / large phone: two tracks still read cleanly. */
+@media (min-width: 601px) and (max-width: 900px) {
+  .ev2-esc__detail .ev2-kv {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}

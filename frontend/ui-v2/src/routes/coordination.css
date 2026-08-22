@@ -45,3 +45,19 @@
   font-size: var(--text-sm);
   color: var(--fg-muted);
 }
+
+/* ENC-TSK-O40 — the Escalations tab is a monitor view; this points io at the
+   decision surface instead of leaving a tab that looks like a destination. */
+.ev2-coord__escalation-cta {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.ev2-coord__escalation-cta a {
+  color: var(--enc-teal, #3d9ba8);
+  text-decoration: none;
+}
+
+.ev2-coord__escalation-cta a:hover {
+  text-decoration: underline;
+}

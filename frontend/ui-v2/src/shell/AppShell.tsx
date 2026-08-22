@@ -24,6 +24,11 @@ const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Governance', href: '/governance' },
   { type: 'link' as const, text: 'Changelog', href: '/changelog' },
   { type: 'link' as const, text: 'Coordination', href: '/coordination' },
+  // ENC-TSK-O40: the escalations decision surface. Restored as a first-class
+  // nav item — CoordinationRoute's tab is a read-only monitor view and cannot
+  // approve or deny, and approve/deny have no MCP path by design, so this is
+  // the ONLY way a decision can be made once v4 is the production surface.
+  { type: 'link' as const, text: 'Escalations', href: '/escalations' },
   { type: 'link' as const, text: 'Component registry', href: '/component-registry' },
   { type: 'link' as const, text: 'Deployment manager', href: '/deployments' },
   { type: 'link' as const, text: 'Access tokens', href: '/access-tokens' },

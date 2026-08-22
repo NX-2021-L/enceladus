@@ -7,8 +7,13 @@
  * comp-coordination-api backend slice (src/api/coordination.ts), NOT the
  * tracker/documents corpus, the OpenSearch index, or /feed/corpus.
  *
- * The standalone Escalations menu item is deprecated by this page -- the
- * Escalations tab below is the one surface for that record type now.
+ * The Escalations tab below is a READ-ONLY monitor view. It is deliberately not
+ * the one surface for that record type: approve/deny are non-delegable human
+ * Cognito decisions (ENC-FTR-121 §6) and live on the dedicated /escalations
+ * route (ENC-TSK-O40). An earlier revision of this comment claimed the
+ * standalone menu item was deprecated by this page -- that was wrong, and left
+ * the cockpit with a tab that looked like a destination but could not decide
+ * anything.
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -177,6 +182,12 @@ export function CoordinationRoute() {
       label: 'Escalations',
       count: escalations.length,
       content: (
+        <>
+          {/* ENC-TSK-O40: this tab monitors; it cannot decide. Send io to the
+              decision surface rather than leaving a dead end here. */}
+          <div className="ev2-coord__escalation-cta">
+            <a href="/escalations">Open the escalations queue to approve or deny →</a>
+          </div>
         <Cards<EscalationRecord>
           items={escalations}
           trackBy="item_id"
@@ -190,6 +201,7 @@ export function CoordinationRoute() {
             ],
           }}
         />
+        </>
       ),
     },
     {

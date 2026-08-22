@@ -122,6 +122,13 @@ const skillLibraryRoute = createRoute({
   path: '/skills',
   component: lazyRouteComponent(() => import('./SkillLibraryRoute'), 'SkillLibraryRoute'),
 })
+const escalationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/escalations',
+  // ENC-TSK-O40: the io approval cockpit. CoordinationRoute's Escalations tab
+  // stays as the read-only monitor view; this is the decision surface.
+  component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationsRoute'),
+})
 const sessionRoute = createSessionDetailRoute(() => rootRoute)
 const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
 
@@ -151,6 +158,7 @@ const routeTree = rootRoute.addChildren([
   changelogRoute,
   coordinationRoute,
   skillLibraryRoute,
+  escalationsRoute,
   sessionRoute,
   agentDetailRoute,
   ...placeholderRoutes,
