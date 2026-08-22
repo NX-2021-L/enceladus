@@ -38,6 +38,8 @@ Resources:
     Properties:
       TableName: !Sub "coordination-requests${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: request_id
           AttributeType: S
@@ -81,6 +83,8 @@ Resources:
     Properties:
       TableName: !Sub "devops-project-tracker${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
       AttributeDefinitions:
@@ -156,6 +160,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-relationships${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
       AttributeDefinitions:
@@ -180,6 +186,8 @@ Resources:
     Properties:
       TableName: !Sub "projects${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
         - AttributeName: project_id
@@ -208,6 +216,8 @@ Resources:
     Properties:
       TableName: !Sub "documents${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
       DeletionProtectionEnabled: !If [IsProduction, true, false]
@@ -249,6 +259,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: wave_id
           AttributeType: S
@@ -282,6 +294,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-stigmergic-trace${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: trace_id
           AttributeType: S
@@ -318,6 +332,8 @@ Resources:
     Properties:
       TableName: !Sub "devops-deployment-manager${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: project_id
           AttributeType: S
@@ -357,6 +373,8 @@ Resources:
     Properties:
       TableName: !Sub "governance-policies${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: policy_id
           AttributeType: S
@@ -424,6 +442,8 @@ Resources:
     Properties:
       TableName: !Sub "agent-compliance-violations${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: violation_id
           AttributeType: S
@@ -481,6 +501,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-id-counters${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: counter_key
           AttributeType: S
@@ -503,6 +525,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-id-idempotency${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: idempotency_key
           AttributeType: S
@@ -529,6 +553,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-id-violations${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: caller_identity
           AttributeType: S
@@ -784,6 +810,8 @@ Resources:
     Properties:
       TableName: !Sub "agent-sessions${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
         - AttributeName: session_id
@@ -813,6 +841,8 @@ Resources:
     Properties:
       TableName: !Sub "agent-types${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
         - AttributeName: agent_type_id
@@ -843,6 +873,8 @@ Resources:
     Properties:
       TableName: !Sub "agent-credentials${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
         - AttributeName: credential_id
@@ -872,6 +904,8 @@ Resources:
     Properties:
       TableName: !Sub "user-preferences${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: sub
           AttributeType: S
@@ -896,6 +930,8 @@ Resources:
     Properties:
       TableName: !Sub "governance-version${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: version_id
           AttributeType: S
@@ -919,6 +955,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-percolation-telemetry${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -943,6 +981,8 @@ Resources:
     Properties:
       TableName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: attribute_name
           AttributeType: S
