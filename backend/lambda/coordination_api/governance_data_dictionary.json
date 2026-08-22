@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-21.4",
-  "updated_at": "2026-08-21T22:02:00Z",
-  "last_change_summary": "ENC-TSK-O37 (ENC-ISS-597): added checkout_service.stale_holder_release documenting the new POST /{project}/task/{task_id}/recover route (_handle_release_recover) -- governed, audited recovery for a checkout wedged behind a dead agent session. Server-verifies the current holder's terminality against the live agent-sessions store (_session_terminal_state: absent / retired / sci_ttl_elapsed vs live) rather than trusting a client claim; a live holder still rejects third-party recovery (409, no write). A confirmed-terminal recovery writes an audit worklog naming the prior holder before clearing the checkout. Follows same-day 2026-08-21.3 (ENC-TSK-O36 corpus-namespace port); merged via cherry-pick recut PR after original PR #1104 failed to trigger CI.",
+  "version": "2026-08-22.2",
+  "updated_at": "2026-08-22T00:30:00Z",
+  "last_change_summary": "ENC-TSK-O47 follow-up: alias_prefixes resolution extended beyond the MCP server to every other prefix->project_id resolver in the codebase, closing a gap where ENC-TSK-O45's gamma prefix repoint would still have broken legacy ENC-* record resolution through coordination_api's checkout/tracker-mutation routes even though the MCP server was fixed. backend/lambda/coordination_api/project_utils.py::_key_for_record_id() (and its Scan fallback, now projecting alias_prefixes) and backend/lambda/deploy_finalize/lambda_function.py + backend/lambda/deploy_orchestrator/lambda_function.py's _infer_project_id()/_load_prefix_map() all now apply the identical MINT-wins-deterministically, logged-not-silent collision rule as server.py's _get_prefix_map(). project_service.alias_prefixes entity updated to document all four consumers and the Scan-projection requirement.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1837,6 +1837,21 @@
         "uri": {
           "type": "string",
           "usage_guidance": "Resolved as governance://{file_name}. Registered file_names are pre-validated; arbitrary 'agents/' paths are accepted by the API and resolve if the S3 object exists."
+        }
+      }
+    },
+    "project_service.alias_prefixes": {
+      "description": "ENC-TSK-O47: optional alias_prefixes attribute on the projects DynamoDB table record, additive to the existing MINT `prefix` attribute. Read by every prefix->project_id resolver in the codebase, each of which unions a project's alias_prefixes entries into its resolution map alongside that row's canonical `prefix`: tools/enceladus-mcp-server/server.py::_get_prefix_map() (and, downstream, _resolve_prefix/_parse_record_id/_tracker_key); backend/lambda/coordination_api/project_utils.py::_key_for_record_id() (via _resolve_prefix_from_cache(), used by coordination_api's checkout and tracker-mutation routes); and the best-effort deployment-worklog resolvers backend/lambda/deploy_finalize/lambda_function.py::_infer_project_id() and backend/lambda/deploy_orchestrator/lambda_function.py::_infer_project_id() (both via _load_prefix_map()). Motivating case: ENC-TSK-O45 repoints gamma's MINT `prefix` to a disjoint value, so gamma's ~4,232 pre-existing ENC-* records would become unresolvable -- across the MCP server AND the backend Lambda routes -- if `prefix` were the sole resolution key anywhere; alias_prefixes keeps resolution additive everywhere it happens so that migration cannot orphan existing record IDs or silently stop stamping their deployment worklogs.",
+      "fields": {
+        "alias_prefixes": {
+          "type": "array",
+          "definition": "List of 3-letter uppercase legacy/secondary record-ID prefixes that resolve to this project's project_id in addition to its canonical MINT `prefix`, in every resolver that reads it (see entity description). Each entry is normalized the same way `prefix` is (.strip().upper()); empty or malformed entries are skipped. Resolution-only: alias_prefixes never changes which prefix tracker.create mints new record IDs under -- that remains governed exclusively by `prefix`.",
+          "constraints": {
+            "item_format": "^[A-Z]{3}$ after normalization",
+            "collision_rule": "If a prefix value is simultaneously one project's alias_prefixes entry and a different project's MINT `prefix`, the MINT prefix always wins the resolution, deterministically and independent of source row/page order, in every resolver. The collision is never silently resolved: each resolver logs it (logger.warning, message tagged [PREFIX-COLLISION]) and records it in its own module-level _PREFIX_COLLISIONS dict -- tools/enceladus-mcp-server/server.py, backend/lambda/coordination_api/project_utils.py, backend/lambda/deploy_finalize/lambda_function.py, and backend/lambda/deploy_orchestrator/lambda_function.py each carry their own -- for programmatic detection, guarding against re-creating the ENC-ISS-538 collision class inside this same fix.",
+            "projection_note": "Every Scan/API read that backs a resolver's prefix map must explicitly project alias_prefixes (not just prefix), or that resolver will silently never see the field. coordination_api/project_utils.py's Scan and the deploy_finalize/deploy_orchestrator Scans were extended accordingly in the same change that added this field."
+          },
+          "usage_guidance": "Set on a project's projects-table record when repointing its MINT `prefix` to a new value while pre-existing records under the old prefix must remain resolvable (ENC-TSK-O45 gamma repoint is the motivating case). Not required for a project that has never changed its prefix. Optional; omitted/empty is equivalent to no aliases."
         }
       }
     },
@@ -8624,6 +8639,18 @@
       "summary": "ENC-TSK-O36 (ENC-ISS-604): port the intelligence-project corpus-governance namespace from frozen main onto v4/main -- new entities corpus.edge_taxonomy (the fourteen-type governed typed-edge taxonomy for the io-graph corpus, project_id=intelligence, DOC-4DD9C4E8B66C section 7.2) and corpus.graph_isolated_reason (the eight-value graph_isolated_reason enum, INT-TSK-197 / INT-PLN-012). Both entities are DOCUMENTATION ONLY -- verified 2026-08-08 that no Lambda in this repo reads governance-dictionary content for either entity; the enforcing allowlists (graph_sync.ALLOWED_EDGE_TYPES, graph_query_api._ALLOWED_EDGE_TYPES, graph_health_metrics.ALLOWED_EDGE_TYPES) and the graph_isolated_reason IS NULL read live in the SEPARATE intelligence-project repo, not in Enceladus's own same-named graph_sync/graph_query_api/graph_health_metrics Lambdas that govern Enceladus's own tracker/document graph (the ENC-ISS-604 second-hazard disambiguation: no name collision here, the two entities' governing_documents cite INT-* records exclusively). Ported verbatim, byte-for-byte, from origin/main's 2026-08-17.1 dictionary; no existing v4/main entity was modified, reordered, or removed. No Lambda code, handler, or test file exists in this repo for either entity -- there is nothing else to port.",
       "task": "ENC-TSK-O36",
       "issue": "ENC-ISS-604"
+    },
+    {
+      "version": "2026-08-22.1",
+      "date": "2026-08-22",
+      "summary": "ENC-TSK-O47: server.py's _get_prefix_map()/_resolve_prefix() prefix->project_id resolution made additive. New project_service.alias_prefixes entity documents the optional alias_prefixes projects-table attribute -- _get_prefix_map() now unions every project's alias_prefixes into the resolution map alongside its canonical MINT `prefix`, so a project (e.g. gamma under ENC-TSK-O45) can repoint its mint prefix to a disjoint value without orphaning pre-existing record IDs minted under the old prefix. Collision rule: MINT prefix always wins over a conflicting alias, deterministically; the collision is logged and recorded in the new module-level _PREFIX_COLLISIONS dict for programmatic detection rather than silently resolved (guards against re-creating the ENC-ISS-538 collision class inside this fix). _resolve_prefix()'s error message shape for genuinely unknown prefixes is unchanged.",
+      "task": "ENC-TSK-O47"
+    },
+    {
+      "version": "2026-08-22.2",
+      "date": "2026-08-22",
+      "summary": "ENC-TSK-O47 follow-up: alias_prefixes resolution extended beyond the MCP server to every other prefix->project_id resolver in the codebase, closing a gap where ENC-TSK-O45's gamma prefix repoint would still have broken legacy ENC-* record resolution through coordination_api's checkout/tracker-mutation routes even though the MCP server was fixed. backend/lambda/coordination_api/project_utils.py::_key_for_record_id() (and its Scan fallback, now projecting alias_prefixes) and backend/lambda/deploy_finalize/lambda_function.py + backend/lambda/deploy_orchestrator/lambda_function.py's _infer_project_id()/_load_prefix_map() all now apply the identical MINT-wins-deterministically, logged-not-silent collision rule as server.py's _get_prefix_map(). project_service.alias_prefixes entity updated to document all four consumers and the Scan-projection requirement.",
+      "task": "ENC-TSK-O47"
     }
   ]
 }

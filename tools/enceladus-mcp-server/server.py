@@ -724,10 +724,29 @@ _COORDINATION_REQUEST_ID_RE = re.compile(r"^(CRQ|DSP)-[A-Z0-9-]{3,64}$", re.IGNO
 _TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN"}
 _TRACKER_COUNTER_PREFIX = "counter#"
 _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
+# Populated on every _get_prefix_map() build with any prefix that appears as
+# both one project's MINT `prefix` and another project's `alias_prefixes`
+# entry. Mint always wins the resolution (see _get_prefix_map docstring), but
+# the collision is kept here — in addition to a logger.warning — so it stays
+# programmatically detectable instead of silently resolving (ENC-TSK-O47;
+# guards against re-creating the ENC-ISS-538 collision class inside the fix).
+_PREFIX_COLLISIONS: Dict[str, Dict[str, str]] = {}
 
 
 def _get_prefix_map(*, _refresh: bool = False) -> Dict[str, str]:
-    """Build prefix -> project_name map via projects HTTP API.
+    """Build prefix -> project_id map via projects HTTP API.
+
+    Maps each row's canonical (MINT) `prefix` AND every entry of its optional
+    `alias_prefixes` list (ENC-TSK-O47) to that row's project_id, so legacy
+    record IDs minted under a prefix a project has since moved off of (e.g.
+    gamma's ENC-* records after ENC-TSK-O45 repoints gamma's mint prefix)
+    keep resolving.
+
+    Resolution is additive, never destructive: if a prefix is simultaneously
+    one project's MINT prefix and a different project's alias, the MINT
+    prefix always wins, deterministically, regardless of row iteration
+    order. Such a collision is never resolved silently — it is logged and
+    recorded in `_PREFIX_COLLISIONS` for callers/tests to inspect.
 
     On cache miss for a specific prefix, callers should retry with
     _refresh=True to pick up newly created projects (ENC-ISS-123).
@@ -737,12 +756,42 @@ def _get_prefix_map(*, _refresh: bool = False) -> Dict[str, str]:
         return _PREFIX_MAP_CACHE
     resp = _projects_api_request("GET")
     projects = resp.get("projects", [])
-    mapping = {}
+
+    mint_mapping: Dict[str, str] = {}
+    alias_mapping: Dict[str, str] = {}
     for proj in projects:
         pid = str(proj.get("project_id") or proj.get("name") or "").strip()
+        if not pid:
+            continue
         pfx = str(proj.get("prefix") or "").strip().upper()
-        if pid and pfx:
-            mapping[pfx] = pid
+        if pfx:
+            mint_mapping[pfx] = pid
+        for alias in proj.get("alias_prefixes") or []:
+            alias_pfx = str(alias or "").strip().upper()
+            if not alias_pfx:
+                continue
+            alias_mapping[alias_pfx] = pid
+
+    # Start from aliases, then let mint prefixes overwrite — mint always
+    # wins, applied last/over aliases so the outcome is independent of the
+    # order projects came back from the API.
+    mapping: Dict[str, str] = dict(alias_mapping)
+    collisions: Dict[str, Dict[str, str]] = {}
+    for pfx, mint_pid in mint_mapping.items():
+        alias_pid = alias_mapping.get(pfx)
+        if alias_pid is not None and alias_pid != mint_pid:
+            collisions[pfx] = {"mint_project_id": mint_pid, "alias_project_id": alias_pid}
+            logger.warning(
+                "[PREFIX-COLLISION] prefix %r is project %r's MINT prefix but also project %r's "
+                "alias_prefixes entry; MINT wins (ENC-ISS-538 collision class)",
+                pfx,
+                mint_pid,
+                alias_pid,
+            )
+        mapping[pfx] = mint_pid
+
+    _PREFIX_COLLISIONS.clear()
+    _PREFIX_COLLISIONS.update(collisions)
     _PREFIX_MAP_CACHE = mapping
     return mapping
 

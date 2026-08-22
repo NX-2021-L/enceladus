@@ -427,23 +427,63 @@ def _get_project_deploy_mode(project_id: str) -> str:
 # --- Record-only helpers (ENC-ISS-102) ---
 # Prefix-to-project cache for tracker worklog writes
 _prefix_to_project: Dict[str, str] = {}
+# Populated whenever _load_prefix_map() finds a prefix that is simultaneously
+# one project's MINT `prefix` and another project's `alias_prefixes` entry.
+# MINT always wins the cache entry, but the collision is kept here -- in
+# addition to a logger.warning -- so it stays programmatically detectable
+# instead of silently resolving (ENC-TSK-O47; mirrors tools/enceladus-mcp-
+# server/server.py::_PREFIX_COLLISIONS and coordination_api/project_utils.py's
+# equivalent; guards against re-creating the ENC-ISS-538 collision class).
+_PREFIX_COLLISIONS: Dict[str, Dict[str, str]] = {}
 
 
 def _load_prefix_map() -> None:
-    """Load prefix -> project_id mapping from projects table."""
+    """Load prefix -> project_id mapping from projects table.
+
+    Maps each row's canonical MINT `prefix` AND every entry of its optional
+    `alias_prefixes` list (ENC-TSK-O47) to that row's project_id, so a
+    project (e.g. gamma under ENC-TSK-O45) can repoint its MINT prefix to a
+    disjoint value without this Lambda losing the ability to attribute
+    pre-existing record IDs -- minted under the old prefix -- back to it for
+    [DEPLOYMENT] worklog stamping. If a prefix is simultaneously one
+    project's MINT prefix and a different project's alias, MINT always wins,
+    deterministically, regardless of scan/page order.
+    """
     if _prefix_to_project:
         return
     try:
         ddb = _get_ddb()
         resp = ddb.scan(
             TableName=PROJECTS_TABLE,
-            ProjectionExpression="project_id, prefix",
+            ProjectionExpression="project_id, prefix, alias_prefixes",
         )
+        alias_to_project: Dict[str, str] = {}
+        mint_to_project: Dict[str, str] = {}
         for item in resp.get("Items", []):
             pid = item.get("project_id", {}).get("S", "")
-            pfx = item.get("prefix", {}).get("S", "")
-            if pid and pfx:
-                _prefix_to_project[pfx] = pid
+            if not pid:
+                continue
+            pfx = str(item.get("prefix", {}).get("S", "")).strip().upper()
+            if pfx:
+                mint_to_project[pfx] = pid
+            for alias in item.get("alias_prefixes", {}).get("L", []):
+                alias_pfx = str(alias.get("S", "")).strip().upper()
+                if alias_pfx:
+                    alias_to_project[alias_pfx] = pid
+
+        _prefix_to_project.update(alias_to_project)
+        for pfx, mint_pid in mint_to_project.items():
+            alias_pid = alias_to_project.get(pfx)
+            if alias_pid is not None and alias_pid != mint_pid:
+                _PREFIX_COLLISIONS[pfx] = {"mint_project_id": mint_pid, "alias_project_id": alias_pid}
+                logger.warning(
+                    "[PREFIX-COLLISION] prefix %r is project %r's MINT prefix but also project %r's "
+                    "alias_prefixes entry; MINT wins (ENC-ISS-538 collision class)",
+                    pfx,
+                    mint_pid,
+                    alias_pid,
+                )
+            _prefix_to_project[pfx] = mint_pid
     except Exception:
         logger.warning("Failed to load prefix map", exc_info=True)
 
