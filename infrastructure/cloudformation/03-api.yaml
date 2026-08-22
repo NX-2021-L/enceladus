@@ -487,6 +487,16 @@ Resources:
       RouteKey: POST /api/v1/projects
       Target: !Sub integrations/${ProjectServiceIntegration}
 
+  # ENC-TSK-N88 / ENC-FTR-131: project metadata editing from the PWA. Without this route
+  # the PATCH handler added in ENC-TSK-N87 is unreachable from the edge — routes here are
+  # declared per-method, so a handler alone is not addressable.
+  RouteProjectsUpdate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/projects/{projectName}
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
   # ---------------------------------------------------------------------------
   # Routes — Feed, Monitor, Deploy, Reference, DocPrep, Auth
   # ---------------------------------------------------------------------------

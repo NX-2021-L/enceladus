@@ -76,6 +76,41 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # DVP-TSK-671 (BRD B2-R2): the warehouse registration library claims
+      # idempotency, full-refresh correctness, schema evolution, and a
+      # transactional write ordering. The whole T2 contract rests on those
+      # claims, so they are tested rather than asserted. Needs pyarrow for the
+      # Parquet write path; the contract half of the suite runs without it.
+      - name: Warehouse registration contract tests (DVP-TSK-671)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyarrow
+          cd backend/lambda/shared_layer
+          PYTHONPATH=python python3 -m unittest test_warehouse_registration -v
+
+      # DVP-TSK-648/649 (BRD B3): the governance analytics mart's grain contract
+      # is only a contract if violating it fails the build. This suite enforces
+      # DOC-3391173F2A5C mechanically — the substitution test is parametrised
+      # over all seven tables and fails on any free-text column name, because
+      # per the grain contract the appearance of such a column IS the Risk R-4
+      # drift signal rather than something a later review might catch. It also
+      # asserts daily grain on every fact table, the mandatory freshness stamp,
+      # zero partition keys (DOC-1E1EC5B7CE02), and that the four
+      # awaiting-upstream spectral columns stay DECLARED-and-NULL (risk R-11).
+      - name: Governance mart contract tests (DVP-TSK-648)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyarrow pytest
+          python3 -m pytest backend/lambda/governance_mart -q
+
+      # DVP-TSK-703: the platform health monitor and the ad-hoc promotion
+      # transform tests used to run here. Both lambdas moved to
+      # NX-2021-L/devops (services/lambda/platform_health,
+      # services/lambda/adhoc_promotion) because they operate on
+      # data.jreese.net rather than on the governance ontology; their suites
+      # run in that repo's CI. The governance mart step above STAYS: BRD
+      # B3-R4 keeps the mart's projection logic and schema here.
+
       # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
       # computation, direction-lock refusal, counter-reset step (stdlib-only).
       - name: Gamma tracker mirror tests (ENC-TSK-M98)

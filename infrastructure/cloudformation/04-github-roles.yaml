@@ -257,6 +257,10 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/enceladus-*"
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/devops-*"
+                  # DVP-TSK-705: the nine legacy un-prefixed 01-data tables are NOT listed
+                  # here. They live in LegacyDataStackDdbOpsPolicy (an attached managed
+                  # policy) because this role's aggregate inline-policy quota is exhausted
+                  # — see that resource for the full account.
 
               - Sid: SnsTopicOps
                 Effect: Allow
@@ -588,6 +592,63 @@ Resources:
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:application:enceladus-lambda*"
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
+
+  # ---------------------------------------------------------------------------
+  # DVP-TSK-705 / DVP-PLN-001 -- same failure class as CodeDeployStackOpsPolicy
+  # (ENC-TSK-J85) and LambdaFunctionUrlConfigPolicy (ENC-TSK-K09), and arrived at
+  # the same way: DVP-TSK-704 first tried to extend the inline DynamoDBTableOps
+  # statement and LimitExceeded live on 2026-08-08 (aggregate inline quota measured
+  # at 10089/10240, nine ARNs needing ~700 bytes). Shipped as an attached MANAGED
+  # policy instead, mirroring both precedents exactly.
+  #
+  # The gap this closes: DynamoDBTableOps scopes to table/enceladus-* and
+  # table/devops-*, but nine of the eleven tables in the 01-data stack predate that
+  # naming convention, so the deploy role held NO control-plane DynamoDB permission
+  # on them. Every "CloudFormation Compute Stack Deploy" apply since the last green
+  # run on 2026-07-08 failed at dynamodb:DescribeTable, rolled 01-data back to
+  # UPDATE_ROLLBACK_COMPLETE, and skipped the 02-compute change-set -- which is why
+  # devops-governance-mart, and every other Lambda added to 02-compute since, never
+  # existed in AWS despite being merged to main. Measured with the IAM simulator:
+  # 9 of 11 tables implicitDeny on DescribeTable/UpdateTable/ListTagsOfResource.
+  #
+  # Enumerated rather than widened to table/*: this is a closed legacy set, and a
+  # wildcard would hand the deploy role control-plane authority over every table in
+  # the account. New tables should use the enceladus-*/devops-* prefixes and be
+  # covered by DynamoDBTableOps rather than added here.
+  # ---------------------------------------------------------------------------
+  LegacyDataStackDdbOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-legacy-ddb-v1
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LegacyDataStackDdbOps
+            Effect: Allow
+            Action:
+              - dynamodb:CreateTable
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeTable
+              - dynamodb:UpdateTable
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:UpdateTimeToLive
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:TagResource
+              - dynamodb:UntagResource
+              - dynamodb:ListTagsOfResource
+            Resource:
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-compliance-violations"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-sessions"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/agent-types"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/component-registry"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-policies"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version"
+              - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-K09 / ENC-ISS-469 -- same failure class as CodeDeployStackOpsPolicy

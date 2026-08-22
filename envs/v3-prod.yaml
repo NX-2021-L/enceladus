@@ -83,6 +83,7 @@ function_name_map:
   github_integration: devops-github-integration
   glue_crawler_launcher: devops-glue-crawler-launcher
   governance_audit: enceladus-governance-audit
+  governance_mart: devops-governance-mart
   graph_health_metrics: enceladus-graph-health-metrics
   graph_query_api: devops-graph-query-api
   graph_sync: devops-graph-sync

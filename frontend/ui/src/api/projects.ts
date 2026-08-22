@@ -19,6 +19,42 @@ export type CreateProjectRequest = {
   repo?: string;
 };
 
+/**
+ * ENC-FTR-131 / ENC-TSK-N89 — the only project fields the PWA may change.
+ * Identity and hierarchy fields (project_id, name, prefix, parent, path) are immutable:
+ * they are referenced by every tracker record, and the backend rejects them with a 400.
+ */
+export type UpdateProjectRequest = {
+  summary?: string;
+  status?: string;
+  /** Empty string clears the repo attribute server-side; omit the key to leave it alone. */
+  repo?: string;
+};
+
+export type ProjectRecord = {
+  project_id: string;
+  name?: string;
+  prefix: string;
+  path?: string;
+  repo?: string;
+  summary: string;
+  status: string;
+  parent?: string;
+  created_at: string;
+  updated_at: string;
+  created_by?: string;
+};
+
+export type UpdateProjectResponse = {
+  success: boolean;
+  project: ProjectRecord;
+};
+
+export type GetProjectResponse = {
+  success: boolean;
+  project: ProjectRecord;
+};
+
 export type CreateProjectResponse = {
   success: boolean;
   project: {
@@ -151,6 +187,99 @@ export async function createProject(
 
   // Should not reach here, but satisfy TypeScript
   throw new ProjectServiceError(0, 'All retry cycles exhausted');
+}
+
+/**
+ * Shared request cycle for the single-project endpoints (ENC-TSK-N89).
+ *
+ * Mirrors createProject's 401 -> refreshCredentials -> retry behaviour. Kept as one helper
+ * so the auth-retry semantics cannot drift between GET and PATCH; createProject is left on
+ * its own loop because it additionally falls back to the canonical collection URL.
+ */
+async function requestProject<T>(
+  projectName: string,
+  init: RequestInit
+): Promise<T> {
+  const url = `${BASE_URL}/projects/${encodeURIComponent(projectName)}`;
+
+  for (let cycle = 1; cycle <= MAX_CREATE_CYCLES; cycle++) {
+    try {
+      const response = await fetch(url, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          ...(init.headers ?? {}),
+        },
+        credentials: 'include',
+      });
+      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+      if (response.status === 401) {
+        const refreshed = await refreshCredentials();
+        if (refreshed && cycle < MAX_CREATE_CYCLES) {
+          continue;
+        }
+        throw new ProjectServiceError(
+          401,
+          'Your session has expired. Please log in again.',
+          body
+        );
+      }
+
+      if (!response.ok) {
+        const errorMessage =
+          body.error ||
+          body.message ||
+          `HTTP ${response.status}: ${response.statusText}`;
+        throw new ProjectServiceError(response.status, String(errorMessage), body);
+      }
+
+      return body as unknown as T;
+    } catch (error) {
+      if (error instanceof ProjectServiceError) {
+        throw error;
+      }
+      if (error instanceof Error) {
+        if (cycle < MAX_CREATE_CYCLES) {
+          await refreshCredentials();
+          continue;
+        }
+        throw new ProjectServiceError(0, `Network error: ${error.message}`);
+      }
+      throw new ProjectServiceError(0, 'Unknown error occurred');
+    }
+  }
+
+  throw new ProjectServiceError(0, 'All retry cycles exhausted');
+}
+
+/**
+ * Fetch a single project record.
+ *
+ * The edit dialog prefills from this, NOT from the projects feed: the feed's ProjectSummary
+ * shape carries no `repo`, so prefilling from it and saving would silently clear the field
+ * this feature exists to set.
+ */
+export async function getProject(projectName: string): Promise<GetProjectResponse> {
+  return requestProject<GetProjectResponse>(projectName, { method: 'GET' });
+}
+
+/**
+ * Update a project's editable metadata (summary, status, repo).
+ *
+ * Send only the fields that actually changed. An empty patch is rejected by the backend
+ * with a 400 rather than treated as a successful no-op.
+ */
+export async function updateProject(
+  projectName: string,
+  patch: UpdateProjectRequest
+): Promise<UpdateProjectResponse> {
+  return requestProject<UpdateProjectResponse>(projectName, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
 }
 
 /**

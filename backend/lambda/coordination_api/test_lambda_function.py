@@ -283,6 +283,19 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             caps["providers"]["claude_agent_sdk"]["allowed_tools"],
         )
 
+    def test_load_governance_dictionary_reads_bundled_file_only(self):
+        """ENC-TSK-K34 (ENC-ISS-477): the DDB scan branch is retired -- the
+        bundled repo file is the sole and always-authoritative source. Does
+        NOT mock _get_ddb, proving no DynamoDB client is touched at all.
+        Backported to main by ENC-TSK-N82 (ENC-ISS-599 / ENC-ISS-600)."""
+        with patch.object(coordination_lambda, "_get_ddb") as mock_get_ddb:
+            dictionary, source_meta = coordination_lambda._load_governance_dictionary()
+        mock_get_ddb.assert_not_called()
+        self.assertEqual(source_meta["source"], "bundled")
+        self.assertIsInstance(dictionary, dict)
+        self.assertIn("entities", dictionary)
+        self.assertEqual(source_meta["version"], dictionary.get("version"))
+
     @patch.object(
         coordination_lambda,
         "_load_governance_dictionary",

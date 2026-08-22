@@ -9,6 +9,7 @@ Routes (via API Gateway proxy):
     POST   /api/v1/projects                        Create a new project
     GET    /api/v1/projects                        List all projects
     GET    /api/v1/projects/{projectName}           Get a single project
+    PATCH  /api/v1/projects/{projectName}           Update summary/status/repo (ENC-FTR-131)
     OPTIONS /api/v1/projects[/{projectName}]        CORS preflight
 
 Auth:
@@ -132,6 +133,28 @@ _PREFIX_PATTERN = re.compile(r"^[A-Z]{3}$")
 _REPO_URL_PATTERN = re.compile(r"^https?://[^\s]+$")
 _VALID_CREATE_STATUSES = {"planning", "development", "active_production"}
 _ALL_STATUSES = _VALID_CREATE_STATUSES | {"closed", "archived"}
+
+# ENC-TSK-N87 / ENC-FTR-131 — project metadata update contract.
+# HTTP methods that mutate the projects table and therefore require projects:write.
+_WRITE_METHODS = {"POST", "PATCH"}
+# The only attributes PATCH may change. Deliberately narrow: project_id and prefix are
+# referenced by every tracker record and `path` encodes hierarchy, so making any of them
+# editable would silently orphan records rather than fail loudly.
+_MUTABLE_UPDATE_FIELDS = ("summary", "status", "repo")
+# Named explicitly so a caller who sends one gets a 400 naming the field, instead of the
+# request being silently accepted with the field dropped.
+_IMMUTABLE_UPDATE_FIELDS = (
+    "project_id",
+    "name",
+    "prefix",
+    "parent",
+    "path",
+    "deploy_policy",
+    "deploy_mode",
+    "created_at",
+    "created_by",
+    "updated_at",
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -364,7 +387,7 @@ def _deserialize_item(raw: Dict) -> Dict[str, Any]:
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Cookie, X-Coordination-Internal-Key",
         "Access-Control-Allow-Credentials": "true",
     }
@@ -483,6 +506,74 @@ def _validate_create_input(body: Dict) -> Tuple[Optional[Dict], Optional[str]]:
         "name": name, "prefix": prefix, "summary": summary,
         "status": status, "parent": parent, "repo": repo,
     }, None
+
+
+def _validate_update_input(body: Dict) -> Tuple[Optional[Dict], Optional[str]]:
+    """Validate a PATCH body against the ENC-FTR-131 update contract.
+
+    Returns ({field: value}, None) on success, where only fields actually present in the
+    body appear. A repo value of None is the explicit "remove this attribute" sentinel —
+    distinct from repo being absent, which means "leave it alone".
+
+    Mirrors _validate_create_input's rules for summary and status so the two paths cannot
+    drift; a project that could not be created with a given value must not be reachable by
+    updating into it either.
+    """
+    if not isinstance(body, dict):
+        return None, "body must be a JSON object"
+
+    supplied_immutable = [f for f in _IMMUTABLE_UPDATE_FIELDS if f in body]
+    if supplied_immutable:
+        return None, (
+            f"immutable field(s) not editable: {', '.join(sorted(supplied_immutable))}. "
+            f"Editable fields are: {', '.join(_MUTABLE_UPDATE_FIELDS)}"
+        )
+
+    unknown = [k for k in body if k not in _MUTABLE_UPDATE_FIELDS]
+    if unknown:
+        return None, (
+            f"unknown field(s): {', '.join(sorted(unknown))}. "
+            f"Editable fields are: {', '.join(_MUTABLE_UPDATE_FIELDS)}"
+        )
+
+    errors: List[str] = []
+    data: Dict[str, Any] = {}
+
+    if "summary" in body:
+        summary = (body.get("summary") or "").strip()
+        if not summary or len(summary) > 500:
+            errors.append("summary: required, 1-500 chars")
+        else:
+            data["summary"] = summary
+
+    if "status" in body:
+        status = (body.get("status") or "").strip()
+        if status not in _VALID_CREATE_STATUSES:
+            errors.append(f"status: must be one of {sorted(_VALID_CREATE_STATUSES)}")
+        else:
+            data["status"] = status
+
+    if "repo" in body:
+        raw_repo = body.get("repo")
+        repo = "" if raw_repo is None else str(raw_repo).strip()
+        if not repo:
+            # Empty clears the attribute. Storing "" instead would make _resolve_github_repo
+            # see a present-but-unusable value, trading one failure mode for a subtler one.
+            data["repo"] = None
+        elif len(repo) > 2048 or not _REPO_URL_PATTERN.match(repo):
+            errors.append("repo: when provided, must be a valid http(s) URL up to 2048 characters")
+        else:
+            data["repo"] = repo
+
+    if errors:
+        return None, "; ".join(errors)
+    if not data:
+        # A no-op 200 would let a UI bug that sends nothing look like a successful save.
+        return None, (
+            f"no editable fields supplied. Provide at least one of: "
+            f"{', '.join(_MUTABLE_UPDATE_FIELDS)}"
+        )
+    return data, None
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +863,80 @@ def _handle_get(project_name: str) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# UPDATE project (PATCH /api/v1/projects/{projectName})
+# ---------------------------------------------------------------------------
+
+
+def _handle_update(project_name: str, body: Dict, claims: Dict) -> Dict:
+    """Update the editable metadata of an existing project (ENC-FTR-131).
+
+    Editable: summary, status, repo. Everything else is rejected with a 400 that names the
+    offending field, and no write is attempted.
+
+    Exists because the projects table previously had no update path at all: a project whose
+    metadata was wrong or missing at create time was frozen unless someone wrote DynamoDB
+    with privileged credentials. FIN-TSK-154 is the canonical case — the finance project
+    carries no `repo`, so every GitHub-validated checkout gate demanded owner/repo be passed
+    explicitly on every single call.
+    """
+    data, validation_error = _validate_update_input(body)
+    if validation_error:
+        return _error(400, validation_error)
+
+    ddb = _get_ddb()
+    now = _now_z()
+
+    set_parts: List[str] = ["#updated_at = :updated_at"]
+    remove_parts: List[str] = []
+    names: Dict[str, str] = {"#updated_at": "updated_at"}
+    values: Dict[str, Dict[str, str]] = {":updated_at": {"S": now}}
+
+    for field in _MUTABLE_UPDATE_FIELDS:
+        if field not in data:
+            continue
+        placeholder = f"#{field}"
+        names[placeholder] = field
+        value = data[field]
+        if value is None:
+            # repo="" — clear the attribute entirely rather than storing an empty string.
+            remove_parts.append(placeholder)
+        else:
+            set_parts.append(f"{placeholder} = :{field}")
+            values[f":{field}"] = {"S": value}
+
+    expression = "SET " + ", ".join(set_parts)
+    if remove_parts:
+        expression += " REMOVE " + ", ".join(remove_parts)
+
+    try:
+        resp = ddb.update_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": {"S": project_name}},
+            UpdateExpression=expression,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            # Guards against a concurrent delete resurrecting the row as a partial item.
+            ConditionExpression="attribute_exists(project_id)",
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        return _error(404, f"Project '{project_name}' not found")
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("projects table update failed: %s", exc)
+        return _error(500, "Failed to update project entry.")
+
+    logger.info(
+        "[SUCCESS] project updated: project_id=%s fields=%s actor=%s",
+        project_name,
+        sorted(data.keys()),
+        claims.get("sub", "unknown"),
+    )
+
+    project = _enrich_project(_deserialize_item(resp.get("Attributes", {})))
+    return _response(200, {"success": True, "project": project})
+
+
+# ---------------------------------------------------------------------------
 # Path parsing
 # ---------------------------------------------------------------------------
 
@@ -794,7 +959,12 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
 
     # Auth
-    required_scopes = ["projects:write"] if method == "POST" else ["projects:read"]
+    # ENC-TSK-N87 / ENC-FTR-131: PATCH mutates the projects table, so it must sit on the
+    # write scope alongside POST. Leaving it on the else-branch would have handed every
+    # projects:read caller an update path.
+    required_scopes = (
+        ["projects:write"] if method in _WRITE_METHODS else ["projects:read"]
+    )
     headers = event.get("headers") or {}
     internal_key = (
         headers.get("x-coordination-internal-key")
@@ -849,6 +1019,13 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     elif method == "GET" and project_name:
         return _handle_get(project_name)
+
+    elif method == "PATCH" and project_name:
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            return _error(400, "Invalid JSON body.")
+        return _handle_update(project_name, body, claims)
 
     else:
         return _error(405, "Method not allowed.")
