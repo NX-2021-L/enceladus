@@ -224,3 +224,46 @@
 .feed-recent-nav .ev2-pag__ellipsis {
   display: none;
 }
+
+/* ENC-TSK-O48 (io gamma UAT, pre-cutover): keep RecordDetailHub STACKED inside
+   the feed reading pane.
+ *
+ * recordDetailHub.css turns `.ev2-rdh` into a two-column grid
+ * (`22rem minmax(0, 1fr)`) at `@media (min-width: 64rem)`, with
+ * `.ev2-rdh__main { display: contents }` promoting the header card and the tab
+ * content to sibling grid columns. On the full-page record routes that is
+ * right -- the hub owns the whole content width.
+ *
+ * Here it is not. The hub renders inside `.feed-route__pane`, which is already
+ * one column of the `.feed-route__split` master-detail flex. The hub then
+ * splits its own column again, producing three effective columns:
+ * feed list | 22rem header card | whatever remains. The remainder is a few
+ * hundred pixels even on a wide display, so Overview body text wrapped at
+ * roughly two words per line.
+ *
+ * The media query asks how wide the WINDOW is; what matters is how wide the
+ * HUB'S CONTAINER is. A CSS container query on `.ev2-rdh` is the correct
+ * root-cause fix and would work for every consumer, but ui-v2 and
+ * design-system-2 currently use no container queries at all, so introducing
+ * the pattern touches every hub consumer -- not a change to make days before
+ * the cutover. This scoped override is the pre-cutover fix; the container-query
+ * refactor is recorded on ENC-TSK-O48 as the follow-up.
+ *
+ * Deliberately NOT reverted here: `.ev2-rdh__vitals` keeps its two-column
+ * layout (the header card is now full pane width, so two columns reads better,
+ * not worse), and the action bar stays inline rather than reverting to the
+ * mobile sticky variant. */
+@media (min-width: 64rem) {
+  .feed-route__pane .ev2-rdh {
+    display: block;
+  }
+
+  .feed-route__pane .ev2-rdh__main {
+    display: block;
+  }
+
+  .feed-route__pane .ev2-rdh__head {
+    position: static;
+    margin-bottom: var(--space-5);
+  }
+}
