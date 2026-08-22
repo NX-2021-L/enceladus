@@ -8114,6 +8114,228 @@ Resources:
       AlarmActions:
         - !Ref RhythmBeatNotificationTopic
 
+  # ENC-TSK-O46 / ENC-ISS-649 -- 7 gap roles never previously declared in CFN,
+  # brought under management via mechanical transcription of their live state
+  # (tools/iam-audit/transcribe_gap_roles.py). GAMMA-ONLY for this pass -- do NOT
+  # merge to v4/main until ENC-ISS-648's broader prod-stack reconciliation lands;
+  # 4 of these 7 declarations (Github/Titan/Checkout pairs) resolve to already-live
+  # prod role names and would CREATE_FAILED against enceladus-compute if applied
+  # there before that reconciliation. See DOC-17EC9B87C27F ACTION 3.
+  GithubIntegrationLambdaRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-github-integration-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "devops-github-integration-inline"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: CloudWatchLogs
+              Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-github-integration${EnvironmentSuffix}*'
+            - Sid: SecretsManagerGitHubKey
+              Effect: Allow
+              Action:
+              - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*'
+            - Sid: GMFDeploymentManagerAccess
+              Effect: Allow
+              Action:
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:Scan
+              Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager'
+
+  TitanEmbeddingBackfillLambdaRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-titan-embedding-backfill-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "titan-embed-backfill-inline${EnvironmentSuffix}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: CloudWatchLogs
+              Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-titan-embedding-backfill${EnvironmentSuffix}*'
+            - Sid: SecretsManagerNeo4j
+              Effect: Allow
+              Action:
+              - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials*'
+            - Sid: BedrockTitanEmbedV2Invoke
+              Effect: Allow
+              Action:
+              - bedrock:InvokeModel
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+            - Sid: DynamoDBReadTracker
+              Effect: Allow
+              Action:
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              Resource:
+              - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker'
+              - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker/index/*'
+              - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents'
+              - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents/index/*'
+
+  CheckoutServiceRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-checkout-service-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub "checkout-secrets-policy${EnvironmentSuffix}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/enceladus-private-key-*'
+        - PolicyName: !Sub "checkout-tokens-policy${EnvironmentSuffix}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-checkout-tokens${EnvironmentSuffix}'
+        - !If
+          - IsProduction
+          - PolicyName: "checkout-projects-table-read"
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+              - Sid: VisualEditor0
+                Effect: Allow
+                Action:
+                - dynamodb:DescribeImport
+                - dynamodb:ListTables
+                - dynamodb:DescribeContributorInsights
+                - dynamodb:ListTagsOfResource
+                - dynamodb:GetAbacStatus
+                - dynamodb:DescribeReservedCapacityOfferings
+                - dynamodb:PartiQLSelect
+                - dynamodb:DescribeTable
+                - dynamodb:GetItem
+                - dynamodb:DescribeContinuousBackups
+                - dynamodb:DescribeExport
+                - dynamodb:ListImports
+                - dynamodb:GetResourcePolicy
+                - dynamodb:DescribeKinesisStreamingDestination
+                - dynamodb:ListExports
+                - dynamodb:DescribeLimits
+                - dynamodb:BatchGetItem
+                - dynamodb:ReadDataForReplication
+                - dynamodb:ConditionCheckItem
+                - dynamodb:ListBackups
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:DescribeStream
+                - dynamodb:DescribeTimeToLive
+                - dynamodb:ListStreams
+                - dynamodb:ListContributorInsights
+                - dynamodb:DescribeGlobalTableSettings
+                - dynamodb:ListGlobalTables
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeGlobalTable
+                - dynamodb:DescribeReservedCapacity
+                - dynamodb:DescribeBackup
+                - dynamodb:DescribeEndpoints
+                - dynamodb:GetRecords
+                - dynamodb:DescribeTableReplicaAutoScaling
+                Resource: '*'
+          - !Ref AWS::NoValue
+
+  JsonParquetLambdaRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Condition: IsProduction
+    Properties:
+      RoleName: "devops-json-parquet-lambda"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "devops-json-parquet-inline"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: S3Access
+              Effect: Allow
+              Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              Resource:
+              - arn:aws:s3:::devops-agentcli-compute
+              - arn:aws:s3:::devops-agentcli-compute/projects/*
+            - Sid: SNSPublish
+              Effect: Allow
+              Action: sns:Publish
+              Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-json-parquet-ready'
+            - Sid: EventBridgePut
+              Effect: Allow
+              Action: events:PutEvents
+              Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+            - Sid: CloudWatchLogs
+              Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:PutLogEvents
+              - logs:PutRetentionPolicy
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
