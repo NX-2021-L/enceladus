@@ -31,6 +31,18 @@ and small ids/versions per step, never full response bodies);
 source_sha256 / reverse_substituted_sha256 are hex digests; patch_performed
 is a bool. Same digest-first discipline applies -- small and stable, no
 raw payload bodies.
+
+``dest``, ``source_ref``, ``manifest_version``, ``files_verified``,
+``files_failed``, ``mismatched``, and ``refusal`` (added for ENC-TSK-O55 /
+elr_sync.py) carry the hash-pinned manifest distribution path's small,
+stable summaries: dest/source_ref are small path/sha strings;
+manifest_version echoes the manifest's own version marker;
+files_verified/files_failed are counts; mismatched is a small list of
+relative paths that failed verification (never file bodies); refusal
+mirrors the {reason, missing_fields, violations} shape every other ELR
+CLI's local refusal helper already uses, folded into build_digest so
+elr_sync can reuse ONE digest builder for both its success and its
+refuse-activation paths.
 """
 
 from __future__ import annotations
@@ -57,6 +69,13 @@ _OPTIONAL_FIELDS = (
     "source_sha256",
     "reverse_substituted_sha256",
     "patch_performed",
+    "dest",
+    "source_ref",
+    "manifest_version",
+    "files_verified",
+    "files_failed",
+    "mismatched",
+    "refusal",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

@@ -1,0 +1,72 @@
+{
+  "files": [
+    {
+      "path": "tools/elr/README.md",
+      "sha256": "67d0f0c9bc4d1e5826c365877a123c5f37d9f2e244940f3c8ed53f79a3795b60",
+      "size_bytes": 1364
+    },
+    {
+      "path": "tools/elr/elr_batch_get.py",
+      "sha256": "826e91a779e5ee5a1be28ffd01c61de4fc371d4e7514a4c22761678e0138c3e0",
+      "size_bytes": 17363
+    },
+    {
+      "path": "tools/elr/elr_contracts.json",
+      "sha256": "d8921394d76e2db99b420169e9e81a25fb39713a24182c7842edfa36a3072069",
+      "size_bytes": 7694
+    },
+    {
+      "path": "tools/elr/elr_doc_get.py",
+      "sha256": "b993058c27ca786706380a166ea77c9b9da2327bfcb500a6ae8a797949f6dad9",
+      "size_bytes": 8512
+    },
+    {
+      "path": "tools/elr/elr_lib/__init__.py",
+      "sha256": "d0767fce7c573039a91993b7ae6503b54d69bd21924da54d8fef7d7b07f52277",
+      "size_bytes": 1080
+    },
+    {
+      "path": "tools/elr/elr_lib/config.py",
+      "sha256": "f6b1ce3c9ed59ca164591cf7e653b1154c021da0f79aa8c5ebdf75451d3ec299",
+      "size_bytes": 8191
+    },
+    {
+      "path": "tools/elr/elr_lib/digest.py",
+      "sha256": "61b6bb4e4b34a3580498b0a8a47e9296ab50357a90d82848d1487cf3d48a7b98",
+      "size_bytes": 5147
+    },
+    {
+      "path": "tools/elr/elr_lib/plane_safety.py",
+      "sha256": "4da7190909731eea31dfe603630e4e12e9faf8a45b1179704941ea62c4205c2d",
+      "size_bytes": 15133
+    },
+    {
+      "path": "tools/elr/elr_lib/transport.py",
+      "sha256": "8078efa6361ddd83d160643f89835fac32e6481380fa4f279f590b35b2d6fe77",
+      "size_bytes": 15164
+    },
+    {
+      "path": "tools/elr/elr_publish.py",
+      "sha256": "a004009731bf483582b6a90f312568b03b7eced06d295de5a4f88ee785348ffd",
+      "size_bytes": 25755
+    },
+    {
+      "path": "tools/elr/elr_smoke.py",
+      "sha256": "40c45096e7d5bb035622712470932aff6a71dce49207f2377ef27eb7228da50e",
+      "size_bytes": 2971
+    },
+    {
+      "path": "tools/elr/elr_sync.py",
+      "sha256": "4eda382d20d67bf5096eaee8d9078548066fb4427b2677d79eb83bb592f12f64",
+      "size_bytes": 30303
+    },
+    {
+      "path": "tools/elr/elr_validate.py",
+      "sha256": "e914c7e2ef1db5996421ef216fa6809ce5fb82356ad4b2c934feb9008ac75cea",
+      "size_bytes": 37760
+    }
+  ],
+  "generated_at": "2026-08-22T14:37:42-07:00",
+  "manifest_version": 1,
+  "source_ref": "ae64fe1f3b435a726b5d4e6e9e8a82cba4d857d5"
+}
