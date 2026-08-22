@@ -744,11 +744,29 @@ Resources:
   # it does not attempt to bring the rest of the role under CFN. Gamma-only: the ENC-ISS-640 fix
   # was applied to the gamma role/table only, so this is scoped with Condition: IsGamma rather than
   # via ${EnvironmentSuffix} substitution reaching into a prod role that was never granted this.
+  # POLICY-NAME COLLISION FIX (2026-08-22). The first form of this resource used
+  # PolicyName: AgentSessionsGammaAccess -- byte-identical to the inline policy io applied BY HAND
+  # to this role during the ENC-ISS-640 SEV2 remediation. CloudFormation implements
+  # AWS::IAM::Policy as a CREATE, so it collided:
+  #   CREATE_FAILED CheckoutServiceRoleAgentSessionsGammaAccess
+  #     "The policy AgentSessionsGammaAccess already exists on the role
+  #      enceladus-checkout-service-role-gamma."
+  # -> UPDATE_ROLLBACK_COMPLETE on enceladus-compute-gamma, which blocked the gamma compute
+  # deploy lane for EVERY agent. This is the same declare-a-live-resource-without-importing class
+  # that ENC-TSK-O49 handled correctly for the APIGW recover route -- and inline role policies are
+  # NOT in CloudFormation's importable resource set, so the import escape hatch does not exist here.
+  #
+  # THE FIX: CloudFormation owns a DISTINCTLY NAMED inline policy carrying the identical grant.
+  # IAM unions inline policies, so the role's effective permissions are unchanged and there is no
+  # window in which the ENC-ISS-640 remediation loses its access. The hand-applied
+  # AgentSessionsGammaAccess is now REDUNDANT drift: io can delete it at any time, with zero
+  # access risk, because this CFN-managed policy already grants the same actions on the same
+  # resource. Deleting it is the step that actually retires the drift; until then both exist.
   CheckoutServiceRoleAgentSessionsGammaAccess:
     Type: AWS::IAM::Policy
     Condition: IsGamma
     Properties:
-      PolicyName: AgentSessionsGammaAccess
+      PolicyName: AgentSessionsGammaAccessCfn
       Roles:
         - !Sub "enceladus-checkout-service-role${EnvironmentSuffix}"
       PolicyDocument:
