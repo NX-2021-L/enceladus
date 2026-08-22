@@ -1013,6 +1013,57 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/changelog/*"
 
+  # ENC-ISS-635 / ENC-ISS-631 AC-6 (io codify-now ruling 2026-08-22): five
+  # integrations' invoke permissions existed only as out-of-band
+  # `aws lambda add-permission` grants (Sid AllowAPIGatewayInvoke-gamma) --
+  # auth-refresh from the ENC-TSK-O31 sitting, the other four from the
+  # ENC-ISS-635 remediation sitting. A stack rebuild would silently drop them
+  # (checkout / deploy-decide / github / doc-prep routes 500 with integration
+  # 403, auth callback breaks). Codified per the ENC-TSK-L65 precedent above.
+  # The broad /*/* SourceArn deliberately matches the live manual grants;
+  # route-scoped tightening + manual-statement cleanup ride ENC-PLN-082.
+  # CloudFormation mints its own statement ids, so these coexist with the
+  # manual statements without conflict.
+  AuthRefreshInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  CheckoutServiceInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  DeployDecideInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  GithubIntegrationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-github-integration${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  DocPrepInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
   # ---------------------------------------------------------------------------
   # ENC-TSK-L10 (B64 Ph3): REST API Gateway (v1) for Lambda response streaming.
   # A SEPARATE API from HttpApi above -- HTTP API v2 (AWS::ApiGatewayV2) does not
