@@ -21,6 +21,16 @@ COMPACT summary dicts for a batch operation -- e.g.
 {id, kind, ok, status_or_version, title} -- never full record bodies.
 It is still subject to the same digest-first discipline as every other
 field: small, stable, no raw payloads.
+
+``proofs``, ``plane_safety``, ``source_sha256``, ``reverse_substituted_sha256``,
+and ``patch_performed`` (added for ENC-TSK-O54 / elr_publish.py) carry the
+dual-proof write path's small, stable summaries: proofs is a
+{hash_echo, reverse_substitution} pass/fail/skip map (never body bytes);
+plane_safety is the five-step pre/post-write report (status/ok booleans
+and small ids/versions per step, never full response bodies);
+source_sha256 / reverse_substituted_sha256 are hex digests; patch_performed
+is a bool. Same digest-first discipline applies -- small and stable, no
+raw payload bodies.
 """
 
 from __future__ import annotations
@@ -42,6 +52,11 @@ _OPTIONAL_FIELDS = (
     "local_sha256",
     "outline",
     "rows",
+    "proofs",
+    "plane_safety",
+    "source_sha256",
+    "reverse_substituted_sha256",
+    "patch_performed",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
