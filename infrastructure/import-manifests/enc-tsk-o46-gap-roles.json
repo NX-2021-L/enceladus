@@ -1,0 +1,5 @@
+[
+  {"ResourceType":"AWS::IAM::Role","LogicalResourceId":"GithubIntegrationLambdaRole","ResourceIdentifier":{"RoleName":"devops-github-integration-lambda-role-gamma"}},
+  {"ResourceType":"AWS::IAM::Role","LogicalResourceId":"TitanEmbeddingBackfillLambdaRole","ResourceIdentifier":{"RoleName":"devops-titan-embedding-backfill-lambda-role-gamma"}},
+  {"ResourceType":"AWS::IAM::Role","LogicalResourceId":"CheckoutServiceRole","ResourceIdentifier":{"RoleName":"enceladus-checkout-service-role-gamma"}}
+]
