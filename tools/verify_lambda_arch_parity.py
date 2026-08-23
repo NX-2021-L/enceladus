@@ -30,6 +30,12 @@ COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
 SHARED_LAYER_DEPLOY = REPO_ROOT / "backend/lambda/shared_layer/deploy.sh"
 
+# ENC-TSK-O87: the two real arm64-dependency build paths. Neither is a
+# "deploy script" in the ENVIRONMENT_SUFFIX-conditional sense the two
+# constants above validate, so they get their own dedicated check.
+BUILD_WORKFLOW_PATH = REPO_ROOT / ".github/workflows/_build.yml"
+PACKAGE_ARTIFACT_SCRIPT = REPO_ROOT / "tools/package_lambda_artifact.sh"
+
 # Expected structural values for prod safety. These are compared directly
 # against the parsed Properties.Runtime / Properties.Architectures values
 # (see LambdaResource below) rather than against raw template text, so
@@ -533,6 +539,109 @@ def _validate_shared_layer_deploy_script() -> List[str]:
             "[INFO] shared_layer/deploy.sh validated: all three pip flags "
             "present (--platform, --python-version, --abi), prod build target "
             "manylinux2014_x86_64/3.11/cp311 confirmed"
+        )
+
+    return errors
+
+
+# ENC-TSK-O87: the four flags every arm64 dependency build must pass. Order
+# in the tuple has no meaning; presence is checked independently per flag.
+REQUIRED_PIP_ARCH_FLAGS: tuple = (
+    "--platform",
+    "--implementation cp",
+    "--python-version",
+    "--only-binary=:all:",
+)
+
+
+def _extract_shell_command_block(text: str, anchor: str) -> Optional[str]:
+    """Return the backslash-continued shell command starting at `anchor`.
+
+    Scans line-by-line from the first occurrence of `anchor`, including every
+    subsequent line that is part of the same continued command (a line ending
+    in ``\``), and stops at (and includes) the first line that does not end
+    in a continuation backslash — i.e. the line that actually terminates the
+    shell command. Returns None if `anchor` is not found in `text`.
+
+    This mirrors how both real invocations are written: multi-line pip
+    installs with a trailing ``\`` on every line but the last.
+    """
+    idx = text.find(anchor)
+    if idx == -1:
+        return None
+    block_lines: List[str] = []
+    for line in text[idx:].splitlines():
+        block_lines.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    return "\n".join(block_lines)
+
+
+def _validate_build_invocation_flags() -> List[str]:
+    """ENC-TSK-O87: assert both real arm64-dependency build invocations still
+    carry the full pip flag contract, so the contract is enforced
+    structurally instead of by one-time inspection.
+
+    BRD Sec 6.5: "The build invocation is therefore part of the contract,
+    not an implementation detail." Without --only-binary=:all: specifically,
+    a missing aarch64 wheel makes pip silently fall back to a source build
+    or an older version instead of failing CI loudly (ENC-TSK-O87 AC-2,
+    observed at https://github.com/NX-2021-L/enceladus/actions/runs/32615808666).
+
+    Checks two paths — there is no third; deploy.sh / shared_layer/deploy.sh
+    are tombstoned and validated separately, and _deploy.yml has no
+    independent install path of its own (it only calls _build.yml):
+      1. .github/workflows/_build.yml — the Gen2 matrix build (one shared
+         `python -m pip install` invocation, arch selected via
+         matrix.pip_platform).
+      2. tools/package_lambda_artifact.sh — the legacy per-function build
+         invoked by build-lambda-artifacts.yml.
+    """
+    errors: List[str] = []
+
+    checks = (
+        ("_build.yml", BUILD_WORKFLOW_PATH, "python -m pip install"),
+        ("package_lambda_artifact.sh", PACKAGE_ARTIFACT_SCRIPT, "pip install"),
+    )
+
+    for label, path, anchor in checks:
+        if not path.is_file():
+            errors.append(f"{label}: file not found at {path}")
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        block = _extract_shell_command_block(text, anchor)
+        if block is None:
+            errors.append(
+                f"{label}: no '{anchor}' invocation found. The arm64 wheel "
+                f"contract (ENC-TSK-O87) can't be verified because this "
+                f"build path no longer installs dependencies via pip, or "
+                f"the invocation no longer starts with '{anchor}'."
+            )
+            continue
+
+        for flag in REQUIRED_PIP_ARCH_FLAGS:
+            if flag not in block:
+                errors.append(
+                    f"{label}: pip install invocation is missing required "
+                    f"flag '{flag}' (ENC-TSK-O87 aarch64 wheel contract, "
+                    f"BRD Sec 6.5). Without every one of "
+                    f"{', '.join(REQUIRED_PIP_ARCH_FLAGS)}, a missing "
+                    f"aarch64 wheel silently falls back to a source build "
+                    f"or a stale version instead of failing CI loudly."
+                )
+
+    if not errors:
+        # Deliberately not path.relative_to(REPO_ROOT) here: tests mock
+        # BUILD_WORKFLOW_PATH / PACKAGE_ARTIFACT_SCRIPT to tempfiles outside
+        # REPO_ROOT, and an [INFO] print crashing on relative_to() would be
+        # exactly the kind of guard-goes-vacuously-green-by-accident bug
+        # this check exists to prevent elsewhere. Labels are stable regardless
+        # of what's mocked underneath them.
+        checked_labels = ", ".join(label for label, _, _ in checks)
+        print(
+            f"[INFO] Build invocation flag contract validated: both "
+            f"{checked_labels} carry {', '.join(REQUIRED_PIP_ARCH_FLAGS)}"
         )
 
     return errors
@@ -1125,6 +1234,13 @@ def main() -> int:
     if shared_layer_errors:
         errors.append("=== Shared layer build script violations ===")
         errors.extend(shared_layer_errors)
+
+    # ENC-TSK-O87: assert the aarch64 wheel contract survives on both real
+    # arm64-dependency build paths, not just at the time someone inspected it.
+    build_invocation_errors = _validate_build_invocation_flags()
+    if build_invocation_errors:
+        errors.append("=== Build invocation flag violations ===")
+        errors.extend(build_invocation_errors)
 
     # Cross-validate manifest expectations (ENC-TSK-D17 AC7)
     manifest_errors = _validate_manifest_expectations()

@@ -1023,5 +1023,158 @@ class TestGitBackedRatchetGlue(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-O87: build-invocation flag contract coverage.
+#
+# _validate_build_invocation_flags() is the guard that makes the aarch64
+# wheel contract structural rather than a fact someone checked once. These
+# tests prove it actually goes red when a flag is missing from either real
+# build path, and green when all four are present — the same
+# never-seen-red-is-not-evidence discipline as ENC-ISS-556 / the ENC-TSK-O87
+# `tbb` negative control (observed failing at
+# https://github.com/NX-2021-L/enceladus/actions/runs/32615808666).
+# ---------------------------------------------------------------------------
+
+# Minimal synthetic stand-in for the real _build.yml pip install step —
+# same anchor text, same flags, same multi-line backslash-continuation
+# shape, without dragging in the rest of the workflow.
+GOOD_BUILD_YML_SNIPPET = """\
+            python -m pip install \\
+              --platform "${{ matrix.pip_platform }}" \\
+              --implementation cp \\
+              --python-version "${{ matrix.py_version }}" \\
+              --only-binary=:all: \\
+              --upgrade \\
+              --target "$workdir" \\
+              -r "$workdir/requirements.txt"
+"""
+
+# Minimal synthetic stand-in for the real package_lambda_artifact.sh
+# invocation.
+GOOD_PACKAGE_SCRIPT_SNIPPET = """\
+  pip install \\
+    --platform "${PIP_PLATFORM}" \\
+    --python-version "${PIP_PYTHON_VERSION}" \\
+    --abi "${PIP_ABI}" \\
+    --implementation cp \\
+    --only-binary=:all: \\
+    -t "${BUILD_DIR}" \\
+    -r "${LAMBDA_SRC}/requirements.txt" \\
+    --quiet
+"""
+
+
+class TestBuildInvocationFlagsValidator(unittest.TestCase):
+    """ENC-TSK-O87 — the aarch64 wheel contract must survive as code, not
+    as a fact someone once verified by inspection."""
+
+    def _run_with_files(self, build_yml_text: str, package_script_text: str) -> list[str]:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write(build_yml_text)
+            build_path = Path(fh.name)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sh", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write(package_script_text)
+            script_path = Path(fh.name)
+        try:
+            with mock.patch.object(vlap, "BUILD_WORKFLOW_PATH", build_path), \
+                 mock.patch.object(vlap, "PACKAGE_ARTIFACT_SCRIPT", script_path):
+                return vlap._validate_build_invocation_flags()
+        finally:
+            build_path.unlink(missing_ok=True)
+            script_path.unlink(missing_ok=True)
+
+    def test_both_good_invocations_pass(self):
+        errors = self._run_with_files(GOOD_BUILD_YML_SNIPPET, GOOD_PACKAGE_SCRIPT_SNIPPET)
+        self.assertEqual(
+            errors, [],
+            f"Both known-good invocations must pass the guard but produced "
+            f"errors:\n  " + "\n  ".join(errors),
+        )
+
+    def test_missing_only_binary_all_in_build_yml_is_rejected(self):
+        """The ENC-TSK-O87 AC-2 negative control, as a permanent unit test:
+        deleting --only-binary=:all: from _build.yml's invocation must turn
+        the guard red."""
+        bad = GOOD_BUILD_YML_SNIPPET.replace("--only-binary=:all: \\\n", "")
+        errors = self._run_with_files(bad, GOOD_PACKAGE_SCRIPT_SNIPPET)
+        self.assertTrue(
+            any("_build.yml" in e and "--only-binary=:all:" in e for e in errors),
+            f"Missing --only-binary=:all: in _build.yml must be caught; got: {errors}",
+        )
+        # The good package script must not also be flagged.
+        self.assertFalse(
+            any("package_lambda_artifact.sh" in e for e in errors),
+            f"The unmodified package script must not be flagged; got: {errors}",
+        )
+
+    def test_missing_only_binary_all_in_package_script_is_rejected(self):
+        bad = GOOD_PACKAGE_SCRIPT_SNIPPET.replace("--only-binary=:all: \\\n", "")
+        errors = self._run_with_files(GOOD_BUILD_YML_SNIPPET, bad)
+        self.assertTrue(
+            any("package_lambda_artifact.sh" in e and "--only-binary=:all:" in e for e in errors),
+            f"Missing --only-binary=:all: in package_lambda_artifact.sh must "
+            f"be caught; got: {errors}",
+        )
+        self.assertFalse(
+            any("_build.yml" in e for e in errors),
+            f"The unmodified _build.yml must not be flagged; got: {errors}",
+        )
+
+    def test_missing_platform_flag_is_rejected(self):
+        bad = GOOD_BUILD_YML_SNIPPET.replace('--platform "${{ matrix.pip_platform }}" \\\n', "")
+        errors = self._run_with_files(bad, GOOD_PACKAGE_SCRIPT_SNIPPET)
+        self.assertTrue(
+            any("--platform" in e for e in errors),
+            f"Missing --platform must be caught; got: {errors}",
+        )
+
+    def test_missing_python_version_flag_is_rejected(self):
+        bad = GOOD_BUILD_YML_SNIPPET.replace(
+            '--python-version "${{ matrix.py_version }}" \\\n', ""
+        )
+        errors = self._run_with_files(bad, GOOD_PACKAGE_SCRIPT_SNIPPET)
+        self.assertTrue(
+            any("--python-version" in e for e in errors),
+            f"Missing --python-version must be caught; got: {errors}",
+        )
+
+    def test_missing_implementation_cp_flag_is_rejected(self):
+        bad = GOOD_PACKAGE_SCRIPT_SNIPPET.replace("--implementation cp \\\n", "")
+        errors = self._run_with_files(GOOD_BUILD_YML_SNIPPET, bad)
+        self.assertTrue(
+            any("--implementation cp" in e for e in errors),
+            f"Missing --implementation cp must be caught; got: {errors}",
+        )
+
+    def test_missing_invocation_entirely_is_rejected(self):
+        """If a build path stops installing via pip altogether (or the
+        anchor text changes), the guard must fail loudly, not vacuously
+        pass because there was nothing to find fault with."""
+        errors = self._run_with_files(
+            "# no pip install here anymore\n", GOOD_PACKAGE_SCRIPT_SNIPPET
+        )
+        self.assertTrue(
+            any("_build.yml" in e and "no" in e.lower() for e in errors),
+            f"A build path with no pip install invocation must fail, not "
+            f"pass vacuously; got: {errors}",
+        )
+
+    def test_real_repo_paths_pass(self):
+        """Smoke test against the actual on-disk _build.yml and
+        package_lambda_artifact.sh. If this fails, either the contract
+        regressed for real or the guard itself is broken."""
+        if not vlap.BUILD_WORKFLOW_PATH.is_file() or not vlap.PACKAGE_ARTIFACT_SCRIPT.is_file():
+            self.skipTest("Real build files not present in this checkout")
+        errors = vlap._validate_build_invocation_flags()
+        self.assertEqual(
+            errors, [],
+            f"On-disk build invocations failed the guard:\n  " + "\n  ".join(errors),
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
