@@ -1722,3 +1722,189 @@ def test_p20_pagination_error_is_unknown_never_a_determinate_verdict():
     state, _ = harness._probe_escalation_authorizer_routes(
         ESC_FN, {"apigatewayv2": client})
     assert state == harness.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P26 / ENC-ISS-678 -- probe attribution, and the governance-version
+# record probe that replaces a mis-registered one.
+# ---------------------------------------------------------------------------
+
+RGF = "devops-recompute-governance-gamma"
+MARTF = "devops-governance-mart-gamma"
+_GOOD_SHA = "b" * 64
+
+
+class FakeLambdaCfgClient:
+    """Only get_function_configuration -- that is all attribution needs."""
+
+    def __init__(self, env=None, error=None):
+        self._env = env or {}
+        self._error = error
+
+    def get_function_configuration(self, FunctionName):  # noqa: N803
+        if self._error:
+            raise self._error
+        return {"Environment": {"Variables": dict(self._env)}}
+
+
+class FakeDdbClient:
+    def __init__(self, item=None, error=None):
+        self._item = item
+        self._error = error
+
+    def get_item(self, TableName, Key):  # noqa: N803
+        if self._error:
+            raise self._error
+        return {"Item": self._item} if self._item else {}
+
+
+def _gov_item(*, updated_at="2026-08-01T02:02:16Z", gov_hash=_GOOD_SHA,
+              generation="664", cas="664", files=None):
+    if files is None:
+        files = [{"uri": "governance://agents.md", "s3_key": "governance/live/agents.md",
+                  "checksum_sha256_hex": _GOOD_SHA}]
+    return {
+        "version_id": {"S": "governance-version-current"},
+        "updated_at": {"S": updated_at},
+        "governance_hash": {"S": gov_hash},
+        "generation": {"N": generation},
+        "cas_version": {"N": cas},
+        "files": {"S": __import__("json").dumps(files)},
+    }
+
+
+def _gov_clients(item=None, *, ddb_error=None, env=None, run_start_ms=None):
+    return {
+        "dynamodb": FakeDdbClient(item=item, error=ddb_error),
+        "lambda": FakeLambdaCfgClient(
+            env=env if env is not None else {"GOVERNANCE_VERSION_TABLE": "governance-version-gamma"}),
+        "run_start_ms": run_start_ms if run_start_ms is not None else 4102444800000.0,
+    }
+
+
+def test_p26_recompute_governance_is_no_longer_bound_to_the_mart_probe():
+    """THE REGRESSION (ENC-ISS-678). These two functions do not share a sink:
+    the mart writes S3 parquet, recompute-governance writes a DynamoDB record.
+    Binding them to one probe let a dead recompute-governance score PASS on the
+    mart's output -- a false pass attributable to another component."""
+    assert harness.PROBE_REGISTRY[MARTF] is harness._probe_governance_mart
+    assert harness.PROBE_REGISTRY[RGF] is harness._probe_governance_version_record
+    assert harness.PROBE_REGISTRY[RGF] is not harness.PROBE_REGISTRY[MARTF]
+    for name in ("devops-recompute-governance", RGF):
+        assert harness.PROBE_CONTRACTS[name] == ("GOVERNANCE_VERSION_TABLE",)
+    for name in ("devops-governance-mart", MARTF):
+        assert harness.PROBE_CONTRACTS[name] == ("MART_BUCKET",)
+
+
+def test_p26_misattributed_probe_is_refused_as_unknown_never_pass():
+    """The structural guard. A probe declaring a downstream the function does
+    not reference must not run at all -- and must yield UNKNOWN, not FAIL: the
+    edge is not established broken, it is not established at all."""
+    # recompute-governance's real env has no MART_BUCKET, which is exactly why
+    # the old registration was wrong. Point the mart probe at it and the guard
+    # must catch it without the probe ever executing.
+    harness.PROBE_REGISTRY[RGF] = harness._probe_governance_mart
+    harness.PROBE_CONTRACTS[RGF] = ("MART_BUCKET",)
+    try:
+        result = harness.check_integration_edge(RGF, {
+            "lambda": FakeLambdaCfgClient(env={"GOVERNANCE_VERSION_TABLE": "governance-version-gamma"}),
+        })
+    finally:
+        harness.PROBE_REGISTRY[RGF] = harness._probe_governance_version_record
+        harness.PROBE_CONTRACTS[RGF] = ("GOVERNANCE_VERSION_TABLE",)
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "probe_contract_mismatch"
+    assert "MART_BUCKET" in result.detail
+
+
+def test_p26_contract_guard_does_not_block_a_correctly_attributed_probe():
+    """CONTROL. A guard that refuses everything is as useless as one that
+    refuses nothing -- the correctly-registered case must still reach a verdict."""
+    result = harness.check_integration_edge(RGF, _gov_clients(_gov_item()))
+    assert result.state == harness.PASS
+    assert result.reason_code == "probe_result"
+
+
+def test_p26_contract_guard_fails_safe_when_configuration_is_unreadable():
+    result = harness.check_integration_edge(RGF, {
+        "lambda": FakeLambdaCfgClient(error=RuntimeError("AccessDenied")),
+    })
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "probe_contract_unverifiable"
+
+
+def test_p26_contract_reason_codes_are_not_attestable():
+    """Neither new code may be laundered into ATTESTABLE_REASON_CODES. A probe
+    aimed at the wrong resource is a MEASUREMENT defect, not a declared
+    external ceiling."""
+    assert "probe_contract_mismatch" not in harness.ATTESTABLE_REASON_CODES
+    assert "probe_contract_unverifiable" not in harness.ATTESTABLE_REASON_CODES
+    for code in ("probe_contract_mismatch", "probe_contract_unverifiable"):
+        assert code in harness.REASON_CODE_GLOSSARY
+
+
+def test_p26_governance_version_probe_passes_on_a_coherent_record():
+    state, detail = harness._probe_governance_version_record(RGF, _gov_clients(_gov_item()))
+    assert state == harness.PASS
+    assert "governance-version-current" in detail
+
+
+def test_p26_governance_version_probe_does_not_false_fail_on_an_OLD_record():
+    """THE DESIGN DECISION, pinned so a successor does not 'fix' it into a bug.
+
+    This writer is S3-event-driven: when no governance file changes it must
+    write NOTHING, and the canonical record legitimately sits untouched for
+    weeks (observed at 22 days on a healthy system). A freshness window here
+    would manufacture a FAIL out of correct quiescence -- ENC-ISS-675 with the
+    sign flipped. Age is not evidence for an event-driven writer.
+    """
+    state, _ = harness._probe_governance_version_record(
+        RGF, _gov_clients(_gov_item(updated_at="2020-01-01T00:00:00Z")))
+    assert state == harness.PASS
+
+
+def test_p26_governance_version_probe_fails_on_an_incoherent_record():
+    """CONTROL. Structural checking must still be able to fail, or it is a
+    vacuous pass wearing a different shape."""
+    bad = _gov_item(files=[{"s3_key": "governance/live/agents.md",
+                            "checksum_sha256_hex": "not-a-sha"}])
+    state, detail = harness._probe_governance_version_record(RGF, _gov_clients(bad))
+    assert state == harness.FAIL
+    assert "checksum" in detail
+
+    state, _ = harness._probe_governance_version_record(
+        RGF, _gov_clients(_gov_item(gov_hash="short")))
+    assert state == harness.FAIL
+
+    state, _ = harness._probe_governance_version_record(
+        RGF, _gov_clients(_gov_item(generation="0")))
+    assert state == harness.FAIL
+
+    state, detail = harness._probe_governance_version_record(
+        RGF, _gov_clients(_gov_item(files=[])))
+    assert state == harness.FAIL
+
+
+def test_p26_governance_version_probe_fails_when_canonical_record_is_absent():
+    """This function is the SOLE WRITER (I28), so an absent record is its
+    contract unmet -- a determinate FAIL, not an unknown."""
+    state, detail = harness._probe_governance_version_record(RGF, _gov_clients(None))
+    assert state == harness.FAIL
+    assert "SOLE WRITER" in detail
+
+
+def test_p26_governance_version_probe_is_unknown_not_pass_when_read_is_denied():
+    state, _ = harness._probe_governance_version_record(
+        RGF, _gov_clients(_gov_item(), ddb_error=RuntimeError("AccessDenied")))
+    assert state == harness.UNKNOWN
+
+
+def test_p26_governance_version_probe_refuses_state_written_after_run_start():
+    """ENC-ISS-665 remedy 1, applied to a probe that reads no logs at all: a
+    write at or after this run started may have been caused BY this run."""
+    item = _gov_item(updated_at="2026-08-01T02:02:16Z")
+    run_start = 1000.0  # long before the record's timestamp
+    state, detail = harness._probe_governance_version_record(
+        RGF, _gov_clients(item, run_start_ms=run_start))
+    assert state == harness.UNKNOWN
+    assert "remedy 1" in detail

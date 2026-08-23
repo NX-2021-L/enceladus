@@ -365,6 +365,8 @@ REASON_CODES = {
     # ENC-TSK-P19 / ENC-ISS-665 -- declared ownership, not a skip.
     "not_applicable_on_plane_devops_owned": "the function is declared, by EXACT name match, in infrastructure/devops_lambda_ownership_snapshot.json's functions[] -- it is owned by NX-2021-L/devops, so enceladus deploy validation has no standing to assert its downstream contract. NOT_APPLICABLE_ON_PLANE: the gate still fires and still records an answer; it is simply a declared answer rather than a probed one. Never a silent skip and never a pass",
     "devops_ownership_declaration_unreadable": "the devops ownership declaration (infrastructure/devops_lambda_ownership_snapshot.json) could not be read or parsed, so NO function can be resolved to NOT_APPLICABLE_ON_PLANE this run -- a missing declaration is an unknown, never a silent pass and never an assumed non-devops classification (ENC-TSK-P15 AC-3/AC-5 discipline, reused)",
+    "probe_contract_mismatch": "the probe registered for this function asserts a downstream the function does not reference in its own configuration -- refused rather than run, because judging a function on an artifact another function writes produces a PASS attributable to the wrong component (ENC-ISS-678). UNKNOWN, never pass and never fail: the edge is not established broken, it is not established at all",
+    "probe_contract_unverifiable": "the probe declares a downstream env key but the function's configuration could not be read to confirm it references that downstream -- fail-safe to unknown rather than run a probe whose attribution cannot be checked (ENC-ISS-678)",
     "probe_error": "the registered probe raised an exception",
     "probe_invalid_state": "the registered probe returned a state outside pass/fail/unknown",
     "probe_result": "the registered probe ran to completion and returned this state",
@@ -1361,13 +1363,92 @@ def check_live_invocation(lambda_client, function_name: str, payload: str = "{}"
 IntegrationProbe = Callable[[str, Dict[str, object]], Tuple[str, str]]
 PROBE_REGISTRY: Dict[str, IntegrationProbe] = {}
 
+# ENC-ISS-678: every probe must DECLARE the downstream it asserts against, as
+# the environment-variable key(s) through which the target function names that
+# downstream in its own configuration. PROBE_CONTRACTS[function_name] is that
+# declaration, and _verify_probe_contract enforces it BEFORE the probe runs.
+#
+# WHY THIS EXISTS. register_probe used to be a bare name->callable map, which
+# cannot express "this probe belongs to this function" and therefore cannot be
+# reviewed for it. _probe_governance_mart was registered for FOUR names, two of
+# which (devops-recompute-governance[-gamma]) do not write the mart at all --
+# they write a DynamoDB governance-version record. The mart parquet those two
+# were being judged on is written by a DIFFERENT function, so a dead
+# recompute-governance would still have scored PASS on the mart's output.
+#
+# That is a FALSE ATTRIBUTION, and it is the ENC-ISS-665 family in a fourth
+# shape: 665 passed on state it created itself, 675 failed on an enumeration it
+# truncated, 677 certified completeness it did not have, and this one passes on
+# state SOMEONE ELSE created. All four substitute an observable merely
+# CORRELATED with health for the one that IS health.
+#
+# A mismatch is UNKNOWN, never PASS and never FAIL -- the harness cannot claim
+# the edge is broken when what it has actually established is that it was
+# pointed at the wrong edge.
+PROBE_CONTRACTS: Dict[str, Tuple[str, ...]] = {}
 
-def register_probe(*function_names: str) -> Callable[[IntegrationProbe], IntegrationProbe]:
+
+def register_probe(
+    *function_names: str, declares: Tuple[str, ...] = (),
+) -> Callable[[IntegrationProbe], IntegrationProbe]:
+    """Register `fn` as the point-4 probe for each name in `function_names`.
+
+    `declares` names the environment variable(s) through which the target
+    function must itself reference the downstream this probe asserts against.
+    An empty `declares` is permitted only for probes whose downstream is not
+    expressible as a function environment variable (e.g. the API Gateway route
+    topology, which lives in the API's configuration and not the function's) --
+    those state their justification at the registration site.
+    """
     def deco(fn: IntegrationProbe) -> IntegrationProbe:
         for name in function_names:
             PROBE_REGISTRY[name] = fn
+            PROBE_CONTRACTS[name] = tuple(declares)
         return fn
     return deco
+
+
+def _verify_probe_contract(
+    function_name: str, clients: Dict[str, object],
+) -> Optional[Tuple[str, str]]:
+    """Confirm the registered probe's declared downstream is one THIS function
+    actually references. Returns None when the contract holds, else a
+    (reason_code, detail) pair for an UNKNOWN verdict.
+
+    Fail-safe by construction: an unreadable configuration yields
+    probe_contract_unverifiable, never a silent pass. Neither returned reason
+    code is in ATTESTABLE_REASON_CODES -- a probe pointed at the wrong resource
+    is a measurement defect, not a declared external ceiling, and must not be
+    laundered into looking like one.
+    """
+    required = PROBE_CONTRACTS.get(function_name) or ()
+    if not required:
+        return None
+    lambda_client = clients.get("lambda")
+    if lambda_client is None:
+        return ("probe_contract_unverifiable",
+                f"probe for {function_name!r} declares downstream env key(s) "
+                f"{', '.join(required)} but no lambda client was supplied to confirm the "
+                f"function actually references them -- refusing to run a probe whose "
+                f"attribution to this function cannot be checked (ENC-ISS-678)")
+    try:
+        cfg = lambda_client.get_function_configuration(FunctionName=function_name)
+    except Exception as exc:  # noqa: BLE001
+        return ("probe_contract_unverifiable",
+                f"could not read configuration for {function_name!r} to confirm it references "
+                f"the declared downstream env key(s) {', '.join(required)}: {_err(exc)}")
+    env = ((cfg or {}).get("Environment") or {}).get("Variables") or {}
+    missing = [k for k in required if not env.get(k)]
+    if missing:
+        return ("probe_contract_mismatch",
+                f"PROBE MISATTRIBUTION REFUSED: the probe registered for {function_name!r} "
+                f"asserts a downstream this function does not reference. It declares env key(s) "
+                f"{', '.join(required)}, but {', '.join(missing)} is absent from the function's "
+                f"own configuration (present: {', '.join(sorted(env)) or 'none'}). Running it "
+                f"would judge {function_name!r} on an artifact written by something else -- a "
+                f"false PASS in the lenient direction (ENC-ISS-678). Reported UNKNOWN: the edge "
+                f"is not established broken, it is not established at all.")
+    return None
 
 
 _REQUEST_ID_MARKER_RE = re.compile(r"RequestId:\s*([0-9a-fA-F-]{8,})")
@@ -1714,7 +1795,13 @@ def _paginate_v2(fn, item_key: str = "Items", **kwargs) -> Tuple[Optional[List[d
     return None, "pagination did not terminate within 50 pages"
 
 
-@register_probe("escalation-decision-authorizer", "escalation-decision-authorizer-gamma")
+# declares=() is deliberate and justified: this probe's downstream is the API
+# Gateway ROUTE TOPOLOGY, which lives in the API's configuration rather than in
+# the function's environment. The probe establishes attribution directly and
+# more strongly than an env key could -- it resolves each route's AuthorizerId
+# and confirms that authorizer's AuthorizerUri references THIS function.
+@register_probe("escalation-decision-authorizer", "escalation-decision-authorizer-gamma",
+                declares=())
 def _probe_escalation_authorizer_routes(
     function_name: str, clients: Dict[str, object],
 ) -> Tuple[str, str]:
@@ -1855,8 +1942,17 @@ def _probe_governance_mart_produced(
         f"{max_age_hours}h window")
 
 
-@register_probe("devops-recompute-governance", "devops-recompute-governance-gamma",
-                "devops-governance-mart", "devops-governance-mart-gamma")
+# ENC-ISS-678: devops-recompute-governance[-gamma] WAS registered here and is
+# not any more. It does not write the mart -- it is the sole writer of the
+# governance-version DynamoDB record (02-compute.yaml RecomputeGovernanceFunction:
+# "Triggered by S3 ObjectCreated on governance/live/*; writes canonical
+# governance-version DDB record. IAM sole-writer grant (I28)"). Its probe is
+# _probe_governance_version_record below. `declares` pins this probe to the
+# MART_BUCKET env key, which the mart function carries and recompute-governance
+# does not -- so the misattribution is now mechanically detectable, not merely
+# absent by review.
+@register_probe("devops-governance-mart", "devops-governance-mart-gamma",
+                declares=("MART_BUCKET",))
 def _probe_governance_mart(function_name: str, clients: Dict[str, object]) -> Tuple[str, str]:
     """Composite: BRD 8.4's example has two clauses and this checks both.
 
@@ -1873,6 +1969,135 @@ def _probe_governance_mart(function_name: str, clients: Dict[str, object]) -> Tu
         if worst in (schedule_state, produced_state):
             return worst, detail
     return PASS, detail
+
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_GOVERNANCE_VERSION_CANONICAL_KEY = "governance-version-current"
+
+
+# ENC-ISS-678 / ENC-TSK-P26. The real downstream contract for
+# devops-recompute-governance[-gamma], replacing the mart probe that was
+# mis-registered for it.
+#
+# WHY THIS PROBE ASSERTS STRUCTURE AND NOT FRESHNESS, which is the whole design
+# decision and the easiest thing for a successor to "fix" wrongly. This function
+# is S3-EVENT-DRIVEN (ObjectCreated on governance/live/*) with an hourly
+# backstop. When no governance file changes, the correct behaviour is to write
+# NOTHING, and the canonical record legitimately sits untouched for weeks -- it
+# was observed at updated_at 2026-08-01, twenty-two days old, on a healthy
+# system. A freshness window here would manufacture a FAIL out of correct
+# quiescence: the ENC-ISS-675 defect with the sign flipped, an enumeration-style
+# false negative produced by measuring the wrong property rather than by reading
+# too little. Age is not evidence for an event-driven writer.
+#
+# What IS assertable is that the artifact this function is the SOLE WRITER of is
+# present, canonical and internally coherent -- a partial, truncated or
+# half-written record fails these checks while a merely old one passes.
+@register_probe("devops-recompute-governance", "devops-recompute-governance-gamma",
+                declares=("GOVERNANCE_VERSION_TABLE",))
+def _probe_governance_version_record(
+    function_name: str, clients: Dict[str, object],
+) -> Tuple[str, str]:
+    ddb = clients.get("dynamodb")
+    if ddb is None:
+        return UNKNOWN, ("no dynamodb client supplied -- cannot read the governance-version "
+                         "record this function is the sole writer of")
+    lambda_client = clients.get("lambda")
+    if lambda_client is None:
+        return UNKNOWN, "no lambda client supplied -- cannot resolve GOVERNANCE_VERSION_TABLE"
+    try:
+        cfg = lambda_client.get_function_configuration(FunctionName=function_name)
+        table = (((cfg or {}).get("Environment") or {}).get("Variables") or {}).get(
+            "GOVERNANCE_VERSION_TABLE")
+    except Exception as exc:  # noqa: BLE001
+        return UNKNOWN, f"could not read GOVERNANCE_VERSION_TABLE from configuration: {_err(exc)}"
+    if not table:
+        return UNKNOWN, "GOVERNANCE_VERSION_TABLE is not set on this function"
+
+    try:
+        resp = ddb.get_item(
+            TableName=table,
+            Key={"version_id": {"S": _GOVERNANCE_VERSION_CANONICAL_KEY}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return UNKNOWN, (f"could not read {_GOVERNANCE_VERSION_CANONICAL_KEY!r} from {table!r}: "
+                         f"{_err(exc)} -- a read this probe cannot perform is unknown, not a pass")
+    item = (resp or {}).get("Item")
+    if not item:
+        return FAIL, (f"{table!r} has no {_GOVERNANCE_VERSION_CANONICAL_KEY!r} item. This "
+                      f"function is its SOLE WRITER (I28), so an absent canonical record means "
+                      f"the governance-version contract is not being satisfied by anything.")
+
+    def _s(key: str) -> str:
+        return str((item.get(key) or {}).get("S") or "")
+
+    def _n(key: str) -> str:
+        return str((item.get(key) or {}).get("N") or "")
+
+    problems: List[str] = []
+
+    gov_hash = _s("governance_hash")
+    if not _SHA256_HEX_RE.match(gov_hash):
+        problems.append(f"governance_hash is not a 64-char lowercase hex digest "
+                        f"(got {gov_hash[:24]!r}...)")
+
+    for numeric in ("generation", "cas_version"):
+        raw = _n(numeric)
+        if not raw.isdigit() or int(raw) <= 0:
+            problems.append(f"{numeric} is not a positive integer (got {raw!r})")
+
+    files_raw = _s("files")
+    try:
+        files = json.loads(files_raw) if files_raw else []
+    except Exception:  # noqa: BLE001
+        files = None
+        problems.append("files does not parse as JSON")
+    if files is not None:
+        if not isinstance(files, list) or not files:
+            problems.append("files is empty or not a list -- the record claims to describe no "
+                            "governance objects at all")
+        else:
+            for entry in files:
+                if not isinstance(entry, dict) or not entry.get("s3_key"):
+                    problems.append("a files[] entry is missing s3_key")
+                    break
+                if not _SHA256_HEX_RE.match(str(entry.get("checksum_sha256_hex") or "")):
+                    problems.append(f"files[] entry {entry.get('s3_key')!r} has no valid "
+                                    f"64-hex checksum_sha256_hex")
+                    break
+
+    # ENC-ISS-665 remedy 1, applied even though this probe reads no logs: state
+    # written at or after this harness run started is state the run itself may
+    # have caused, and is never accepted as evidence.
+    updated_at = _s("updated_at")
+    run_start_ms = clients.get("run_start_ms")
+    if updated_at and isinstance(run_start_ms, (int, float)):
+        try:
+            written_ms = datetime.strptime(
+                updated_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() * 1000.0
+        except Exception:  # noqa: BLE001
+            problems.append(f"updated_at {updated_at!r} is not an ISO-8601 Z timestamp")
+        else:
+            if written_ms >= run_start_ms:
+                return UNKNOWN, (
+                    f"the canonical record's updated_at ({updated_at}) is at or after this "
+                    f"harness run started -- refusing to accept as evidence a write this run "
+                    f"may itself have triggered (ENC-ISS-665 remedy 1)")
+
+    if problems:
+        return FAIL, (f"the canonical governance-version record in {table!r} is present but "
+                      f"INCOHERENT: {'; '.join(problems)}. This function is its sole writer, so "
+                      f"a malformed record is this function's contract being violated, not a "
+                      f"downstream's.")
+
+    file_count = len(files or [])
+    return PASS, (f"{table!r} holds a coherent {_GOVERNANCE_VERSION_CANONICAL_KEY!r} record: "
+                  f"governance_hash {gov_hash[:12]}..., generation {_n('generation')}, "
+                  f"cas_version {_n('cas_version')}, {file_count} governance object(s) each "
+                  f"carrying an s3_key and a 64-hex checksum, updated_at {updated_at} "
+                  f"(predating this run). Checked for STRUCTURAL COHERENCE rather than age: "
+                  f"this writer is event-driven, so an old record on an unchanged governance "
+                  f"corpus is correct behaviour, not staleness.")
 
 
 def _enforce_no_pass_when_point3_failed(
@@ -1916,6 +2141,18 @@ def check_integration_edge(
     ownership = _resolve_devops_ownership(function_name)
     if ownership is not None:
         return _enforce_no_pass_when_point3_failed(ownership, point3_result)
+
+    # ENC-ISS-678: attribution is checked BEFORE the probe runs. A probe pointed
+    # at another function's artifact must never get the chance to return a
+    # verdict -- remedy 3 below only catches a bad PASS when point 3 also
+    # failed, so it cannot cover this case on its own.
+    contract_failure = _verify_probe_contract(function_name, clients)
+    if contract_failure is not None:
+        reason_code, detail = contract_failure
+        return _enforce_no_pass_when_point3_failed(
+            PointResult(4, "integration_edge", UNKNOWN, detail, reason_code=reason_code),
+            point3_result,
+        )
 
     probe = PROBE_REGISTRY.get(function_name)
     if probe is None:
@@ -2047,7 +2284,7 @@ ARTIFACT_TAG_SCHEME_WARNING = (
 
 def evaluate_function(
     *, lambda_client, s3_client, logs_client, function_name: str,
-    apigw_client=None,
+    apigw_client=None, ddb_client=None,
     expected_arch: str = "arm64", py_version: str = "3.12",
     commit_sha: Optional[str] = None, bucket: str = ARTIFACT_BUCKET_DEFAULT,
     key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT, invoke_payload: str = "{}",
@@ -2076,7 +2313,8 @@ def evaluate_function(
         # client makes the relevant probe report UNKNOWN and say so; it never
         # makes it pass.
         {"lambda": lambda_client, "logs": logs_client, "s3": s3_client,
-         "apigatewayv2": apigw_client, "run_start_ms": run_start_ms},
+         "apigatewayv2": apigw_client, "dynamodb": ddb_client,
+         "run_start_ms": run_start_ms},
         # ENC-ISS-665 remedy 3 (load-bearing): point 4 is structurally
         # incapable of returning PASS when point 3 FAILED in this same run.
         point3_result=point3,
@@ -2148,11 +2386,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         apigw_client = session.client("apigatewayv2", region_name=args.region)
     except Exception:  # noqa: BLE001 - probe reports UNKNOWN rather than failing the run
         apigw_client = None
+    try:
+        ddb_client = session.client("dynamodb", region_name=args.region)
+    except Exception:  # noqa: BLE001 - probe reports UNKNOWN rather than failing the run
+        ddb_client = None
 
     reports = [
         evaluate_function(
             lambda_client=lambda_client, s3_client=s3_client, logs_client=logs_client,
-            apigw_client=apigw_client, function_name=fn, expected_arch=args.arch, py_version=args.py_version,
+            apigw_client=apigw_client, ddb_client=ddb_client,
+            function_name=fn, expected_arch=args.arch, py_version=args.py_version,
             commit_sha=args.commit_sha, bucket=args.bucket, key_prefix=args.key_prefix,
             invoke_payload=args.invoke_payload, env=args.env,
             repo=args.repo, ci_workflow=args.ci_workflow,
