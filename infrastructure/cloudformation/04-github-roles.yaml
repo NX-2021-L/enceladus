@@ -554,6 +554,142 @@ Resources:
               - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:application/fhhcl7m/*"
               - !Sub "arn:aws:appconfig:us-west-2:${AWS::AccountId}:deploymentstrategy/AppConfig.AllAtOnce"
 
+
+  # ENC-TSK-O98 / ENC-ISS-660 — the CloudFormation deploy role could not reach
+  # three of the five resources ENC-TSK-O80 declares for the gamma governance
+  # mart. The AWS::Glue::Database create failed at apply on 2026-08-23, and
+  # CloudFormation's rollback then reverted an UNRELATED in-flight parameter,
+  # pushing SharedLayerArn :12 -> :10 across the fleet (ENC-ISS-656) and
+  # undoing ENC-TSK-O94's correct pin fix. ENC-TSK-O95 had to revert all five.
+  #
+  # The audit that produced this policy checked all five resources rather than
+  # only the one that fired, because the handoff (DOC-6EF8FAFC5E0A) asked for
+  # exactly that -- and it found a THIRD gap the incident had not yet reached:
+  #
+  #   GovernanceMartBucketGamma     AWS::S3::Bucket          GAP  (S3UiBucketOps is enceladus-ui-v2* only)
+  #   GovernanceMartDatabaseGamma   AWS::Glue::Database      GAP  (zero glue: actions anywhere)
+  #   GovernanceMartScheduleDlq     AWS::SQS::Queue          ok   (SqsQueueOps covers devops-*)
+  #   GovernanceMartSchedulerRole   AWS::IAM::Role           ok   (IAMRoleManagement covers role/devops-*, incl. PassRole)
+  #   GovernanceMartScheduleGamma   AWS::Scheduler::Schedule GAP  (EventBridgeSchedulerOps is rhythm-*/enceladus-* only;
+  #                                                                the schedule declares no GroupName, so it lands at
+  #                                                                schedule/default/... which neither pattern matches)
+  #
+  # Re-landing O80 with only the Glue and S3 grants would therefore have rolled
+  # the gamma stack back a SECOND time, on the Scheduler resource.
+  #
+  # A MANAGED policy, not another statement on CloudFormationDeployPolicy or
+  # another put-role-policy inline: this role's aggregate INLINE quota (10,240
+  # bytes) is already exhausted by the out-of-band patch policies -- the same
+  # constraint that forced CodeDeployStackOpsPolicy and the ENC-TSK-M56 AppSync
+  # grant to be managed policies. An inline addition here would fail on quota.
+  #
+  # GAMMA ONLY, BY RESOURCE. Production's `devops` Glue database and
+  # `devops-agentcli-compute` bucket are out-of-band T0-onboarded resources
+  # (DOC-04AF8A02A8F7) that no template declares; nothing here grants reach to
+  # them. Actions are complete for each resource's CRUD surface -- following the
+  # ENC-TSK-M56 precedent of granting the whole surface the stack manages rather
+  # than only the action that happened to fail first, so the next property
+  # touched does not reopen this gap one rollback at a time.
+  GovernanceMartStackOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-governance-mart-ops
+      Description: >
+        ENC-TSK-O98 / ENC-ISS-660: Glue database, mart bucket and default-group
+        Scheduler reach for the gamma governance mart resources declared in
+        02-compute.yaml (ENC-TSK-O80). Gamma-scoped; production's out-of-band
+        mart resources are deliberately not reachable.
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # GovernanceMartDatabaseGamma (AWS::Glue::Database, name "devops-gamma").
+          # DeleteDatabase cascades to contained tables and user-defined
+          # functions, so the delete path needs those child ARNs too or the
+          # rollback cannot clean up -- which is exactly what happened on
+          # 2026-08-23 (AccessDenied on glue:DeleteDatabase, retried 3x, stack
+          # left UPDATE_ROLLBACK_COMPLETE "one or more resources could not be
+          # deleted"). The catalog ARN is required by Glue for any database call.
+          - Sid: GovernanceMartGlueDatabaseGamma
+            Effect: Allow
+            Action:
+              - glue:CreateDatabase
+              - glue:GetDatabase
+              - glue:UpdateDatabase
+              - glue:DeleteDatabase
+              - glue:GetTables
+              - glue:DeleteTable
+              - glue:GetUserDefinedFunctions
+              - glue:DeleteUserDefinedFunction
+              - glue:TagResource
+              - glue:UntagResource
+              - glue:GetTags
+            Resource:
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:database/devops-gamma"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:table/devops-gamma/*"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:userDefinedFunction/devops-gamma/*"
+
+          # GovernanceMartBucketGamma (AWS::S3::Bucket, "devops-agentcli-compute-gamma").
+          # Bucket-level only -- no object actions. The mart Lambda writes its
+          # own objects under its own execution role; the deploy role has no
+          # business reading or writing mart data, only provisioning the bucket.
+          # The read actions beyond the three properties the template sets
+          # (encryption, public-access-block, tags) are what CloudFormation's
+          # S3 bucket handler calls on read-back; denying them fails the stack
+          # just as surely as denying CreateBucket.
+          - Sid: GovernanceMartBucketGamma
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutEncryptionConfiguration
+              - s3:GetEncryptionConfiguration
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:GetBucketVersioning
+              - s3:GetLifecycleConfiguration
+              - s3:GetBucketOwnershipControls
+            Resource:
+              - "arn:aws:s3:::devops-agentcli-compute-gamma"
+
+          # GovernanceMartScheduleGamma (AWS::Scheduler::Schedule,
+          # "devops-governance-mart-daily-gamma"). THE THIRD GAP. The existing
+          # EventBridgeSchedulerOps statement on CloudFormationDeployPolicy --
+          # and the identical statement applied live by
+          # iam-cfn-deploy-role-scheduler-patch.yml -- are both scoped to
+          # schedule/rhythm-*/* and schedule/enceladus-*/*. This schedule sets
+          # no GroupName, so its ARN is schedule/default/devops-governance-mart-daily-gamma,
+          # matched by neither. Creating a schedule in a group also requires
+          # GetScheduleGroup on that group, hence schedule-group/default.
+          # Deliberately NOT schedule/default/* -- only the mart's own prefix.
+          - Sid: GovernanceMartSchedulerDefaultGroupGamma
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:GetSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:TagResource
+              - scheduler:UntagResource
+            Resource:
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/default/devops-governance-mart-*"
+          - Sid: GovernanceMartSchedulerDefaultGroupRead
+            Effect: Allow
+            Action:
+              - scheduler:GetScheduleGroup
+            Resource:
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/default"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:

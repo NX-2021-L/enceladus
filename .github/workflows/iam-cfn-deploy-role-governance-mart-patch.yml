@@ -1,0 +1,270 @@
+name: IAM CFN Deploy Role — Governance Mart (Glue/S3/Scheduler) Patch
+
+# ENC-TSK-O98 / ENC-ISS-660 — ACTION 2 of DOC-6EF8FAFC5E0A.
+#
+# WHAT WENT WRONG. ENC-TSK-O80 (PR #1137) declared GovernanceMartDatabaseGamma,
+# an AWS::Glue::Database, and enceladus-cloudformation-deploy-github-role holds
+# no Glue permissions whatsoever. Every pre-merge guard was green -- nothing in
+# CI has any notion of whether the deploy role can reach a resource TYPE a
+# template newly introduces. The create failed at apply, CloudFormation rolled
+# the stack back, and the rollback restored SharedLayerArn to the stack's stored
+# :10, performing exactly the fleet downgrade the health gate had just refused
+# (ENC-ISS-656). The rollback then could not delete the Glue resource either
+# (AccessDenied on glue:DeleteDatabase, retried 04:33:40 / 04:36:43 / 04:39:46),
+# leaving UPDATE_ROLLBACK_COMPLETE. ENC-TSK-O95 reverted all five O80 resources.
+#
+# THREE GAPS, NOT TWO. The handoff asked that all five of O80's resources be
+# confirmed reachable before re-landing rather than discovered one rollback at a
+# time. That audit found a third gap the incident had not yet reached:
+#
+#   GovernanceMartBucketGamma     AWS::S3::Bucket          GAP
+#   GovernanceMartDatabaseGamma   AWS::Glue::Database      GAP  <- the one that fired
+#   GovernanceMartScheduleDlq     AWS::SQS::Queue          ok
+#   GovernanceMartSchedulerRole   AWS::IAM::Role           ok
+#   GovernanceMartScheduleGamma   AWS::Scheduler::Schedule GAP  <- previously undiscovered
+#
+# The Scheduler gap is the subtle one: that TYPE is already granted, but
+# EventBridgeSchedulerOps (and the identical live statement from
+# iam-cfn-deploy-role-scheduler-patch.yml) is scoped to schedule/rhythm-*/* and
+# schedule/enceladus-*/*. The schedule declares no GroupName, so it lands at
+# schedule/default/devops-governance-mart-daily-gamma -- matched by neither.
+# Re-landing O80 with only Glue and S3 would have rolled the stack back again.
+#
+# MANAGED POLICY, NOT put-role-policy. This role's aggregate INLINE quota
+# (10,240 bytes) is already exhausted by the out-of-band patch policies, which
+# is why CodeDeployStackOpsPolicy and the ENC-TSK-M56 AppSync grant are managed
+# policies. Copying the older inline patch workflows here would fail on quota.
+# This follows iam-cfn-deploy-role-appsync-events-patch.yml instead.
+#
+# DURABLE FIX: GovernanceMartStackOpsPolicy in
+# infrastructure/cloudformation/04-github-roles.yaml, with the SAME policy name
+# (enceladus-cfn-deploy-governance-mart-ops) and byte-identical statements.
+# 04-github-roles.yaml has no push-deploy lane, so this one-off dispatch is what
+# actually applies the grant, ahead of the next github-roles stack deploy. When
+# that stack does deploy, it adopts this same policy name rather than a second
+# copy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "ENC-TSK-O98 / ENC-ISS-660 — grant Glue database, mart bucket and default-group Scheduler reach so ENC-TSK-O80/O81 can re-land without a second rollback"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Attach governance-mart managed policy to CFN deploy role
+    # ENC-TSK-J64 / ENC-FTR-120: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      # PREFLIGHT, deliberately BEFORE any mutation. The negative control below
+      # is required, not optional (DOC-6EF8FAFC5E0A) -- so if this role cannot
+      # call iam:SimulatePrincipalPolicy, that must be discovered now, while
+      # nothing has changed, rather than after the grant has landed and the run
+      # fails on an unprovable assertion. Abort here leaves the account untouched.
+      - name: Preflight — confirm the controls below can actually run
+        run: |
+          set -euo pipefail
+          if ! aws iam simulate-principal-policy \
+                 --policy-source-arn "arn:aws:iam::356364570033:role/enceladus-cloudformation-deploy-github-role" \
+                 --action-names "sts:GetCallerIdentity" \
+                 --query 'EvaluationResults[0].EvalDecision' --output text >/dev/null; then
+            echo "::error::iam:SimulatePrincipalPolicy is unavailable to this identity. The mandatory negative control cannot run, so this patch is NOT being applied. Grant iam:SimulatePrincipalPolicy to the backend deploy role, or apply and verify this grant by another audited means."
+            exit 1
+          fi
+          echo "simulate-principal-policy reachable — controls can run."
+
+      - name: Create (or version) the governance-mart managed policy
+        id: policy
+        run: |
+          set -euo pipefail
+          cat > /tmp/governance-mart-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "GovernanceMartGlueDatabaseGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "glue:CreateDatabase",
+                  "glue:GetDatabase",
+                  "glue:UpdateDatabase",
+                  "glue:DeleteDatabase",
+                  "glue:GetTables",
+                  "glue:DeleteTable",
+                  "glue:GetUserDefinedFunctions",
+                  "glue:DeleteUserDefinedFunction",
+                  "glue:TagResource",
+                  "glue:UntagResource",
+                  "glue:GetTags"
+                ],
+                "Resource": [
+                  "arn:aws:glue:us-west-2:356364570033:catalog",
+                  "arn:aws:glue:us-west-2:356364570033:database/devops-gamma",
+                  "arn:aws:glue:us-west-2:356364570033:table/devops-gamma/*",
+                  "arn:aws:glue:us-west-2:356364570033:userDefinedFunction/devops-gamma/*"
+                ]
+              },
+              {
+                "Sid": "GovernanceMartBucketGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:CreateBucket",
+                  "s3:DeleteBucket",
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation",
+                  "s3:GetBucketAcl",
+                  "s3:GetBucketPolicy",
+                  "s3:PutBucketTagging",
+                  "s3:GetBucketTagging",
+                  "s3:PutEncryptionConfiguration",
+                  "s3:GetEncryptionConfiguration",
+                  "s3:PutBucketPublicAccessBlock",
+                  "s3:GetBucketPublicAccessBlock",
+                  "s3:GetBucketVersioning",
+                  "s3:GetLifecycleConfiguration",
+                  "s3:GetBucketOwnershipControls"
+                ],
+                "Resource": [
+                  "arn:aws:s3:::devops-agentcli-compute-gamma"
+                ]
+              },
+              {
+                "Sid": "GovernanceMartSchedulerDefaultGroupGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "scheduler:CreateSchedule",
+                  "scheduler:GetSchedule",
+                  "scheduler:UpdateSchedule",
+                  "scheduler:DeleteSchedule",
+                  "scheduler:TagResource",
+                  "scheduler:UntagResource"
+                ],
+                "Resource": [
+                  "arn:aws:scheduler:us-west-2:356364570033:schedule/default/devops-governance-mart-*"
+                ]
+              },
+              {
+                "Sid": "GovernanceMartSchedulerDefaultGroupRead",
+                "Effect": "Allow",
+                "Action": [
+                  "scheduler:GetScheduleGroup"
+                ],
+                "Resource": [
+                  "arn:aws:scheduler:us-west-2:356364570033:schedule-group/default"
+                ]
+              }
+            ]
+          }
+          JSON
+
+          policy_arn="arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-governance-mart-ops"
+          if aws iam get-policy --policy-arn "${policy_arn}" >/dev/null 2>&1; then
+            echo "Policy exists; creating a new default version rather than re-creating."
+            version_count=$(aws iam list-policy-versions --policy-arn "${policy_arn}" --query 'length(Versions)' --output text)
+            if [ "${version_count}" -ge 5 ]; then
+              oldest_non_default=$(aws iam list-policy-versions --policy-arn "${policy_arn}" \
+                --query 'Versions[?IsDefaultVersion==`false`]|sort_by(@,&CreateDate)[0].VersionId' --output text)
+              aws iam delete-policy-version --policy-arn "${policy_arn}" --version-id "${oldest_non_default}"
+            fi
+            aws iam create-policy-version \
+              --policy-arn "${policy_arn}" \
+              --policy-document "file:///tmp/governance-mart-policy.json" \
+              --set-as-default
+          else
+            aws iam create-policy \
+              --policy-name "enceladus-cfn-deploy-governance-mart-ops" \
+              --policy-document "file:///tmp/governance-mart-policy.json" \
+              --description "ENC-TSK-O98 / ENC-ISS-660: Glue database, mart bucket and default-group Scheduler reach for the gamma governance mart (ENC-TSK-O80). Gamma-scoped."
+          fi
+          echo "policy_arn=${policy_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attach managed policy to the CFN deploy role
+        run: |
+          set -euo pipefail
+          aws iam attach-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-arn "${{ steps.policy.outputs.policy_arn }}"
+
+      - name: Verify attachment
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query "AttachedPolicies[?PolicyName=='enceladus-cfn-deploy-governance-mart-ops']" \
+            --output table
+
+      # NEGATIVE CONTROL — the grant must not have widened to production's
+      # out-of-band mart resources. `devops` (prod) and `devops-gamma` differ by
+      # one suffix; a careless wildcard would have covered both, and production's
+      # mart database and bucket are T0-onboarded resources no template declares.
+      # Simulate rather than call: this asserts the policy's reach without
+      # touching a production resource at all.
+      - name: Negative control — production mart resources must remain unreachable
+        run: |
+          set -euo pipefail
+          role_arn="arn:aws:iam::356364570033:role/enceladus-cloudformation-deploy-github-role"
+          fail=0
+          check_denied() {
+            local action="$1" resource="$2"
+            decision=$(aws iam simulate-principal-policy \
+              --policy-source-arn "${role_arn}" \
+              --action-names "${action}" \
+              --resource-arns "${resource}" \
+              --query 'EvaluationResults[0].EvalDecision' --output text)
+            if [ "${decision}" = "allowed" ]; then
+              echo "::error::NEGATIVE CONTROL FAILED — ${action} is ALLOWED on ${resource}. The grant widened to production; do not proceed."
+              fail=1
+            else
+              echo "ok: ${action} on ${resource} -> ${decision}"
+            fi
+          }
+          check_denied glue:DeleteDatabase "arn:aws:glue:us-west-2:356364570033:database/devops"
+          check_denied s3:DeleteBucket     "arn:aws:s3:::devops-agentcli-compute"
+          check_denied s3:PutObject        "arn:aws:s3:::devops-agentcli-compute-gamma/warehouse/x"
+          exit "${fail}"
+
+      # POSITIVE CONTROL — the three gaps this patch exists to close are now
+      # reachable. Proving the grant landed is not the same as proving it landed
+      # on the right resources; both halves are asserted here so the next
+      # ENC-TSK-O80 apply is not itself the test.
+      - name: Positive control — the three gap resources are now reachable
+        run: |
+          set -euo pipefail
+          role_arn="arn:aws:iam::356364570033:role/enceladus-cloudformation-deploy-github-role"
+          fail=0
+          check_allowed() {
+            local action="$1" resource="$2"
+            decision=$(aws iam simulate-principal-policy \
+              --policy-source-arn "${role_arn}" \
+              --action-names "${action}" \
+              --resource-arns "${resource}" \
+              --query 'EvaluationResults[0].EvalDecision' --output text)
+            if [ "${decision}" != "allowed" ]; then
+              echo "::error::POSITIVE CONTROL FAILED — ${action} on ${resource} -> ${decision}. ENC-TSK-O80 would roll back again."
+              fail=1
+            else
+              echo "ok: ${action} on ${resource} -> allowed"
+            fi
+          }
+          check_allowed glue:CreateDatabase   "arn:aws:glue:us-west-2:356364570033:database/devops-gamma"
+          check_allowed s3:CreateBucket       "arn:aws:s3:::devops-agentcli-compute-gamma"
+          check_allowed scheduler:CreateSchedule "arn:aws:scheduler:us-west-2:356364570033:schedule/default/devops-governance-mart-daily-gamma"
+          check_allowed scheduler:GetScheduleGroup "arn:aws:scheduler:us-west-2:356364570033:schedule-group/default"
+          exit "${fail}"
