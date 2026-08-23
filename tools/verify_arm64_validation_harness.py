@@ -1677,6 +1677,43 @@ def _resolve_devops_ownership(function_name: str) -> Optional[PointResult]:
         reason_code="not_applicable_on_plane_devops_owned")
 
 
+def _paginate_v2(fn, item_key: str = "Items", **kwargs) -> Tuple[Optional[List[dict]], Optional[str]]:
+    """Drain every page of an apigatewayv2 list call. (items, error).
+
+    ENC-TSK-P20. apigatewayv2 get_routes returns a BOUNDED FIRST PAGE -- 25 of
+    184 routes on the gamma API in practice -- and the boundary is not an error
+    the caller can see. Reading only that page made this probe report
+    FAIL/"no escalation route found for /deny" on an API where the deny route
+    exists and is correctly guarded by the same authorizer as /approve.
+
+    THAT IS A FALSE FAIL, AND IT IS THE MIRROR IMAGE OF THE ENC-ISS-665 VACUOUS
+    PASS, NOT ITS OPPOSITE. A check that reports FAIL because it could not see
+    everything is exactly as untrustworthy as one that reports PASS because it
+    did not look -- both substitute the reach of the query for the state of the
+    world. A verdict is only worth its enumeration.
+
+    Errors are RETURNED rather than raised so the caller can answer UNKNOWN. An
+    enumeration that could not complete must never collapse into a determinate
+    verdict in either direction.
+    """
+    items: List[dict] = []
+    next_token = None
+    for _ in range(50):  # bounded: a runaway NextToken must not hang the harness
+        call_kwargs = dict(kwargs)
+        call_kwargs["MaxResults"] = "500"
+        if next_token:
+            call_kwargs["NextToken"] = next_token
+        try:
+            resp = fn(**call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            return None, _err(exc)
+        items.extend(resp.get(item_key) or [])
+        next_token = resp.get("NextToken")
+        if not next_token:
+            return items, None
+    return None, "pagination did not terminate within 50 pages"
+
+
 @register_probe("escalation-decision-authorizer", "escalation-decision-authorizer-gamma")
 def _probe_escalation_authorizer_routes(
     function_name: str, clients: Dict[str, object],
@@ -1696,20 +1733,18 @@ def _probe_escalation_authorizer_routes(
     if api_client is None:
         return UNKNOWN, ("no apigatewayv2 client supplied -- route attachment cannot be read, "
                          "so this probe asserts nothing (it does not pass by default)")
-    try:
-        apis = (api_client.get_apis().get("Items") or [])
-    except Exception as exc:  # noqa: BLE001
-        return UNKNOWN, f"could not list HTTP APIs (apigatewayv2:GetApis): {_err(exc)}"
+    apis, apis_err = _paginate_v2(api_client.get_apis)
+    if apis_err is not None:
+        return UNKNOWN, f"could not list HTTP APIs (apigatewayv2:GetApis): {apis_err}"
 
     found: Dict[str, dict] = {}
     for api in apis:
         api_id = api.get("ApiId")
         if not api_id:
             continue
-        try:
-            routes = (api_client.get_routes(ApiId=api_id).get("Items") or [])
-        except Exception as exc:  # noqa: BLE001
-            return UNKNOWN, f"could not list routes on API {api_id}: {_err(exc)}"
+        routes, routes_err = _paginate_v2(api_client.get_routes, ApiId=api_id)
+        if routes_err is not None:
+            return UNKNOWN, f"could not list routes on API {api_id}: {routes_err}"
         for route in routes:
             route_key = route.get("RouteKey") or ""
             if ESCALATION_ROUTE_MARKER not in route_key:
