@@ -8219,6 +8219,58 @@ Resources:
         - Key: Component
           Value: escalation-decision-authorizer
 
+  # ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through): the gamma-suffixed mart
+  # outputs that ENC-TSK-O77 parameterised GovernanceMartFunction/Role to
+  # point at (devops-agentcli-compute-gamma, devops-gamma) did not exist.
+  # Production's own equivalents (devops-agentcli-compute, devops) are NOT
+  # declared anywhere in this repo's CloudFormation -- they are out-of-band,
+  # T0-onboarded resources (DOC-04AF8A02A8F7) predating IaC coverage. That is
+  # exactly the uncodified-live-resource class ENC-ISS-651/657 and the
+  # ENC-TSK-H29 orphan guard exist to stop; it is not a pattern to copy. The
+  # gamma twins declared below are real IaC from the start, Condition: IsGamma
+  # only -- production's bucket/database are untouched by this change and
+  # remain out-of-band (closing that gap is a separate, larger effort, not in
+  # scope here).
+  GovernanceMartBucketGamma:
+    Type: AWS::S3::Bucket
+    Condition: IsGamma
+    Properties:
+      # Renders "devops-agentcli-compute-gamma". Never evaluated when
+      # EnvironmentSuffix="" because the whole resource is Condition: IsGamma.
+      BucketName: !Sub "devops-agentcli-compute${EnvironmentSuffix}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
+  GovernanceMartDatabaseGamma:
+    Type: AWS::Glue::Database
+    Condition: IsGamma
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        # Renders "devops-gamma", matching MART_DATABASE on GovernanceMartFunction
+        # and the GlueDeclaredSchemaRegistration IAM Resource ARNs on the role
+        # below. Given a LocationUri, mirroring how `devops` itself was T0-onboarded
+        # (DOC-04AF8A02A8F7) -- register_table() still passes an explicit S3 path
+        # per table, but an unset LocationUri leaves the database's own default
+        # location ambiguous, which is exactly the kind of implicit-inference this
+        # mart's contract (DOC-5E35E14DAD05) exists to forbid.
+        Name: !Sub "devops${EnvironmentSuffix}"
+        LocationUri: !Sub "s3://devops-agentcli-compute${EnvironmentSuffix}/warehouse/devops${EnvironmentSuffix}/"
+        Description: "ENC-TSK-O80: gamma-plane twin of the (out-of-band) production `devops` Glue database, for the governance analytics mart only."
+
   GovernanceMartRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
@@ -8370,11 +8422,13 @@ Resources:
           # ENC-TSK-O77: parameterised with ${EnvironmentSuffix} so gamma writes
           # its own Parquet mart / Glue tables instead of overwriting production's
           # (ENC-FTR-136 AC-4). EnvironmentSuffix="" renders both values
-          # byte-identical to the previous literals for production. The gamma
-          # bucket (devops-agentcli-compute-gamma) and Glue database
-          # (devops-gamma) do not exist yet -- provisioning them is ENC-TSK-O80's
-          # scope, not this task's. The schedule below stays DISABLED on gamma
-          # until that lands, so nothing fires against them unprovisioned.
+          # byte-identical to the previous literals for production. ENC-TSK-O80
+          # declares the gamma bucket (GovernanceMartBucketGamma) and Glue
+          # database (GovernanceMartDatabaseGamma) below production's block, but
+          # they exist only from the deploy that applies this template onward --
+          # not yet at review time. GovernanceMartScheduleGamma stays DISABLED
+          # until a deploy has landed them and a hand-invoked run has confirmed
+          # the gamma outputs land in the gamma-suffixed bucket/database only.
           MART_BUCKET: !Sub "devops-agentcli-compute${EnvironmentSuffix}"
           MART_DATABASE: !Sub "devops${EnvironmentSuffix}"
           # Read-only governed sources. Same env var names and the same
@@ -8401,39 +8455,138 @@ Resources:
   # and schema to enceladus because that schema IS such a projection.
   # See NX-2021-L/devops infrastructure/aws/{lambda,iam,eventbridge,cloudwatch}/.
 
+  # ENC-TSK-O80: production keeps the plain EventBridge Rule. ENC-PLN-086 is
+  # gamma-only by charter and mutating the live production schedule is out of
+  # scope for it; migrating production too would also mean re-proving the
+  # Rule-vs-Scheduler cutover against the one plane that cannot tolerate a
+  # missed or duplicated day, for a plan that does not ask for it. The two
+  # paths diverging (production on Rule, gamma on Scheduler) is real debt --
+  # noted here rather than left implicit -- but it is debt already implied by
+  # every other IsGamma-conditioned resource in this file, and folding
+  # production onto Scheduler is a clean, separable follow-up once gamma has
+  # proven the retry/DLQ/Input-pinning behavior below in practice.
   GovernanceMartSchedule:
     Type: AWS::Events::Rule
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       Name: !Sub "devops-governance-mart-daily${EnvironmentSuffix}"
       Description: "DVP-TSK-649: daily 06:00 UTC full refresh of the governance analytics mart. Schedule-only by design — never per-mutation."
       ScheduleExpression: "cron(0 6 * * ? *)"
-      # DISABLED in gamma, on purpose. ENC-TSK-O77 parameterised MART_BUCKET and
-      # MART_DATABASE with ${EnvironmentSuffix} (see GovernanceMartFunction) so
-      # the two planes are no longer aimed at the same S3 bucket / Glue database
-      # -- but the gamma-suffixed bucket (devops-agentcli-compute-gamma) and Glue
-      # database (devops-gamma) do not exist yet; provisioning them is ENC-TSK-O80.
-      # Flipping this to ENABLED before that lands would fail every gamma run
-      # (missing bucket/database), and flipping it before verifying plane
-      # separation would risk exactly the PRODUCTION Parquet / Glue overwrite this
-      # comment previously existed to prevent. Leaving the gamma rule disabled
-      # means the function can still be invoked by hand for testing, deliberately
-      # and with someone watching, but never fires itself on a schedule. Do not
-      # enable this in ENC-TSK-O77 -- that is ENC-TSK-O80's scope, after the
-      # outputs are provably plane-separated.
-      State: !If [IsGamma, DISABLED, ENABLED]
+      State: ENABLED
       Targets:
         - Arn: !GetAtt GovernanceMartFunction.Arn
           Id: governance-mart-daily
 
   GovernanceMartPermission:
     Type: AWS::Lambda::Permission
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Ref GovernanceMartFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GovernanceMartSchedule.Arn
+
+  # --- ENC-TSK-O80: gamma path, EventBridge Scheduler (AC-1) -----------------
+  # AWS now recommends Scheduler over Rules for invoke-on-a-schedule: per-
+  # schedule time zones with DST handling, flexible time windows, and --
+  # the reason this migration exists -- a RetryPolicy and DeadLetterConfig
+  # that a plain Rule target cannot express at all (a Rule's Lambda target
+  # only gets Lambda's own generic async-invoke retry, unconfigurable per rule
+  # and with no DLQ short of wiring one onto the function itself).
+  GovernanceMartScheduleDlq:
+    Type: AWS::SQS::Queue
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-governance-mart-schedule-dlq${EnvironmentSuffix}"
+      MessageRetentionPeriod: 1209600  # 14 days -- max, for replay/forensics
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
+  GovernanceMartSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    Properties:
+      RoleName: !Sub "devops-governance-mart-scheduler-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeGovernanceMartLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeMart
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt GovernanceMartFunction.Arn
+              - Sid: SendToScheduleDlq
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt GovernanceMartScheduleDlq.Arn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
+  GovernanceMartScheduleGamma:
+    Type: AWS::Scheduler::Schedule
+    Condition: IsGamma
+    Properties:
+      Name: !Sub "devops-governance-mart-daily${EnvironmentSuffix}"
+      Description: "ENC-TSK-O80: daily 06:00 UTC full refresh of the gamma governance analytics mart, via EventBridge Scheduler."
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      # DISABLED on purpose, still. GovernanceMartBucketGamma and
+      # GovernanceMartDatabaseGamma above are declared in this same change but
+      # have not been PROVISIONED by it -- that happens on deploy, which is
+      # outside this PR. Enabling here would arm a schedule against outputs
+      # this PR cannot yet prove exist, let alone prove plane-separated from
+      # production. ENC-TSK-O81 needs a firing schedule to observe its alarm
+      # and is the right place to flip this to ENABLED, once a deploy has
+      # landed the bucket/database and someone has confirmed a hand-invoked
+      # run lands in the gamma-suffixed outputs only.
+      State: DISABLED
+      Target:
+        Arn: !GetAtt GovernanceMartFunction.Arn
+        RoleArn: !GetAtt GovernanceMartSchedulerRole.Arn
+        # AC-2: pins every automatic retry of a given firing to the calendar
+        # day Scheduler INTENDED to fire, not the clock time the retry
+        # actually runs. Without this, a retry that crosses midnight UTC (the
+        # exact scenario automatic retries introduce that a bare Rule never
+        # had to consider) would silently rebuild a different day's grain
+        # under the same schedule slot instead of overwriting the failed
+        # run's own day. The Parquet write itself was already
+        # duplicate-proof by construction (DOC-1E1EC5B7CE02: one deterministic
+        # key per table, full-refresh overwrite, no partitioning -- see
+        # backend/lambda/shared_layer/python/enceladus_shared/warehouse_registration.py);
+        # this closes the remaining gap retries specifically introduce: WHICH
+        # day's content that overwrite contains. `<aws.scheduler.scheduled-time>`
+        # is a Scheduler context attribute, constant across every retry attempt
+        # of one firing; lambda_function.py's `_parse_last_day` already accepts
+        # an ISO-8601 string and truncates to the leading YYYY-MM-DD.
+        Input: '{"last_day": "<aws.scheduler.scheduled-time>"}'
+        RetryPolicy:
+          # A run takes up to 900s (GovernanceMartFunction's Timeout); two
+          # retries inside a 1-hour event-age ceiling gives three total
+          # attempts comfortably inside the same operational day without
+          # cascading toward the NEXT day's 06:00 firing.
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 3600
+        DeadLetterConfig:
+          Arn: !GetAtt GovernanceMartScheduleDlq.Arn
 
   GovernanceAuditStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
