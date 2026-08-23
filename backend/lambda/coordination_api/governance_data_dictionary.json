@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-22.2",
-  "updated_at": "2026-08-22T00:30:00Z",
-  "last_change_summary": "ENC-TSK-O47 follow-up: alias_prefixes resolution extended beyond the MCP server to every other prefix->project_id resolver in the codebase, closing a gap where ENC-TSK-O45's gamma prefix repoint would still have broken legacy ENC-* record resolution through coordination_api's checkout/tracker-mutation routes even though the MCP server was fixed. backend/lambda/coordination_api/project_utils.py::_key_for_record_id() (and its Scan fallback, now projecting alias_prefixes) and backend/lambda/deploy_finalize/lambda_function.py + backend/lambda/deploy_orchestrator/lambda_function.py's _infer_project_id()/_load_prefix_map() all now apply the identical MINT-wins-deterministically, logged-not-silent collision rule as server.py's _get_prefix_map(). project_service.alias_prefixes entity updated to document all four consumers and the Scan-projection requirement.",
+  "version": "2026-08-23.1",
+  "updated_at": "2026-08-23T00:25:00Z",
+  "last_change_summary": "ENC-TSK-O59 / ENC-ISS-648: forward-ported the nine prod-stack resources that origin/v4/main did not declare, under Condition: IsProduction, plus the source trees and manifest entries for the two Lambdas among them. Registers the two entities that document those Lambdas and were present only on origin/main: coordination.escalation_decision_authorizer (the ENC-FTR-121 approve/deny request authorizer) and warehouse.governance_mart (the DVP-TSK-649 daily governance analytics mart).",
   "owners": [
     "enceladus-platform"
   ],
@@ -8164,10 +8164,185 @@
           ]
         }
       }
+    },
+    "coordination.escalation_decision_authorizer": {
+      "description": "ENC-TSK-L95 / ENC-ISS-501 (SEV-1): standalone API Gateway v2 REQUEST authorizer (backend/lambda/escalation_decision_authorizer), attached ONLY to POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve and .../deny (Condition: IsProduction routes in 03-api.yaml). Closes the gap where coordination_api's own in-Lambda _is_cognito_session check -- a fail-open blocklist that excludes only auth_mode in {internal-key, managed-token}, letting any other or absent auth_mode pass as human -- let a non-human Cognito-authenticated identity self-approve governance-bypass escalations within seconds of filing. Deliberately does NOT modify coordination_api/lambda_function.py at all (that file's main-branch source is stale relative to live and unsafe to rebuild from without a much larger reconciliation effort, discovered mid-task); this authorizer runs in ADDITION to, in front of, the existing unmodified in-Lambda check. Two checks, both required: (1) genuine Cognito ID token, RS256-verified against the human user pool JWKS via enceladus_shared.auth._authenticate (same verifier every other Enceladus Lambda already uses -- no bespoke crypto); (2) the verified token's email claim must appear in the Console-edit-only S3 allowlist. Fails CLOSED on any allowlist fetch/parse error. AuthorizerResultTtlInSeconds=0 (no APIGW-level caching; the Lambda's own 60s in-memory S3 cache is the sole cache layer, avoiding two-tier cache-staleness confusion). ENC-TSK-M12 / ENC-ISS-501 (2026-07-08): a third check now runs between token verification and the email allowlist -- _is_human_cognito_principal (fail-closed): token_use must be exactly 'id' (rejects access/client_credentials/M2M grants and the token-use-less internal-key mode), the token's aud must be on the human app-client allowlist (ESCALATION_HUMAN_CLIENT_IDS, default COGNITO_CLIENT_ID), bare client_id-without-aud shapes are rejected, and the email claim must exist and not fall under a machine principal domain (ESCALATION_MACHINE_EMAIL_DOMAINS, default enceladus.internal). This closes the residual gap where the email allowlist was the sole barrier against machine-minted principals: machine-operated Cognito users in the human pool (e.g. terminal-agent@enceladus.internal, mintable via coordination auth.cognito_session) carry genuine ID tokens that pass JWKS verification, so an allowlisted-by-mistake machine identity would have reopened approve/deny. Machine token shapes are now denied regardless of allowlist contents. The gamma counterpart (v4/main) enforces the identical predicate in-Lambda in coordination_api._handle_escalation_decision (PR #944).",
+      "fields": {
+        "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
+          "type": "string",
+          "definition": "Env var on escalation-decision-authorizer (default 'enceladus-356364570033-us-west-2-an'). S3 bucket holding the escalation-approver allowlist document. ENC-ISS-505 (SEV-1): originally 'jreese-net', which is served publicly on the open web via CloudFront -- the allowlist was readable by anyone with no auth. Relocated to this bucket, which has no CloudFront origin and full S3 Public Access Block enabled."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_KEY": {
+          "type": "string",
+          "definition": "Env var on escalation-decision-authorizer (default 'security/escalation-approvers.md'). S3 key of the allowlist document, shared by BOTH gamma (ENC-TSK-L92) and prod (this task) -- same bucket/key, no env-suffix distinction, so one Console edit updates the allowlist everywhere at once. This Lambda's role (EscalationDecisionAuthorizerRole) is granted s3:GetObject ONLY on this exact key -- no role in the account, including this one, has PutObject/DeleteObject on it. The document is a markdown file with a fenced yaml block of `- email: \"...\"` list entries, parsed without a yaml dependency. Edits require an AWS Console-authenticated human; there is deliberately no programmatic write path."
+        },
+        "COGNITO_USER_POOL_ID": {
+          "type": "string",
+          "definition": "Env var on escalation-decision-authorizer, same value as CoordinationApiFunction's -- the human-interactive Cognito user pool whose JWKS validates the decider's ID token."
+        },
+        "ESCALATION_HUMAN_CLIENT_IDS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var on escalation-decision-authorizer: comma-separated Cognito app-client ids whose ID tokens may represent a human escalation decider. Defaults to COGNITO_CLIENT_ID (the interactive PWA client) when unset. Read per-call by _escalation_human_client_ids(); an empty resolved set fails CLOSED (every decision denied). Tokens minted by any other app client (e.g. the ENC-FTR-074 agent M2M client) are denied on the decision routes regardless of their other claims."
+        },
+        "ESCALATION_MACHINE_EMAIL_DOMAINS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var on escalation-decision-authorizer: comma-separated email domains marking machine-operated Cognito principals (default 'enceladus.internal'). An otherwise-valid human-shaped ID token whose email falls under one of these domains is denied even if that email appears on the approver allowlist -- the allowlist must never be the only barrier between a machine principal and an escalation approval (the ENC-ISS-501 attacker identity terminal-agent@enceladus.internal is exactly this class)."
+        }
+      }
+    },
+    "warehouse.governance_mart": {
+      "description": "DVP-TSK-648 / DVP-TSK-649 (BRD B3, plan DVP-PLN-001): the governance analytics mart -- a T2 warehouse projection of the governed record store, addressed as hive.devops.<table>. Seven DECLARED tables built by backend/lambda/governance_mart on a scheduled full refresh (EventBridge cron(0 6 * * ? *), never a per-mutation trigger) and registered through the B2-R2 shared library enceladus_shared.warehouse_registration. The mart holds METADATA ONLY, governed by DOC-3391173F2A5C: counts, statuses, durations, transitions, timestamps and identifiers -- never record bodies, titles, descriptions, intents, acceptance-criteria text, worklog prose, or document content. The standing test is 'if a column would let a reader substitute the mart for the record store, it does not belong', and it is enforced in CI over all seven tables rather than left to review, because per the grain contract the appearance of a free-text column IS the Risk R-4 drift signal. Also governed by DOC-04AF8A02A8F7 (four-tier architecture), DOC-5E35E14DAD05 (crawler prohibition -- schema is declared in code, never inferred by a Glue crawler), and DOC-1E1EC5B7CE02 (full-refresh partitioning discipline -- no partition keys, exactly one Parquet object per table at a constant key, so file count tracks data size and never write count). Ownership per BRD B3-R4: devops owns the platform tier and the contract; enceladus owns the projection logic and schema, because the schema is a projection of the governance ontology (ENC-FTR-053) and must evolve with it.",
+      "addressing": "hive.devops.<table>",
+      "storage": "s3://devops-agentcli-compute/warehouse/devops/<table>/data.parquet (Parquet, snappy, full-refresh overwrite)",
+      "required_column": {
+        "ingest_ts": {
+          "type": "string",
+          "definition": "Mandatory T2 freshness stamp (DOC-04AF8A02A8F7): UTC ISO-8601 warehouse write time, library-owned (stamp_freshness=True) because the mart is derived data. One shared value across all seven tables per refresh."
+        }
+      },
+      "daily_grain_rule": {
+        "type": "rule",
+        "definition": "Every fact table carries snapshot_date at daily grain FROM THE OUTSET, not as a later upgrade. Enforced by mart_schema.assert_daily_grain() at module import and re-checked in CI. This is what makes a refresh failure show up as a series that STOPS DRAWING rather than a current value that persists and looks healthy while being arbitrarily stale (OBJ-6). The *_daily aggregates lead their grain with snapshot_date; fact_record_transition is an EVENT table whose grain is one row per transition and which carries snapshot_date as the day bucket."
+      },
+      "tables": {
+        "dim_record": {
+          "grain": "one row per governed tracker record, current state",
+          "task": "DVP-TSK-672",
+          "columns": [
+            "record_id",
+            "project_id",
+            "record_type",
+            "status",
+            "priority",
+            "category",
+            "parent_id",
+            "component_ids",
+            "created_at",
+            "updated_at",
+            "closed_at",
+            "checkout_count",
+            "closed_count",
+            "ontology_completeness_score",
+            "transition_type",
+            "ingest_ts"
+          ],
+          "notes": "status is projected VERBATIM, not normalised -- the live corpus carries Completed/Complete/complete as distinct values and folding them is a judgement the mart is not entitled to make on the record store's behalf. ontology_completeness_score is RECOMPUTED from the record store's own ENC-FTR-011 rubric because it is computed at read time by the MCP server and never persisted to DynamoDB. component_ids is a JSON-array string because the shared library declares array<> writable only by flattening."
+        },
+        "fact_record_daily": {
+          "grain": "(snapshot_date, project_id, record_type, status)",
+          "task": "DVP-TSK-673",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "record_type",
+            "status",
+            "record_count",
+            "opened_count",
+            "closed_count",
+            "ingest_ts"
+          ],
+          "notes": "record_count partitions the record set: several transitions on one day collapse to one row holding the day's LAST status."
+        },
+        "fact_record_transition": {
+          "grain": "one row per lifecycle transition",
+          "task": "DVP-TSK-674",
+          "columns": [
+            "record_id",
+            "project_id",
+            "record_type",
+            "from_status",
+            "to_status",
+            "transitioned_at",
+            "days_in_prior_status",
+            "transition_type",
+            "snapshot_date",
+            "ingest_ts"
+          ],
+          "notes": "The tracker stores NO structural status transition: history[].status is an entry KIND (created|worklog) and the transition lives inside the entry's free-text description. The projection parses that prose to recover two status tokens and a timestamp and DISCARDS the prose -- the substitution test applied to a source that is mostly free text. Re-homes the ENC-TSK-989 corpus-with-history extraction rather than re-deriving it."
+        },
+        "dim_document": {
+          "grain": "one row per docstore document",
+          "task": "DVP-TSK-675",
+          "columns": [
+            "document_id",
+            "project_id",
+            "document_subtype",
+            "subtypepattern",
+            "status",
+            "document_maturity_state",
+            "compliance_score",
+            "compliance_warning_count",
+            "size_bytes",
+            "version",
+            "related_item_count",
+            "created_at",
+            "updated_at",
+            "ingest_ts"
+          ],
+          "notes": "No document content. Where substance was available a COUNT was projected instead: compliance_warning_count not the warning text, related_item_count not the ids, size_bytes as the metadata shadow of the body -- how much, never what."
+        },
+        "fact_document_daily": {
+          "grain": "(snapshot_date, project_id, document_subtype, document_maturity_state)",
+          "task": "DVP-TSK-676",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "document_subtype",
+            "document_maturity_state",
+            "document_count",
+            "created_count",
+            "mean_compliance_score",
+            "ingest_ts"
+          ],
+          "notes": "Type-1 dimension limitation, recorded rather than hidden: the docstore keeps no maturity HISTORY, so subtype and maturity are current attributes projected across each document's lifetime. Document production per day is exact; maturity movement reads from the current distribution."
+        },
+        "fact_session_daily": {
+          "grain": "(snapshot_date, project_id, agent_type, model)",
+          "task": "DVP-TSK-677",
+          "columns": [
+            "snapshot_date",
+            "project_id",
+            "agent_type",
+            "model",
+            "session_count",
+            "records_touched",
+            "ingest_ts"
+          ],
+          "notes": "model is a DATA column describing observed agent sessions, never configuration. agent_type carries agent_types.surface joined from the session's agent_type_id. There is NO stored session-to-record edge, so records_touched is obtained by inverting the tracker side: every ENC-SES-* named in a record's history plus active_agent_session_id. Sessions that touched nothing are retained under project_id='unattributed'."
+        },
+        "fact_graph_health_daily": {
+          "grain": "one row per snapshot_date",
+          "task": "DVP-TSK-678",
+          "columns": [
+            "snapshot_date",
+            "node_count",
+            "edge_count",
+            "orphan_node_count",
+            "unresolved_edge_count",
+            "hot_tier_fraction",
+            "percolation_margin",
+            "fiedler_value",
+            "demand_centroid_drift",
+            "ingest_ts"
+          ],
+          "notes": "Risk R-11 discipline. hot_tier_fraction, percolation_margin, fiedler_value and demand_centroid_drift have no upstream computation today (graph_health_metrics publishes CloudWatch proxies and says so in its own docstring), so they are DECLARED NOW and written NULL, to be filled by ENC-FTR-063 / comp-percolation-monitor as an UPDATE rather than a schema change against a live table. The first four columns are computed today from the governed graph (records + documents as nodes; parent, subtask_ids, related_*_ids, related_items, informed_by as edges), so the table is never empty while it waits. This table PROJECTS, it does not compute."
+        }
+      },
+      "refresh_contract": {
+        "type": "rule",
+        "definition": "Scheduled FULL REFRESH, daily minimum, never event-driven. No EventBridge per-mutation trigger, no Glue crawler and no crawler launcher, no partition keys. Each run rebuilds every table from scratch and overwrites a single object per table at a constant key, so crawler concurrency is unreachable, partition explosion is impossible by construction, and the new-project sync gap cannot recur because the refresh scans ALL projects. The handler re-raises on error rather than returning 200: the daily series must stop drawing AND the invocation must fail, not one without the other."
+      },
+      "change_governance": "Mart schema changes (adding a column, adding a table, widening a grain) are governed changes reviewed against the substitution test -- never incidental edits folded into an unrelated ETL change. devops owns the test; enceladus applies it."
     }
   },
   "change_summary": "ENC-TSK-O36 (ENC-ISS-604): port the intelligence-project corpus-governance namespace from frozen main onto v4/main -- new entities corpus.edge_taxonomy (the fourteen-type governed typed-edge taxonomy for the io-graph corpus, project_id=intelligence, DOC-4DD9C4E8B66C section 7.2) and corpus.graph_isolated_reason (the eight-value graph_isolated_reason enum, INT-TSK-197 / INT-PLN-012). Both entities are DOCUMENTATION ONLY -- verified 2026-08-08 that no Lambda in this repo reads governance-dictionary content for either entity; the enforcing allowlists (graph_sync.ALLOWED_EDGE_TYPES, graph_query_api._ALLOWED_EDGE_TYPES, graph_health_metrics.ALLOWED_EDGE_TYPES) and the graph_isolated_reason IS NULL read live in the SEPARATE intelligence-project repo, not in Enceladus's own same-named graph_sync/graph_query_api/graph_health_metrics Lambdas that govern Enceladus's own tracker/document graph (the ENC-ISS-604 second-hazard disambiguation: no name collision here, the two entities' governing_documents cite INT-* records exclusively). Ported verbatim, byte-for-byte, from origin/main's 2026-08-17.1 dictionary; no existing v4/main entity was modified, reordered, or removed. No Lambda code, handler, or test file exists in this repo for either entity -- there is nothing else to port.",
   "change_log": [
+    {
+      "version": "2026-08-23.1",
+      "date": "2026-08-23",
+      "record": "ENC-TSK-O59",
+      "summary": "Registered coordination.escalation_decision_authorizer and warehouse.governance_mart on this branch. Both entities already existed on origin/main; v4/main declared neither, because neither Lambda's source nor its CloudFormation resource had ever been forward-ported. ENC-ISS-648."
+    },
     {
       "version": "2026-08-17.2",
       "date": "2026-08-17",
