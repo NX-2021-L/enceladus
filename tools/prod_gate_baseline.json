@@ -50,13 +50,6 @@
       ],
       "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
     },
-    "cloudformation-github-roles-stack-deploy.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [
-        "apply"
-      ],
-      "notes": "ENC-TSK-L51 / DOC-B716E8FB10B6 Channel C: dispatch-only enceladus-github-roles stack deploy; apply job environment: v3-prod"
-    },
     "cloudformation-api-stack-deploy.yml": {
       "class": "conditional",
       "gated_jobs": [
@@ -78,6 +71,13 @@
       ],
       "notes": "ENC-TSK-J62 plan/apply split; apply environment by ref"
     },
+    "cloudformation-github-roles-stack-deploy.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-L51 / DOC-B716E8FB10B6 Channel C: dispatch-only enceladus-github-roles stack deploy; apply job environment: v3-prod"
+    },
     "cloudformation-monitoring-stack-deploy.yml": {
       "class": "conditional",
       "gated_jobs": [
@@ -96,6 +96,20 @@
       "class": "inert",
       "notes": "guard"
     },
+    "ddb-add-deployment-manager-gsis.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "add-gsis"
+      ],
+      "notes": "ENC-TSK-J65: dispatch-only GSI addition on the prod deployment-manager table; environment: v3-prod. Caught by the guard's own first fail-closed run."
+    },
+    "gamma-tracker-mirror.yml": {
+      "class": "gamma-only",
+      "gated_jobs": [
+        "execute"
+      ],
+      "notes": "ENC-TSK-M98 / ENC-ISS-538 canonical->gamma tracker mirror. Mutates ONLY -gamma DynamoDB tables (in-tool direction lock: source hard-coded to devops-project-tracker read-only, every write target must end -gamma). dry_run job is read-only; execute job requires typed confirm phrase OVERWRITE-GAMMA AND environment: gamma-mirror (io one-time setup: add required_reviewers to gamma-mirror before first execute, ENC-TSK-N01)."
+    },
     "governance-dictionary-guard.yml": {
       "class": "inert",
       "notes": "guard"
@@ -107,6 +121,27 @@
       ],
       "notes": "v4/main-only file; dispatch-only IAM grant with doc-id consent input; apply job gated environment: v3-prod by ENC-TSK-J64's v4 port (baseline entry corrected by the J65 guard's own first v4 run)."
     },
+    "iam-agent-cli-s3-boundary-fix.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "correct-boundary"
+      ],
+      "notes": "ENC-TSK-P02 / ENC-ISS-659: environment: v3-prod -- mutates enceladus-agent-cli-policy, the S3 security boundary for every enceladus agent session project-wide, which additionally governs a second project's production bucket. Removes the s3:* Allow on harrisonfamily-frontend and replaces the shadowing NotResource Deny; dry_run defaults to true so the first dispatch only prints the before/after diff. Post-write simulate-principal-policy checks assert harrisonfamily is no longer writable and that the run did not widen read access beyond the chosen read_scope."
+    },
+    "iam-cfn-deploy-role-appconfig-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L83: environment: v3-prod — grants appconfig profile/hosted-version/deployment ops on application fhhcl7m to the SHARED CFN deploy role (rhythm-tenants + appconfig-governance stack unblock)"
+    },
+    "iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-K59: environment: v3-prod — despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
+    },
     "iam-cfn-deploy-role-eventbridge-listrules-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
@@ -114,12 +149,12 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod (shared/global IAM role objects)"
     },
-    "iam-cfn-deploy-role-scheduler-patch.yml": {
+    "iam-cfn-deploy-role-fnurlconfig-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+      "notes": "ENC-TSK-K09: environment: v3-prod — patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
     },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
@@ -127,6 +162,13 @@
         "patch-role"
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod — despite the name it patches the SHARED CFN deploy role object"
+    },
+    "iam-cfn-deploy-role-governance-mart-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-O98 / ENC-ISS-660: environment: v3-prod -- patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-appsync-events-patch.yml). Grants Glue database, gamma mart S3 bucket and default-group Scheduler reach for the five ENC-TSK-O80 governance-mart resources, via a customer-managed policy (create-or-new-version + attach) rather than inline put-role-policy, since this role's inline aggregate is already at the 10,240-byte cap. Every Resource is pinned to a gamma name; a negative control asserts production's out-of-band devops database and devops-agentcli-compute bucket stay unreachable, and a preflight aborts before any mutation if that control cannot run."
     },
     "iam-cfn-deploy-role-legacy-ddb-patch.yml": {
       "class": "prod-mutating",
@@ -142,19 +184,19 @@
       ],
       "notes": "ENC-TSK-L43: environment: v3-prod — NAT gateway EC2 grants on shared CFN deploy role for gamma OpenSearch/Lambda subnet"
     },
-    "iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml": {
+    "iam-cfn-deploy-role-s3-lifecycle-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-K59: environment: v3-prod — despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
+      "notes": "ENC-TSK-N70: environment: v3-prod — patches the SHARED CFN deploy role object with s3:Get/PutLifecycleConfiguration on jreese-net (ENC-TSK-N49 rhythm-cycle artifact retention unblock); same pattern as iam-cfn-deploy-role-gamma-patch.yml"
     },
-    "iam-cfn-deploy-role-fnurlconfig-patch.yml": {
+    "iam-cfn-deploy-role-scheduler-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-K09: environment: v3-prod — patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
+      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
     },
     "iam-cfn-deploy-role-secretsmanager-patch.yml": {
       "class": "prod-mutating",
@@ -208,6 +250,13 @@
       "class": "inert",
       "notes": "relay: dispatches _deploy.yml whose v3-prod lane is environment-gated; performs no mutation itself"
     },
+    "s3-governance-notification-wire.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "wire-notification"
+      ],
+      "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
+    },
     "secrets-guardrail.yml": {
       "class": "inert",
       "notes": "guard"
@@ -233,41 +282,6 @@
         "deploy"
       ],
       "notes": "v4/main-only; environment: v4-gamma with dedicated GitHubActions-V4Gamma-DeployRole since inception"
-    },
-    "ddb-add-deployment-manager-gsis.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [
-        "add-gsis"
-      ],
-      "notes": "ENC-TSK-J65: dispatch-only GSI addition on the prod deployment-manager table; environment: v3-prod. Caught by the guard's own first fail-closed run."
-    },
-    "s3-governance-notification-wire.yml": {
-      "class": "conditional",
-      "gated_jobs": [
-        "wire-notification"
-      ],
-      "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
-    },
-    "gamma-tracker-mirror.yml": {
-      "class": "gamma-only",
-      "gated_jobs": [
-        "execute"
-      ],
-      "notes": "ENC-TSK-M98 / ENC-ISS-538 canonical->gamma tracker mirror. Mutates ONLY -gamma DynamoDB tables (in-tool direction lock: source hard-coded to devops-project-tracker read-only, every write target must end -gamma). dry_run job is read-only; execute job requires typed confirm phrase OVERWRITE-GAMMA AND environment: gamma-mirror (io one-time setup: add required_reviewers to gamma-mirror before first execute, ENC-TSK-N01)."
-    },
-    "iam-cfn-deploy-role-appconfig-patch.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [
-        "patch-role"
-      ],
-      "notes": "ENC-TSK-L83: environment: v3-prod — grants appconfig profile/hosted-version/deployment ops on application fhhcl7m to the SHARED CFN deploy role (rhythm-tenants + appconfig-governance stack unblock)"
-    },
-    "iam-cfn-deploy-role-s3-lifecycle-patch.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [
-        "patch-role"
-      ],
-      "notes": "ENC-TSK-N70: environment: v3-prod — patches the SHARED CFN deploy role object with s3:Get/PutLifecycleConfiguration on jreese-net (ENC-TSK-N49 rhythm-cycle artifact retention unblock); same pattern as iam-cfn-deploy-role-gamma-patch.yml"
     }
   }
 }
