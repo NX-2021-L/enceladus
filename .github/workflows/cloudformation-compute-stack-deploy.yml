@@ -374,7 +374,8 @@ jobs:
           fi
 
           # ENC-TSK-H28 / ENC-ISS-385: SharedLayerArn must be passed explicitly too -- for the
-          # INVERSE reason to the NoEcho guards above. enceladus-shared:10 (== :7 + appconfig_flags)
+          # INVERSE reason to the NoEcho guards above. enceladus-shared:12 (ENC-TSK-O94 /
+          # ENC-ISS-656; previously :10 == :7 + appconfig_flags)
           # is the canonical pin; 02-compute.yaml's SharedLayerArn Default is :10 and all 23 fns
           # !Ref it. But `aws cloudformation deploy` reuses the stack's stored param value for any
           # un-passed param, and the deployed enceladus-compute stack stored SharedLayerArn=:7
@@ -434,7 +435,7 @@ jobs:
               AppConfigApplicationId="${APPCFG_APP}" \
               AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
-              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
+              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12" \
               RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
               RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
               RhythmBeatsEnabled="${RHYTHM_BEATS_ENABLED}" \

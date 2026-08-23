@@ -38,7 +38,7 @@ Parameters:
       its stream ARN as <DataStackName>-TrackerStreamArn.
   SharedLayerArn:
     Type: String
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
     Description: Shared enceladus_shared layer ARN (mirrors 02-compute.yaml pin).
   ApiKeyExpiresEpoch:
     Type: Number

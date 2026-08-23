@@ -53,7 +53,14 @@ Parameters:
     # tools/verify_shared_layer_version.py (pre-deploy gate). :10 == :7 + appconfig_flags
     # (ENC-LSN-020 three-flag ABI). To change it, bump CANONICAL_SHARED_LAYER_ARN in that
     # script too, or the layer-version parity gate fails the deploy.
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
+    # ENC-TSK-O94 (ENC-ISS-656): bumped :10 -> :12. ENC-TSK-O07 published :12 carrying
+    # enceladus_shared.github_app_auth and moved checkout_service, deploy_decide and
+    # auth_refresh onto it, but never bumped this pin. Those three import github_app_auth
+    # UNGUARDED at module scope, so an apply at :10 would Runtime.ImportModuleError them --
+    # the same failure shape as the :7 incident above, one layer version later. :12 is a
+    # pure-Python superset of :10 (zero .so) and declares CompatibleArchitectures
+    # [x86_64, arm64], so the move is additive for every other function.
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
     Type: String
