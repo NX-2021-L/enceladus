@@ -84,6 +84,47 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # ENC-TSK-L92/L95 / ENC-ISS-501 (SEV-1): standalone REQUEST authorizer for
+  # the escalation approve/deny decision routes ONLY. Verifies a genuine
+  # Cognito ID token (RS256, human user pool) AND checks the decider's email
+  # against a Console-edit-only S3 allowlist -- closing the gap where
+  # coordination_api's own in-Lambda check (a fail-open blocklist) let a
+  # non-human identity self-approve. Deliberately a brand-new, self-contained
+  # Lambda that does not modify coordination_api at all; its check runs in
+  # ADDITION to (in front of) the existing in-Lambda check, not instead of it.
+  #
+  # ENC-TSK-O77 / ENC-TSK-O76: forward-ported from origin/main -- present there,
+  # absent from v4/main, which left gamma's approve/deny routes unauthenticated
+  # (AuthorizationType defaulting to NONE with no AuthorizerId wired). Already
+  # unconditioned and ${EnvironmentSuffix}-parameterised on main, so it carries
+  # over unconditioned: EnvironmentSuffix="" renders production's Name/
+  # FunctionName/SourceArn byte-identical, and gamma gets its own twin bound to
+  # EscalationDecisionAuthorizerFunction (02-compute.yaml), which ENC-TSK-O73
+  # already ruled ports to gamma. AuthorizerResultTtlInSeconds stays 0 -- ENC-TSK-O73
+  # confirmed prod runs at 0 today, a deliberate override of the APIGW v2
+  # REQUEST-authorizer 300s default (a stale cached allow on a human-approval
+  # mutation gate is a real risk, BRD risk 10.1).
+  EscalationDecisionAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      AuthorizerType: REQUEST
+      AuthorizerPayloadFormatVersion: '2.0'
+      EnableSimpleResponses: true
+      AuthorizerResultTtlInSeconds: 0
+      IdentitySource:
+        - "$request.header.Cookie"
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:escalation-decision-authorizer${EnvironmentSuffix}/invocations"
+
+  EscalationDecisionAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/authorizers/${EscalationDecisionAuthorizer}"
+
   TrackerMutationIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -655,6 +696,18 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  # ENC-TSK-N88 / ENC-FTR-131: project metadata editing from the PWA. Without this route
+  # the PATCH handler added in ENC-TSK-N87 is unreachable from the edge — routes here are
+  # declared per-method, so a handler alone is not addressable.
+  # ENC-TSK-O77 / ENC-TSK-O76: forward-ported from origin/main -- present there,
+  # absent from v4/main. Unconditioned on main; carried over unconditioned here.
+  RouteProjectsUpdate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/projects/{projectName}
       Target: !Sub integrations/${ProjectServiceIntegration}
 
   # ---------------------------------------------------------------------------
@@ -2718,6 +2771,14 @@ Resources:
       RouteKey: "GET /api/v1/coordination/escalations/watch"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-L95 / ENC-ISS-501 / ENC-TSK-O77 / ENC-TSK-O76: AuthorizerId wired --
+  # these are the two decision-making (non-read-only) escalation routes, gated by
+  # EscalationDecisionAuthorizer in addition to coordination_api's own existing
+  # in-Lambda check. Feed/Watch (read-only) are intentionally left unauthorized
+  # here, matching the original ENC-ISS-501 remediation scope on main. Only the
+  # AuthorizerId wiring is forward-ported; Condition: IsGamma is UNCHANGED --
+  # promoting these routes to render on production in v4/main is a separate,
+  # io-gated decision (DOC-B716E8FB10B6) this task does not make.
   RouteEscalationsApprove:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsGamma
@@ -2725,6 +2786,8 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
       Target: !Sub integrations/${CoordinationApiIntegration}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref EscalationDecisionAuthorizer
 
   RouteEscalationsDeny:
     Type: AWS::ApiGatewayV2::Route
@@ -2733,6 +2796,8 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
       Target: !Sub integrations/${CoordinationApiIntegration}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref EscalationDecisionAuthorizer
 
   RouteTrackerEscalationApply:
     Type: AWS::ApiGatewayV2::Route

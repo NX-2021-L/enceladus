@@ -8125,12 +8125,21 @@ Resources:
   # DOC-AB51FA4D9232 records as WORSE than uncodified, because re-declaring an
   # orphan later is a CREATE collision).
   #
-  # Condition: IsProduction is REQUIRED and is not cosmetic. Seven of the nine are
-  # unconditioned on main and their physical names carry no ${EnvironmentSuffix}
-  # (escalation-decision-authorizer, devops-governance-mart, devops-governance-mart-daily,
-  # ...). Declaring them bare here would make the next GAMMA deploy attempt to CREATE
-  # prod-named resources -> CREATE_FAILED -> gamma lane down. That is the ENC-TSK-O58
-  # failure this programme already paid for twice in a single session.
+  # ENC-TSK-O77: Condition: IsProduction is REMOVED from the six Category A
+  # resources below (the two Lambdas plus their Category B/C bindings: each
+  # Lambda's Role, and the Mart's Schedule + Permission). Their physical names
+  # already carry ${EnvironmentSuffix} (added alongside this change where they
+  # did not), so with EnvironmentSuffix="" production renders byte-identical
+  # names -- no rename, no replacement, no CREATE_FAILED collision -- while
+  # gamma can now declare its own twins. This was the ENC-TSK-O58 failure mode
+  # (bare prod-named resources colliding on a gamma deploy); parameterising the
+  # name removes the failure mode instead of gating around it.
+  #
+  # The remaining three of the nine -- GovernanceAuditStreamTrigger and the two
+  # EnceladusMcpCode*LiveFunctionUrl resources -- stay Condition: IsProduction.
+  # They target literally-named, already plane-specific functions
+  # (enceladus-mcp-code / enceladus-mcp-code-gamma) or an adopted event source
+  # mapping outside this task's scope, and are not part of ENC-TSK-O77.
   #
   # DeletionPolicy: Retain is ADDED to GovernanceMartSchedule and GovernanceMartPermission,
   # which lack it on main and are therefore the only two of the nine an apply truly destroys.
@@ -8141,7 +8150,6 @@ Resources:
   # CognitoClientId, S3Bucket, EnvironmentSuffix).
   EscalationDecisionAuthorizerRole:
     Type: AWS::IAM::Role
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "enceladus-escalation-decision-authorizer-role${EnvironmentSuffix}"
@@ -8181,7 +8189,6 @@ Resources:
 
   EscalationDecisionAuthorizerFunction:
     Type: AWS::Lambda::Function
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
@@ -8214,7 +8221,6 @@ Resources:
 
   GovernanceMartRole:
     Type: AWS::IAM::Role
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "devops-governance-mart-lambda-role${EnvironmentSuffix}"
@@ -8278,8 +8284,11 @@ Resources:
                   - s3:GetObject
                   - s3:GetObjectAttributes
                 Resource:
-                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/*"
-                  - "arn:aws:s3:::devops-agentcli-compute/warehouse-registrations/devops/*"
+                  # ENC-TSK-O77: bucket name carries ${EnvironmentSuffix} so gamma's
+                  # role is scoped to a gamma-suffixed bucket, never the prod one.
+                  # EnvironmentSuffix="" renders the prod ARN byte-identical.
+                  - !Sub "arn:aws:s3:::devops-agentcli-compute${EnvironmentSuffix}/warehouse/devops/*"
+                  - !Sub "arn:aws:s3:::devops-agentcli-compute${EnvironmentSuffix}/warehouse-registrations/devops/*"
               # register_table() measures the prefix (list_objects_v2) rather than
               # asserting a file count, so ListBucket is required — constrained to
               # this project's two prefixes so it can never enumerate the bucket.
@@ -8287,7 +8296,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: "arn:aws:s3:::devops-agentcli-compute"
+                Resource: !Sub "arn:aws:s3:::devops-agentcli-compute${EnvironmentSuffix}"
                 Condition:
                   StringLike:
                     "s3:prefix":
@@ -8324,8 +8333,10 @@ Resources:
                   - glue:UpdateTable
                 Resource:
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/*"
+                  # ENC-TSK-O77: database/table name carries ${EnvironmentSuffix}
+                  # for the same plane-separation reason as the S3 ARNs above.
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops${EnvironmentSuffix}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops${EnvironmentSuffix}/*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -8334,7 +8345,6 @@ Resources:
 
   GovernanceMartFunction:
     Type: AWS::Lambda::Function
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
@@ -8357,8 +8367,16 @@ Resources:
         Variables:
           # T2 coordinates (BRD B3-R4). The Glue database `devops` was created as
           # a T0 onboarding action WITH a LocationUri (DOC-04AF8A02A8F7).
-          MART_BUCKET: devops-agentcli-compute
-          MART_DATABASE: devops
+          # ENC-TSK-O77: parameterised with ${EnvironmentSuffix} so gamma writes
+          # its own Parquet mart / Glue tables instead of overwriting production's
+          # (ENC-FTR-136 AC-4). EnvironmentSuffix="" renders both values
+          # byte-identical to the previous literals for production. The gamma
+          # bucket (devops-agentcli-compute-gamma) and Glue database
+          # (devops-gamma) do not exist yet -- provisioning them is ENC-TSK-O80's
+          # scope, not this task's. The schedule below stays DISABLED on gamma
+          # until that lands, so nothing fires against them unprovisioned.
+          MART_BUCKET: !Sub "devops-agentcli-compute${EnvironmentSuffix}"
+          MART_DATABASE: !Sub "devops${EnvironmentSuffix}"
           # Read-only governed sources. Same env var names and the same
           # ${EnvironmentSuffix} convention the owning Lambdas use, so the mart
           # resolves gamma tables without inventing a second convention.
@@ -8385,21 +8403,24 @@ Resources:
 
   GovernanceMartSchedule:
     Type: AWS::Events::Rule
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       Name: !Sub "devops-governance-mart-daily${EnvironmentSuffix}"
       Description: "DVP-TSK-649: daily 06:00 UTC full refresh of the governance analytics mart. Schedule-only by design — never per-mutation."
       ScheduleExpression: "cron(0 6 * * ? *)"
-      # DISABLED in gamma, on purpose. MART_BUCKET and MART_DATABASE are the
-      # unsuffixed production values (devops-agentcli-compute, devops) because the
-      # mart's warehouse is a single governed T2 namespace -- there is no gamma
-      # Glue database, and creating one is a T0 onboarding action, not something a
-      # deploy should do implicitly. So a gamma copy of this function firing on a
-      # schedule would overwrite PRODUCTION Parquet and re-register PRODUCTION Glue
-      # tables. Leaving the gamma rule disabled means the function can still be
-      # invoked by hand for testing, deliberately and with someone watching, but
-      # never fires itself into prod data.
+      # DISABLED in gamma, on purpose. ENC-TSK-O77 parameterised MART_BUCKET and
+      # MART_DATABASE with ${EnvironmentSuffix} (see GovernanceMartFunction) so
+      # the two planes are no longer aimed at the same S3 bucket / Glue database
+      # -- but the gamma-suffixed bucket (devops-agentcli-compute-gamma) and Glue
+      # database (devops-gamma) do not exist yet; provisioning them is ENC-TSK-O80.
+      # Flipping this to ENABLED before that lands would fail every gamma run
+      # (missing bucket/database), and flipping it before verifying plane
+      # separation would risk exactly the PRODUCTION Parquet / Glue overwrite this
+      # comment previously existed to prevent. Leaving the gamma rule disabled
+      # means the function can still be invoked by hand for testing, deliberately
+      # and with someone watching, but never fires itself on a schedule. Do not
+      # enable this in ENC-TSK-O77 -- that is ENC-TSK-O80's scope, after the
+      # outputs are provably plane-separated.
       State: !If [IsGamma, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt GovernanceMartFunction.Arn
@@ -8407,7 +8428,6 @@ Resources:
 
   GovernanceMartPermission:
     Type: AWS::Lambda::Permission
-    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Ref GovernanceMartFunction
