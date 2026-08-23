@@ -1,0 +1,157 @@
+{
+  "_doc": "ENC-TSK-P11 / ENC-ISS-666: the Component Dependency Closure primitive, landing DOC-6EFD5DB32CD8 Revision 19 Addendum's schema in the repo. WHY THIS EXISTS: nothing in this repo could express that a component's dependency might be structurally absent from a plane BY DECISION (the Trino/Superset estate has one EC2 host and will never have a gamma twin) as distinct from an ORDINARY GAP that should eventually close (devops-agentcli-compute is not yet provisioned on gamma) or from a dependency that is DECLARED present but has never been checked against reality (the exact ENC-ISS-672 shape: glue:CreateDatabase was declared reachable for the CFN deploy role and was not, and the guard that only reads declared-vs-declared said GREEN while gamma rolled back). A two-state present/absent model has nowhere to put the first case, so a check meeting it invents an answer -- which is ENC-ISS-665 arriving by another route. This file is the DECLARATIVE half (three-state plane_state per dependency, business decisions AWS cannot tell you); tools/verify_component_closure.py is the DETECTOR (schema validation always; cheap local existence checks always; AWS-derived existence checks opt-in via --live, mirroring the two-tier convention tools/verify_devops_ownership_snapshot.py and tools/verify_liveness_contract.py already established).",
+  "_schema": {
+    "version": "2026-08-23-p11",
+    "plane_state_enum": [
+      "PROVISIONED_ON_PLANE",
+      "NOT_YET_PROVISIONED",
+      "STRUCTURALLY_ABSENT"
+    ],
+    "plane_state_enum_note": "Canonicalised to the three names DOC-6EFD5DB32CD8 enumerates as first-class. The addendum's own illustrative YAML abbreviates PROVISIONED_ON_PLANE to 'PROVISIONED' in prose -- this file and its validator accept ONLY the three full enum spellings; 'PROVISIONED' alone is treated as a malformed value (fail-closed on an ambiguous abbreviation, not a silent alias).",
+    "verdict_enum": [
+      "PASS",
+      "VIOLATION",
+      "NOT_APPLICABLE_ON_PLANE",
+      "UNKNOWN",
+      "GAP"
+    ],
+    "verdict_enum_note": "PASS/VIOLATION/UNKNOWN/NOT_APPLICABLE_ON_PLANE are DOC-6EFD5DB32CD8's four verdicts that must never collapse into one another. GAP is this tool's own label for a declared, not-yet-resolved NOT_YET_PROVISIONED finding -- distinct from VIOLATION so 'this is a known, tracked, ordinary absence' is never printed or counted the same as 'this is unclassifiable drift' (AC-7's ENC-ISS-672 shape).",
+    "dependency_kind_enum": [
+      "bundled_module",
+      "lambda_layer",
+      "s3_bucket",
+      "external_estate",
+      "external_layer",
+      "iam_role_out_of_band"
+    ],
+    "component_fields": "name (string, required), owning_repository (string, required, FIRST-CLASS not a comment), deployed_by (string, required), declared_in (string, optional -- see devops-io-devops-mcp below for why this is a SEPARATE fact from owning_repository), planes (array of plane names, required, non-empty), dependencies (array, required, may be empty)",
+    "dependency_fields": "id (string, required, unique within its component), kind (one of dependency_kind_enum, required), owning_repository (string, required), mechanism (string, optional), mount_path (string, optional), provenance (string, optional), plane_state (object keyed by plane name -> plane_state_enum value; required for every plane the OWNING component declares in its own planes[]), absence_rationale (string, required whenever any plane_state value is STRUCTURALLY_ABSENT, minimum 40 chars), validation_semantics (string, optional; NOT_APPLICABLE_ON_PLANE is the only defined value today, documents that the checker will not attempt to disprove a STRUCTURALLY_ABSENT declaration at runtime)",
+    "enforced_dependency_kinds": "AC-9's ratchet. Only a dependency whose kind appears in the top-level enforced_dependency_kinds[] list can affect this tool's exit code (a VIOLATION or an un-waived GAP on any other kind is still computed, printed and counted -- fleet-wide in what it SEES -- but never blocks -- narrow in what it BLOCKS). This list may only GROW: tools/verify_component_closure.py's --base-ref ratchet fails a PR that removes a kind from it, mirroring infrastructure/lambda_workflow_manifest.json's architecture_exceptions temporary-class ratchet (ENC-TSK-O84).",
+    "known_open_gaps": "A dated, tracked exception ledger for NOT_YET_PROVISIONED findings on an enforced kind -- same convention as tools/cross_plane_arn_isolation_exceptions.json and tools/cfn_deploy_role_reach_map.json's exceptions. An entry does not silence the finding (it still prints as [GAP] every run); it only keeps a KNOWN, already-tracked, pre-existing gap from failing every unrelated future PR (ENC-TSK-O78 scoping discipline: a guard that goes red for unrelated reasons teaches people to bypass it). A ledger entry whose target has stopped being NOT_YET_PROVISIONED (resolved, or reclassified STRUCTURALLY_ABSENT) is itself a VIOLATION -- the same stale-ledger rule tools/cfn_deploy_role_reach_guard.py applies to its own exceptions.",
+    "degradation_markers": "AC-8's revert-orphan rule ledger. When a --base-ref diff shows a dependency removed from a component that still declares the affected plane(s), the removal is a VIOLATION unless a matching degradation_markers entry exists, citing what was removed and why the dependent is not orphaned (ENC-TSK-O95 / ENC-ISS-666: GovernanceMartBucketGamma was removed while devops-governance-mart-gamma stayed deployed and enabled with its bucket gone -- silently, with no marker)."
+  },
+  "enforced_dependency_kinds": [
+    "bundled_module",
+    "lambda_layer",
+    "s3_bucket"
+  ],
+  "known_open_gaps": [
+    {
+      "component": "devops-governance-mart",
+      "dependency_id": "devops-agentcli-compute",
+      "plane": "gamma",
+      "reason": "devops-agentcli-compute has no gamma-plane bucket yet. Tracked, pre-existing, not introduced by this primitive -- ENC-PLN-086 Phase 3's remaining objectives are blocked on exactly this class of io IAM/S3 provisioning (see DOC-6EF8FAFC5E0A). Recorded here so the gate reports the gap on every run (see the [GAP] line) without failing every unrelated future PR on a pre-existing infra dependency this primitive did not create and cannot itself resolve.",
+      "tracker": "ENC-ISS-660 / ENC-PLN-086 Phase 3",
+      "recorded": "2026-08-23"
+    }
+  ],
+  "degradation_markers": [],
+  "components": [
+    {
+      "name": "devops-governance-mart",
+      "owning_repository": "NX-2021-L/enceladus",
+      "deployed_by": ".github/workflows/_deploy.yml",
+      "declared_in": "infrastructure/lambda_workflow_manifest.json + infrastructure/cloudformation/02-compute.yaml (GovernanceMartFunction / GovernanceMartBucketGamma / GovernanceMartDatabaseGamma)",
+      "planes": ["prod", "gamma"],
+      "dependencies": [
+        {
+          "id": "warehouse-registration-module",
+          "kind": "bundled_module",
+          "mechanism": ".build_extras",
+          "mount_path": "/var/task",
+          "owning_repository": "NX-2021-L/enceladus",
+          "source_path": "backend/lambda/shared_layer/python/enceladus_shared/warehouse_registration.py",
+          "build_extras_manifest": "backend/lambda/governance_mart/.build_extras",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          }
+        },
+        {
+          "id": "enceladus-shared",
+          "kind": "lambda_layer",
+          "mount_path": "/opt",
+          "owning_repository": "NX-2021-L/enceladus",
+          "provenance": "UNKNOWN",
+          "layer_name": "enceladus-shared",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          }
+        },
+        {
+          "id": "devops-agentcli-compute",
+          "kind": "s3_bucket",
+          "owning_repository": "NX-2021-L/devops",
+          "bucket_name": "devops-agentcli-compute",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "NOT_YET_PROVISIONED"
+          }
+        },
+        {
+          "id": "trino-superset-estate",
+          "kind": "external_estate",
+          "owning_repository": "NX-2021-L/devops",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "STRUCTURALLY_ABSENT"
+          },
+          "absence_rationale": "io ruling: no gamma twin exists or is intended. One EC2 host, shared across both planes' READ paths; gamma reads production's estate directionally and will never provision its own. See tools/cross_plane_arn_isolation_exceptions.json's ProjectJsonSyncRule entry for the enforcing mechanism of the read-only direction.",
+          "validation_semantics": "NOT_APPLICABLE_ON_PLANE"
+        },
+        {
+          "id": "appconfig-extension-arm64",
+          "kind": "external_layer",
+          "owning_repository": "EXTERNAL",
+          "declared_architecture": "arm64",
+          "layer_arn": "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          }
+        }
+      ]
+    },
+    {
+      "name": "enceladus-checkout-service",
+      "owning_repository": "NX-2021-L/enceladus",
+      "deployed_by": ".github/workflows/_deploy.yml",
+      "declared_in": "infrastructure/lambda_workflow_manifest.json + infrastructure/cloudformation/02-compute.yaml (CheckoutServiceFunction, imported via cfn-resource-import.yml per ENC-TSK-K45)",
+      "planes": ["prod", "gamma"],
+      "dependencies": [
+        {
+          "id": "enceladus-shared",
+          "kind": "lambda_layer",
+          "mount_path": "/opt",
+          "owning_repository": "NX-2021-L/enceladus",
+          "provenance": "UNKNOWN",
+          "layer_name": "enceladus-shared",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          }
+        },
+        {
+          "id": "checkout-service-iam-role",
+          "kind": "iam_role_out_of_band",
+          "owning_repository": "NX-2021-L/enceladus",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          },
+          "notes": "enceladus-checkout-service-role[-gamma] is deliberately NOT a CFN resource in 02-compute.yaml (see the CheckoutServiceFunction comment block, ENC-TSK-K45/ENC-ISS-640): CFN references it by raw ARN only. iam_role_out_of_band is a THIRD dependency kind this schema can express beyond the addendum's own worked example, not yet in enforced_dependency_kinds -- demonstrating AC-9's list may only GROW, admitted here, not yet blocking."
+        }
+      ]
+    },
+    {
+      "name": "devops-io-devops-mcp",
+      "owning_repository": "NX-2021-L/devops",
+      "deployed_by": ".github/workflows/deploy-io-devops.yml (in NX-2021-L/devops)",
+      "declared_in": "scripts/deploy_io_devops_mcp.py + .github/workflows/deploy-io-devops.yml in NX-2021-L/devops -- and explicitly ABSENT from that repo's OWN infrastructure/aws/lambda/functions.yaml (ENC-ISS-669). THE SCHEMA DESIGN TEST (ENC-TSK-P11): owning_repository and declared_in are deliberately separate fields. A component can be owned and deployed by a repository yet be declared nowhere in that repository's canonical manifest -- ownership is a fact about who is accountable for a resource; declaration is a fact about which committed artifact names it. Collapsing them into one field (as a functions.yaml-only predicate does) is exactly the gap ENC-ISS-669 found.",
+      "ownership_predicate_source": "infrastructure/devops_lambda_ownership_snapshot.json (ENC-TSK-P15) -- tools/verify_component_closure.py reuses tools/verify_lambda_arch_parity.py's _load_devops_ownership_snapshot/_devops_owned_function_names to confirm this component's name is a real, hash-pinned devops-owned function, never re-deriving ownership from a name prefix or hand-authored second ledger.",
+      "planes": ["prod"],
+      "dependencies": []
+    }
+  ]
+}

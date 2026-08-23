@@ -204,6 +204,33 @@ jobs:
           python3 tools/verify_liveness_contract.py
           python3 -m unittest tools.test_verify_liveness_contract
 
+      # ENC-TSK-P11 / ENC-ISS-666: DOC-6EFD5DB32CD8 Revision 19 Addendum's
+      # Component Dependency Closure primitive. A two-state present/absent
+      # model has nowhere to put a dependency that is absent BY DECISION
+      # (the Trino/Superset estate: one EC2 host, no gamma twin, none
+      # intended) as distinct from an ordinary gap that should eventually
+      # close (devops-agentcli-compute is not yet provisioned on gamma) --
+      # so a check meeting that edge invents an answer, which is
+      # ENC-ISS-665's fabricated-verdict failure mode by another route.
+      # Structural only here: schema validation, the cheap local
+      # bundled_module existence check (no AWS -- always runs for real),
+      # the devops-ownership predicate reuse (ENC-TSK-P15, never a second
+      # ownership mechanism), and the --base-ref ratchets (AC-9's
+      # enforced_dependency_kinds may only grow; AC-8's revert-orphan rule,
+      # reusing this job's own arch_exceptions_range base-ref resolution
+      # rather than a second one). The AWS-derived existence checks
+      # (--live) and the live component-coverage reconciliation
+      # (--check-component-coverage, reusing verify_lambda_arch_parity.py's
+      # own _enumerate_live_lambda_functions) are opt-in and not wired
+      # here -- same reasoning as that file's --check-live-reconciliation:
+      # this job has no AWS credentials configured anywhere.
+      - name: Component dependency closure (ENC-TSK-P11)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_component_closure.py \
+            --base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
+          python3 -m unittest tools.test_verify_component_closure
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail
