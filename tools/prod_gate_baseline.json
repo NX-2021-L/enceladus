@@ -135,6 +135,13 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod (shared/global IAM role objects)"
     },
+    "iam-cfn-deploy-role-governance-mart-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-O98 / ENC-ISS-660: environment: v3-prod -- patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-appsync-events-patch.yml). Grants Glue database, gamma mart S3 bucket and default-group Scheduler reach for the five ENC-TSK-O80 governance-mart resources, via a customer-managed policy (create-or-new-version + attach) rather than inline put-role-policy, since this role's inline aggregate is already at the 10,240-byte cap. Every Resource is pinned to a gamma name; a negative control asserts production's out-of-band devops database and devops-agentcli-compute bucket stay unreachable, and a preflight aborts before any mutation if that control cannot run."
+    },
     "iam-cfn-deploy-role-scheduler-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
