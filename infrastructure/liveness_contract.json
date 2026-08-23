@@ -1,0 +1,105 @@
+{
+  "_doc": "ENC-TSK-P12 / ENC-ISS-667: per-component liveness contract. devops-recompute-governance-gamma's schedule went silent for ~365.7h against a 26h expectation and nothing alarmed -- 49 of 51 functions had no liveness probe at all, and the one probe that existed (tools/verify_arm64_validation_harness.py point 4) only runs when someone manually invokes that harness for that one function. ENC-TSK-O81's dead-man's-switch was scoped mart-specific; silent-cron-death is a universal property of every scheduled component. This file is the DECLARATIVE half of the contract -- the things AWS itself cannot tell you (how long a gap is tolerable, which disabled schedules are deliberate and why, which family a schedule belongs to). tools/verify_liveness_contract.py is the detector: it derives WHAT is scheduled live from the account itself (EventBridge Rules AND EventBridge Scheduler -- two different APIs, ENC-TSK-P13/P15's enceladus-checkout-service-auto-gamma blindness is the same shape of gap one layer up), reconciles it against this file plus two OTHER already-governed sources it reuses rather than re-declaring (infrastructure/devops_lambda_ownership_snapshot.json for devops-owned functions, ENC-TSK-P15; backend/lambda/rhythm_cycle/legacy_schedules.py for the rhythm-tier supersession map, K91), and resolves every live schedule to exactly one of: LIVE (checked against CloudWatch), a named governed exception (printed every run, never a silent skip), or a FAIL. A disabled schedule matching no family here is a violation, not a shrug.",
+
+  "scope_prefixes": {
+    "_doc": "A live EventBridge Rule or Scheduler Schedule is in scope for this contract only if its NAME starts with one of these. 'enceladus-' and 'devops-' mirror tools/verify_lambda_arch_parity.py's _RECONCILIATION_SCOPE_PREFIXES (this AWS account is shared with unrelated tenants: io-graph-*, an SST app, ...). 'rhythm-' is an ADDITIONAL prefix this contract needs that the Lambda-name reconciliation does not: the five rhythm pacemaker schedules (rhythm-decide-act-gamma, rhythm-sense-hourly-gamma, rhythm-coherence-point-gamma, rhythm-light-integrate-gamma, rhythm-heavy-integrate-gamma) carry NEITHER the enceladus- nor devops- prefix. A scope predicate copied verbatim from the Lambda-name reconciliation would make the entire rhythm pacemaker invisible to this contract -- exactly the enceladus-checkout-service-auto-gamma class of blindness the task brief warns about, reproduced by a different, more subtle route (a prefix list that was correct for one naming family silently failing a different one). Verified live 2026-08-23 (AWS_PROFILE=enceladus-agent): every rhythm-* EventBridge Scheduler schedule confirmed via scheduler:ListSchedules; without the 'rhythm-' prefix here, scope filtering on 'enceladus-'/'devops-' alone returns zero Scheduler schedules in the account (the io-graph-* schedules are the only other live schedules, correctly excluded -- different product, same AWS account).",
+    "prefixes": ["enceladus-", "devops-", "rhythm-"]
+  },
+
+  "out_of_scope_verified": {
+    "_doc": "Live resources deliberately EXCLUDED from this contract, with the verification performed so the exclusion is a checked fact, not an assumption -- printed every run this tool executes with --live, never silently dropped.",
+    "entries": [
+      {
+        "kind": "event_pattern_rule",
+        "rationale": "An EventBridge Rule with ScheduleExpression=null fires on an EventPattern (S3 write, CodeBuild state change, ...), not a cadence. There is no 'expected every N hours' to declare for an irregular, externally-triggered rule -- this contract's tolerance-window model does not apply. Examples verified live: devops-deploy-codebuild-finalize[-gamma], io-graph-cognito-writes-iograph, io-graph-direct-intake-iograph, io-graph-yourls-stream-iograph, on-parquet-ready, on-project-json-sync, StepFunctionsGetEventsForECSTaskRule. Still enumerated and printed by --live (as OUT_OF_SCOPE_NOT_SCHEDULED), never dropped without a line in the output."
+      },
+      {
+        "kind": "lambda_function",
+        "name": "enceladus-checkout-service-auto-gamma",
+        "rationale": "Named explicitly in the ENC-TSK-P12 brief as the shape of blindness ENC-TSK-P13 and ENC-TSK-P15 independently caught (a live component invisible to a declared source). Checked directly for THIS contract's domain (schedule-driven liveness) on 2026-08-23: lambda:ListEventSourceMappings returns empty, lambda:GetPolicy returns ResourceNotFoundException (no resource-based invoke policy for any principal, so no EventBridge/SNS/S3 service trigger exists), and a full events:ListTargetsByRule sweep of every live Rule in the account found no target ARN referencing this function. It DOES show recent AWS/Lambda Invocations activity (2 invocations observed 2026-08-22), so it is not dead -- it is invoked some other way (direct SDK/API call from another component's execution role, which needs no resource policy) and was never schedule-driven in the first place. This contract's scope is EventBridge-triggered cadence; a function invoked out-of-band by another component is a different question (does IT have a liveness contract at its own layer) that this file does not answer and does not claim to. Recorded here so the exclusion is a checked, dated fact rather than a silent absence someone has to re-discover."
+      }
+    ]
+  },
+
+  "tolerance_policy": {
+    "_doc": "Default expected-activity window for a LIVE-classified component whose cadence is not explicitly overridden below. Derived mechanically from the component's OWN declared ScheduleExpression (see tools/verify_liveness_contract.py:_nominal_interval_hours), never hand-authored per component -- so a live schedule with no entry in `overrides` still gets a real tolerance instead of silently escaping the contract (ENC-TSK-P12 AC-1/AC-4 combined: nothing gets checked-against-nothing).",
+    "multiplier": 3.0,
+    "multiplier_rationale": "3x the nominal fire interval absorbs ordinary jitter, retries, and Lambda cold-start/backoff without flapping (ENC-ISS-624's caution: a guard that goes red for reasons unrelated to its purpose teaches people to bypass it). Not tuned per component; a component whose real SLA is tighter or looser than 3x its own cadence belongs in `overrides` with a cited rationale, not a change to this global multiplier.",
+    "minimum_hours": 1.0,
+    "minimum_hours_rationale": "A rate(5 minutes) rule computes a sub-hour tolerance under the 3x multiplier; floored at 1h so this contract does not become a source of its own false alarms on fast-cadence housekeeping rules."
+  },
+
+  "overrides": {
+    "_doc": "component_name (the LIVE-triggered target Lambda's FunctionName) -> explicit expected_activity_within_hours, when the mechanical rate/cron-derived default is wrong for the real-world trigger shape. Every entry needs a cited rationale.",
+    "entries": {
+      "devops-recompute-governance": {
+        "expected_activity_within_hours": 26.0,
+        "rationale": "BRD DOC-56CFA21523C1 section 8.4's own worked example ('the mart must produce a mart on its schedule'); matches tools/verify_arm64_validation_harness.py's _probe_governance_mart_schedule max_age_hours=26.0 default (ENC-TSK-O88/P08). The function's REAL trigger is an S3 governance/live/* write via an out-of-band relay, not the hourly devops-recompute-governance-backstop[-gamma] EventBridge Rule -- that rule is a backstop, not the primary cadence, so its rate(1 hour) expression is not this component's real SLA. ENC-TSK-P12 / ENC-ISS-667's own defect: 365.7h silent against this exact 26h figure."
+      },
+      "devops-recompute-governance-gamma": {
+        "expected_activity_within_hours": 26.0,
+        "rationale": "Gamma twin of devops-recompute-governance -- see that entry. This is the literal function named in the ENC-TSK-P12 brief as the one that MUST be covered."
+      },
+      "devops-governance-mart": {
+        "expected_activity_within_hours": 26.0,
+        "rationale": "BRD 8.4; matches the O88 harness's registered probe for this function family (max_age_hours=26.0)."
+      },
+      "devops-governance-mart-gamma": {
+        "expected_activity_within_hours": 26.0,
+        "rationale": "Gamma twin of devops-governance-mart. NOTE (ENC-TSK-P12 live finding, 2026-08-23): this function's only declared live trigger, EventBridge Rule 'devops-governance-mart-daily-gamma', is currently DISABLED and matches no governed exception family in this file -- see verify_liveness_contract.py's ORPHANED_CROSS_SERVICE_STALE_RESOURCE handling. Do not add a deliberate-pause exception for that rule name without first confirming which of the two same-named, different-SERVICE resources (the retained AWS::Events::Rule vs the templated-but-not-yet-live AWS::Scheduler::Schedule GovernanceMartScheduleGamma, ENC-TSK-O80) any rationale actually refers to."
+      }
+    }
+  },
+
+  "devops_ownership_snapshot_path": "infrastructure/devops_lambda_ownership_snapshot.json",
+  "legacy_schedule_inventory_module": "backend.lambda.rhythm_cycle.legacy_schedules",
+
+  "rhythm_beat_family": {
+    "_doc": "ENC-TSK-N78: the five rhythm pacemaker schedules (EventBridge Scheduler, not Rules). Paused together via the RhythmBeatsEnabled CFN parameter -- default true in the template, but the LIVE gamma stack currently runs with an override (confirmed live 2026-08-23: all five report State=DISABLED). This is a documented, intentional cost-stop (memory: 'PLN-078 cognition wave ... beats still paused; resume=RHYTHM_BEATS_ENABLED'), not a stopped cron -- but ONLY if all five move together. A split state (some enabled, some not) is not a documented configuration and this contract treats it as a violation, not a partial pass.",
+    "gating_parameter": "RhythmBeatsEnabled",
+    "gating_condition": "RhythmBeatsActive",
+    "source": "infrastructure/cloudformation/02-compute.yaml",
+    "schedule_name_basenames": [
+      "rhythm-sense-hourly",
+      "rhythm-light-integrate",
+      "rhythm-decide-act",
+      "rhythm-heavy-integrate",
+      "rhythm-coherence-point"
+    ]
+  },
+
+  "rhythm_tier_to_schedule_basename": {
+    "_doc": "backend/lambda/rhythm_cycle/legacy_schedules.py's LEGACY_SCHEDULE_INVENTORY names a rhythm_tier per absorbed legacy rule (e.g. 'heavy_integrate'); this maps that tier vocabulary to the EventBridge Scheduler schedule basename (rhythm_beat_family.schedule_name_basenames above) whose live State is the ground truth for whether that tier is actually running.",
+    "sense": "rhythm-sense-hourly",
+    "light_integrate": "rhythm-light-integrate",
+    "decide_act": "rhythm-decide-act",
+    "heavy_integrate": "rhythm-heavy-integrate",
+    "coherence_point": "rhythm-coherence-point"
+  },
+
+  "rhythm_absorbed_legacy_family": {
+    "_doc": "ENC-TSK-N19: 02-compute.yaml gates a legacy EventBridge Rule's State on the RhythmAbsorbed condition (State: !If [RhythmAbsorbed, DISABLED, ENABLED]) when that rule's cadence has been declared superseded by the rhythm cycle. This is a STRUCTURAL pattern detected directly from CFN (verify_liveness_contract.py parses infrastructure/cloudformation/02-compute.yaml's Conditions + Resources blocks for this exact !If shape), not a hand-maintained name list here -- so a new RhythmAbsorbed-gated rule added later is picked up automatically. THE ENC-ISS-667 MECHANISM, MADE CHECKABLE: a rule disabled under this condition is claiming 'the rhythm cycle now does this instead.' That claim is only true if the rhythm substrate is actually alive. When legacy_schedules.py names a SPECIFIC rhythm_tier for the rule, this tool cross-checks that exact tier's scheduler schedule. When it does not (legacy_schedules.py's own inventory is incomplete -- confirmed live 2026-08-23: 2 of its 4 rule_name entries do not match any currently-live rule name at all), this tool falls back to a general check: is ANY of the five rhythm_beat_family schedules live ENABLED. If the rhythm substrate is entirely paused (as observed live 2026-08-23 -- all five DISABLED) while a RhythmAbsorbed-gated rule is ALSO disabled, the supersession claim is false and this tool reports a CONTRADICTION, never a silent pass. Live finding 2026-08-23: seven such rules were found simultaneously in this contradictory state on gamma (devops-recompute-governance-backstop-gamma, enceladus-memory-consolidation-nightly-gamma, enceladus-corpus-entropy-nightly-gamma, enceladus-corpus-entropy-gdmp-nightly-gamma, enceladus-graph-health-daily-gamma, enceladus-handoff-consolidation-engine-schedule-gamma, enceladus-percolation-nightly-gamma) -- a systemic instance of the exact defect ENC-ISS-667 names, not an isolated one.",
+    "cfn_condition_name": "RhythmAbsorbed",
+    "cfn_state_if_pattern": ["RhythmAbsorbed", "DISABLED", "ENABLED"],
+    "gating_parameter": "RhythmAbsorbLegacy"
+  },
+
+  "io_hold_family": {
+    "_doc": "ENC-TSK-N19 (C3) / ENC-FTR-106: the standing io-HOLD on the nightly Crick-Mitchison unlearning pass, codified as IaC via the UnlearningEnabled parameter (default 'false') gating the UnlearningEnabledCond condition. Opposite polarity from rhythm_absorbed_legacy_family on purpose: State: !If [UnlearningEnabledCond, ENABLED, DISABLED] -- DISABLED is the safe default here, ENABLED requires explicit io re-arm. Detected structurally (same reasoning as rhythm_absorbed_legacy_family): a rule matching this exact !If shape is DELIBERATELY_PAUSED when live-observed DISABLED (the expected, documented state) and reclassified LIVE (checked normally against CloudWatch) if ever observed ENABLED, since that means io has re-armed it and it must actually run.",
+    "cfn_condition_name": "UnlearningEnabledCond",
+    "cfn_state_if_pattern": ["UnlearningEnabledCond", "ENABLED", "DISABLED"],
+    "gating_parameter": "UnlearningEnabled",
+    "citation": "ENC-FTR-106"
+  },
+
+  "permanently_decommissioned_rules": {
+    "_doc": "Rules whose CFN Properties.State is a LITERAL 'DISABLED' (not a condition !If) with an inline comment citing the retirement decision -- a permanent decommission, not a pause awaiting a resume flag. Verified via a raw-text proximity check against the CFN source (State: DISABLED plus the citation string within the same resource block) so a future edit that drops the comment or flips the state re-surfaces this rule for real classification instead of the exception silently continuing to apply (the constraint's own 'a stale declared exception is itself a violation' rule, applied here).",
+    "entries": [
+      {
+        "name_contains": "standing-projection-refresh",
+        "citation": "ENC-ISS-465",
+        "rationale": "enceladus-standing-projection-refresh: 'ENC-ISS-465/J41: 30-min AGA warmer retired (cost kill)'. Hardcoded State: DISABLED in 02-compute.yaml (StandingProjectionRefreshSchedule, Condition: IsProduction) -- prod-only resource, no gamma twin exists or is expected."
+      }
+    ]
+  }
+}

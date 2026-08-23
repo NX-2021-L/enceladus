@@ -180,6 +180,30 @@ jobs:
           python3 tools/verify_devops_ownership_snapshot.py
           python3 -m unittest tools.test_verify_devops_ownership_snapshot
 
+      # ENC-TSK-P12 / ENC-ISS-667: devops-recompute-governance-gamma's schedule
+      # went silent for ~365.7h against a 26h expectation and nothing alarmed --
+      # 49 of 51 functions had no liveness probe at all. This guard is the
+      # STRUCTURAL half of the per-component liveness contract (contract schema,
+      # the two reused sources -- devops ownership snapshot, ENC-TSK-P15;
+      # legacy_schedules.py's rhythm-tier map, K91 -- still load, and
+      # 02-compute.yaml + 05-monitoring.yaml still parse and still carry the
+      # RhythmAbsorbed/UnlearningEnabledCond conditions and the permanent-
+      # decommission citations this contract's family logic keys off of). No
+      # AWS credentials needed, same as every other guard in this job. The full
+      # AWS-derived reconciliation (--live: enumerate every live EventBridge
+      # Rule and Scheduler schedule, cross-check every disabled legacy rule's
+      # supersession claim against whether its claimed rhythm tier is actually
+      # alive, check real CloudWatch Invocations activity) is opt-in and not
+      # wired here -- same reasoning as verify_lambda_arch_parity.py's
+      # --check-live-reconciliation flag, this job has no AWS credentials
+      # configured anywhere.
+      - name: Per-component liveness contract (ENC-TSK-P12)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 tools/verify_liveness_contract.py
+          python3 -m unittest tools.test_verify_liveness_contract
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail
