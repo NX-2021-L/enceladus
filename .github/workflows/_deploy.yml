@@ -927,12 +927,21 @@ jobs:
       # deploy, a rollback, a manual replacement, or a future edit that removes
       # the widening rule is still caught. Needs only lambda:GetFunction -- no
       # invoke permission -- so it runs on every gamma deploy unconditionally.
+      #
+      # It reads the deploy's OWN function_name_map rather than enumerating the
+      # account: the deploy role has no lambda:ListFunctions (confirmed live, run
+      # 32624487071 -- the guard's first version died on exactly that), and
+      # checking the functions this deploy was responsible for is the more precise
+      # question anyway. Requesting a ListFunctions grant to satisfy a guard would
+      # have been the wrong trade, and is the ENC-ISS-660 pattern in miniature.
       - name: Assert no placeholder Lambdas (ENC-ISS-663)
         if: contains(needs.resolve.outputs.environment, 'gamma')
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
         run: |
           set -euo pipefail
           python3 tools/assert_no_placeholder_lambdas.py \
-            --suffix="${{ needs.resolve.outputs.environment_suffix }}" \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
             --region "${{ env.AWS_REGION }}"
 
       - name: Set deployment status → success

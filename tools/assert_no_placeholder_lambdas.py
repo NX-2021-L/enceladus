@@ -164,6 +164,21 @@ def check_function(lambda_client, name: str,
     return {"function": name, "state": state, "detail": detail, "handler": handler}
 
 
+def expand_map(map_json: str) -> List[str]:
+    """Flatten a function_name_map into target function names.
+
+    One source dir can fan out to several deployed functions -- the deploy step
+    already supports a comma-list value (e.g. checkout_service maps to both
+    enceladus-checkout-service-gamma and enceladus-checkout-service-auto-gamma),
+    and a guard that checked only the first would silently miss the second.
+    """
+    data = json.loads(map_json) if map_json.strip() else {}
+    out: List[str] = []
+    for value in data.values():
+        out.extend(n.strip() for n in str(value).split(",") if n.strip())
+    return out
+
+
 def _self_test() -> int:
     ph = io.BytesIO()
     with zipfile.ZipFile(ph, "w") as z:
@@ -190,6 +205,11 @@ def _self_test() -> int:
         ("a script handler that is genuinely ABSENT is still DEAD",
          classify_package("run.sh", ["other.py"], b"x"), DEAD),
     ]
+    # expand_map: the deploy lane's target list, including comma fan-out.
+    assert expand_map('{"a": "fn-a", "b": "fn-b1,fn-b2"}') == ["fn-a", "fn-b1", "fn-b2"], \
+        "a comma fan-out must yield EVERY target -- checkout_service maps to two functions"
+    assert expand_map("{}") == [] and expand_map("  ") == []
+    print("  PASS  expand_map flattens comma fan-out and tolerates an empty map")
     failed = 0
     for label, (state, detail), expected in cases:
         ok = state == expected
@@ -209,7 +229,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--function-name", action="append", default=[],
                    help="Explicit function name. Repeatable.")
     p.add_argument("--suffix", default=None,
-                   help="Check every account function whose name ends with this (e.g. -gamma).")
+                   help="Check every account function whose name ends with this (e.g. -gamma). "
+                        "Requires lambda:ListFunctions -- fine for an audit from an operator "
+                        "identity, but NOT available to the deploy role; use "
+                        "--function-name-map-json in the deploy lane.")
+    p.add_argument("--function-name-map-json", default=None,
+                   help="JSON object of {source_dir: 'fn' | 'fn1,fn2'} -- the deploy lane's own "
+                        "function_name_map. Preferred inside _deploy.yml: it needs only "
+                        "lambda:GetFunction (no account enumeration), and it checks exactly the "
+                        "functions this deploy was responsible for rather than whatever happens "
+                        "to exist in the account.")
     p.add_argument("--region", default="us-west-2")
     p.add_argument("--profile", default=None)
     p.add_argument("--strict", action="store_true",
@@ -222,8 +251,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.self_test:
         return _self_test()
 
-    if not args.function_name and not args.suffix:
-        p.error("supply --function-name and/or --suffix (or --self-test)")
+    if not args.function_name and not args.suffix and not args.function_name_map_json:
+        p.error("supply --function-name, --suffix and/or --function-name-map-json (or --self-test)")
 
     try:
         import boto3  # noqa: PLC0415
@@ -235,6 +264,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     client = session.client("lambda", region_name=args.region)
 
     targets = list(args.function_name)
+    if args.function_name_map_json:
+        targets.extend(expand_map(args.function_name_map_json))
     if args.suffix:
         paginator = client.get_paginator("list_functions")
         for page in paginator.paginate():
