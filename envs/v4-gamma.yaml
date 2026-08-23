@@ -55,56 +55,73 @@ artifact_version_ids: {}
 # the mapped name in `aws lambda update-function-code --function-name`.
 # Gamma uses prefixed/hyphenated conventions that differ from backend/lambda/<dir> names.
 # Functions absent from this map are silently skipped by the deploy step.
-# deploy_capability_auditor intentionally excluded — not provisioned in v4-gamma.
+# Functions intentionally absent are declared in function_name_map_exclusions
+# below and enforced by tools/assert_function_name_map_lockstep.py, so an
+# omission can no longer pass as an intention (ENC-ISS-663 / ENC-TSK-P03).
 function_name_map:
   # ENC-TSK-K56: the AppSync FeedPublisher (K20) was missing from this map, so
   # Gen2 silently skipped it and the fn kept its CFN placeholder code (loaded
   # surgically as a stopgap during gamma provisioning). New-gamma-Lambda
   # checklist step 3 — keep this map in lockstep with lambda_workflow_manifest.
   appsync_feed_publisher: devops-appsync-feed-publisher-gamma
+  arc_walk_metrics: enceladus-arc-walk-metrics-gamma
   auth_refresh: auth-refresh-gamma
   bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
   changelog_api: devops-changelog-api-gamma
   checkout_service: enceladus-checkout-service-gamma,enceladus-checkout-service-auto-gamma
+  convergence_telemetry: enceladus-convergence-telemetry-gamma
   coordination_api: devops-coordination-api-gamma
   coordination_monitor_api: devops-coordination-monitor-api-gamma
+  corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
+  corpus_entropy_gdmp_remediation: enceladus-corpus-entropy-gdmp-remediation-gamma
   deploy_decide: devops-deploy-decide-gamma
   deploy_finalize: devops-deploy-finalize-gamma
   deploy_intake: devops-deploy-intake-gamma
   deploy_orchestrator: devops-deploy-orchestrator-gamma
+  deploy_parity_validator: devops-deploy-parity-validator-gamma
   doc_prep: devops-doc-prep-gamma
   document_api: devops-document-api-gamma
   env_drift_auditor: devops-env-drift-auditor-gamma
+  escalation_decision_authorizer: escalation-decision-authorizer-gamma
   feed_publisher: devops-feed-publisher-gamma
   feed_query: devops-feed-query-api-gamma
   github_integration: devops-github-integration-gamma
   governance_audit: enceladus-governance-audit-gamma
   governance_drift_check: devops-governance-drift-check-gamma
+  governance_mart: devops-governance-mart-gamma
   graph_health_metrics: enceladus-graph-health-metrics-gamma
-  arc_walk_metrics: enceladus-arc-walk-metrics-gamma
   graph_query_api: devops-graph-query-api-gamma
   graph_sync: devops-graph-sync-gamma
-  opensearch_indexer: devops-opensearch-indexer-gamma
-  opensearch_backfill: devops-opensearch-backfill-gamma
-  memory_consolidation: enceladus-memory-consolidation-gamma
   handoff_consolidation_engine: enceladus-handoff-consolidation-engine-gamma
+  id_service: enceladus-id-service-gamma
+  lifecycle_service: enceladus-lifecycle-service-gamma
+  mcp_code: enceladus-mcp-code-gamma
+  mcp_streamable: enceladus-mcp-streamable-gamma
+  mcp_streaming_gateway: enceladus-mcp-streaming-gateway-gamma
+  memory_consolidation: enceladus-memory-consolidation-gamma
   neo4j_backup: enceladus-neo4j-backup-gamma
+  opensearch_backfill: devops-opensearch-backfill-gamma
+  opensearch_indexer: devops-opensearch-indexer-gamma
   percolation_monitor: enceladus-percolation-monitor-gamma
-  unlearning: enceladus-unlearning-gamma
   prod_health_monitor: enceladus-prod-health-monitor-gamma
   project_service: devops-project-service-gamma
+  recompute_governance: devops-recompute-governance-gamma
   reference_search: devops-reference-search-gamma
+  rhythm_cycle: enceladus-rhythm-cycle-gamma
+  scoring_service: enceladus-scoring-service-gamma
   stale_checkout_monitor: enceladus-stale-checkout-monitor-gamma
   titan_embedding_backfill: devops-titan-embedding-backfill-gamma
   tracker_mutation: devops-tracker-mutation-api-gamma
-  deploy_parity_validator: devops-deploy-parity-validator-gamma
-  mcp_code: enceladus-mcp-code-gamma
-  mcp_streamable: enceladus-mcp-streamable-gamma
-  lifecycle_service: enceladus-lifecycle-service-gamma
-  scoring_service: enceladus-scoring-service-gamma
-  recompute_governance: devops-recompute-governance-gamma
-  rhythm_cycle: enceladus-rhythm-cycle-gamma
-  corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
-  corpus_entropy_gdmp_remediation: enceladus-corpus-entropy-gdmp-remediation-gamma
+  unlearning: enceladus-unlearning-gamma
   user_preferences_api: enceladus-user-preferences-api-gamma
-  mcp_streaming_gateway: enceladus-mcp-streaming-gateway-gamma
+
+# ENC-ISS-663 / ENC-TSK-P03. A function in lambda_workflow_manifest.json that is
+# absent from function_name_map above is SILENTLY SKIPPED by the deploy step --
+# CloudFormation still creates it, so it sits on its placeholder body and returns
+# Runtime.ImportModuleError forever while the stack reads UPDATE_COMPLETE.
+# That happened to the AppSync FeedPublisher (ENC-TSK-K56) and then, four months
+# later, to three more functions on 2026-08-23. The old remedy was a comment
+# asking a human to keep the two files in lockstep; this list makes the intent
+# machine-checkable instead, so an OMISSION can no longer masquerade as a DECISION.
+function_name_map_exclusions:
+  deploy_capability_auditor: not provisioned in v4-gamma

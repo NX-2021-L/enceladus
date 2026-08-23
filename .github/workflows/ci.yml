@@ -115,6 +115,20 @@ jobs:
           python3 tools/assert_no_placeholder_lambdas.py --self-test
           python3 -m unittest tools.test_compute_affected_targets
 
+      # ENC-ISS-663 / ENC-TSK-P03: a function in lambda_workflow_manifest.json with
+      # no function_name_map entry is SILENTLY SKIPPED by _deploy.yml while
+      # CloudFormation still creates it -- leaving it on its placeholder body. This
+      # already happened to the AppSync FeedPublisher (ENC-TSK-K56); the remedy then
+      # was a comment asking a human to keep the two files in lockstep, and four
+      # months later it recurred for three more functions. This is that comment,
+      # executed. Runs on every PR -- no AWS access required.
+      - name: Function-name-map lockstep (ENC-ISS-663)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 tools/assert_function_name_map_lockstep.py --self-test
+          python3 tools/assert_function_name_map_lockstep.py
+
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.
