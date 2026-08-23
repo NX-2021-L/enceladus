@@ -286,6 +286,13 @@
     "opensearch-failover-drill.yml": {
       "class": "gamma-only",
       "notes": "ENC-TSK-M13 (L46 AC-2 carrier): workflow_dispatch OpenSearch failover drill. guard-gamma-only refuses non-v4/** refs; SSM systemctl stop/start of the gamma-only opensearch-node instance via BackendDeployRole (no v3-prod resources exist; node is gamma-only, DOC-499FA089EC30)"
+    },
+    "iam-agent-cli-s3-boundary-fix.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "correct-boundary"
+      ],
+      "notes": "ENC-TSK-P02 / ENC-ISS-659: environment: v3-prod -- mutates enceladus-agent-cli-policy, the S3 security boundary for every enceladus agent session project-wide, which additionally governs a second project's production bucket. Removes the s3:* Allow on harrisonfamily-frontend and replaces the shadowing NotResource Deny; dry_run defaults to true so the first dispatch only prints the before/after diff. Post-write simulate-principal-policy checks assert harrisonfamily is no longer writable and that the run did not widen read access beyond the chosen read_scope."
     }
   }
 }

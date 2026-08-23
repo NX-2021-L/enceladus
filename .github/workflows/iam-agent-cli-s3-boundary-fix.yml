@@ -1,0 +1,176 @@
+name: IAM agent-cli — S3 boundary correction (ENC-ISS-659)
+
+# ENC-TSK-P02 / ENC-ISS-659 — ACTION 4 of DOC-6EF8FAFC5E0A.
+#
+# io found this during a read-only inspection on 2026-08-23 and correctly
+# declined to edit without the specific intended change stated first: this
+# policy is the S3 security boundary for EVERY enceladus-agent-cli session
+# project-wide, and it additionally governs a second project's production
+# bucket. This workflow is that statement, made executable and reviewable.
+#
+# TWO SEPARABLE DEFECTS.
+#
+#   1. THE CROSS-PROJECT PRIVILEGE (the one with blast radius). An Allow of
+#      s3:* -- not s3:GetObject -- on arn:aws:s3:::harrisonfamily-frontend. So
+#      an enceladus agent session can Put, Delete and overwrite objects in an
+#      unrelated project's PRODUCTION frontend bucket. Nothing in the enceladus
+#      workload needs that. The failure mode is not exotic: a confused-deputy
+#      path, a mis-scoped cleanup loop, or a prompt-injected instruction
+#      reaching an agent session all land with full write authority on a live
+#      site belonging to a different project.
+#
+#   2. THE DEAD LETTER. A Deny of s3:* on NotResource of that same bucket.
+#      Explicit Deny beats Allow, so it denies s3 on every OTHER bucket --
+#      shadowing the AllowMinimalReads s3:GetObject/ListBucket on Resource '*'
+#      completely. The written contract (project CLAUDE.md documents "S3 reads"
+#      as a baseline capability) and the enforced policy disagree, and the
+#      written one is wrong. Confirmed behaviourally by ENC-TSK-O88:
+#      s3:GetObject on s3://jreese-net/lambda-artifacts/ returns AccessDenied.
+#
+# WHY THIS IS A TRANSFORM AND NOT A HAND-AUTHORED DOCUMENT. Removing one
+# statement from a managed policy means writing a whole new version of the
+# document. enceladus-agent-cli cannot read its own policy (iam:GetPolicyVersion
+# is denied), so no agent session can author a safe full replacement -- it would
+# be guessing at the statements it is not changing. Instead this workflow READS
+# the live default version under a privileged role and applies narrow, asserted
+# RULES to it. Anything it does not recognise, it leaves alone. If the policy
+# does not have the shape described above, it FAILS rather than writing.
+#
+# DELIBERATELY NOT BUNDLED WITH ENC-ISS-658's lambda:InvokeFunction grant. A
+# security correction should not ride along with a capability grant. Note the
+# converse dependency the reply on DOC-6EF8FAFC5E0A records: the s3:GetObject
+# half of ENC-ISS-658 was WITHDRAWN precisely because satisfying it meant
+# editing this boundary. That makes this record more load-bearing than it first
+# appeared -- but it does NOT make this a back door to that grant. Point 1 of
+# ENC-ISS-658 is closed by ENC-TSK-O96's presigned-URL substitute either way.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = print the before/after diff and the simulated outcome, write NOTHING. Run this first."
+        type: boolean
+        default: true
+      read_scope:
+        description: >
+          What replaces the shadowing Deny. `none` keeps today's effective posture
+          (no S3 read anywhere) and leaves CLAUDE.md to be corrected instead.
+          `jreese-net` re-scopes the Deny so enceladus's own bucket is readable,
+          making the documented capability true. io's call -- see ENC-ISS-659.
+        type: choice
+        options:
+          - none
+          - jreese-net
+        default: none
+        required: true
+      reason:
+        description: "Why this run is dispatched (audit trail)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  correct-boundary:
+    name: Remove cross-project s3:* and un-shadow the intended read
+    # Live IAM mutation on the shared agent identity — pauses on the v3-prod
+    # required-reviewer rule (ENC-TSK-J64 / ENC-FTR-120).
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Transform the policy (fail-closed on an unexpected shape)
+        id: transform
+        env:
+          READ_SCOPE: ${{ inputs.read_scope }}
+        run: |
+          set -euo pipefail
+          policy_arn="arn:aws:iam::356364570033:policy/enceladus-agent-cli-policy"
+          version=$(aws iam get-policy --policy-arn "${policy_arn}" \
+            --query 'Policy.DefaultVersionId' --output text)
+          aws iam get-policy-version --policy-arn "${policy_arn}" --version-id "${version}" \
+            --query 'PolicyVersion.Document' --output json > /tmp/policy-before.json
+          echo "policy_arn=${policy_arn}" >> "${GITHUB_OUTPUT}"
+          echo "Read default version ${version}."
+          python3 tools/correct_agent_cli_s3_boundary.py \
+            --in /tmp/policy-before.json \
+            --out /tmp/policy-after.json \
+            --read-scope "${READ_SCOPE}"
+
+      - name: Publish the new default version
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          policy_arn="${{ steps.transform.outputs.policy_arn }}"
+          count=$(aws iam list-policy-versions --policy-arn "${policy_arn}" \
+            --query 'length(Versions)' --output text)
+          if [ "${count}" -ge 5 ]; then
+            oldest=$(aws iam list-policy-versions --policy-arn "${policy_arn}" \
+              --query 'Versions[?IsDefaultVersion==`false`]|sort_by(@,&CreateDate)[0].VersionId' \
+              --output text)
+            echo "Pruning oldest non-default version ${oldest} to stay under the 5-version cap."
+            aws iam delete-policy-version --policy-arn "${policy_arn}" --version-id "${oldest}"
+          fi
+          aws iam create-policy-version --policy-arn "${policy_arn}" \
+            --policy-document "file:///tmp/policy-after.json" --set-as-default
+
+      # THE POINT OF THE WHOLE CHANGE, asserted rather than assumed. Simulated
+      # against the live identity, so it reflects the policy as IAM evaluates
+      # it -- not as this workflow believes it wrote it.
+      - name: Verify — harrisonfamily is no longer writable by an enceladus agent
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          user_arn="arn:aws:iam::356364570033:user/enceladus-agent-cli"
+          fail=0
+          for action in s3:PutObject s3:DeleteObject s3:DeleteBucket s3:PutBucketPolicy; do
+            decision=$(aws iam simulate-principal-policy \
+              --policy-source-arn "${user_arn}" --action-names "${action}" \
+              --resource-arns "arn:aws:s3:::harrisonfamily-frontend/index.html" \
+              --query 'EvaluationResults[0].EvalDecision' --output text)
+            if [ "${decision}" = "allowed" ]; then
+              echo "::error::${action} is STILL allowed on harrisonfamily-frontend. The cross-project write privilege was not removed."
+              fail=1
+            else
+              echo "ok: ${action} on harrisonfamily-frontend -> ${decision}"
+            fi
+          done
+          exit "${fail}"
+
+      - name: Verify — the documented read capability now matches reality
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          user_arn="arn:aws:iam::356364570033:user/enceladus-agent-cli"
+          decision=$(aws iam simulate-principal-policy \
+            --policy-source-arn "${user_arn}" --action-names s3:GetObject \
+            --resource-arns "arn:aws:s3:::jreese-net/lambda-artifacts/probe" \
+            --query 'EvaluationResults[0].EvalDecision' --output text)
+          echo "s3:GetObject on s3://jreese-net/lambda-artifacts/ -> ${decision}"
+          if [ "${{ inputs.read_scope }}" = "jreese-net" ]; then
+            if [ "${decision}" != "allowed" ]; then
+              echo "::error::read_scope=jreese-net was requested but the read is still ${decision}. The Deny still shadows AllowMinimalReads."
+              exit 1
+            fi
+            echo "The CLAUDE.md claim of baseline S3 reads is now TRUE."
+          else
+            if [ "${decision}" = "allowed" ]; then
+              echo "::error::read_scope=none was requested but the read is allowed. This run widened access it was not asked to widen."
+              exit 1
+            fi
+            echo "::notice::read_scope=none -- enceladus-agent-cli still has no S3 read. The project CLAUDE.md must stop claiming it does; ENC-TSK-P02 carries that edit."
+          fi
