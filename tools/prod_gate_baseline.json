@@ -293,6 +293,10 @@
         "correct-boundary"
       ],
       "notes": "ENC-TSK-P02 / ENC-ISS-659: environment: v3-prod -- mutates enceladus-agent-cli-policy, the S3 security boundary for every enceladus agent session project-wide, which additionally governs a second project's production bucket. Removes the s3:* Allow on harrisonfamily-frontend and replaces the shadowing NotResource Deny; dry_run defaults to true so the first dispatch only prints the before/after diff. Post-write simulate-principal-policy checks assert harrisonfamily is no longer writable and that the run did not widen read access beyond the chosen read_scope."
+    },
+    "shared-layer-build.yml": {
+      "class": "inert",
+      "notes": "ENC-TSK-P13. Classified inert against the ENC-FTR-120 invariant, same basis as _build.yml: publish-layer-version CREATES a new enceladus-shared version but REPOINTS NOTHING. No running function moves until a separate CloudFormation deploy passes a new SharedLayerArn parameter, and that deploy is itself gated. Defence in depth on top of that: the publish job is workflow_dispatch-only (if: github.event_name == 'workflow_dispatch'), and the real AWS call is additionally guarded by if: inputs.dry_run == false with dry_run defaulting true. The pull_request/push path runs only verify-and-build, which makes zero AWS calls. If a future change makes this workflow set SharedLayerArn or invoke a deploy, it must be reclassified prod-mutating."
     }
   }
 }

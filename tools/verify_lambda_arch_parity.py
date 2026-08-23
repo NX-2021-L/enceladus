@@ -487,11 +487,21 @@ def _validate_shared_layer_deploy_script() -> List[str]:
 
     content = SHARED_LAYER_DEPLOY.read_text(encoding="utf-8")
 
-    # ENC-TSK-F59: script tombstoned — artifact build moved to _deploy.yml matrix
+    # ENC-TSK-F59 tombstoned this script claiming _deploy.yml's matrix build took
+    # over -- ENC-TSK-P13 found that claim was false the entire time (_build.yml's
+    # function-discovery glob never matches shared_layer/, and no workflow in this
+    # repo ever published this layer). ENC-TSK-P13 landed the real lane,
+    # .github/workflows/shared-layer-build.yml, which builds a deliberately
+    # dependency-free pure-Python zip (no pip install, no compiled deps, see that
+    # workflow's header comment) -- so the ABI-flag checks below (--platform /
+    # --python-version / --abi, meant for a pip-installing build) do not apply to
+    # it either. This skip is correct for today's real lane, not just a fallback
+    # for an absent one.
     if content.strip().startswith("# TOMBSTONE:"):
         print(
             "[INFO] shared_layer/deploy.sh is tombstoned — ABI flag validation skipped"
-            " (artifact build handled by .github/workflows/_deploy.yml)"
+            " (build lane is .github/workflows/shared-layer-build.yml, ENC-TSK-P13;"
+            " it does not pip-install compiled deps, so these ABI-pin checks do not apply)"
         )
         return []
 

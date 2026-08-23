@@ -1,0 +1,269 @@
+name: Build enceladus-shared Layer (ENC-TSK-P13)
+
+# ENC-TSK-P13 (Gate F) -- the enceladus-shared Lambda layer supply chain.
+#
+# BEFORE THIS WORKFLOW: nothing built or published enceladus-shared at all.
+# backend/lambda/shared_layer/deploy.sh is a tombstone ("# TOMBSTONE: see
+# .github/workflows/_deploy.yml matrix build" -- a claim that was FALSE the
+# whole time this task investigated it: _build.yml's discovery glob
+# (`find backend/lambda -maxdepth 2 -name lambda_function.py`) structurally
+# never matches shared_layer/, which has no lambda_function.py, and `git grep`
+# for publish-layer-version / PublishLayerVersion across .github/workflows/
+# returns zero hits anywhere). Someone already noticed this gap once before
+# (git history: commit b826fd3 "restore shared_layer/deploy.sh — Lambda Layer
+# not covered by Gen2 matrix", 2026-04-20) and it was re-tombstoned (5140e46 /
+# c96d8a8) without anything replacing it. The two most recent published
+# versions (:11, :12) were BOTH hand-run via `aws lambda publish-layer-version`
+# from a local machine (CloudTrail: both events carry userIdentity
+# arn:aws:iam::356364570033:user/io-dev-admin, same source IP, same
+# aws-cli/2.34.5 os/macos user-agent, PublishLayerVersion20181031) -- see
+# backend/lambda/shared_layer/PROVENANCE.json for the full record. This
+# workflow is the CI lane that was supposed to exist instead.
+#
+# WHY A NEW FILE, NOT A ROW IN _build.yml's MATRIX (ENC-TSK-P13 -- explicit
+# per-file decision, not just "a lane exists somewhere"):
+#
+#   1. DIFFERENT ARTIFACT SHAPE. _build.yml discovers Lambda FUNCTIONS
+#      (lambda_function.py) and uploads S3-versioned per-function zips; a
+#      Lambda LAYER is published via a distinct API (publish-layer-version)
+#      with its own versioning (an integer, not an S3 VersionId) and its own
+#      consumer-attachment model (Layers: [!Ref SharedLayerArn], not a
+#      per-environment S3 key resolve). Bending _build.yml's matrix to also
+#      emit a layer would mean teaching a function-shaped pipeline a second,
+#      structurally different output type.
+#
+#   2. NO ARCHITECTURE MATRIX NEEDED. _build.yml's x86_64/py3.11 +
+#      arm64/py3.12 matrix exists because PER-FUNCTION artifacts pip-install
+#      compiled dependencies with `--platform`/`--only-binary=:all:` (ABI-pinned
+#      per ENC-ISS-213/198). This workflow's build step (below) verified by
+#      downloading and inspecting the live :11 and :12 zips during ENC-TSK-P13
+#      that the PUBLISHED layer contains ONLY the pure-Python enceladus_shared
+#      package -- zero third-party dependencies, zero .so files, matching
+#      infrastructure/cloudformation/02-compute.yaml's own comment ":12 is a
+#      pure-Python superset of :10 (zero .so)". backend/lambda/shared_layer/
+#      requirements.txt (PyJWT, cryptography, certifi) is NOT bundled into the
+#      layer by the live artifact -- every consuming function vendors those
+#      itself in its own requirements.txt (confirmed: checkout_service,
+#      coordination_api, and 8+ others all list PyJWT independently). This
+#      build step matches that live reality rather than the tombstoned
+#      deploy.sh's abandoned design (which DID pip-install requirements.txt
+#      with three ABI-pinning flags, single-arch-per-publish -- see git show
+#      b826fd3 for that design if a future task needs to reintroduce bundled
+#      compiled deps; doing so would also require reintroducing a 2-row arch
+#      matrix, because a compiled layer is exactly the failure class
+#      ENC-ISS-041/044/198 already burned this platform on three times). One
+#      pure-Python build, declaring BOTH runtimes and BOTH architectures
+#      honestly (matching what :11/:12 already do), is correct and simpler.
+#
+#   3. PUBLISH IS A DELIBERATE, RARE, REVIEWED ACTION, not a per-commit
+#      artifact. Every push to main/v4-main runs _build.yml; this workflow's
+#      publish job is workflow_dispatch-gated with a dry_run input defaulting
+#      true (same shape as .github/workflows/iam-agent-cli-s3-boundary-fix.yml)
+#      so a version is never cut without a human choosing to cut it.
+#
+# PROVENANCE DISCIPLINE (ENC-TSK-P13 AC-1/AC-4), modeled on
+# NX-2021-L/devops's scripts/fetch_shared_library.py -- the ONE proven-working
+# half of this supply chain (pinned commit + per-module sha256, stale digest =
+# hard failure, see that script's own docstring for why build-time-fetch over a
+# vendored copy). tools/verify_shared_layer_digests.py is the enceladus-side
+# mirror of that same discipline: backend/lambda/shared_layer/MODULE_DIGESTS.json
+# pins a sha256 per module, and ANY mismatch (edited-without-regenerating,
+# undeclared-new-module, or stale-deleted-entry) is a hard build failure below
+# -- never a warning. A successful real publish (dry_run=false) prints a
+# provenance record that must be landed into
+# backend/lambda/shared_layer/PROVENANCE.json via a follow-up, reviewed PR --
+# this workflow deliberately does NOT auto-commit it back (an unreviewed
+# CI-authored commit to a governance ledger is its own risk class; the
+# explicit-reviewed-edit discipline is the same one fetch_shared_library.py's
+# docstring argues for on the devops side).
+#
+# CONSTRAINTS THIS FILE RESPECTS (ENC-TSK-P13):
+#   - gamma plane only; no production mutation. A NEW layer VERSION is
+#     additive and inert until something is deliberately reconfigured to
+#     reference it (tools/verify_shared_layer_version.py's canonical pin +
+#     02-compute.yaml's SharedLayerArn Default) -- publishing one does not by
+#     itself touch any running function, prod or gamma. This workflow never
+#     touches that pin, never calls update-function-configuration, and never
+#     triggers a deploy.
+#   - This workflow is WIRED BUT NOT FIRED as landed by ENC-TSK-P13: the
+#     verify-and-build job runs on pull_request/push (safe -- zero AWS calls),
+#     but the publish job only runs on workflow_dispatch, which nobody
+#     triggered during ENC-TSK-P13, and even then only calls the real
+#     publish-layer-version API when dry_run is explicitly set to false.
+#   - Reuses the EXISTING GitHubActions-Build-Role (already granted
+#     lambda:PublishLayerVersion + lambda:GetLayerVersion via BuildArtifactsPolicy
+#     in infrastructure/cloudformation/04-github-roles.yaml, sid LambdaLayerOps --
+#     confirmed present, unused by any live workflow, before this file). No new
+#     IAM surface was requested or created for this lane.
+#   - Does NOT touch devops's auto-deploy workflow 245543976
+#     (disabled_manually, DVP-TSK-700) in any way -- different repo, not
+#     referenced anywhere in this file.
+#   - Per ENC-TSK-P03 precedent (PR #1153): a workflow_dispatch-only job does
+#     not register as dispatchable until it lands on `main`, not just
+#     `v4/main` / a feature branch. ENC-TSK-P13 lands this on its task branch
+#     only -- the coordinating session owns any dual-land to `main`.
+
+on:
+  pull_request:
+    paths:
+      - "backend/lambda/shared_layer/**"
+      - "tools/verify_shared_layer_digests.py"
+      - ".github/workflows/shared-layer-build.yml"
+  push:
+    branches:
+      - main
+      - v4/main
+    paths:
+      - "backend/lambda/shared_layer/**"
+      - "tools/verify_shared_layer_digests.py"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          true (DEFAULT) = build, verify digests, and print exactly what WOULD
+          be published -- publish NOTHING. false = actually call
+          `aws lambda publish-layer-version`. Run true first, always.
+        type: boolean
+        default: true
+      reason:
+        description: "Why this run is dispatched (audit trail; folded into the printed provenance record)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-and-build:
+    name: Verify module digests + build layer artifact (no AWS calls)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      zip_sha256: ${{ steps.build.outputs.zip_sha256 }}
+      module_count: ${{ steps.build.outputs.module_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify module digests (stale digest = hard failure)
+        run: python3 tools/verify_shared_layer_digests.py
+
+      - name: Run digest-gate + census self-tests (offline, no AWS)
+        run: |
+          python3 tools/verify_shared_layer_digests.py --selftest
+          python3 tools/census_shared_layer_consumers.py --selftest
+          python3 tools/verify_shared_layer_version.py --selftest
+
+      - name: Build layer zip (pure-Python enceladus_shared package only)
+        id: build
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          mkdir -p "${build_dir}/python"
+          # Deliberately NOT `pip install -r requirements.txt` -- see this
+          # file's header comment (point 2): the live :11/:12 layer contains
+          # only the enceladus_shared package itself, zero third-party deps,
+          # zero .so files. Consuming functions vendor PyJWT/cryptography/
+          # certifi themselves.
+          cp -r backend/lambda/shared_layer/python/enceladus_shared "${build_dir}/python/"
+          zip_path="/tmp/enceladus-shared-layer.zip"
+          (cd "${build_dir}" && zip -qr "${zip_path}" python/)
+          sha="$(shasum -a 256 "${zip_path}" | awk '{print $1}')"
+          count="$(find backend/lambda/shared_layer/python/enceladus_shared -name '*.py' | wc -l | tr -d ' ')"
+          size="$(stat -c%s "${zip_path}" 2>/dev/null || stat -f%z "${zip_path}")"
+          echo "zip_sha256=${sha}" >> "$GITHUB_OUTPUT"
+          echo "module_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Built ${zip_path}: sha256=${sha} size=${size}B modules=${count}"
+          unzip -l "${zip_path}"
+
+      - name: Upload layer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: enceladus-shared-layer-zip
+          path: /tmp/enceladus-shared-layer.zip
+          retention-days: 14
+
+  publish:
+    name: Publish layer version (workflow_dispatch only; dry_run gates the real AWS call)
+    needs: verify-and-build
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download layer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: enceladus-shared-layer-zip
+          path: /tmp
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-Build-Role
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Summary (always prints, even in dry-run)
+        run: |
+          echo "layer-name:               enceladus-shared"
+          echo "source commit:            ${GITHUB_SHA}"
+          echo "zip sha256:                ${{ needs.verify-and-build.outputs.zip_sha256 }}"
+          echo "module count:              ${{ needs.verify-and-build.outputs.module_count }}"
+          echo "compatible-runtimes:       python3.11 python3.12"
+          echo "compatible-architectures:  x86_64 arm64"
+          echo "dispatched by:             ${{ github.actor }}"
+          echo "reason:                    ${{ inputs.reason }}"
+          echo "dry_run:                   ${{ inputs.dry_run }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo ""
+            echo "DRY RUN -- aws lambda publish-layer-version was NOT called."
+            echo "Re-dispatch with dry_run=false to publish for real."
+          fi
+
+      - name: Publish layer version (REAL AWS mutation -- only when dry_run=false)
+        if: ${{ inputs.dry_run == false }}
+        id: publish
+        run: |
+          set -euo pipefail
+          version_arn="$(aws lambda publish-layer-version \
+            --region us-west-2 \
+            --layer-name enceladus-shared \
+            --description "enceladus_shared pure-Python package, built by CI from commit ${GITHUB_SHA} (ENC-TSK-P13)" \
+            --compatible-runtimes python3.11 python3.12 \
+            --compatible-architectures x86_64 arm64 \
+            --zip-file "fileb:///tmp/enceladus-shared-layer.zip" \
+            --query 'LayerVersionArn' --output text)"
+          echo "Published: ${version_arn}"
+          echo "version_arn=${version_arn}" >> "$GITHUB_OUTPUT"
+
+      - name: Print provenance record (land this into PROVENANCE.json via a follow-up PR)
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          cat <<PROVEOF
+          ---- APPEND THIS ENTRY TO backend/lambda/shared_layer/PROVENANCE.json IN A FOLLOW-UP, REVIEWED PR ----
+          {
+            "version_arn": "${{ steps.publish.outputs.version_arn }}",
+            "commit_sha": "${GITHUB_SHA}",
+            "lane": "ci:${{ github.workflow }}@run-${{ github.run_id }}",
+            "actor": "${{ github.actor }}",
+            "reason": "${{ inputs.reason }}",
+            "zip_sha256": "${{ needs.verify-and-build.outputs.zip_sha256 }}",
+            "module_count": "${{ needs.verify-and-build.outputs.module_count }}",
+            "published_at_utc": "REPLACE_WITH_createdDate_FROM_THE_PUBLISH_RESPONSE"
+          }
+          ------------------------------------------------------------------------------------------------------
+          This workflow deliberately does not auto-commit this record. See this
+          file's header comment for why (an unreviewed CI-authored commit to a
+          governance ledger is its own risk class).
+          PROVEOF

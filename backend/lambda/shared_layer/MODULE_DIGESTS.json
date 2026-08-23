@@ -1,0 +1,18 @@
+{
+  "_generated_by": "tools/verify_shared_layer_digests.py --write (ENC-TSK-P13)",
+  "_purpose": "Per-module sha256 provenance pin for the enceladus_shared package shipped in the enceladus-shared Lambda layer. See this script's module docstring for the full rationale. To change a module: edit it, run this script with --write, and commit both the module change and this file's diff in the SAME PR.",
+  "package_dir": "backend/lambda/shared_layer/python/enceladus_shared",
+  "modules": {
+    "__init__.py": "5af6ad1b5a1f1f4ed64d567d52f8861dbb4d929645fb26fef666637bad6034f0",
+    "appconfig_flags.py": "283e34214904b9d82f094d9c1a4dec5089a965e1e4e9beeaca0d37efb1bba445",
+    "auth.py": "9b49104e3eee5d260b765bff606e6b81b8fbe2e39eb23096be30d6f141ff56be",
+    "aws_clients.py": "d245a0e73e73cfc1f69fc072ac1f04ddcc4545915ab73acfd09d2133ead37b45",
+    "github_app_auth.py": "7427ae8938017c2c72d14b97d5b951f0b945a5f6a9e3336a03b15875380a38ad",
+    "http_utils.py": "4a7c10a3ff5807e0676f2a9d9b7370f95927b6de82627ba340e0be159e5bce1b",
+    "record_extensions.py": "ed714c71a025aeb10574ec046d5d1cb3022a54600f4454a49f6f68a763e1227d",
+    "relationship_store.py": "8f23d761090c8b58bf39e7111c67b299dcb6712a93fd24e3938f424a0b40d72f",
+    "serialization.py": "97d4c193bdb772c826da5c7ad91568d84695ef12441f02c1f1525a2b6eaf01f2",
+    "version_seq.py": "8bafa98aaa048c5609dbd35a272bc4c2fc2f73001c16b3fd085097a8df7c2621",
+    "warehouse_registration.py": "cdedc4600d6c0f94b0d88570674303852324c20c886b0a25061bc09c32efa371"
+  }
+}

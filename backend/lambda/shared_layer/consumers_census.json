@@ -1,0 +1,257 @@
+{
+  "_purpose": "Cross-repo consumer census for enceladus-shared (ENC-TSK-P13 AC-2). Regenerate with `python3 tools/census_shared_layer_consumers.py [--refresh-devops] > backend/lambda/shared_layer/consumers_census.json`.",
+  "_generated_at": "2026-08-23T18:35:03Z",
+  "enceladus": [
+    {
+      "logical_id": "CoordinationApiFunction",
+      "function_name": "!Sub \"devops-coordination-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "TrackerMutationFunction",
+      "function_name": "!Sub \"devops-tracker-mutation-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DocumentApiFunction",
+      "function_name": "!Sub \"devops-document-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "LifecycleServiceFunction",
+      "function_name": "!Sub \"enceladus-lifecycle-service${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "CheckoutServiceFunction",
+      "function_name": "!Sub \"enceladus-checkout-service${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ScoringServiceFunction",
+      "function_name": "!Sub \"enceladus-scoring-service${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "IdServiceFunction",
+      "function_name": "!Sub \"enceladus-id-service${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ProjectServiceFunction",
+      "function_name": "!Sub \"devops-project-service${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "FeedQueryFunction",
+      "function_name": "!Sub \"devops-feed-query-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "CoordinationMonitorFunction",
+      "function_name": "!Sub \"devops-coordination-monitor-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DeployIntakeFunction",
+      "function_name": "!Sub \"devops-deploy-intake${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ReferenceSearchFunction",
+      "function_name": "!Sub \"devops-reference-search${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "AuthRefreshFunction",
+      "function_name": "!Sub \"auth-refresh${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DeployOrchestratorFunction",
+      "function_name": "!Sub \"devops-deploy-orchestrator${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DeployFinalizeFunction",
+      "function_name": "!Sub \"devops-deploy-finalize${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DeployDecideFunction",
+      "function_name": "!Sub \"devops-deploy-decide${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DeployParityValidatorFunction",
+      "function_name": "!Sub \"devops-deploy-parity-validator${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "FeedPublisherFunction",
+      "function_name": "!Sub \"devops-feed-publisher${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GovernanceAuditFunction",
+      "function_name": "!Sub \"enceladus-governance-audit${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DocPrepFunction",
+      "function_name": "!Sub \"devops-doc-prep${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "BedrockAgentActionsFunction",
+      "function_name": "!Sub \"enceladus-bedrock-agent-actions${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ChangelogApiFunction",
+      "function_name": "!Sub \"devops-changelog-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "McpStreamingGatewayFunction",
+      "function_name": "!Sub \"enceladus-mcp-streaming-gateway${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "UserPreferencesApiFunction",
+      "function_name": "!Sub \"enceladus-user-preferences-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GraphSyncFunction",
+      "function_name": "!Sub \"devops-graph-sync${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GraphQueryApiFunction",
+      "function_name": "!Sub \"devops-graph-query-api${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ConvergenceTelemetryFunction",
+      "function_name": "!Sub \"enceladus-convergence-telemetry${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "Neo4jBackupFunction",
+      "function_name": "!Sub \"enceladus-neo4j-backup${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "MemoryConsolidationFunction",
+      "function_name": "!Sub \"enceladus-memory-consolidation${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "HandoffConsolidationEngineFunction",
+      "function_name": "!Sub \"enceladus-handoff-consolidation-engine${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "UnlearningFunction",
+      "function_name": "!Sub \"enceladus-unlearning${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "DevopsEnvDriftAuditorFunction",
+      "function_name": "!Sub \"devops-env-drift-auditor${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "StaleCheckoutMonitorFunction",
+      "function_name": "!Sub \"enceladus-stale-checkout-monitor${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ProdHealthMonitorFunction",
+      "function_name": "!Sub \"enceladus-prod-health-monitor${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GraphHealthMetricsFunction",
+      "function_name": "!Sub \"enceladus-graph-health-metrics${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "PercolationMonitorFunction",
+      "function_name": "!Sub \"enceladus-percolation-monitor${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "CorpusEntropyEngineFunction",
+      "function_name": "!Sub \"enceladus-corpus-entropy-engine${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "CorpusEntropyGdmpRemediationFunction",
+      "function_name": "!Sub \"enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "ArcWalkMetricsFunction",
+      "function_name": "!Sub \"enceladus-arc-walk-metrics${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "EnceladusMcpCodeGammaFunction",
+      "function_name": "enceladus-mcp-code-gamma",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "RecomputeGovernanceFunction",
+      "function_name": "!Sub \"devops-recompute-governance${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GovernanceDriftCheckFunction",
+      "function_name": "!Sub \"devops-governance-drift-check${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "RhythmCycleFunction",
+      "function_name": "!Sub \"enceladus-rhythm-cycle${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "EscalationDecisionAuthorizerFunction",
+      "function_name": "!Sub \"escalation-decision-authorizer${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "GovernanceMartFunction",
+      "function_name": "!Sub \"devops-governance-mart${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/02-compute.yaml"
+    },
+    {
+      "logical_id": "AppSyncFeedPublisherFunction",
+      "function_name": "!Sub \"devops-appsync-feed-publisher${EnvironmentSuffix}\"",
+      "template": "infrastructure/cloudformation/06-appsync-events.yaml"
+    }
+  ],
+  "devops": {
+    "captured_at": "2026-08-23T00:00:00Z",
+    "source_repo": "NX-2021-L/devops",
+    "source_file": "infrastructure/analytics-stack.yaml",
+    "pinned_commit": "d7277132506b68acd98645fe6342f6fa3d70105e",
+    "package": "enceladus_shared",
+    "modules": [
+      "warehouse_registration.py"
+    ],
+    "consumers": [
+      "services/lambda/adhoc_promotion",
+      "services/lambda/platform_health"
+    ],
+    "mechanism": "build-time fetch + pinned sha256 verification (scripts/fetch_shared_library.py) -- NOT a Lambda layer attachment. Deliberate per that script's docstring: a vendored copy would fork silently.",
+    "source": "fallback_snapshot"
+  },
+  "totals": {
+    "enceladus_layer_attachments": 46,
+    "devops_pinned_fetch_consumers": 2,
+    "cross_repo_total": 48
+  }
+}

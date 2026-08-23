@@ -61,6 +61,19 @@ deploy runs, which is exactly why checks 1-3 are the pre-deploy gate):
      TOLERATING a stale live -- the pre-deploy regression guard used by
      tools/pre-deploy-health-gate.sh, where a stale :7 is the state THIS deploy heals
      (firing on it pre-deploy would deadlock the heal). Post-deploy, use bare --live.
+  5b. (ENC-ISS-656) Same as 5, for each function's "-gamma" twin, gated on a
+      gamma-targeted --stack-name so a prod-targeted run is unaffected by gamma drift.
+  6. (ENC-TSK-P13 AC-5) LIVE-DERIVED consumer census -- NOT manifest-driven, unlike
+     5/5b. Enumerates every function the ACCOUNT reports as carrying enceladus-shared
+     (`aws lambda list-functions`, no manifest consulted) and diffs it against the
+     manifest-derived set from 5/5b. Anything live the manifest never named is an
+     UNKNOWN CONSUMER -- a coverage gap distinct from the version-drift STALE/REGRESS
+     classes above (an unknown consumer could even be on the canonical version and 5/5b
+     would never notice, because they never look at a function the manifest didn't
+     name). This is the check that would have caught
+     enceladus-checkout-service-auto-gamma -- live in the account, enceladus-shared
+     attached, absent from lambda_workflow_manifest.json for BOTH planes. Scoped to the
+     SAME plane as --stack-name, for the same ENC-ISS-624 reason 5b is gamma-scoped.
 
 Exit 0 = all checks pass. Exit 1 = a violation that would (re)introduce the
 :7-class incident. Exit 2 = usage error.
@@ -320,6 +333,55 @@ def _live_stack_param(stack_name, region):
     return None
 
 
+def _live_functions_with_layer(region):
+    """Return {function_name: version_int} for EVERY live Lambda function in the
+    account/region that has ANY version of enceladus-shared attached (LAYER_NAME,
+    via the same _ARN_RE every other check in this file uses) -- discovered by
+    enumerating the account (aws lambda list-functions, auto-paginated by the
+    CLI), never by consulting a manifest. This is the ENC-TSK-P13 AC-5 primitive:
+    check 5/5b above (unchanged) start from lambda_workflow_manifest.json's
+    function list and ask "is THIS known function's layer version canonical" --
+    manifest-driven by construction, and therefore structurally blind to a live
+    function the manifest never named (ENC-ISS-656's fix, PR #1134, was correct
+    but exactly this shape of blind -- it could not see
+    enceladus-checkout-service-auto-gamma, live in the account and attached to
+    enceladus-shared, because that name is absent from
+    lambda_workflow_manifest.json for BOTH planes; confirmed live via
+    `aws lambda get-function --function-name enceladus-checkout-service-auto-gamma`
+    during ENC-TSK-P13). This function instead asks the account itself "which
+    live functions have this layer attached at all" and returns ALL of them;
+    check_live's new check 6 (below) is what then diffs that live-derived set
+    against the manifest-derived set from checks 5/5b to name the unknowns,
+    rather than silently iterating past them.
+
+    Returns {} (not None) on any failure (no creds / cli missing / account
+    unreadable) so callers can distinguish "queried, found nothing" from
+    "could not query" via the accompanying INFO log in check_live, matching the
+    existing _live_layer_version / _live_stack_param fail-quiet convention."""
+    functions = {}
+    try:
+        out = subprocess.check_output(
+            [
+                "aws", "lambda", "list-functions",
+                "--region", region,
+                "--query", "Functions[].{n:FunctionName,l:Layers[].Arn}",
+                "--output", "json",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None  # could not query at all -- distinct from "queried, found none"
+    rows = json.loads(out.decode() if isinstance(out, bytes) else out or "null") or []
+    for row in rows:
+        name = row.get("n")
+        for arn in row.get("l") or []:
+            m = _ARN_RE.search(arn or "")
+            if m and name:
+                functions[name] = int(m.group(1))
+                break
+    return functions
+
+
 def _classify_live_version(label, live_version, canonical, regress_only=False):
     """Pure comparator (no AWS) for checks 4-5. Returns a failure string when the live
     version != canonical (STALE if below, REGRESS if above), else None. Factored out so
@@ -451,6 +513,62 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
             f"[INFO] --live{mode}: stack '{stack_name}' is not gamma-suffixed -- "
             f"skipping check 5b (gamma-plane drift, ENC-ISS-656); prod-targeted "
             f"invocations are unaffected by gamma-plane state."
+        )
+
+    # Check 6 (ENC-TSK-P13 AC-5): LIVE-DERIVED consumer census -- not manifest-driven.
+    # Checks 5/5b above start from lambda_workflow_manifest.json's function list and
+    # ask "is THIS KNOWN function's live layer version canonical" -- by construction
+    # they can only ever be as complete as the manifest. ENC-ISS-656's fix (PR #1134)
+    # was correct on its own terms but exactly this shape of blind: it cannot see a
+    # live function the manifest never named. ENC-TSK-P13 found one --
+    # enceladus-checkout-service-auto-gamma is live in the account, carries
+    # enceladus-shared, and is absent from the manifest for BOTH planes (confirmed via
+    # `aws lambda get-function --function-name enceladus-checkout-service-auto-gamma`).
+    # This check instead asks the ACCOUNT ITSELF which live functions carry the layer
+    # (_live_functions_with_layer, one list-functions scan, no manifest involved) and
+    # diffs that against the manifest-derived set from checks 5/5b -- anything live
+    # that the manifest never named is an UNKNOWN CONSUMER, a distinct failure class
+    # from the STALE/REGRESS version-drift checks above (this is a *coverage* gap, not
+    # a *version* gap -- an unknown consumer could even be sitting on the canonical
+    # version, and checks 5/5b would stay silent forever because they never look at it).
+    #
+    # Scoped to the SAME plane as stack_name, for the SAME ENC-ISS-624 reason check 5b
+    # is gamma-scoped immediately above: a prod-targeted invocation must not go red
+    # because of an unknown GAMMA function it has no power to fix and no business
+    # gating on, and a gamma-targeted invocation must not go red over unknown PROD
+    # surface it isn't running against. "Plane" is decided the same way as every other
+    # plane test in this file: a "-gamma" name suffix.
+    live_map = _live_functions_with_layer(region)
+    if live_map is None:
+        print(
+            f"[INFO] --live{mode}: could not enumerate live functions via "
+            f"`aws lambda list-functions` (no creds / denied / cli missing) -- "
+            f"skipped check 6 (live-derived consumer census, ENC-TSK-P13 AC-5)."
+        )
+    else:
+        known = set(fns)
+        if is_gamma_target:
+            known |= {f"{fn}-gamma" for fn in fns}
+            live_plane = {n: v for n, v in live_map.items() if n.endswith("-gamma")}
+            plane_label = "gamma-plane"
+        else:
+            live_plane = {n: v for n, v in live_map.items() if not n.endswith("-gamma")}
+            plane_label = "prod-plane"
+        unknown = sorted(set(live_plane) - known)
+        for fn in unknown:
+            failures.append(
+                f"UNKNOWN CONSUMER (live-derived, ENC-TSK-P13 AC-5): {fn} is LIVE on "
+                f"enceladus-shared:{live_plane[fn]} but is absent from "
+                f"lambda_workflow_manifest.json ({plane_label}). A manifest-driven "
+                f"check (checks 5/5b) cannot see a consumer the manifest never named "
+                f"-- this one can, because it starts from the account, not the "
+                f"manifest. Add it to the manifest (if it should exist) or delete the "
+                f"function (if it should not) -- either way this cannot stay silent."
+            )
+        print(
+            f"[INFO] --live{mode}: check 6 (ENC-TSK-P13 AC-5, live-derived): "
+            f"{len(live_plane)} live {plane_label} function(s) carry enceladus-shared; "
+            f"{len(unknown)} absent from the manifest."
         )
     return failures
 
@@ -608,9 +726,19 @@ def _selftest():
         # data with no AWS creds required. Without this, a future edit could silently
         # turn check 5b into a no-op (e.g. an early continue, a wrong suffix, a typo in
         # "-gamma") and every case above would keep passing.
-        global _live_layer_version, _live_stack_param
+        global _live_layer_version, _live_stack_param, _live_functions_with_layer
         _real_live_layer_version = _live_layer_version
         _real_live_stack_param = _live_stack_param
+        _real_live_functions_with_layer = _live_functions_with_layer
+        # Check 6 (ENC-TSK-P13 AC-5) is unconditional in check_live, so every case
+        # below must also stub this seam -- otherwise the "offline, no AWS creds
+        # required" selftest would shell out to the real `aws lambda list-functions`
+        # on every check_live() call in this block. Default: no live-derived
+        # consumers at all, so cases that are not specifically testing check 6 see
+        # zero contribution from it (an empty dict, not None -- None means
+        # "could not query" and would just print an INFO skip, which is also
+        # exercised explicitly below).
+        _live_functions_with_layer = lambda region: {}
         gamma_test_tmpdir = tempfile.mkdtemp(prefix="iss656-gamma-selftest-")
         try:
             infra_dir = os.path.join(gamma_test_tmpdir, "infrastructure")
@@ -671,9 +799,92 @@ def _selftest():
                     not any("gamma" in f for f in prod_targeted_failures),
                 )
             )
+
+            # ---- Check 6 (ENC-TSK-P13 AC-5): live-derived consumer census ----
+            # Reset 5/5b's seams to canonical/clean so every failure asserted below
+            # can only have come from check 6, never from version drift.
+            _live_layer_version = _make_fake_live(canonical)
+            _live_stack_param = _fake_stack_param
+
+            # Case A: an UNKNOWN gamma consumer -- live, layer attached, canonical
+            # version, absent from the manifest entirely (this is the
+            # enceladus-checkout-service-auto-gamma shape: checks 5/5b would stay
+            # silent forever on it because they never look at a name the manifest
+            # didn't provide).
+            _live_functions_with_layer = lambda region: {
+                "iss656-synthetic-fn-gamma": canonical,       # known (manifest twin)
+                "totally-unknown-fn-gamma": canonical,        # NOT in the manifest
+            }
+            unknown_gamma_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-TSK-P13 AC-5: an unnamed live gamma consumer is caught by "
+                    "check 6 even though its layer version is canonical (checks "
+                    "5/5b would never see it)",
+                    any(
+                        "UNKNOWN CONSUMER" in f and "totally-unknown-fn-gamma" in f
+                        for f in unknown_gamma_failures
+                    ),
+                )
+            )
+            cases.append(
+                (
+                    "ENC-TSK-P13 AC-5: the manifest-known gamma twin is NOT flagged "
+                    "as an unknown consumer",
+                    not any(
+                        "UNKNOWN CONSUMER" in f and "iss656-synthetic-fn-gamma" in f
+                        for f in unknown_gamma_failures
+                    ),
+                )
+            )
+
+            # Case B: plane scoping -- an unknown PROD-named consumer must not leak
+            # into a gamma-targeted run, and an unknown GAMMA consumer must not leak
+            # into a prod-targeted run. Same ENC-ISS-624 discipline as check 5b.
+            _live_functions_with_layer = lambda region: {
+                "iss656-synthetic-fn-gamma": canonical,
+                "totally-unknown-fn-gamma": canonical,   # gamma-plane unknown
+                "totally-unknown-fn": canonical,         # prod-plane unknown
+            }
+            gamma_targeted = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-TSK-P13 AC-5: a gamma-targeted run flags the unknown GAMMA "
+                    "consumer but not the unknown PROD one",
+                    any("totally-unknown-fn-gamma" in f for f in gamma_targeted)
+                    and not any(
+                        ("totally-unknown-fn" in f and "gamma" not in f) for f in gamma_targeted
+                    ),
+                )
+            )
+            prod_targeted = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack")
+            cases.append(
+                (
+                    "ENC-TSK-P13 AC-5: a prod-targeted run flags the unknown PROD "
+                    "consumer but not the unknown GAMMA one",
+                    any(
+                        ("totally-unknown-fn" in f and "gamma" not in f) for f in prod_targeted
+                    )
+                    and not any("totally-unknown-fn-gamma" in f for f in prod_targeted),
+                )
+            )
+
+            # Case C: _live_functions_with_layer returning None (no creds / denied /
+            # cli missing) must skip check 6 quietly -- never a crash, never a
+            # spurious failure.
+            _live_functions_with_layer = lambda region: None
+            no_creds_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-TSK-P13 AC-5: check 6 with no queryable live data (None) "
+                    "contributes zero failures rather than crashing or false-firing",
+                    not any("UNKNOWN CONSUMER" in f for f in no_creds_failures),
+                )
+            )
         finally:
             _live_layer_version = _real_live_layer_version
             _live_stack_param = _real_live_stack_param
+            _live_functions_with_layer = _real_live_functions_with_layer
             shutil.rmtree(gamma_test_tmpdir, ignore_errors=True)
 
         # ENC-ISS-459: applicability gate
