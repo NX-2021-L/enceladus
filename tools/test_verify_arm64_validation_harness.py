@@ -1363,21 +1363,42 @@ def test_p18_same_account_layer_failure_is_not_called_cross_account():
 # ---------------------------------------------------------------------------
 
 class FakeApiGatewayV2Client:
+    """Fake apigatewayv2. ENC-TSK-P20: models REAL PAGINATION.
+
+    page_size simulates the service's bounded first page. The live gamma API
+    returns 25 of 184 routes unpaginated, which is what made the escalation
+    probe report a FALSE FAIL on a /deny route that exists. A fake that always
+    returns everything in one page cannot reproduce that class of defect, so it
+    would have let the bug ship twice.
+    """
+
     def __init__(self, *, apis=None, routes=None, authorizers=None,
-                 apis_error=None, authorizer_error=None):
+                 apis_error=None, authorizer_error=None, page_size=None):
         self._apis = apis or []
         self._routes = routes or {}
         self._authorizers = authorizers or {}
         self._apis_error = apis_error
         self._authorizer_error = authorizer_error
+        self._page_size = page_size
 
-    def get_apis(self):
+    def _page(self, items, NextToken=None, **_kwargs):  # noqa: N803
+        if not self._page_size:
+            return {"Items": items}
+        start = int(NextToken) if NextToken else 0
+        chunk = items[start:start + self._page_size]
+        out = {"Items": chunk}
+        nxt = start + self._page_size
+        if nxt < len(items):
+            out["NextToken"] = str(nxt)
+        return out
+
+    def get_apis(self, **kwargs):
         if self._apis_error:
             raise self._apis_error
-        return {"Items": self._apis}
+        return self._page(self._apis, **kwargs)
 
-    def get_routes(self, ApiId):  # noqa: N803
-        return {"Items": self._routes.get(ApiId, [])}
+    def get_routes(self, ApiId, **kwargs):  # noqa: N803
+        return self._page(self._routes.get(ApiId, []), **kwargs)
 
     def get_authorizer(self, ApiId, AuthorizerId):  # noqa: N803
         if self._authorizer_error:
@@ -1635,3 +1656,69 @@ def test_p19_not_applicable_reaches_attested_never_an_unqualified_pass():
     assert report.overall == harness.ATTESTED
     assert report.overall != harness.PASS
     assert report.attested_points == [4]
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P20 -- the false-FAIL regression.
+#
+# Reproduces the LIVE defect exactly: the gamma API carries 184 routes and
+# apigatewayv2 get_routes returns a bounded first page of 25. /approve landed
+# in that page and /deny did not, so the probe reported
+# FAIL "no escalation route found for /deny" against an API where the deny
+# route exists and is guarded by the same authorizer as approve.
+#
+# A check that reports FAIL because it could not see everything is exactly as
+# untrustworthy as one that reports PASS because it did not look. Both
+# substitute the reach of the query for the state of the world.
+# ---------------------------------------------------------------------------
+
+
+def _escalation_api_paginated(page_size, filler_routes):
+    """approve on page 1, deny pushed onto a later page behind filler."""
+    routes = [{"RouteKey": f"{ESC_BASE}/approve", "AuthorizerId": "auth-esc"}]
+    routes += [{"RouteKey": f"GET /api/v1/filler/{i}"} for i in range(filler_routes)]
+    routes.append({"RouteKey": f"{ESC_BASE}/deny", "AuthorizerId": "auth-esc"})
+    return FakeApiGatewayV2Client(
+        apis=[{"ApiId": "api1"}],
+        routes={"api1": routes},
+        authorizers={
+            "auth-esc": {"Name": "escalation",
+                         "AuthorizerUri": f"arn:.../{ESC_FN}/invocations"},
+        },
+        page_size=page_size)
+
+
+def test_p20_probe_paginates_and_does_not_false_fail_on_a_later_page_deny():
+    """The regression. Unpaginated, this returned FAIL/no deny route found."""
+    client = _escalation_api_paginated(page_size=25, filler_routes=200)
+    state, detail = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": client})
+    assert state == harness.PASS, f"false FAIL reintroduced: {detail}"
+    assert "/approve" in detail and "/deny" in detail
+
+
+def test_p20_a_genuinely_missing_deny_route_still_fails_after_pagination():
+    """The negative control. Pagination must not make the probe unable to fail.
+
+    Fixing a false FAIL by making the check incapable of failing would be the
+    ENC-ISS-665 vacuous pass rebuilt from the other direction.
+    """
+    routes = [{"RouteKey": f"{ESC_BASE}/approve", "AuthorizerId": "auth-esc"}]
+    routes += [{"RouteKey": f"GET /api/v1/filler/{i}"} for i in range(200)]
+    client = FakeApiGatewayV2Client(
+        apis=[{"ApiId": "api1"}], routes={"api1": routes},
+        authorizers={"auth-esc": {"Name": "escalation",
+                                  "AuthorizerUri": f"arn:.../{ESC_FN}/invocations"}},
+        page_size=25)
+    state, detail = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": client})
+    assert state == harness.FAIL
+    assert "/deny" in detail
+
+
+def test_p20_pagination_error_is_unknown_never_a_determinate_verdict():
+    """An enumeration that could not complete must not collapse to pass OR fail."""
+    client = FakeApiGatewayV2Client(apis_error=RuntimeError("AccessDenied"))
+    state, _ = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": client})
+    assert state == harness.UNKNOWN
