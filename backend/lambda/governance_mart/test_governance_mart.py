@@ -34,6 +34,7 @@ from enceladus_shared.warehouse_registration import (  # noqa: E402
     build_contract,
 )
 
+import lambda_function  # noqa: E402
 import mart_project  # noqa: E402
 import mart_schema  # noqa: E402
 from mart_source import is_sentinel  # noqa: E402
@@ -361,3 +362,43 @@ def test_terminal_status_vocabulary_is_case_folded():
     assert mart_project.is_terminal("Completed")
     assert not mart_project.is_terminal("in-progress")
     assert not mart_project.is_terminal(None)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O80: EventBridge Scheduler retries pin `last_day` via the
+# `<aws.scheduler.scheduled-time>` context attribute (Target.Input on
+# GovernanceMartScheduleGamma, 02-compute.yaml). Scheduler substitutes that
+# placeholder with the schedule's INTENDED fire time -- constant across every
+# retry attempt of one firing -- as an ISO-8601 string, e.g.
+# "2026-08-23T06:00:00Z". These tests pin the handler's parsing of that shape
+# so a future change to `_parse_last_day` can't silently break the one thing
+# that makes a retry crossing midnight UTC still overwrite the day it was
+# meant to, instead of quietly drifting onto the day it happened to run.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_last_day_accepts_a_bare_date():
+    assert lambda_function._parse_last_day("2026-08-23") == date(2026, 8, 23)
+
+
+def test_parse_last_day_accepts_the_scheduler_scheduled_time_shape():
+    # What Scheduler actually substitutes for <aws.scheduler.scheduled-time>.
+    assert lambda_function._parse_last_day("2026-08-23T06:00:00Z") == date(2026, 8, 23)
+
+
+def test_parse_last_day_pins_the_intended_day_across_a_late_retry():
+    # The scenario retries introduce that a bare Rule never had to consider: a
+    # retry firing after midnight UTC for a schedule that was meant to run the
+    # day before. Because Input carries the ORIGINAL scheduled-time (constant
+    # per firing, not per attempt), a retry at 00:12 the next day still
+    # resolves to the day the schedule intended.
+    original_fire_time = "2026-08-23T06:00:00Z"
+    late_retry_wall_clock = date(2026, 8, 24)  # what datetime.now() would give
+    resolved = lambda_function._parse_last_day(original_fire_time)
+    assert resolved == date(2026, 8, 23)
+    assert resolved != late_retry_wall_clock
+
+
+def test_parse_last_day_treats_falsy_as_unset():
+    assert lambda_function._parse_last_day(None) is None
+    assert lambda_function._parse_last_day("") is None

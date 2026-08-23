@@ -20,6 +20,21 @@ Returns the ``RefreshResult`` summary: per-table row, byte, and file counts
 plus the shared write timestamp. A non-zero ``file_count`` above 1 on any
 table is the B6-R2 full-refresh violation signal and is surfaced rather than
 swallowed.
+
+ENC-TSK-O80: on the gamma path (GovernanceMartScheduleGamma, 02-compute.yaml)
+the trigger is an EventBridge **Scheduler** schedule with a RetryPolicy and a
+DLQ, not a bare Rule. Its Target.Input pins ``last_day`` to the
+``<aws.scheduler.scheduled-time>`` context attribute -- an ISO-8601 string
+Scheduler substitutes with the schedule's INTENDED fire time, constant across
+every automatic retry of that firing. ``_parse_last_day`` truncates that to
+its leading ``YYYY-MM-DD``. Without this, a retry firing after midnight UTC
+would resolve ``last_day`` from wall-clock ``datetime.now()`` instead and
+silently rebuild the WRONG day's grain under the failed run's schedule slot --
+still landing at the mart's one deterministic per-table key
+(``DOC-1E1EC5B7CE02``, ``enceladus_shared.warehouse_registration``), so never
+a duplicate object, but the wrong day's content. Retries are new precisely
+because Scheduler makes them automatic; a plain Rule target never offered a
+configurable RetryPolicy to trigger this failure mode in the first place.
 """
 
 from __future__ import annotations
