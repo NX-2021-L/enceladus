@@ -144,6 +144,23 @@ jobs:
           python3 tools/cfn_deploy_role_reach_guard.py
           python3 -m unittest tools.test_cfn_deploy_role_reach_guard
 
+      # ENC-TSK-P15 / ENC-ISS-669: ProjectJsonSyncRule's Name carries
+      # ${EnvironmentSuffix} like every other EventBridge rule in
+      # 02-compute.yaml, while its Target Arn hardcodes the PRODUCTION
+      # devops-json-to-parquet-transformer Lambda with no suffix. Only
+      # Condition: IsProduction stops a gamma rendering of that rule from
+      # invoking the production devops Lambda from gamma -- a direct
+      # violation of the standing directional isolation ruling (gamma READS
+      # devops prod; gamma NEVER WRITES into it, and an invoke is a write).
+      # This guard sweeps every governed template for the same shape: a
+      # plane-suffixed-context resource whose invoke target hardcodes a
+      # literal, unsuffixed ARN with no declared exception.
+      - name: Cross-plane ARN isolation sweep (ENC-TSK-P15)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_cross_plane_arn_isolation.py
+          python3 -m unittest tools.test_verify_cross_plane_arn_isolation
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail
