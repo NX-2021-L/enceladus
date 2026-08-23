@@ -34,6 +34,25 @@ THE FIVE POINTS (BRD section 8, verbatim numbering)
                            Function-level green is NOT system-level green.
                            Necessarily function-specific: implemented as a
                            pluggable probe registry (see PROBE_REGISTRY).
+                           REPAIRED under ENC-TSK-P08/ENC-ISS-665: point 4 used
+                           to read a CloudWatch log stream mid-flight -- before
+                           an ERROR/Traceback had been written -- and measure
+                           "freshness" against point 3's OWN invocation from
+                           seconds earlier in the same run, manufacturing the
+                           freshness it then accepted. Four remedies now hold
+                           simultaneously: run-start freshness anchoring (never
+                           use activity that postdates this run), a
+                           terminated-invocation requirement (never classify an
+                           invocation with no REPORT/END line; bounded poll,
+                           UNKNOWN on timeout, never PASS), a structural
+                           cross-point contradiction assertion (point 4 cannot
+                           return PASS for a function whose point 3 FAILED in
+                           this run -- this one is load-bearing and holds even
+                           if the other three regress), and log-group-wide
+                           evaluation (a concurrent invocation on another
+                           stream can no longer be invisible). See
+                           _enforce_no_pass_when_point3_failed and
+                           _evaluate_schedule_window below.
 5. CI predicate observed failing -- the guard covering this function exists
                            in CI and has actually been seen red, not just
                            written to look correct (ENC-ISS-556 lesson).
@@ -50,8 +69,49 @@ writing nothing. A probe that cannot run must say so, loudly, at the same
 severity as a probe that ran and failed. See test_verify_arm64_validation_harness.py
 for the self-tests proving this (search for "unknown_not_pass").
 
-At the function level: overall = FAIL if any point is FAIL; else UNKNOWN if
-any point is UNKNOWN; else PASS. UNKNOWN is non-passing.
+At the function level: overall = FAIL if any point is FAIL; else, if any
+point is UNKNOWN, ATTESTED when EVERY non-passing point's reason_code is in
+ATTESTABLE_REASON_CODES (a narrow, explicitly named external-dependency /
+ownership permission ceiling -- ENC-TSK-P09/ENC-ISS-668), otherwise plain
+UNKNOWN; else PASS. Both UNKNOWN and ATTESTED are non-passing -- an
+unqualified overall "pass" is structurally impossible whenever any point is
+UNKNOWN, because that string is only ever produced in the branch where no
+point is UNKNOWN at all. ATTESTED differs from UNKNOWN only in that it NAMES
+which points could not be verified and why (see FunctionReport.attested_points
+/ .attestation_note), instead of leaving a permission ceiling
+indistinguishable from an undiagnosed gap. PointResult.state itself stays a
+strict three-state PASS/FAIL/UNKNOWN contract -- ATTESTED exists ONLY at the
+FunctionReport rollup level, never as a fourth PointResult state.
+
+O96/ATTESTED VS ENC-ISS-665 -- READ THIS BEFORE TOUCHING EITHER REMEDIATION
+-----------------------------------------------------------------------------
+Two remediations in this file can look superficially similar and must never
+be confused, because confusing them sanctions exactly the defect class each
+one exists to prevent:
+
+  - ENC-TSK-O96's deployed-package substitute (point 1) and ENC-TSK-P09's
+    ATTESTED overall verdict (point 2's EXTERNAL_LAYER_REGISTRY) both exist
+    because a check genuinely CANNOT SEE the answer: an IAM boundary that is
+    not coming back, a cross-account layer this account will never be able to
+    GetLayerVersion on. That is a LIMIT of the vantage point, not a wrong
+    verdict -- so it is correct, and per ENC-ISS-668 necessary, to name that
+    limit explicitly (ATTESTED) rather than let it sink forever into an
+    undifferentiated "unknown" that 33 functions could never climb out of.
+  - ENC-TSK-P08/ENC-ISS-665 is the opposite shape entirely: point 4 SAW the
+    wrong answer and reported it as a pass. It read a log stream that had not
+    finished writing, mid-flight, and measured "freshness" against its own
+    harness run's invocation from seconds earlier. That is not a limit of
+    what could be seen -- it is having looked and gotten it wrong. Applying
+    an O96/ATTESTED-style relabelling to that outcome would not name a limit;
+    it would sanction a false positive. So ENC-ISS-665's fix is a REPAIR
+    (run-start anchoring, a termination requirement, a structural cross-point
+    contradiction assertion, log-group-wide evaluation) that makes point 4
+    actually correct -- never a relabelling of its wrong answer into
+    something more palatable. POINT 4 IS REPAIRED, NOT RELABELLED.
+
+Rule of thumb applied throughout this file: relabel an "unknown" only when
+the check truly never got to look. Never relabel a "wrong" into anything but
+FAIL. Never widen an acceptance condition to make a failing check pass.
 
 Every PointResult also carries a `reason_code` -- a small closed vocabulary
 (REASON_CODES / REASON_CODE_GLOSSARY below) distinguishing WHY a state was
@@ -165,6 +225,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -185,6 +246,29 @@ PASS = "pass"
 FAIL = "fail"
 UNKNOWN = "unknown"
 _VALID_STATES = (PASS, FAIL, UNKNOWN)
+
+# FunctionReport-level-only verdict (ENC-TSK-P09/ENC-ISS-668). Deliberately
+# NOT added to _VALID_STATES: PointResult stays a strict three-state
+# PASS/FAIL/UNKNOWN contract forever -- ATTESTED is a rollup concept that
+# names WHY a set of UNKNOWN points is a documented permission ceiling, not a
+# fourth thing a single point can independently be. See FunctionReport.overall
+# and the "O96/ATTESTED VS ENC-ISS-665" module-docstring section above.
+ATTESTED = "attested"
+
+# The narrow, explicitly enumerated set of reason_codes that may lift a
+# FunctionReport's overall verdict from plain UNKNOWN to the named ATTESTED
+# state -- and ONLY when every single non-passing point on that function
+# carries one of them. This is intentionally small: it is NOT "any unknown is
+# fine." Widening it to cover ordinary permission_denied, no_probe_registered,
+# or any other reason code would blur exactly the line the module docstring's
+# "O96/ATTESTED VS ENC-ISS-665" section draws -- a documented external
+# dependency/ownership ceiling on one specific, named layer is a limit of the
+# vantage point; a generic "we could not check this" is not automatically the
+# same thing and must not be laundered into looking like one.
+ATTESTABLE_REASON_CODES = {
+    "external_dependency_declared",
+    "external_dependency_owned_devops",
+}
 
 # Machine-readable reason codes -- every PointResult carries one of these, not
 # just a prose `detail`. This exists because "unknown" alone does not tell a
@@ -232,6 +316,14 @@ REASON_CODES = {
     "compiled_object_mismatch": "a layer's compiled object does not match the function's actual architecture",
     "layer_arn_unparseable": "a layer ARN could not be parsed into name/version",
     "layer_not_found": "GetLayerVersion could not find the layer version (commonly a cross-account AWS-managed layer that cannot be introspected from this account)",
+    # ENC-TSK-P09 / ENC-ISS-668 -- external-dependency register. These are
+    # deliberately DISTINCT from layer_not_found: that code means "we could
+    # not find out why," these two mean "we know exactly why, and who owns
+    # it." Both remain UNKNOWN state -- neither is ever promoted to PASS --
+    # but they are the specific, narrow set FunctionReport.overall may lift
+    # to the named ATTESTED verdict (see ATTESTABLE_REASON_CODES).
+    "external_dependency_declared": "the layer is a documented external (commonly cross-account) dependency whose architecture is recorded as a declared fact in EXTERNAL_LAYER_REGISTRY, not independently verified by downloading and inspecting its content -- still unknown, never promoted to pass, but distinguishable from a genuine layer_not_found mystery",
+    "external_dependency_owned_devops": "the layer is owned by a separate repo/team (NX-2021-L/devops), recorded in EXTERNAL_LAYER_REGISTRY so it is never folded into a generic layer_not_found -- still unknown, never promoted to pass",
     "layer_download_error": "the layer's presigned content URL could not be downloaded",
     "layer_content_unclassifiable": "the layer contains compiled objects that could not be architecture-classified",
     "bad_layer_zip": "the downloaded layer content is not a valid zip archive",
@@ -246,6 +338,7 @@ REASON_CODES = {
     "probe_error": "the registered probe raised an exception",
     "probe_invalid_state": "the registered probe returned a state outside pass/fail/unknown",
     "probe_result": "the registered probe ran to completion and returned this state",
+    "point3_point4_contradiction": "point 4's probe reported pass while point 3 (live_invocation) FAILED in this same run -- structurally overridden to fail (ENC-TSK-P08/ENC-ISS-665 remedy 3, load-bearing); a function that just failed live invocation cannot simultaneously have a healthy downstream integration edge, and this override is independent of the freshness/anchoring logic",
     # point 5 -- ci_predicate_observed_failing
     "negative_control_missing": "no negative-control test file exists for the guard covering this function",
     "negative_control_check_error": "the negative-control test could not be run locally",
@@ -370,10 +463,25 @@ class FunctionReport:
 
     @property
     def overall(self) -> str:
+        """FAIL beats everything. Otherwise, UNKNOWN sinks the verdict --
+        UNLESS every single non-passing point's reason_code is in
+        ATTESTABLE_REASON_CODES (ENC-TSK-P09/ENC-ISS-668), in which case the
+        verdict is the explicitly-named ATTESTED rather than an
+        undifferentiated UNKNOWN. Structural guarantee: this can NEVER return
+        PASS when UNKNOWN is present in `states` -- that string literal is
+        only ever produced by the final `return PASS`, which is unreachable
+        from inside the `if UNKNOWN in states` branch. See the module
+        docstring's "O96/ATTESTED VS ENC-ISS-665" section before touching
+        ATTESTABLE_REASON_CODES: it must stay narrow, never widened to make a
+        non-passing function read as fine.
+        """
         states = {p.state for p in self.points}
         if FAIL in states:
             return FAIL
         if UNKNOWN in states:
+            non_pass = [p for p in self.points if p.state != PASS]
+            if non_pass and all(p.reason_code in ATTESTABLE_REASON_CODES for p in non_pass):
+                return ATTESTED
             return UNKNOWN
         return PASS
 
@@ -388,6 +496,41 @@ class FunctionReport:
         """
         return [p.point for p in self.points if p.reason_code == "permission_denied"]
 
+    @property
+    def attested_points(self) -> List[int]:
+        """Points that are UNKNOWN specifically because of a documented
+        external-dependency/ownership permission ceiling (ENC-TSK-P09/
+        ENC-ISS-668) -- exactly the points an ATTESTED overall verdict is
+        naming. Empty whenever overall != ATTESTED: a function with even one
+        OTHER, non-attestable unknown does not get to claim any of its
+        unknowns are "just" a documented ceiling -- the overall verdict for
+        that function is plain UNKNOWN, and this list reflects that.
+        """
+        if self.overall != ATTESTED:
+            return []
+        return [p.point for p in self.points
+                if p.state == UNKNOWN and p.reason_code in ATTESTABLE_REASON_CODES]
+
+    @property
+    def attestation_note(self) -> Optional[str]:
+        """None unless overall == ATTESTED, in which case this NAMES the
+        unverified points and why -- the concrete text of "a permission
+        ceiling is not a defect" (ENC-ISS-668): every other point passed, and
+        these specific points are unknown for a specific, documented,
+        non-fabricated reason, not silence.
+        """
+        if self.overall != ATTESTED:
+            return None
+        named = "; ".join(
+            f"point {p.point} ({p.name}): {p.reason_code}"
+            for p in self.points if p.point in self.attested_points
+        )
+        return (
+            f"ATTESTED, not PASS: every other point on {self.function_name!r} is pass; the "
+            f"following are unknown solely because of a documented external-dependency/ownership "
+            f"permission ceiling, never a fabricated pass -- {named}"
+        )
+
     def to_dict(self) -> dict:
         return {
             "function_name": self.function_name,
@@ -395,6 +538,8 @@ class FunctionReport:
             "generated_at": self.generated_at,
             "points": [p.to_dict() for p in self.points],
             "permission_denied_points": self.permission_denied_points,
+            "attested_points": self.attested_points,
+            "attestation_note": self.attestation_note,
             "warnings": self.warnings,
         }
 
@@ -725,6 +870,79 @@ def check_artifact_identity(
 # Point 2 -- layer coherence
 # ---------------------------------------------------------------------------
 
+# External-dependency register (ENC-TSK-P09 / ENC-ISS-668).
+#
+# 33 of 51 gamma functions attach AWS-AppConfig-Extension-Arm64:147, owned by
+# AWS account 359756378197. GetLayerVersion cannot reach another account's
+# layer version from this account -- confirmed live 2026-08-23 -- so those 33
+# functions were stuck reporting layer_not_found on point 2 forever, which
+# sank their FunctionReport.overall to plain UNKNOWN with no way to ever reach
+# any other verdict. This register records the specific, DECLARED facts this
+# harness already knows about specific named external dependencies, so point 2
+# can classify them distinctly from a genuine "we don't know why" mystery --
+# without ever pretending to have inspected bytes it cannot reach. Consulted
+# ONLY as a fallback, after a real GetLayerVersion attempt fails; a future IAM
+# or account change that makes the real check possible again is never shadowed
+# by this table (see _inspect_one_layer).
+#
+# Keyed by LAYER NAME (not ARN, not version) -- the facts recorded here are
+# properties of the named artifact/family, not of one specific version.
+EXTERNAL_LAYER_REGISTRY: Dict[str, dict] = {
+    # AWS publishes this Lambda extension under architecture-specific NAMES
+    # (this one, and a plain "AWS-AppConfig-Extension" for x86_64) -- the
+    # "-Arm64" suffix IS the vendor's own architecture declaration for this
+    # artifact family. That is recorded here as a declared fact, once, rather
+    # than parsed from the ARN string on every run (a heuristic on top of a
+    # heuristic is exactly the class of mistake ENC-TSK-P06 already burned
+    # this file on once). Version :147 confirmed live 2026-08-23.
+    "AWS-AppConfig-Extension-Arm64": {
+        "declared_arch": "arm64",
+        "owner_account": "359756378197",
+        "classification": "aws_managed_cross_account",
+        "reason_code": "external_dependency_declared",
+        "note": (
+            "AWS-managed cross-account layer (owner account 359756378197, confirmed live "
+            "2026-08-23 for version 147). lambda:GetLayerVersion cannot reach another "
+            "account's layer version from this account -- this is a permission ceiling, not "
+            "a probe defect. Declared arch 'arm64' comes from the layer's own AWS-assigned "
+            "name (the '-Arm64' suffix distinguishes this extension's architecture-specific "
+            "variants), not from CompatibleArchitectures metadata and not from content this "
+            "harness has inspected."
+        ),
+    },
+    # Owned by NX-2021-L/devops -- a DIFFERENT repo/team, not an AWS-managed
+    # layer and not this harness's own build lane. Per ENC-TSK-P09 these must
+    # be classified DISTINCTLY from layer_not_found: folding a known-owned,
+    # known-reason dependency into the same bucket as a genuine mystery would
+    # hide who owns the remediation and why the check cannot see it. Versions
+    # :3 (pyarrow) and :2 (numpy) confirmed live 2026-08-23.
+    "devops-json-to-parquet-pyarrow": {
+        "declared_arch": None,
+        "owner_account": None,
+        "classification": "devops_owned",
+        "reason_code": "external_dependency_owned_devops",
+        "note": (
+            "Owned by NX-2021-L/devops (a separate repo/team from this harness's own build "
+            "lane), not an AWS-managed layer and not a resolution failure. Architecture is "
+            "not independently declared here; this only records OWNERSHIP so the point is "
+            "never miscategorized as layer_not_found."
+        ),
+    },
+    "devops-json-to-parquet-numpy": {
+        "declared_arch": None,
+        "owner_account": None,
+        "classification": "devops_owned",
+        "reason_code": "external_dependency_owned_devops",
+        "note": (
+            "Owned by NX-2021-L/devops (a separate repo/team from this harness's own build "
+            "lane), not an AWS-managed layer and not a resolution failure. Architecture is "
+            "not independently declared here; this only records OWNERSHIP so the point is "
+            "never miscategorized as layer_not_found."
+        ),
+    },
+}
+
+
 def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                         downloader: Callable[[str], bytes],
                         classify_so: Callable[[Path], Optional[str]]) -> Tuple[str, str, str]:
@@ -743,6 +961,26 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
         lv = lambda_client.get_layer_version(LayerName=layer_name, VersionNumber=version)
     except Exception as exc:  # noqa: BLE001
         msg = _err(exc)
+        # ENC-TSK-P09 / ENC-ISS-668: try the REAL check first, always -- the
+        # register is a fallback for when it structurally cannot complete, not
+        # a shortcut that shadows it. Consulted before the generic
+        # permission_denied/layer_not_found branches so a documented external
+        # dependency is never folded into either of those undifferentiated
+        # buckets.
+        registered = EXTERNAL_LAYER_REGISTRY.get(layer_name)
+        if registered is not None:
+            arch_note = ""
+            if registered.get("declared_arch"):
+                arch_note = (
+                    f" Declared arch={registered['declared_arch']!r} vs function arch="
+                    f"{function_arch!r} (informational only -- this point remains unknown; "
+                    f"a declared fact about the layer's name is not independently verified "
+                    f"content, so it is never promoted to pass)."
+                )
+            return UNKNOWN, registered["reason_code"], (
+                f"{layer_arn}: GetLayerVersion could not complete ({msg}); resolved via the "
+                f"external-dependency register instead of a generic layer_not_found -- "
+                f"{registered['note']}{arch_note}")
         if "AccessDenied" in msg or "Forbidden" in msg or "403" in msg:
             return UNKNOWN, "permission_denied", f"{layer_arn}: GetLayerVersion denied: {msg}"
         if "ResourceNotFoundException" in msg or "404" in msg:
@@ -883,13 +1121,36 @@ def check_live_invocation(lambda_client, function_name: str, payload: str = "{}"
 
 # ---------------------------------------------------------------------------
 # Point 4 -- integration edge (pluggable per-function probe)
+#
+# REPAIRED under ENC-TSK-P08/ENC-ISS-665 -- see the module docstring's "THE
+# FIVE POINTS" entry for point 4 and its "O96/ATTESTED VS ENC-ISS-665"
+# section before changing anything below. The concrete defect: the probe used
+# to read a single CloudWatch log stream mid-flight, before an ERROR/Traceback
+# had been written, and measure "freshness" against point 3's OWN invocation
+# from seconds earlier in the same run -- manufacturing the freshness it then
+# accepted. Four remedies now hold at once:
+#   1. Run-start freshness anchoring   -- _evaluate_schedule_window / the
+#      "run_start_ms" anchor threaded through clients.
+#   2. Terminated-invocation requirement -- _evaluate_schedule_window's
+#      REPORT/END check, plus the bounded poll-and-retry loop in
+#      _probe_governance_mart_schedule (UNKNOWN on timeout, never PASS).
+#   3. Cross-point contradiction assertion (LOAD-BEARING) --
+#      _enforce_no_pass_when_point3_failed, applied unconditionally by
+#      check_integration_edge. This does not look at logs, timestamps, or
+#      streams at all -- it only compares two already-computed verdicts, so
+#      it holds even if remedies 1, 2 and 4 are absent or regressed.
+#   4. Log-group-wide evaluation -- _fetch_log_group_window uses
+#      filter_log_events (merges every stream in the group by time) instead
+#      of describe_log_streams(limit=1) (a single "latest" stream a
+#      concurrent invocation could hide behind).
 # ---------------------------------------------------------------------------
 
 # A probe receives (function_name, clients) where clients is a dict of
-# already-constructed boto3 clients (e.g. {"logs": ..., "lambda": ...}), and
-# must return (state, detail) with state in PASS/FAIL/UNKNOWN. Never PASS
-# by default -- a missing probe is UNKNOWN, not a pass (BRD 8.4: function
-# green is not system green).
+# already-constructed boto3 clients (e.g. {"logs": ..., "lambda": ...,
+# "run_start_ms": <float, epoch ms captured before point 3 ran>}), and must
+# return (state, detail) with state in PASS/FAIL/UNKNOWN. Never PASS by
+# default -- a missing probe is UNKNOWN, not a pass (BRD 8.4: function green
+# is not system green).
 IntegrationProbe = Callable[[str, Dict[str, object]], Tuple[str, str]]
 PROBE_REGISTRY: Dict[str, IntegrationProbe] = {}
 
@@ -902,75 +1163,267 @@ def register_probe(*function_names: str) -> Callable[[IntegrationProbe], Integra
     return deco
 
 
+_REQUEST_ID_MARKER_RE = re.compile(r"RequestId:\s*([0-9a-fA-F-]{8,})")
+
+
+def _fetch_log_group_window(logs_client, log_group: str, start_ms: float, end_ms: float) -> List[dict]:
+    """REMEDY 4 (log-group-wide evaluation): uses filter_log_events, which
+    merges events across EVERY stream in the log group ordered by time,
+    instead of describe_log_streams(limit=1) picking one single "latest"
+    stream. A concurrent invocation (this harness's own point-3 invoke racing
+    a real scheduled firing, or two overlapping scheduled firings) can land in
+    a different stream -- describe_log_streams(limit=1) can then return the
+    wrong stream entirely and never even fetch the one that matters. This
+    function cannot exhibit that failure mode: it does not pick a stream.
+
+    start_ms/end_ms bound the query -- end_ms is normally the harness's
+    run-start anchor (remedy 1), never "now".
+    """
+    events: List[dict] = []
+    kwargs: Dict[str, object] = {
+        "logGroupName": log_group, "startTime": int(start_ms), "endTime": int(end_ms), "limit": 1000,
+    }
+    for _ in range(5):  # bounded pagination -- this is a freshness probe, not a full export
+        resp = logs_client.filter_log_events(**kwargs)
+        events.extend(resp.get("events", []))
+        token = resp.get("nextToken")
+        if not token:
+            break
+        kwargs["nextToken"] = token
+    return events
+
+
+def _group_invocations(events: List[dict]) -> Dict[str, dict]:
+    """Group log-group-wide events by RequestId so each invocation's
+    lifecycle (terminated? erred?) is judged as a whole, never from one line
+    read out of context -- the ENC-ISS-665 defect was exactly reading a
+    single line before its invocation had finished writing.
+    """
+    invocations: Dict[str, dict] = {}
+    for e in events:
+        msg = e.get("message", "") or ""
+        ts = e.get("timestamp", 0) or 0
+        m = _REQUEST_ID_MARKER_RE.search(msg)
+        if not m:
+            continue
+        rid = m.group(1)
+        inv = invocations.setdefault(rid, {"terminated": False, "error": False, "last_ts": ts})
+        inv["last_ts"] = max(inv["last_ts"], ts)
+        if msg.startswith("REPORT RequestId") or msg.startswith("END RequestId"):
+            inv["terminated"] = True
+        if "ERROR" in msg or "Traceback" in msg:
+            inv["error"] = True
+    return invocations
+
+
+def _log_group_has_any_stream(logs_client, log_group: str) -> Optional[bool]:
+    """Cheap existence check, independent of the freshness window, so an empty
+    in-window result can be told apart from "this function has never run" --
+    the two need different verdicts (unknown vs. fail)."""
+    try:
+        resp = logs_client.describe_log_streams(logGroupName=log_group, limit=1)
+    except Exception:  # noqa: BLE001
+        return None
+    return bool(resp.get("logStreams"))
+
+
+def _evaluate_schedule_window(
+    events: List[dict], *, now_ms: float, run_start_ms: float, max_age_hours: float,
+) -> Tuple[str, str, str]:
+    """Pure, AWS-free evaluation of a log-group-wide event window. Returns
+    (state, signal, detail); `signal` is "not_terminated" exactly when the
+    caller's bounded poll-and-retry (remedy 2) should apply, and is otherwise
+    just an internal label -- it is NOT a PointResult.reason_code.
+
+    REMEDY 1 (run-start anchoring) is RE-ASSERTED here, not only at the query
+    boundary in _fetch_log_group_window: any event at or after run_start_ms is
+    dropped before it can influence the verdict, even if a caller's query
+    bounds regress and over-fetch. This is the exact ENC-ISS-665 defect
+    surface: the difference between "the schedule has been healthy" and
+    "point 3's own invocation, seconds old, looks clean so far."
+
+    REMEDY 2 (terminated-invocation requirement): an ERROR/Traceback line,
+    once observed, is decisive evidence immediately -- no need to wait for a
+    REPORT/END line to believe an exception was logged. But the ABSENCE of an
+    error is only trustworthy once the invocation has terminated; an
+    invocation with no error line yet and no REPORT/END line is exactly the
+    shape of the original defect (read before the error had been written) and
+    must be UNKNOWN, never PASS.
+
+    REMEDY 4 (log-group-wide): every invocation found in-window is scanned for
+    errors, not just the single most-recent one by timestamp -- so a
+    concurrent invocation sitting in a different, slightly-older stream cannot
+    hide an error behind a clean newer one.
+    """
+    events = [e for e in events if (e.get("timestamp", 0) or 0) < run_start_ms]
+    if not events:
+        return UNKNOWN, "no_activity", (
+            "no log-group activity found predating this harness run within the schedule "
+            "window -- cannot distinguish a stopped cron from a function with no history yet")
+
+    invocations = _group_invocations(events)
+    if not invocations:
+        return UNKNOWN, "unparseable", (
+            f"{len(events)} log event(s) found in-window but none carried a recognizable "
+            f"RequestId START/END/REPORT marker")
+
+    erroring = [(rid, inv) for rid, inv in invocations.items() if inv["error"]]
+    if erroring:
+        rid, inv = max(erroring, key=lambda kv: kv[1]["last_ts"])
+        age_hours = (now_ms - inv["last_ts"]) / 3_600_000.0
+        return FAIL, "error_found", (
+            f"invocation {rid} contains an ERROR/Traceback line ({age_hours:.1f}h old; found "
+            f"scanning {len(invocations)} invocation(s) log-group-wide across the schedule "
+            f"window, not just the single newest stream -- ENC-ISS-665 remedy 4). An observed "
+            f"error line is decisive regardless of whether its REPORT/END line has been "
+            f"written yet.")
+
+    latest_rid = max(invocations, key=lambda r: invocations[r]["last_ts"])
+    latest = invocations[latest_rid]
+    age_hours = (now_ms - latest["last_ts"]) / 3_600_000.0
+
+    if not latest["terminated"]:
+        return UNKNOWN, "not_terminated", (
+            f"most recent PRE-RUN invocation ({latest_rid}) has no REPORT/END line yet and "
+            f"shows no error either -- refusing to classify an unterminated invocation as a "
+            f"pass (ENC-ISS-665 remedy 2); this is exactly the shape of the original defect: "
+            f"reading a stream before its ERROR/Traceback had been written")
+
+    if age_hours > max_age_hours:
+        return FAIL, "stale", (
+            f"most recent PRE-RUN invocation ({latest_rid}), terminated, last wrote "
+            f"{age_hours:.1f}h ago (> {max_age_hours}h schedule window) -- DVP-ISS-103 class: "
+            f"a stopped cron is silent without this check")
+
+    return PASS, "clean", (
+        f"most recent PRE-RUN invocation ({latest_rid}) terminated {age_hours:.1f}h ago with "
+        f"no ERROR/Traceback, and none of the other {len(invocations) - 1} invocation(s) found "
+        f"log-group-wide in this window showed one either (evaluated strictly before this "
+        f"harness run started -- ENC-ISS-665 remedies 1 and 4)")
+
+
 @register_probe("devops-recompute-governance", "devops-recompute-governance-gamma",
                 "devops-governance-mart", "devops-governance-mart-gamma")
-def _probe_governance_mart_schedule(function_name: str, clients: Dict[str, object],
-                                     max_age_hours: float = 26.0) -> Tuple[str, str]:
+def _probe_governance_mart_schedule(
+    function_name: str, clients: Dict[str, object], max_age_hours: float = 26.0, *,
+    poll_attempts: int = 3, poll_interval_s: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Tuple[str, str]:
     """Demonstration probe for BRD 8.4's own example: 'the mart must produce a
-    mart on its schedule.' Checks CloudWatch Logs for a recent invocation
-    (within the schedule window) whose latest events contain no
-    ERROR/Traceback lines. This is the DVP-ISS-103 class of failure: a
+    mart on its schedule.' Checks CloudWatch Logs, log-group-wide, for a
+    terminated invocation predating this harness run whose events contain no
+    ERROR/Traceback line. This is the DVP-ISS-103 class of failure: a
     scheduled job can stop firing entirely and be invisible to every
     function-level check that only asks 'does invoke succeed.'
+
+    See _evaluate_schedule_window for remedies 1, 2 and 4. Remedy 3 (the
+    load-bearing cross-point contradiction assertion) does NOT live here --
+    it is applied unconditionally by check_integration_edge regardless of
+    what this probe returns, specifically so it holds even if this probe
+    regresses.
     """
     logs_client = clients.get("logs")
     if logs_client is None:
         return UNKNOWN, "no logs client provided to probe"
+
+    run_start_ms = clients.get("run_start_ms")
+    if run_start_ms is None:
+        # Best-effort only: evaluate_function always supplies this, captured
+        # before point 3 runs. A direct caller that omits it loses remedy 1's
+        # guarantee -- documented, not silently patched over.
+        run_start_ms = time.time() * 1000.0
+
     log_group = f"/aws/lambda/{function_name}"
-    try:
-        streams = logs_client.describe_log_streams(
-            logGroupName=log_group, orderBy="LastEventTime", descending=True, limit=1,
-        ).get("logStreams", [])
-    except Exception as exc:  # noqa: BLE001
-        return UNKNOWN, f"could not read {log_group}: {_err(exc)}"
+    window_start_ms = run_start_ms - max_age_hours * 3_600_000.0
 
-    if not streams:
-        return UNKNOWN, f"{log_group} has no log streams -- cannot tell whether it has ever run"
+    state = detail = None
+    for attempt in range(max(1, poll_attempts)):
+        try:
+            events = _fetch_log_group_window(logs_client, log_group, window_start_ms, run_start_ms)
+        except Exception as exc:  # noqa: BLE001
+            return UNKNOWN, f"could not read {log_group}: {_err(exc)}"
 
-    last_event_ms = streams[0].get("lastEventTimestamp")
-    if last_event_ms is None:
-        return UNKNOWN, f"{log_group} latest stream has no lastEventTimestamp"
+        if not events:
+            has_ever_run = _log_group_has_any_stream(logs_client, log_group)
+            if has_ever_run is None:
+                return UNKNOWN, f"could not confirm whether {log_group} has ever produced logs"
+            if not has_ever_run:
+                return UNKNOWN, f"{log_group} has no log streams at all -- cannot tell whether it has ever run"
+            return FAIL, (
+                f"{log_group}: no activity found predating this harness run within the "
+                f"{max_age_hours}h schedule window (the log group has prior streams, so this "
+                f"is staleness, not a never-run function) -- DVP-ISS-103 class: a stopped cron "
+                f"is silent without this check")
 
-    age_hours = (time.time() * 1000 - last_event_ms) / 3_600_000.0
-    if age_hours > max_age_hours:
-        return FAIL, (f"{log_group} last wrote {age_hours:.1f}h ago (> {max_age_hours}h schedule window) "
-                       f"-- DVP-ISS-103 class: a stopped cron is silent without this check")
+        now_ms = time.time() * 1000.0
+        state, signal, detail = _evaluate_schedule_window(
+            events, now_ms=now_ms, run_start_ms=run_start_ms, max_age_hours=max_age_hours)
+        if signal != "not_terminated":
+            return state, detail
+        if attempt < poll_attempts - 1:
+            sleep(poll_interval_s)
 
-    try:
-        events = logs_client.get_log_events(
-            logGroupName=log_group, logStreamName=streams[0]["logStreamName"],
-            limit=50, startFromHead=False,
-        ).get("events", [])
-    except Exception as exc:  # noqa: BLE001
-        return UNKNOWN, f"could not read events for {log_group}: {_err(exc)}"
-
-    if not events:
-        return UNKNOWN, f"{log_group} latest stream is empty"
-
-    bad = [e["message"] for e in events if "ERROR" in e.get("message", "") or "Traceback" in e.get("message", "")]
-    if bad:
-        return FAIL, f"{log_group} latest run contains {len(bad)} error line(s): {bad[0][:200]}"
-    return PASS, f"{log_group} last wrote {age_hours:.1f}h ago with no ERROR/Traceback in latest {len(events)} events"
+    # REMEDY 2's other half: bounded-timeout poll gives up without ever
+    # escalating to PASS.
+    return UNKNOWN, f"{detail} (gave up after {poll_attempts} attempt(s), still unterminated)"
 
 
-def check_integration_edge(function_name: str, clients: Dict[str, object]) -> PointResult:
+def _enforce_no_pass_when_point3_failed(
+    point4: PointResult, point3: Optional[PointResult],
+) -> PointResult:
+    """REMEDY 3 (ENC-TSK-P08/ENC-ISS-665, THE LOAD-BEARING ONE): point 4 must
+    be structurally incapable of reporting PASS for a function whose point 3
+    (live invocation) FAILED in this same run.
+
+    This is deliberately an INDEPENDENT assertion: it does not look at logs,
+    timestamps, streams, or anything _evaluate_schedule_window computed -- it
+    only compares two already-finished verdicts. That means it holds even if
+    remedies 1 (run-start anchoring), 2 (terminated-invocation requirement)
+    and 4 (log-group-wide evaluation) were all absent or regressed, and even
+    if a completely different (or completely broken) probe were registered in
+    PROBE_REGISTRY tomorrow. Applied unconditionally by check_integration_edge
+    -- there is no call path to point 4's public entry point that skips it.
+    """
+    if point3 is not None and point3.state == FAIL and point4.state == PASS:
+        return PointResult(
+            4, "integration_edge", FAIL,
+            f"OVERRIDDEN: probe reported PASS ({point4.detail}), but point 3 (live_invocation) "
+            f"FAILED in this same run ({point3.detail[:200]}) -- a function that just failed "
+            f"live invocation cannot simultaneously have a healthy downstream integration edge. "
+            f"This contradiction assertion is structurally independent of the freshness/"
+            f"anchoring logic (ENC-ISS-665 remedy 3).",
+            reason_code="point3_point4_contradiction",
+        )
+    return point4
+
+
+def check_integration_edge(
+    function_name: str, clients: Dict[str, object], *,
+    point3_result: Optional[PointResult] = None,
+) -> PointResult:
     probe = PROBE_REGISTRY.get(function_name)
     if probe is None:
-        return PointResult(4, "integration_edge", UNKNOWN,
-                            f"no integration probe registered for {function_name!r} -- "
-                            f"function-level results say nothing about the downstream contract "
-                            f"(BRD 8.4: function green is not system green). Register one in "
-                            f"PROBE_REGISTRY to cover this function.",
-                            reason_code="no_probe_registered")
-    try:
-        state, detail = probe(function_name, clients)
-    except Exception as exc:  # noqa: BLE001
-        return PointResult(4, "integration_edge", UNKNOWN, f"probe raised: {_err(exc)}",
-                            reason_code="probe_error")
-    if state not in _VALID_STATES:
-        return PointResult(4, "integration_edge", UNKNOWN, f"probe returned invalid state {state!r}",
-                            reason_code="probe_invalid_state")
-    return PointResult(4, "integration_edge", state, detail, reason_code="probe_result")
+        result = PointResult(4, "integration_edge", UNKNOWN,
+                              f"no integration probe registered for {function_name!r} -- "
+                              f"function-level results say nothing about the downstream contract "
+                              f"(BRD 8.4: function green is not system green). Register one in "
+                              f"PROBE_REGISTRY to cover this function.",
+                              reason_code="no_probe_registered")
+    else:
+        try:
+            state, detail = probe(function_name, clients)
+        except Exception as exc:  # noqa: BLE001
+            result = PointResult(4, "integration_edge", UNKNOWN, f"probe raised: {_err(exc)}",
+                                  reason_code="probe_error")
+        else:
+            if state not in _VALID_STATES:
+                result = PointResult(4, "integration_edge", UNKNOWN,
+                                      f"probe returned invalid state {state!r}",
+                                      reason_code="probe_invalid_state")
+            else:
+                result = PointResult(4, "integration_edge", state, detail, reason_code="probe_result")
+    # ENC-ISS-665 remedy 3 -- applied unconditionally, on every path above.
+    return _enforce_no_pass_when_point3_failed(result, point3_result)
 
 
 # ---------------------------------------------------------------------------
@@ -1085,15 +1538,29 @@ def evaluate_function(
     repo: str = DEFAULT_REPO, ci_workflow: str = DEFAULT_CI_WORKFLOW,
     ci_step: str = DEFAULT_CI_STEP, negative_control_test: str = DEFAULT_NEGATIVE_CONTROL_TEST,
     ci_lookback: int = 50,
+    run_start_ms: Optional[float] = None,
 ) -> FunctionReport:
-    points = [
-        check_artifact_identity(lambda_client, s3_client, function_name, expected_arch,
-                                 py_version, commit_sha, bucket, key_prefix, env=env),
-        check_layer_coherence(lambda_client, function_name),
-        check_live_invocation(lambda_client, function_name, invoke_payload),
-        check_integration_edge(function_name, {"lambda": lambda_client, "logs": logs_client}),
-        check_ci_predicate_observed_failing(repo, ci_workflow, ci_step, negative_control_test, ci_lookback),
-    ]
+    # ENC-ISS-665 remedy 1: capture (or accept an injected) run-start anchor
+    # BEFORE point 3 runs, so point 4 can never treat point 3's own
+    # invocation -- or anything else this run causes -- as evidence of
+    # "freshness." See _evaluate_schedule_window.
+    if run_start_ms is None:
+        run_start_ms = time.time() * 1000.0
+
+    point1 = check_artifact_identity(lambda_client, s3_client, function_name, expected_arch,
+                                      py_version, commit_sha, bucket, key_prefix, env=env)
+    point2 = check_layer_coherence(lambda_client, function_name)
+    point3 = check_live_invocation(lambda_client, function_name, invoke_payload)
+    point4 = check_integration_edge(
+        function_name,
+        {"lambda": lambda_client, "logs": logs_client, "run_start_ms": run_start_ms},
+        # ENC-ISS-665 remedy 3 (load-bearing): point 4 is structurally
+        # incapable of returning PASS when point 3 FAILED in this same run.
+        point3_result=point3,
+    )
+    point5 = check_ci_predicate_observed_failing(repo, ci_workflow, ci_step, negative_control_test, ci_lookback)
+
+    points = [point1, point2, point3, point4, point5]
     return FunctionReport(function_name=function_name, points=points, warnings=[ARTIFACT_TAG_SCHEME_WARNING])
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import sys
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -92,6 +93,46 @@ class FakeS3Client:
         if self._get_error:
             raise self._get_error
         return {"Body": FakeBody(self._objects[(Bucket, Key)])}
+
+
+class FakeCloudWatchLogs:
+    """filter_log_events/describe_log_streams fake matching real CloudWatch
+    Logs semantics closely enough for the point-4 probe (ENC-TSK-P08):
+    filter_log_events only returns events within [startTime, endTime), same
+    as the real API -- this is what makes the run-start-anchoring tests
+    meaningful rather than trivially true.
+
+    `sequence`, when given, is a list of event-lists consumed one per call to
+    filter_log_events (the last entry repeats once exhausted) -- used to
+    simulate the bounded-poll-and-retry remedy seeing an invocation terminate
+    partway through polling.
+    """
+
+    def __init__(self, events=None, *, has_ever_run=True, describe_error=None,
+                 filter_error=None, sequence=None):
+        self._events = events or []
+        self._has_ever_run = has_ever_run
+        self._describe_error = describe_error
+        self._filter_error = filter_error
+        self._sequence = sequence
+        self._call_n = 0
+
+    def filter_log_events(self, logGroupName, startTime, endTime, limit=1000, nextToken=None):  # noqa: N803
+        if self._filter_error:
+            raise self._filter_error
+        if self._sequence is not None:
+            idx = min(self._call_n, len(self._sequence) - 1)
+            events = self._sequence[idx]
+            self._call_n += 1
+        else:
+            events = self._events
+        matched = [e for e in events if startTime <= e["timestamp"] < endTime]
+        return {"events": matched}
+
+    def describe_log_streams(self, logGroupName, limit=1, **kwargs):  # noqa: N803
+        if self._describe_error:
+            raise self._describe_error
+        return {"logStreams": [{"logStreamName": "s1"}] if self._has_ever_run else []}
 
 
 def _zip_bytes(files: dict) -> bytes:
@@ -304,14 +345,14 @@ def test_point4_unknown_not_pass_when_probe_raises():
 
 
 def test_governance_mart_probe_fail_on_stale_schedule():
-    class FakeLogs:
-        def describe_log_streams(self, **kwargs):
-            return {"logStreams": [{"logStreamName": "s1", "lastEventTimestamp": 0}]}
-
-        def get_log_events(self, **kwargs):  # pragma: no cover - not reached (stale short-circuits)
-            return {"events": []}
-
-    state, detail = harness._probe_governance_mart_schedule("devops-recompute-governance", {"logs": FakeLogs()})
+    # ENC-TSK-P08: rewritten for the log-group-wide, run-start-anchored probe
+    # (filter_log_events, not describe_log_streams(limit=1)). The log group
+    # has run before (has_ever_run=True) but nothing shows up inside the
+    # schedule window predating this run -- genuine staleness.
+    logs = FakeCloudWatchLogs(events=[], has_ever_run=True)
+    run_start_ms = 1_700_000_000_000.0
+    state, detail = harness._probe_governance_mart_schedule(
+        "devops-recompute-governance", {"logs": logs, "run_start_ms": run_start_ms})
     assert state == harness.FAIL
     assert "schedule window" in detail
 
@@ -679,6 +720,403 @@ def test_unmapped_function_is_unknown_never_a_missing_artifact_fail():
 def test_artifact_key_uses_the_basename_it_is_given():
     key = harness._artifact_key("auth_refresh", "arm64", "3.12", "deadbeef")
     assert key == "lambda-artifacts/arm64-py3.12/auth_refresh-deadbeef.zip"
+
+
+# ===========================================================================
+# ENC-TSK-P08 / ENC-ISS-665 -- point 4 repair
+#
+# The defect: point 4 read a CloudWatch log stream mid-flight, before an
+# ERROR/Traceback had been written, and measured "freshness" against point
+# 3's OWN invocation from seconds earlier in the same run -- manufacturing
+# the freshness it then accepted. Four remedies, each proven below:
+#   1. run-start freshness anchoring
+#   2. terminated-invocation requirement (bounded poll, UNKNOWN on timeout)
+#   3. cross-point contradiction assertion (load-bearing)
+#   4. log-group-wide evaluation
+# ===========================================================================
+
+def _start_line(rid: str) -> dict:
+    return {"message": f"START RequestId: {rid} Version: $LATEST"}
+
+
+def _report_line(rid: str, ts: float) -> dict:
+    return {"timestamp": ts, "message": f"REPORT RequestId: {rid} Duration: 12.3 ms"}
+
+
+def _error_line(rid: str, ts: float) -> dict:
+    return {"timestamp": ts, "message": f"[ERROR] RequestId: {rid} Traceback (most recent call last): boom"}
+
+
+# ---------------------------------------------------------------------------
+# Remedy 1 -- run-start freshness anchoring
+# ---------------------------------------------------------------------------
+
+def test_remedy1_evaluate_window_excludes_events_at_or_after_run_start():
+    """A clean, terminated invocation that happens AT OR AFTER run_start_ms
+    (i.e. caused by this harness run itself, such as point 3's own invoke)
+    must never count as evidence of freshness -- it must be filtered out
+    before it can influence the verdict, even if the caller's own query
+    bounds regressed and over-fetched it."""
+    run_start_ms = 1_700_000_000_000.0
+    rid = "cccc3333-0000-0000-0000-000000000000"
+    events = [
+        {"timestamp": run_start_ms + 100, "message": f"START RequestId: {rid} Version: $LATEST"},
+        {"timestamp": run_start_ms + 150, "message": f"REPORT RequestId: {rid} Duration: 10 ms"},
+    ]
+    state, signal, detail = harness._evaluate_schedule_window(
+        events, now_ms=run_start_ms + 200, run_start_ms=run_start_ms, max_age_hours=26.0)
+    assert state == harness.UNKNOWN
+    assert signal == "no_activity"
+    assert state != harness.PASS
+
+
+def test_remedy1_duplication_path_schedule_disabled_point3_enabled_no_fresh_activity():
+    """ENC-ISS-665's exact duplication path (AC-3): the schedule is disabled
+    (no genuine historical firing), but point 3 is enabled and just invoked
+    the function, producing a clean, terminated log entry SECONDS after this
+    harness run started. Point 4 must NOT report this as fresh activity.
+    """
+    run_start_ms = 1_700_000_000_000.0
+    point3_invoke_ts = run_start_ms + 5_000  # 5s after run start -- point 3's own invoke
+    rid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fresh_events = [
+        {"timestamp": point3_invoke_ts, "message": f"START RequestId: {rid} Version: $LATEST"},
+        {"timestamp": point3_invoke_ts + 50, "message": f"REPORT RequestId: {rid} Duration: 40 ms"},
+    ]
+    logs = FakeCloudWatchLogs(events=fresh_events, has_ever_run=True)
+
+    state, detail = harness._probe_governance_mart_schedule(
+        "devops-governance-mart-gamma", {"logs": logs, "run_start_ms": run_start_ms}, poll_attempts=1)
+    assert state != harness.PASS, (
+        f"point 4 must not report fresh activity from schedule-disabled + point-3-enabled "
+        f"(ENC-ISS-665 duplication path), got state={state!r} detail={detail!r}")
+    assert "clean" not in detail
+    assert ("no activity" in detail.lower()) or ("schedule window" in detail.lower())
+
+    # CONTRAST -- proves the anchor is what matters, not some other
+    # accidental fix: the SAME event, evaluated as though "now" were the
+    # anchor instead of the real run-start, DOES read as fresh/clean. This is
+    # the exact pre-fix defect shape being reproduced deliberately.
+    unanchored_state, _, _ = harness._evaluate_schedule_window(
+        fresh_events, now_ms=point3_invoke_ts + 1000, run_start_ms=point3_invoke_ts + 1000,
+        max_age_hours=26.0)
+    assert unanchored_state == harness.PASS, (
+        "sanity check: without run-start anchoring, point 3's own fresh invocation DOES look "
+        "like a clean pass -- this is precisely the defect remedy 1 exists to close"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Remedy 2 -- terminated-invocation requirement
+# ---------------------------------------------------------------------------
+
+def test_remedy2_unterminated_invocation_is_unknown_not_pass():
+    run_start_ms = 1_700_000_000_000.0
+    rid = "d0d0d0d0-1111-2222-3333-444444444444"
+    events = [{"timestamp": run_start_ms - 1000, "message": f"START RequestId: {rid} Version: $LATEST"}]
+    state, signal, detail = harness._evaluate_schedule_window(
+        events, now_ms=run_start_ms, run_start_ms=run_start_ms, max_age_hours=26.0)
+    assert state == harness.UNKNOWN
+    assert signal == "not_terminated"
+    assert "reading a stream before" in detail
+
+
+def test_remedy2_bounded_poll_never_escalates_unterminated_to_pass():
+    run_start_ms = 1_700_000_000_000.0
+    rid = "11111111-2222-3333-4444-555555555555"
+    not_terminated = [{"timestamp": run_start_ms - 1000, "message": f"START RequestId: {rid} Version: $LATEST"}]
+    logs = FakeCloudWatchLogs(sequence=[not_terminated, not_terminated, not_terminated])
+    sleeps = []
+    state, detail = harness._probe_governance_mart_schedule(
+        "devops-governance-mart-gamma", {"logs": logs, "run_start_ms": run_start_ms},
+        poll_attempts=3, poll_interval_s=0.01, sleep=sleeps.append)
+    assert state == harness.UNKNOWN, "an invocation that never terminates must NEVER be promoted to pass"
+    assert "gave up after 3 attempt" in detail
+    assert len(sleeps) == 2, "must sleep between attempts, never after the final one"
+
+
+def test_remedy2_bounded_poll_succeeds_once_termination_appears():
+    # This path reaches the freshness/staleness check, which the probe
+    # computes against the REAL clock (time.time()) -- unlike the other
+    # remedy-2 tests, which resolve before ever reaching that comparison.
+    # So run_start_ms must be real-clock-relative, not an arbitrary fixed
+    # past epoch (which would always read as > max_age_hours stale).
+    run_start_ms = time.time() * 1000.0 - 2_000  # "harness run started 2s ago"
+    rid = "aaaaaaaa-1111-2222-3333-444444444444"
+    not_terminated = [{"timestamp": run_start_ms - 1000, "message": f"START RequestId: {rid} Version: $LATEST"}]
+    terminated_clean = not_terminated + [
+        {"timestamp": run_start_ms - 900, "message": f"REPORT RequestId: {rid} Duration: 12 ms"}]
+    logs = FakeCloudWatchLogs(sequence=[not_terminated, terminated_clean])
+    sleeps = []
+    state, detail = harness._probe_governance_mart_schedule(
+        "devops-governance-mart-gamma", {"logs": logs, "run_start_ms": run_start_ms},
+        poll_attempts=3, poll_interval_s=0.01, sleep=sleeps.append)
+    assert state == harness.PASS
+    assert len(sleeps) == 1
+
+
+# ---------------------------------------------------------------------------
+# Remedy 4 -- log-group-wide evaluation
+# ---------------------------------------------------------------------------
+
+def test_remedy4_log_group_wide_catches_error_masked_by_a_newer_clean_invocation():
+    """A naive 'just look at the single newest stream' check would see only
+    the clean, newer invocation (a concurrent execution environment) and miss
+    the erroring, slightly-older one entirely -- log-group-wide evaluation
+    must not."""
+    run_start_ms = 1_700_000_000_000.0
+    older_erroring_rid = "aaaa1111-0000-0000-0000-000000000000"
+    newer_clean_rid = "bbbb2222-0000-0000-0000-000000000000"
+    events = [
+        {"timestamp": run_start_ms - 5000, "message": f"START RequestId: {older_erroring_rid} Version: $LATEST"},
+        {"timestamp": run_start_ms - 4950,
+         "message": f"[ERROR] RequestId: {older_erroring_rid} Traceback (most recent call last): NoSuchBucket"},
+        {"timestamp": run_start_ms - 4900, "message": f"REPORT RequestId: {older_erroring_rid} Duration: 100 ms"},
+        {"timestamp": run_start_ms - 1000, "message": f"START RequestId: {newer_clean_rid} Version: $LATEST"},
+        {"timestamp": run_start_ms - 950, "message": f"REPORT RequestId: {newer_clean_rid} Duration: 40 ms"},
+    ]
+    state, signal, detail = harness._evaluate_schedule_window(
+        events, now_ms=run_start_ms, run_start_ms=run_start_ms, max_age_hours=26.0)
+    assert state == harness.FAIL, (
+        "a single-newest-stream check would see only the clean newer invocation and miss the "
+        "erroring one -- log-group-wide evaluation must catch it regardless"
+    )
+    assert signal == "error_found"
+    assert older_erroring_rid in detail
+
+
+# ---------------------------------------------------------------------------
+# Remedy 3 -- cross-point contradiction assertion (LOAD-BEARING)
+#
+# AC-2's negative control: a synthetic run where point 3 FAILS must make
+# point 4 structurally unable to PASS. Proven three ways: the guard function
+# directly, through check_integration_edge with a probe that is deliberately
+# naive (bypassing remedies 1/2/4 entirely, simulating the pre-fix probe), and
+# through a full evaluate_function run.
+# ---------------------------------------------------------------------------
+
+def test_remedy3_enforce_no_pass_when_point3_failed_direct():
+    point3 = harness.PointResult(3, "live_invocation", harness.FAIL, "NoSuchBucket", reason_code="function_error")
+    naive_point4 = harness.PointResult(4, "integration_edge", harness.PASS, "looked clean", reason_code="probe_result")
+    result = harness._enforce_no_pass_when_point3_failed(naive_point4, point3)
+    assert result.state == harness.FAIL
+    assert result.reason_code == "point3_point4_contradiction"
+
+
+def test_remedy3_no_override_when_point3_did_not_fail():
+    for point3_state in (harness.PASS, harness.UNKNOWN):
+        point3 = harness.PointResult(3, "live_invocation", point3_state, "", reason_code="unspecified")
+        point4 = harness.PointResult(4, "integration_edge", harness.PASS, "looked clean", reason_code="probe_result")
+        result = harness._enforce_no_pass_when_point3_failed(point4, point3)
+        assert result is point4, "must be a no-op whenever point 3 did not fail"
+
+
+def test_remedy3_holds_even_with_a_naive_always_pass_probe():
+    """AC-2, negative control: proven with a deliberately naive probe that
+    ALWAYS returns PASS, completely bypassing remedies 1/2/4. If remedy 3 is
+    truly independent of the freshness/anchoring machinery, it must still
+    catch this."""
+    harness.PROBE_REGISTRY["_test_naive_always_pass"] = lambda fn, clients: (harness.PASS, "always looks clean")
+    try:
+        point3_fail = harness.PointResult(3, "live_invocation", harness.FAIL, "FunctionError: NoSuchBucket",
+                                           reason_code="function_error")
+        result = harness.check_integration_edge("_test_naive_always_pass", {}, point3_result=point3_fail)
+        assert result.state != harness.PASS, "point 4 must be structurally unable to pass when point 3 failed"
+        assert result.state == harness.FAIL
+        assert result.reason_code == "point3_point4_contradiction"
+    finally:
+        del harness.PROBE_REGISTRY["_test_naive_always_pass"]
+
+
+def test_remedy3_full_evaluate_function_run_point3_fails_point4_cannot_pass():
+    """The full synthetic run, AC-2's literal ask: evaluate_function end to
+    end with point 3 FAILING (a real FunctionError, modeled on the live
+    ENC-ISS-666 devops-governance-mart-gamma NoSuchBucket failure) and a
+    naive always-PASS probe registered, proving the WIRING -- not just the
+    helper function in isolation -- forbids the contradiction.
+    """
+    fn_name = "_test_full_run_contradiction_fn"
+    harness.PROBE_REGISTRY[fn_name] = lambda fn, clients: (harness.PASS, "naive: always clean")
+    try:
+        lam = FakeLambdaClient(
+            config={"Architectures": ["arm64"], "Layers": [], "CodeSha256": "x"},
+            invoke_response={"StatusCode": 200, "FunctionError": "Unhandled",
+                              "Payload": FakeBody(b'{"errorType": "NoSuchBucket"}')},
+        )
+        report = harness.evaluate_function(
+            lambda_client=lam, s3_client=FakeS3Client(), logs_client=object(),
+            function_name=fn_name, commit_sha=None,
+            negative_control_test="tools/does_not_exist_xyz.py",  # keeps point 5 deterministic, offline
+        )
+        point3 = next(p for p in report.points if p.point == 3)
+        point4 = next(p for p in report.points if p.point == 4)
+        assert point3.state == harness.FAIL
+        assert point4.state != harness.PASS, "structurally impossible: point 4 cannot pass when point 3 failed"
+        assert point4.reason_code == "point3_point4_contradiction"
+        assert report.overall == harness.FAIL
+    finally:
+        del harness.PROBE_REGISTRY[fn_name]
+
+
+# ===========================================================================
+# ENC-TSK-P09 / ENC-ISS-668 -- external-dependency register and the ATTESTED
+# rollup verdict.
+#
+# 33 of 51 gamma functions attach AWS-AppConfig-Extension-Arm64:147, owned by
+# a different AWS account. Point 2 correctly cannot GetLayerVersion
+# cross-account -- but that UNKNOWN used to sink FunctionReport.overall to a
+# permanent, undifferentiated "unknown" with no way to ever reach any other
+# verdict. These tests prove: (1) the register classifies known external
+# dependencies distinctly from a generic layer_not_found mystery, (2) the
+# rollup reaches an explicit ATTESTED verdict naming the unverified points
+# when that is the ONLY kind of non-pass present, (3) an unqualified PASS
+# stays structurally impossible whenever any point is UNKNOWN, and (4) the
+# 33 affected functions reach a determinate verdict.
+# ===========================================================================
+
+def test_p09_appconfig_extension_layer_resolves_to_external_dependency_declared():
+    lam = FakeLambdaClient(
+        config={"Architectures": ["arm64"],
+                "Layers": [{"Arn": "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147"}]},
+        layer_error=Exception("ResourceNotFoundException: Layer version does not exist"),
+    )
+    result = harness.check_layer_coherence(lam, "auth-refresh-gamma", downloader=lambda url: b"",
+                                            classify_so=lambda p: None)
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "external_dependency_declared", (
+        "must be classified distinctly from a generic layer_not_found mystery -- this is a "
+        "documented, named, cross-account dependency (ENC-TSK-P09/ENC-ISS-668)"
+    )
+    assert "359756378197" in result.detail
+    assert "arm64" in result.detail.lower()
+
+
+def test_p09_devops_owned_layers_resolve_distinctly_from_layer_not_found():
+    for layer_name, version in (("devops-json-to-parquet-pyarrow", 3), ("devops-json-to-parquet-numpy", 2)):
+        lam = FakeLambdaClient(
+            config={"Architectures": ["arm64"],
+                    "Layers": [{"Arn": f"arn:aws:lambda:us-west-2:999999999999:layer:{layer_name}:{version}"}]},
+            layer_error=Exception("ResourceNotFoundException: Layer version does not exist"),
+        )
+        result = harness.check_layer_coherence(lam, "some-fn", downloader=lambda url: b"", classify_so=lambda p: None)
+        assert result.state == harness.UNKNOWN
+        assert result.reason_code == "external_dependency_owned_devops", layer_name
+        assert "NX-2021-L/devops" in result.detail
+        assert result.reason_code != "layer_not_found"
+
+
+def test_p09_unregistered_missing_layer_still_reports_plain_layer_not_found():
+    """The register must not swallow genuine mysteries -- an unregistered
+    layer that 404s stays exactly the undifferentiated layer_not_found it
+    always was."""
+    lam = FakeLambdaClient(
+        config={"Architectures": ["arm64"],
+                "Layers": [{"Arn": "arn:aws:lambda:us-west-2:1:layer:totally-unknown-layer:1"}]},
+        layer_error=Exception("ResourceNotFoundException: Layer version does not exist"),
+    )
+    result = harness.check_layer_coherence(lam, "fn", downloader=lambda url: b"", classify_so=lambda p: None)
+    assert result.reason_code == "layer_not_found"
+
+
+def test_p09_function_report_reaches_attested_when_only_non_pass_is_external_dependency():
+    points = [
+        harness.PointResult(1, "artifact_identity", harness.PASS, "", reason_code="digest_match"),
+        harness.PointResult(2, "layer_coherence", harness.UNKNOWN, "AWS-AppConfig-Extension-Arm64 cross-account",
+                             reason_code="external_dependency_declared"),
+        harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok"),
+        harness.PointResult(4, "integration_edge", harness.PASS, "", reason_code="probe_result"),
+        harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+    ]
+    report = harness.FunctionReport(function_name="auth-refresh-gamma", points=points)
+    assert report.overall == harness.ATTESTED
+    assert report.overall != harness.PASS
+    assert report.attested_points == [2]
+    assert report.attestation_note is not None
+    assert "external_dependency_declared" in report.attestation_note
+    d = report.to_dict()
+    assert d["overall"] == "attested"
+    assert d["overall"] != "pass"
+    assert d["attested_points"] == [2]
+    assert d["attestation_note"] is not None
+
+
+def test_p09_attested_requires_every_non_pass_point_to_be_attestable():
+    points = [
+        harness.PointResult(1, "artifact_identity", harness.PASS, "", reason_code="digest_match"),
+        harness.PointResult(2, "layer_coherence", harness.UNKNOWN, "", reason_code="external_dependency_declared"),
+        harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok"),
+        harness.PointResult(4, "integration_edge", harness.UNKNOWN, "", reason_code="no_probe_registered"),
+        harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+    ]
+    report = harness.FunctionReport(function_name="fn", points=points)
+    assert report.overall == harness.UNKNOWN, (
+        "a coverage gap (no_probe_registered) is not a documented external-dependency ceiling -- "
+        "mixing it in must NOT be laundered into an attested verdict"
+    )
+    assert report.attestation_note is None
+    assert report.attested_points == []
+
+
+def test_p09_fail_beats_attested():
+    points = [
+        harness.PointResult(1, "artifact_identity", harness.FAIL, "", reason_code="digest_mismatch"),
+        harness.PointResult(2, "layer_coherence", harness.UNKNOWN, "", reason_code="external_dependency_declared"),
+        harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok"),
+        harness.PointResult(4, "integration_edge", harness.PASS, "", reason_code="probe_result"),
+        harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+    ]
+    report = harness.FunctionReport(function_name="fn", points=points)
+    assert report.overall == harness.FAIL
+
+
+def test_p09_unqualified_pass_is_structurally_impossible_when_any_point_unknown():
+    """Requirement 3: an unqualified overall PASS must stay structurally
+    impossible when any point is UNKNOWN -- whether that unknown is
+    attestable or not."""
+    for reason_code in ("external_dependency_declared", "external_dependency_owned_devops",
+                        "permission_denied", "no_probe_registered", "layer_not_found"):
+        points = [
+            harness.PointResult(1, "p1", harness.PASS, "", reason_code="digest_match"),
+            harness.PointResult(2, "p2", harness.UNKNOWN, "", reason_code=reason_code),
+            harness.PointResult(3, "p3", harness.PASS, "", reason_code="invoked_ok"),
+            harness.PointResult(4, "p4", harness.PASS, "", reason_code="probe_result"),
+            harness.PointResult(5, "p5", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+        ]
+        report = harness.FunctionReport(function_name="fn", points=points)
+        assert report.overall != harness.PASS, f"reason_code={reason_code} must never yield a bare pass"
+        assert report.overall in (harness.ATTESTED, harness.UNKNOWN)
+
+
+def test_p09_all_33_appconfig_functions_reach_a_determinate_verdict():
+    """ENC-ISS-668: 33 of 51 gamma functions attach AWS-AppConfig-Extension-
+    Arm64:147. Before this fix every one of them was stuck at plain 'unknown'
+    forever, indistinguishable from an undiagnosed gap. Prove all 33 reach an
+    explicit, named ATTESTED verdict -- never a bare pass, never stuck.
+    """
+    thirty_three_function_names = [f"gamma-fn-{i:02d}" for i in range(33)]
+    reports = []
+    for fn_name in thirty_three_function_names:
+        lam = FakeLambdaClient(
+            config={"Architectures": ["arm64"],
+                    "Layers": [{"Arn": "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147"}],
+                    "CodeSha256": "deadbeef"},
+            layer_error=Exception("ResourceNotFoundException: Layer version does not exist"),
+        )
+        point1 = harness.PointResult(1, "artifact_identity", harness.PASS, "", reason_code="digest_match")
+        point2 = harness.check_layer_coherence(lam, fn_name, downloader=lambda url: b"", classify_so=lambda p: None)
+        point3 = harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok")
+        point4 = harness.PointResult(4, "integration_edge", harness.PASS, "", reason_code="probe_result")
+        point5 = harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "",
+                                      reason_code="ci_history_confirmed_red")
+        reports.append(harness.FunctionReport(function_name=fn_name,
+                                               points=[point1, point2, point3, point4, point5]))
+
+    assert len(reports) == 33
+    non_determinate = [r.function_name for r in reports if r.overall == harness.UNKNOWN]
+    assert non_determinate == [], f"still stuck at plain unknown, never reaching a verdict: {non_determinate}"
+    assert all(r.overall == harness.ATTESTED for r in reports)
+    assert all(r.overall != harness.PASS for r in reports), "attested is not a fabricated pass"
+    assert all(2 in r.attested_points for r in reports)
 
 
 if __name__ == "__main__":

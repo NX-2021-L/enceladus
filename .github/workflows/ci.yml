@@ -150,6 +150,48 @@ jobs:
           python3 tools/prod_gate_coverage_guard.py
           python3 -m unittest tools.test_prod_gate_coverage_guard
 
+      # ENC-TSK-P08 / ENC-ISS-665: nothing wired this harness into CI before
+      # this task (git grep verify_arm64_validation_harness in
+      # .github/workflows/ returned nothing) -- so its non-passing discipline
+      # gated nothing. This job has no AWS credentials configured anywhere
+      # (no aws-actions/configure-aws-credentials step exists in this
+      # workflow), so the honest pre-merge wiring is two-part:
+      #   1. The harness's own self-tests (--self-test) as a REAL blocking
+      #      gate -- these need no AWS access and are what prove the
+      #      ENC-ISS-665 remedies (run-start anchoring, the terminated-
+      #      invocation requirement, the load-bearing cross-point
+      #      contradiction assertion, log-group-wide evaluation) and the
+      #      ENC-ISS-668 ATTESTED rollup all hold, on every PR.
+      #   2. One real, unmocked CLI invocation with no AWS credentials
+      #      present, to prove -- for real, not only in a mock -- that the
+      #      harness reports an honest non-pass (UNKNOWN/ATTESTED-eligible
+      #      points, never a fabricated PASS) rather than crashing when it
+      #      genuinely cannot reach AWS. This step is NOT gated on
+      #      overall == pass (it cannot ever be here, credential-less); it is
+      #      gated on "did not crash" and "never reports an unqualified pass."
+      - name: Five-point arm64 validation harness self-tests (ENC-ISS-665 / ENC-ISS-668)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest pyyaml certifi boto3
+          python3 tools/verify_arm64_validation_harness.py --self-test
+
+          echo "[INFO] running one live CLI invocation with no AWS credentials present, to prove honest non-pass reporting rather than a crash or a fabricated pass"
+          set +e
+          python3 tools/verify_arm64_validation_harness.py \
+            --function-name devops-governance-mart-gamma --output /tmp/five-point-ci-report.json
+          set -e
+          python3 -c "
+          import json
+          report = json.load(open('/tmp/five-point-ci-report.json'))
+          fn = report['functions'][0]
+          assert fn['overall'] != 'pass', (
+              f\"this pre-merge lane has no AWS credentials -- overall must never read pass \"
+              f\"here, got {fn['overall']!r}\"
+          )
+          print(f\"[SUCCESS] harness ran for real with no AWS credentials and reported \"
+                f\"overall={fn['overall']!r} (never a fabricated pass)\")
+          "
+
   frontend-ui-tests:
     name: Frontend UI Tests
     runs-on: ubuntu-latest
