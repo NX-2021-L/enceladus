@@ -20,13 +20,21 @@ THE RULES, each asserted before it is applied:
 
   R3  Put back a containment Deny of the SAME SHAPE, scoped to what enceladus
       actually needs -- or to nothing, if read_scope=none.
-        read_scope=none        NotResource: []  -> s3 denied everywhere.
+        read_scope=none        Resource: "*"  -> s3 denied everywhere.
                                Preserves today's EFFECTIVE posture exactly while
                                still removing the harrisonfamily write privilege.
                                The CLAUDE.md claim must then be withdrawn.
-        read_scope=jreese-net  NotResource: the jreese-net bucket and its objects
-                               -> AllowMinimalReads applies there and nowhere
-                               else, making the documented capability true.
+                               (This was NotResource: [] until ENC-TSK-P05, which
+                               Access Analyzer reports as a NO-OP -- see the R3
+                               comment in transform().)
+        read_scope=artifacts   NotResource: the bucket + lambda-artifacts/* only
+                               -> DEFAULT. BRD section 8 point 1 becomes
+                               satisfiable; agent-documents/ objects stay denied,
+                               so the raw-S3 path around governed documents.get
+                               stays closed (ENC-ISS-640 class).
+        read_scope=jreese-net  NotResource: the jreese-net bucket and ALL objects
+                               -> makes the documented capability true, but also
+                               re-opens raw-S3 reads of agent-documents/.
 
 R3 keeps the original author's containment shape rather than deleting it,
 because deleting it would let AllowMinimalReads' Resource '*' become live across
@@ -48,6 +56,27 @@ import sys
 
 HARRISON = "harrisonfamily-frontend"
 JREESE_NET = ["arn:aws:s3:::jreese-net", "arn:aws:s3:::jreese-net/*"]
+
+# ENC-TSK-P05: object reads confined to the build-artifact prefix, plus the bare
+# bucket ARN. Both entries are load-bearing and for different reasons.
+#
+#   the bucket ARN            -- s3:ListBucket acts on the BUCKET, not on an
+#                                object. Without it S3 answers a missing key with
+#                                403 AccessDenied instead of 404 NoSuchKey, and
+#                                the arm64 harness's point 1 routes a real
+#                                artifact_missing FAIL into the permission_denied
+#                                UNKNOWN branch -- silently destroying the most
+#                                important verdict its tri-state exists to carry.
+#   the lambda-artifacts/*    -- object reads reach the build artifacts and
+#                                NOTHING else. agent-documents/ objects stay
+#                                denied, so the raw-S3 path around governed
+#                                documents.get stays closed (ENC-ISS-640 class).
+ARTIFACTS_SCOPE = [
+    "arn:aws:s3:::jreese-net",
+    "arn:aws:s3:::jreese-net/lambda-artifacts/*",
+]
+
+READ_SCOPES = ("none", "artifacts", "jreese-net")
 CONTAINMENT_SID = "DenyS3OutsideEnceladusScope"
 
 
@@ -101,24 +130,55 @@ def transform(document: dict, read_scope: str) -> tuple[dict, list[str]]:
             "The document does not have the shape ENC-ISS-659 describes; "
             "refusing to write.")
 
-    not_resource = [] if read_scope == "none" else list(JREESE_NET)
-    kept.append({
-        "Sid": CONTAINMENT_SID,
-        "Effect": "Deny",
-        "Action": "s3:*",
-        "NotResource": not_resource,
-    })
+    # ENC-TSK-P05 -- read_scope=none previously emitted "NotResource": [].
+    # AWS Access Analyzer's verdict on that document, run live 2026-08-23:
+    #
+    #   SUGGESTION  EMPTY_ARRAY_RESOURCE
+    #   "This statement includes no resources and does not affect the policy."
+    #
+    # So the containment Deny was a NO-OP. Applying it would have removed the
+    # shadowing Deny and replaced it with nothing, promoting AllowMinimalReads'
+    # Resource "*" from dead letter to LIVE ACROSS EVERY BUCKET -- the exact
+    # widening R3's docstring says it exists to prevent, defeated by an empty
+    # array. "Deny everywhere" is Resource "*", never NotResource [].
     if read_scope == "none":
+        containment = {
+            "Sid": CONTAINMENT_SID,
+            "Effect": "Deny",
+            "Action": "s3:*",
+            "Resource": "*",
+        }
         notes.append(
-            f"R3 ADDED Deny [{CONTAINMENT_SID}] s3:* on NotResource [] -- s3 denied "
+            f"R3 ADDED Deny [{CONTAINMENT_SID}] s3:* on Resource '*' -- s3 denied "
             f"everywhere. Effective posture is unchanged from today; only the "
             f"harrisonfamily write privilege is gone. CLAUDE.md must stop claiming "
             f"baseline S3 reads.")
     else:
-        notes.append(
-            f"R3 ADDED Deny [{CONTAINMENT_SID}] s3:* on NotResource {JREESE_NET} -- "
-            f"AllowMinimalReads now applies to jreese-net and nowhere else, making "
-            f"the documented read capability true.")
+        not_resource = list(ARTIFACTS_SCOPE if read_scope == "artifacts" else JREESE_NET)
+        containment = {
+            "Sid": CONTAINMENT_SID,
+            "Effect": "Deny",
+            "Action": "s3:*",
+            "NotResource": not_resource,
+        }
+        if read_scope == "artifacts":
+            notes.append(
+                f"R3 ADDED Deny [{CONTAINMENT_SID}] s3:* on NotResource "
+                f"{ARTIFACTS_SCOPE} -- object reads reach the build-artifact prefix "
+                f"and nothing else, so BRD DOC-56CFA21523C1 section 8 point 1 becomes "
+                f"satisfiable while agent-documents/ objects stay denied and the "
+                f"raw-S3 path around governed documents.get stays closed. The bare "
+                f"bucket ARN is deliberate: without ListBucket, a missing artifact "
+                f"returns 403 instead of 404 and the harness reports UNKNOWN where it "
+                f"should report a FAIL.")
+        else:
+            notes.append(
+                f"R3 ADDED Deny [{CONTAINMENT_SID}] s3:* on NotResource {JREESE_NET} -- "
+                f"AllowMinimalReads now applies to the whole jreese-net bucket. NOTE "
+                f"this includes agent-documents/, which re-opens a raw-S3 read path "
+                f"around governed documents.get (ENC-ISS-640 class). Prefer "
+                f"read_scope=artifacts unless whole-bucket read is genuinely intended.")
+    kept.append(containment)
 
     return {"Version": document.get("Version", "2012-10-17"), "Statement": kept}, notes
 
@@ -127,7 +187,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="src", required=True)
     parser.add_argument("--out", dest="dst", required=True)
-    parser.add_argument("--read-scope", choices=["none", "jreese-net"], default="none")
+    parser.add_argument("--read-scope", choices=list(READ_SCOPES), default="artifacts",
+                        help="none = deny s3 everywhere (Resource '*'); the CLAUDE.md claim "
+                             "must then be withdrawn. artifacts = read the build-artifact "
+                             "prefix only, which makes BRD section 8 point 1 satisfiable "
+                             "without opening a raw-S3 path to agent-documents (DEFAULT). "
+                             "jreese-net = whole-bucket read, which DOES open that path.")
     args = parser.parse_args()
 
     document = json.loads(open(args.src).read())

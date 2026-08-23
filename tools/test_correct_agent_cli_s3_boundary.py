@@ -53,12 +53,28 @@ class TestTransform(unittest.TestCase):
         self.assertEqual(shadowing, [])
 
     def test_read_scope_none_denies_s3_everywhere(self):
-        """The conservative option must not widen anything."""
+        """The conservative option must not widen anything.
+
+        ENC-TSK-P05 CORRECTION. This test previously asserted
+        NotResource == [] and passed -- while the statement it was pinning
+        denied NOTHING. AWS Access Analyzer on that exact document returns
+        EMPTY_ARRAY_RESOURCE, "includes no resources and does not affect the
+        policy". So the conservative option was in fact the widest: it removed
+        the shadowing Deny and replaced it with a no-op, promoting
+        AllowMinimalReads' Resource "*" to live across every bucket.
+
+        A test that asserts the shape a tool emits, and nothing about what that
+        shape MEANS, cannot catch this. Hence
+        test_every_read_scope_produces_a_policy_aws_itself_accepts below.
+        """
         new, _ = transform(live_shaped_policy(), "none")
         containment = [s for s in new["Statement"] if s.get("Sid") == CONTAINMENT_SID]
         self.assertEqual(len(containment), 1)
-        self.assertEqual(containment[0]["NotResource"], [])
         self.assertEqual(containment[0]["Effect"], "Deny")
+        self.assertEqual(containment[0]["Resource"], "*")
+        self.assertNotIn(
+            "NotResource", containment[0],
+            "an empty NotResource is a no-op; deny-everywhere must be Resource '*'")
 
     def test_read_scope_jreese_net_opens_exactly_one_bucket(self):
         new, _ = transform(live_shaped_policy(), "jreese-net")
@@ -118,3 +134,79 @@ class TestTransform(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAgainstAwsItself(unittest.TestCase):
+    """ENC-TSK-P05 -- the check every test above structurally could not make.
+
+    The rest of this file asserts the shape the tool emits, verified against the
+    tool's own expectations: a declaration checked against itself. That is how
+    read_scope=none shipped emitting a Deny that denied nothing, with a passing
+    test named "denies s3 everywhere" pinning it.
+
+    The correction is not a sharper assertion about the shape. It is to ask AWS.
+    accessanalyzer:ValidatePolicy is reachable by enceladus-agent-cli
+    unprivileged (verified live 2026-08-23), so this runs wherever the CLI is
+    configured and skips cleanly where it is not.
+    """
+
+    BLOCKING_TYPES = {"ERROR", "SECURITY_WARNING"}
+    BLOCKING_CODES = {"EMPTY_ARRAY_RESOURCE", "EMPTY_ARRAY_ACTION"}
+
+    def _blocking_findings(self, document):
+        import json
+        import shutil
+        import subprocess
+        import tempfile
+
+        if not shutil.which("aws"):
+            return None
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(document, fh)
+            path = fh.name
+        proc = subprocess.run(
+            ["aws", "accessanalyzer", "validate-policy",
+             "--policy-document", f"file://{path}",
+             "--policy-type", "IDENTITY_POLICY",
+             "--region", "us-west-2", "--output", "json"],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            return None
+        findings = json.loads(proc.stdout).get("findings", [])
+        return [f for f in findings
+                if f.get("findingType") in self.BLOCKING_TYPES
+                or f.get("issueCode") in self.BLOCKING_CODES]
+
+    def test_every_read_scope_produces_a_policy_aws_itself_accepts(self):
+        for scope in ("none", "artifacts", "jreese-net"):
+            with self.subTest(read_scope=scope):
+                new, _ = transform(live_shaped_policy(), scope)
+                blocking = self._blocking_findings(new)
+                if blocking is None:
+                    self.skipTest("AWS CLI unavailable or unauthorized")
+                self.assertEqual(
+                    blocking, [],
+                    f"read_scope={scope} produced a policy AWS flags as blocking: "
+                    f"{blocking}. A statement that does not affect the policy is "
+                    f"not containment.")
+
+
+class TestArtifactsScope(unittest.TestCase):
+    def test_keeps_the_docstore_path_closed(self):
+        """agent-documents/ objects must stay denied, or the raw-S3 route around
+        governed documents.get reopens (ENC-ISS-640 class)."""
+        new, _ = transform(live_shaped_policy(), "artifacts")
+        stmt = [s for s in new["Statement"] if s.get("Sid") == CONTAINMENT_SID][0]
+        self.assertIn("arn:aws:s3:::jreese-net/lambda-artifacts/*", stmt["NotResource"])
+        self.assertNotIn(
+            "arn:aws:s3:::jreese-net/*", stmt["NotResource"],
+            "whole-bucket object read would expose agent-documents/ to raw S3")
+
+    def test_keeps_the_bare_bucket_arn_so_a_missing_artifact_still_reports_404(self):
+        """s3:ListBucket acts on the BUCKET. Without it S3 answers a missing key
+        with 403 AccessDenied instead of 404 NoSuchKey, and the arm64 harness's
+        point 1 routes a real artifact_missing FAIL into the permission_denied
+        UNKNOWN branch -- losing the verdict its tri-state exists to carry."""
+        new, _ = transform(live_shaped_policy(), "artifacts")
+        stmt = [s for s in new["Statement"] if s.get("Sid") == CONTAINMENT_SID][0]
+        self.assertIn("arn:aws:s3:::jreese-net", stmt["NotResource"])
