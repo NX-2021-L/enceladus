@@ -8114,6 +8114,423 @@ Resources:
       AlarmActions:
         - !Ref RhythmBeatNotificationTopic
 
+  # --- ENC-TSK-O59 / ENC-ISS-648: forward-ported from origin/main ---------------
+  # These nine resources are MANAGED BY the live production stack `enceladus-compute`
+  # but were absent from this template. Because io's ENC-PLN-082 Q3 ruling makes the
+  # cutover an IN-PLACE update of that exact stack, an apply without these
+  # declarations is an explicit REMOVE: it DESTROYS GovernanceMartSchedule and
+  # GovernanceMartPermission (which carry no DeletionPolicy on main) and ORPHANS the
+  # other seven out of CloudFormation management (they carry DeletionPolicy: Retain,
+  # so they survive as unmanaged resources -- the permutation-2 state that
+  # DOC-AB51FA4D9232 records as WORSE than uncodified, because re-declaring an
+  # orphan later is a CREATE collision).
+  #
+  # Condition: IsProduction is REQUIRED and is not cosmetic. Seven of the nine are
+  # unconditioned on main and their physical names carry no ${EnvironmentSuffix}
+  # (escalation-decision-authorizer, devops-governance-mart, devops-governance-mart-daily,
+  # ...). Declaring them bare here would make the next GAMMA deploy attempt to CREATE
+  # prod-named resources -> CREATE_FAILED -> gamma lane down. That is the ENC-TSK-O58
+  # failure this programme already paid for twice in a single session.
+  #
+  # DeletionPolicy: Retain is ADDED to GovernanceMartSchedule and GovernanceMartPermission,
+  # which lack it on main and are therefore the only two of the nine an apply truly destroys.
+  #
+  # The set is self-closed: every !Ref / !GetAtt inside these blocks resolves either to
+  # another member of the set or to something already present on this branch
+  # (GovernanceAuditFunction, DataStackName, SharedLayerArn, CognitoUserPoolId,
+  # CognitoClientId, S3Bucket, EnvironmentSuffix).
+  EscalationDecisionAuthorizerRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-escalation-decision-authorizer-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: escalation-decision-authorizer-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/escalation-decision-authorizer${EnvironmentSuffix}*"
+              # Deliberately no s3:PutObject/DeleteObject grant here or
+              # anywhere else in this role; the allowlist document is
+              # Console-edit-only by design.
+              - Sid: EscalationApproverAllowlistRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::enceladus-356364570033-us-west-2-an/security/escalation-approvers.md"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: escalation-decision-authorizer
+
+  EscalationDecisionAuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt EscalationDecisionAuthorizerRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          # ENC-ISS-505 (SEV-1): relocated off !Ref S3Bucket (jreese-net) -- that
+          # bucket is served publicly on the open web via CloudFront, which made
+          # this allowlist (approver identities + this control's own design)
+          # publicly readable. This bucket has no CloudFront origin.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
+          ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: escalation-decision-authorizer
+
+  GovernanceMartRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-governance-mart-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: GovernedSourceRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scan + DescribeTable only. The refresh reads everything by
+              # contract, so there is no GetItem/Query path to grant — and there
+              # is deliberately no write action of any kind: the mart is a
+              # derived read of the governed record store, never a mutator of it.
+              - Sid: DynamoDBFullRefreshScan
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+        - PolicyName: WarehouseObjectWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # warehouse/<project>/<table>/data.parquet plus the registration
+              # record at warehouse-registrations/<project>/<table>.json. GetObject
+              # covers the HeadObject digest probe that makes the write idempotent.
+              # Deliberately NO s3:DeleteObject/DeleteObjects: prune_stale_objects()
+              # is opt-in and the scheduled path never asks for it — the constant
+              # canonical key means nothing accumulates to prune (DOC-1E1EC5B7CE02).
+              - Sid: WarehouseObjectReadWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse/devops/*"
+                  - "arn:aws:s3:::devops-agentcli-compute/warehouse-registrations/devops/*"
+              # register_table() measures the prefix (list_objects_v2) rather than
+              # asserting a file count, so ListBucket is required — constrained to
+              # this project's two prefixes so it can never enumerate the bucket.
+              - Sid: WarehousePrefixList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::devops-agentcli-compute"
+                Condition:
+                  StringLike:
+                    "s3:prefix":
+                      - "warehouse/devops/*"
+                      - "warehouse-registrations/devops/*"
+        - PolicyName: GlueDeclaredSchemaRegister
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # NOTE: this is the FIRST glue:* grant anywhere in this repository —
+              # no other role in 02-compute.yaml (or any other template) holds one.
+              # Treat any future widening of it as a new-capability review, not a
+              # routine edit.
+              #
+              # Scoped to the catalog + the `devops` database + its tables only.
+              # register_table() calls exactly GetTable / CreateTable / UpdateTable;
+              # GetDatabase and GetTables are the read-side companions.
+              #
+              # Deliberately EXCLUDED and not to be added:
+              #   * glue:DeleteTable — the full-refresh contract is register-or-
+              #     update; a declared schema is never dropped by this path.
+              #   * every glue:*Crawler* action (CreateCrawler, StartCrawler,
+              #     UpdateCrawler, GetCrawler, ...) — a Glue crawler in a
+              #     production data path is a governed contract violation
+              #     (DOC-5E35E14DAD05). The schema is a committed value in
+              #     mart_schema.py, discovered by no one.
+              - Sid: GlueDeclaredSchemaRegistration
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
+  GovernanceMartFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      # 2048 MB / 900 s: one run scans ~6.3k tracker records + ~1.4k documents
+      # (~25 MB corpus) and serialises seven Parquet tables in memory before any
+      # of them is written. Memory is sized for the pyarrow buffers, not the scan.
+      MemorySize: 2048
+      Timeout: 900
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt GovernanceMartRole.Arn
+      Description: DVP-TSK-649 scheduled full-refresh governance analytics mart job (DVP-PLN-001)
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          # T2 coordinates (BRD B3-R4). The Glue database `devops` was created as
+          # a T0 onboarding action WITH a LocationUri (DOC-04AF8A02A8F7).
+          MART_BUCKET: devops-agentcli-compute
+          MART_DATABASE: devops
+          # Read-only governed sources. Same env var names and the same
+          # ${EnvironmentSuffix} convention the owning Lambdas use, so the mart
+          # resolves gamma tables without inventing a second convention.
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
+          COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-mart
+
+  # DVP-TSK-703: Relocated to NX-2021-L/devops by DVP-TSK-703.
+  # The ad-hoc promotion transform, the platform health monitor, their
+  # schedule, permission, IAM roles and the two DVP-TSK-635 burstable-CPU
+  # alarms now live in that repo. They operate on data.jreese.net -- the
+  # Trino catalog, the hive.adhoc namespace and EC2 i-0f3a4d5aa1c11dd86 --
+  # which is platform, not a projection of the governance ontology.
+  # The governance mart STAYS here: BRD B3-R4 assigns its projection logic
+  # and schema to enceladus because that schema IS such a projection.
+  # See NX-2021-L/devops infrastructure/aws/{lambda,iam,eventbridge,cloudwatch}/.
+
+  GovernanceMartSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-governance-mart-daily${EnvironmentSuffix}"
+      Description: "DVP-TSK-649: daily 06:00 UTC full refresh of the governance analytics mart. Schedule-only by design — never per-mutation."
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      # DISABLED in gamma, on purpose. MART_BUCKET and MART_DATABASE are the
+      # unsuffixed production values (devops-agentcli-compute, devops) because the
+      # mart's warehouse is a single governed T2 namespace -- there is no gamma
+      # Glue database, and creating one is a T0 onboarding action, not something a
+      # deploy should do implicitly. So a gamma copy of this function firing on a
+      # schedule would overwrite PRODUCTION Parquet and re-register PRODUCTION Glue
+      # tables. Leaving the gamma rule disabled means the function can still be
+      # invoked by hand for testing, deliberately and with someone watching, but
+      # never fires itself into prod data.
+      State: !If [IsGamma, DISABLED, ENABLED]
+      Targets:
+        - Arn: !GetAtt GovernanceMartFunction.Arn
+          Id: governance-mart-daily
+
+  GovernanceMartPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Ref GovernanceMartFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GovernanceMartSchedule.Arn
+
+  GovernanceAuditStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref GovernanceAuditFunction
+      BatchSize: 25
+      MaximumBatchingWindowInSeconds: 30
+      StartingPosition: LATEST
+      Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Rules
+  # ---------------------------------------------------------------------------
+
+  EnceladusMcpCodeLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
+
+  # ENC-TSK-J13 (ENC-ISS-455): enceladus-checkout-auto — the sole documented prod
+  # EventBridge orphan (created out-of-band via CLI for ENC-FTR-037). ADOPTED via
+  # `create-change-set --change-set-type IMPORT` (resource-import-checkout-auto.json)
+  # BEFORE any normal compute deploy. A plain deploy that ADDs this rule fails closed
+  # at AWS::Events::Rule "already exists" (the enceladus-monitoring UPDATE_ROLLBACK
+  # class); import first. Literal prod-only name (Condition: IsProduction) — no gamma
+  # sibling exists. DeletionPolicy/UpdateReplacePolicy: Retain so a stack op never
+  # deletes the live auto-checkout schedule. Properties mirror live EXACTLY for a
+  # clean Import/no-op change-set (rate(5 minutes), ENABLED, target the -auto Lambda).
+  # NOTE: the events->lambda AWS::Lambda::Permission is NOT importable and stays
+  # out-of-band (ENC-ISS-394 precedent); only the rule is adopted here.
+  # After import, J14 drops the audit's documented-exception for enceladus-checkout-auto.
+
+  EnceladusMcpCodeGammaLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
+
+  # ---------------------------------------------------------------------------
+  # ENC-ISS-306 / ENC-TSK-I24: Adopt the prod enceladus-mcp-code QUALIFIED `live`
+  # Lambda Function URL so the Sev1-safe (alias-qualified) public surface for
+  # mcp.jreese.net is stack-managed and cannot be silently deleted.
+  #
+  # WHY this resource exists (ENC-ISS-306): the function also has an UNqualified
+  # Function URL (Qualifier=NONE -> $LATEST). When CloudFront E3IRO1VSMFENCC
+  # (mcp.jreese.net) points its origin at that unqualified URL, any
+  # update-function-code is an instant prod traffic switch -> the 2026-04-25 Sev1.
+  # The fix repoints CloudFront to the QUALIFIED `live` URL (this resource ->
+  # alias `live` -> a published version) and DELETES the unqualified URL. This
+  # resource codifies the good qualified URL so it survives + cannot drift away.
+  #
+  # ADOPTED OUT-OF-BAND (import-first, like EnceladusMcpCodeGammaFunction above):
+  # the physical Function URL already exists (udal3ytbj4ndsxre3yq26qnfoa0jxnaq...).
+  # It is brought under management via `create-change-set --change-set-type IMPORT`
+  # (see resource-import-mcp-code-url-iss306.json) BEFORE any normal compute
+  # deploy. NOTE: the ENC-ISS-386 orphan guard only scans AWS::Lambda::Function,
+  # so a normal deploy of this Url before import fails closed at
+  # AWS::EarlyValidation::ResourceExistenceCheck (non-destructive). Import first.
+  #
+  # Literal prod-only name (Condition: IsProduction) — the gamma stack owns
+  # enceladus-mcp-code-gamma separately, so this must not render there.
+  #
+  # DeletionPolicy/UpdateReplacePolicy: Retain — never delete/replace the live
+  # prod URL from a stack op (CloudFront origin depends on its domain).
+  #
+  # The `live` ALIAS is deliberately NOT codified here: AWS::Lambda::Alias requires
+  # FunctionVersion, which ops moves on every mcp-code promotion; a CFN-pinned
+  # version would revert prod to a stale version on the next compute deploy
+  # (the ENC-ISS-313 / PLN-047 CFN-stomp class). The Url references the alias by
+  # name ("live") and the alias stays operationally managed.
+  # ---------------------------------------------------------------------------
+
+  # --- end ENC-TSK-O59 / ENC-ISS-648 forward-port ------------------------------
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn

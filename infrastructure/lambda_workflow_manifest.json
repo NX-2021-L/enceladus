@@ -117,6 +117,18 @@
       "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
     },
     {
+      "function_name": "devops-governance-mart",
+      "lambda_dir": "backend/lambda/governance_mart",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/governance_mart/deploy.sh",
+      "package_extra_files": [
+        "mart_schema.py",
+        "mart_source.py",
+        "mart_project.py",
+        "mart_refresh.py"
+      ]
+    },
+    {
       "function_name": "devops-graph-query-api",
       "lambda_dir": "backend/lambda/graph_query_api",
       "workflow_file": ".github/workflows/_deploy.yml",
@@ -129,16 +141,16 @@
       "deploy_script": "backend/lambda/graph_sync/deploy.sh"
     },
     {
-      "function_name": "devops-opensearch-indexer",
-      "lambda_dir": "backend/lambda/opensearch_indexer",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/opensearch_indexer/deploy.sh"
-    },
-    {
       "function_name": "devops-opensearch-backfill",
       "lambda_dir": "backend/lambda/opensearch_backfill",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/opensearch_backfill/deploy.sh"
+    },
+    {
+      "function_name": "devops-opensearch-indexer",
+      "lambda_dir": "backend/lambda/opensearch_indexer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/opensearch_indexer/deploy.sh"
     },
     {
       "function_name": "devops-project-service",
@@ -232,16 +244,22 @@
       "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
     },
     {
-      "function_name": "enceladus-lifecycle-service",
-      "lambda_dir": "backend/lambda/lifecycle_service",
+      "function_name": "enceladus-handoff-consolidation-engine",
+      "lambda_dir": "backend/lambda/handoff_consolidation_engine",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
+      "deploy_script": "backend/lambda/handoff_consolidation_engine/deploy.sh"
     },
     {
       "function_name": "enceladus-id-service",
       "lambda_dir": "backend/lambda/id_service",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/id_service/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-lifecycle-service",
+      "lambda_dir": "backend/lambda/lifecycle_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
     },
     {
       "function_name": "enceladus-mcp-code",
@@ -268,12 +286,6 @@
       "lambda_dir": "backend/lambda/memory_consolidation",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-handoff-consolidation-engine",
-      "lambda_dir": "backend/lambda/handoff_consolidation_engine",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/handoff_consolidation_engine/deploy.sh"
     },
     {
       "function_name": "enceladus-neo4j-backup",
@@ -324,6 +336,12 @@
       "lambda_dir": "backend/lambda/user_preferences_api",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/user_preferences_api/deploy.sh"
+    },
+    {
+      "function_name": "escalation-decision-authorizer",
+      "lambda_dir": "backend/lambda/escalation_decision_authorizer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
     }
   ]
 }
