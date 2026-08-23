@@ -42,9 +42,14 @@ jobs:
           print(f'  entities: {list(d[\"entities\"].keys())}')
           "
 
+      # ENC-TSK-O83: the guard now parses 02-compute.yaml structurally
+      # instead of scanning raw text, so it needs PyYAML. No earlier step in
+      # this job imports yaml, so provision it here (same scoped-install
+      # pattern as the env-parity step below).
       - name: Verify Lambda architecture parity
         run: |
           set -euo pipefail
+          python3 -m pip install --quiet pyyaml
           python3 tools/verify_lambda_arch_parity.py
 
       - name: Test Lambda package architecture parity guard (ENC-TSK-E19)
