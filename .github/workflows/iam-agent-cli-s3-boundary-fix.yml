@@ -53,15 +53,20 @@ on:
         default: true
       read_scope:
         description: >
-          What replaces the shadowing Deny. `none` keeps today's effective posture
-          (no S3 read anywhere) and leaves CLAUDE.md to be corrected instead.
-          `jreese-net` re-scopes the Deny so enceladus's own bucket is readable,
-          making the documented capability true. io's call -- see ENC-ISS-659.
+          What replaces the shadowing Deny. `artifacts` (DEFAULT) opens the
+          build-artifact prefix only -- BRD section 8 point 1 becomes satisfiable
+          while agent-documents/ objects stay denied, so the raw-S3 path around
+          governed documents.get stays closed (ENC-ISS-640 class). `none` keeps
+          today's effective posture (no S3 read anywhere) and leaves CLAUDE.md to
+          be corrected instead. `jreese-net` opens the WHOLE bucket, which does
+          re-open that raw-S3 path -- prefer `artifacts` unless whole-bucket read
+          is genuinely intended. io's call -- see ENC-ISS-659.
         type: choice
         options:
+          - artifacts
           - none
           - jreese-net
-        default: none
+        default: artifacts
         required: true
       reason:
         description: "Why this run is dispatched (audit trail)"
@@ -161,16 +166,45 @@ jobs:
             --resource-arns "arn:aws:s3:::jreese-net/lambda-artifacts/probe" \
             --query 'EvaluationResults[0].EvalDecision' --output text)
           echo "s3:GetObject on s3://jreese-net/lambda-artifacts/ -> ${decision}"
-          if [ "${{ inputs.read_scope }}" = "jreese-net" ]; then
-            if [ "${decision}" != "allowed" ]; then
-              echo "::error::read_scope=jreese-net was requested but the read is still ${decision}. The Deny still shadows AllowMinimalReads."
-              exit 1
-            fi
-            echo "The CLAUDE.md claim of baseline S3 reads is now TRUE."
-          else
-            if [ "${decision}" = "allowed" ]; then
-              echo "::error::read_scope=none was requested but the read is allowed. This run widened access it was not asked to widen."
-              exit 1
-            fi
-            echo "::notice::read_scope=none -- enceladus-agent-cli still has no S3 read. The project CLAUDE.md must stop claiming it does; ENC-TSK-P02 carries that edit."
-          fi
+          # ENC-TSK-P05: three scopes, three different expected outcomes. This
+          # was a two-way branch that treated anything other than jreese-net as
+          # "must be denied" -- which would have failed a CORRECT artifacts run.
+          case "${{ inputs.read_scope }}" in
+            artifacts)
+              if [ "${decision}" != "allowed" ]; then
+                echo "::error::read_scope=artifacts was requested but the artifact read is ${decision}. BRD section 8 point 1 is still unsatisfiable."
+                exit 1
+              fi
+              echo "Artifact reads reachable — BRD section 8 point 1 is now satisfiable."
+
+              # THE CONTROL THAT MAKES THE SCOPING DECISION VERIFIABLE, not merely
+              # intended. artifacts exists precisely so agent-documents/ stays
+              # unreachable by raw S3; if that is not true, the scope bought
+              # nothing over jreese-net and re-opened the ENC-ISS-640 path.
+              doc_decision=$(aws iam simulate-principal-policy \
+                --policy-source-arn "${user_arn}" --action-names s3:GetObject \
+                --resource-arns "arn:aws:s3:::jreese-net/agent-documents/probe" \
+                --query 'EvaluationResults[0].EvalDecision' --output text)
+              echo "s3:GetObject on s3://jreese-net/agent-documents/ -> ${doc_decision}"
+              if [ "${doc_decision}" = "allowed" ]; then
+                echo "::error::agent-documents/ is readable by raw S3. read_scope=artifacts must NOT open the docstore — this re-opens the governed-read bypass (ENC-ISS-640 class)."
+                exit 1
+              fi
+              echo "Docstore objects remain unreachable by raw S3 — governed documents.get stays the only path."
+              ;;
+            jreese-net)
+              if [ "${decision}" != "allowed" ]; then
+                echo "::error::read_scope=jreese-net was requested but the read is still ${decision}. The Deny still shadows AllowMinimalReads."
+                exit 1
+              fi
+              echo "::warning::read_scope=jreese-net grants WHOLE-BUCKET read, which includes agent-documents/ and re-opens a raw-S3 path around governed documents.get (ENC-ISS-640 class). read_scope=artifacts is the narrower option."
+              echo "The CLAUDE.md claim of baseline S3 reads is now TRUE."
+              ;;
+            *)
+              if [ "${decision}" = "allowed" ]; then
+                echo "::error::read_scope=none was requested but the read is allowed. This run widened access it was not asked to widen."
+                exit 1
+              fi
+              echo "::notice::read_scope=none -- enceladus-agent-cli still has no S3 read. The project CLAUDE.md must stop claiming it does; ENC-TSK-P02 carries that edit."
+              ;;
+          esac
