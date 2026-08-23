@@ -342,6 +342,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -483,6 +490,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -550,6 +564,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -605,6 +626,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -655,6 +683,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -799,6 +834,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-scoring-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -883,6 +925,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-id-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -922,6 +971,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -967,6 +1023,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1019,6 +1082,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1059,6 +1129,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1111,6 +1188,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1151,6 +1235,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1200,6 +1291,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1242,6 +1340,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1286,6 +1391,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1333,6 +1445,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1412,6 +1531,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1490,6 +1616,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1526,6 +1659,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1567,6 +1707,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1611,6 +1758,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1666,6 +1820,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-mcp-streaming-gateway${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1751,6 +1912,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-user-preferences-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1786,6 +1954,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1830,6 +2005,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1864,6 +2046,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-opensearch-backfill${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -1898,6 +2087,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2000,6 +2196,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2048,6 +2251,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2094,6 +2304,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-memory-consolidation${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2153,6 +2370,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-handoff-consolidation-engine${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2206,6 +2430,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-unlearning${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2266,6 +2497,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2316,6 +2554,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-stale-checkout-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2423,6 +2668,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2534,6 +2786,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2618,6 +2877,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-percolation-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2706,6 +2972,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-corpus-entropy-engine${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2810,6 +3083,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -2910,6 +3190,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-arc-walk-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -7308,6 +7595,13 @@ Resources:
     Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: enceladus-mcp-code-gamma
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -7499,6 +7793,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-recompute-governance${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -7588,6 +7889,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -7826,6 +8134,13 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-rhythm-cycle${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -8239,6 +8554,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
@@ -8553,6 +8875,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"

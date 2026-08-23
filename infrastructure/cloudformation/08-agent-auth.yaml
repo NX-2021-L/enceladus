@@ -64,6 +64,8 @@ Conditions:
   # ENC-FTR-074 Ph2: only grant the authorizer secretsmanager:GetSecretValue (and enable the
   # internal-key principal path) when an internal-key secret id/ARN is supplied.
   HasInternalKeySecret: !Not [!Equals [!Ref InternalKeySecretId, ""]]
+  # ENC-TSK-O91 (ENC-TSK-P23): gates the structured JSON LoggingConfig to gamma.
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
 
 Resources:
 
@@ -98,6 +100,13 @@ Resources:
   PreTokenLambda:
     Type: AWS::Lambda::Function
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-agent-pretoken${EnvironmentSuffix}"
       Description: >
         ENC-FTR-074 Ph1 V3_0 pre-token generation trigger. On
@@ -361,6 +370,13 @@ Resources:
   SecretRotationLambda:
     Type: AWS::Lambda::Function
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-agent-m2m-rotation${EnvironmentSuffix}"
       Description: >
         ENC-FTR-074 Ph1 Secrets Manager rotation Lambda for the enceladus-agent-m2m client secret
@@ -529,6 +545,13 @@ Resources:
   AgentAuthorizerLambda:
     Type: AWS::Lambda::Function
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-agent-authorizer${EnvironmentSuffix}"
       Description: >
         ENC-FTR-074 Ph2 REQUEST-type HTTP API Lambda authorizer. Discriminates three principal
@@ -917,6 +940,13 @@ Resources:
   AgentSelftestLambda:
     Type: AWS::Lambda::Function
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-agent-selftest${EnvironmentSuffix}"
       Description: >
         ENC-FTR-074 Ph2 echo backend for the Tier 0 / Tier 1 authorizer self-test routes. Returns
