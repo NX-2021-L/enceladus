@@ -109,6 +109,70 @@ jobs:
             echo "api_name=${api_name}"
           } >> "${GITHUB_OUTPUT}"
 
+      # ENC-TSK-P01 / ENC-ISS-657 — CROSS-STACK ORDERING GATE.
+      #
+      # 03-api.yaml's EscalationDecisionAuthorizerInvokePermission references a
+      # Lambda created by the COMPUTE stack (escalation-decision-authorizer*) by
+      # a plain !Sub string, not an imported Export -- so CloudFormation has no
+      # way to know this stack must wait. Both stacks deploy on independent
+      # workflows off the same push. On 2026-08-23 the API stack won the race
+      # (run 32615617807 vs 32615617794), the permission CREATE_FAILED on
+      # "Function not found", and the rollback could not delete the authorizer
+      # it had just created because the routes already referenced it -- leaving
+      # an orphaned live Authorizer outside CloudFormation management and every
+      # subsequent deploy failing on "Authorizer name must be unique".
+      #
+      # Two assertions, cheapest first. Waiting on the compute stack is not
+      # sufficient on its own: the stack can be UPDATE_COMPLETE from an earlier
+      # run that predates the function. So the function's existence is asserted
+      # directly -- that is the actual precondition.
+      - name: Wait for the compute stack, then assert the authorizer Lambda exists (ENC-ISS-657)
+        run: |
+          set -euo pipefail
+          compute_stack="${{ steps.params.outputs.compute_stack_name }}"
+          authorizer_fn="escalation-decision-authorizer${ENVIRONMENT_SUFFIX}"
+
+          echo "Waiting for ${compute_stack} to leave any in-progress state..."
+          deadline=$(( SECONDS + 1800 ))
+          while : ; do
+            status=$(aws cloudformation describe-stacks \
+              --region "${AWS_REGION}" --stack-name "${compute_stack}" \
+              --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+            case "${status}" in
+              *_IN_PROGRESS)
+                if [ "${SECONDS}" -ge "${deadline}" ]; then
+                  echo "::error::${compute_stack} still ${status} after 30 minutes. Refusing to plan the API stack into a moving target."
+                  exit 1
+                fi
+                echo "  ${compute_stack}: ${status} — waiting 20s"
+                sleep 20
+                ;;
+              NOT_FOUND)
+                echo "::error::Compute stack ${compute_stack} does not exist. The API stack references resources it creates."
+                exit 1
+                ;;
+              *)
+                echo "  ${compute_stack}: ${status}"
+                break
+                ;;
+            esac
+          done
+
+          # A rolled-back compute stack may not carry the function this stack
+          # needs. Say so plainly rather than discovering it at apply.
+          case "${status}" in
+            *ROLLBACK*|*FAILED*)
+              echo "::warning::${compute_stack} is ${status}. The Lambda assertion below is what decides whether this deploy can proceed."
+              ;;
+          esac
+
+          echo "Asserting ${authorizer_fn} exists..."
+          if ! aws lambda get-function --function-name "${authorizer_fn}" \
+                 --region "${AWS_REGION}" --query 'Configuration.FunctionArn' --output text; then
+            echo "::error::${authorizer_fn} does not exist yet. 03-api.yaml's EscalationDecisionAuthorizerInvokePermission would CREATE_FAILED on 'Function not found', and the resulting rollback would orphan the authorizer (ENC-ISS-657). Let the compute stack deploy first, then re-run this workflow."
+            exit 1
+          fi
+
       - name: Create API stack change-set (no execute)
         id: changeset
         run: |
