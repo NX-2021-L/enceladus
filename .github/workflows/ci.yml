@@ -144,6 +144,42 @@ jobs:
           python3 tools/cfn_deploy_role_reach_guard.py
           python3 -m unittest tools.test_cfn_deploy_role_reach_guard
 
+      # ENC-TSK-P15 / ENC-ISS-669: ProjectJsonSyncRule's Name carries
+      # ${EnvironmentSuffix} like every other EventBridge rule in
+      # 02-compute.yaml, while its Target Arn hardcodes the PRODUCTION
+      # devops-json-to-parquet-transformer Lambda with no suffix. Only
+      # Condition: IsProduction stops a gamma rendering of that rule from
+      # invoking the production devops Lambda from gamma -- a direct
+      # violation of the standing directional isolation ruling (gamma READS
+      # devops prod; gamma NEVER WRITES into it, and an invoke is a write).
+      # This guard sweeps every governed template for the same shape: a
+      # plane-suffixed-context resource whose invoke target hardcodes a
+      # literal, unsuffixed ARN with no declared exception.
+      - name: Cross-plane ARN isolation sweep (ENC-TSK-P15)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_cross_plane_arn_isolation.py
+          python3 -m unittest tools.test_verify_cross_plane_arn_isolation
+
+      # ENC-TSK-P15 AC-3/AC-4/AC-5 (ENC-ISS-669): the arm64 architecture
+      # contract enumerated ONE repository's CloudFormation template while
+      # the fleet spans two -- four production devops-owned Lambdas (plus a
+      # fifth, devops-io-devops-mcp, declared nowhere in devops's OWN
+      # functions.yaml either) were never in scope for any enceladus check.
+      # infrastructure/devops_lambda_ownership_snapshot.json is the
+      # pinned, hash-verified interim fix (enceladus CI cannot read the
+      # private devops repo at check time without a token); this step
+      # verifies that snapshot's own internal consistency every run --
+      # network-free, credential-free, so it always actually runs, unlike
+      # the AWS-credentialed cross-source reconciliation in
+      # verify_lambda_arch_parity.py --check-live-reconciliation (opt-in,
+      # not wired here -- see that flag's own help text for why).
+      - name: Devops Lambda ownership snapshot (ENC-TSK-P15)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_devops_ownership_snapshot.py
+          python3 -m unittest tools.test_verify_devops_ownership_snapshot
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail

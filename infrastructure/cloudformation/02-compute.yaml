@@ -3642,6 +3642,32 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt UnlearningSchedule.Arn
 
+  # ENC-TSK-P15 / ENC-ISS-669: Condition: IsProduction below is LOAD-BEARING,
+  # not incidental -- do not delete it while "tidying" this template.
+  #
+  # The Name carries ${EnvironmentSuffix} like every other EventBridge rule
+  # in this file, so at a glance this rule looks plane-generic. It is not:
+  # the Target Arn is a hardcoded, unsuffixed pointer at
+  # devops-json-to-parquet-transformer, a resource owned by the separate
+  # NX-2021-L/devops repo (not this one) that has no per-plane rendering and
+  # never will -- there is no "-gamma" counterpart to suffix the ARN to, and
+  # there never can be. If Condition: IsProduction is ever removed, this rule
+  # would also materialise on the gamma stack and invoke that SAME
+  # production Lambda from gamma -- a direct violation of the standing
+  # directional isolation ruling: gamma READS devops prod; gamma NEVER
+  # WRITES into it, and an invoke is a write. The Condition -- not the ARN --
+  # is the entire isolation mechanism here, which is exactly why it is
+  # called out explicitly instead of left to look redundant next to a
+  # plane-suffixed Name. Verified by tools/verify_cross_plane_arn_isolation.py
+  # on every PR, which fires this exact resource as a declared
+  # NOT_APPLICABLE_ON_PLANE exception (see
+  # tools/cross_plane_arn_isolation_exceptions.json) rather than silently
+  # skipping it.
+  #
+  # State: ENABLED here reflects the template's steady-state intent, but the
+  # LIVE rule is currently DISABLED out-of-band as a deliberate DVP-TSK-625
+  # harm-stop. Do not change State on this resource and do not re-enable the
+  # live rule as a side effect of this or any other CFN change.
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
     Condition: IsProduction
