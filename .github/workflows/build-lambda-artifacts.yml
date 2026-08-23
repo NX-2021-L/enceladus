@@ -1,19 +1,15 @@
 name: Build Lambda Artifacts
 
 on:
-  # TEMP-ENC-TSK-O87: branches widened to include v4/main so this workflow's
-  # AWS-free `build` job can serve as the observation harness for the
-  # aarch64-wheel negative control on a v4/main PR. Reverted to [main]-only
-  # before merge — see backend/lambda/escalation_decision_authorizer/requirements.txt.
   pull_request:
-    branches: [main, v4/main]
+    branches: [main]
     paths:
       - 'backend/lambda/**'
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
   push:
-    branches: [main, v4/main]
+    branches: [main]
     paths:
       - 'backend/lambda/**'
       - 'tools/package_lambda_artifact.sh'
@@ -44,10 +40,7 @@ jobs:
       - name: Parse manifest into matrix
         id: parse
         run: |
-          # TEMP-ENC-TSK-O87: scoped to the single poisoned function so the
-          # negative-control run stays cheap. Reverted to the full unfiltered
-          # select before merge.
-          matrix=$(jq -c '{include: [.functions[] | select(.function_name == "escalation-decision-authorizer") | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: (.package_extra_files // "")}]}' \
+          matrix=$(jq -c '{include: [.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: (.package_extra_files // "")}]}' \
             infrastructure/lambda_workflow_manifest.json)
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
           echo "Parsed matrix:" >&2
