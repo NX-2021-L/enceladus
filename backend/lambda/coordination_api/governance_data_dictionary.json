@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-23.2",
-  "updated_at": "2026-08-23T04:20:00Z",
-  "last_change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
+  "version": "2026-08-23.3",
+  "updated_at": "2026-08-23T21:53:00Z",
+  "last_change_summary": "ENC-TSK-O81: documented the governance mart's dead-man's-switch heartbeat (Enceladus/GovernanceMart MartLastSuccess), its success-path-only emission contract, the paired TreatMissingData:breaching missing-data alarm and Scheduler DLQ-depth alarm, and the namespace-scoped cloudwatch:PutMetricData grant on GovernanceMartRole.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8332,11 +8332,36 @@
         "type": "rule",
         "definition": "Scheduled FULL REFRESH, daily minimum, never event-driven. No EventBridge per-mutation trigger, no Glue crawler and no crawler launcher, no partition keys. Each run rebuilds every table from scratch and overwrites a single object per table at a constant key, so crawler concurrency is unreachable, partition explosion is impossible by construction, and the new-project sync gap cannot recur because the refresh scans ALL projects. The handler re-raises on error rather than returning 200: the daily series must stop drawing AND the invocation must fail, not one without the other."
       },
-      "change_governance": "Mart schema changes (adding a column, adding a table, widening a grain) are governed changes reviewed against the substitution test -- never incidental edits folded into an unrelated ETL change. devops owns the test; enceladus applies it."
+      "change_governance": "Mart schema changes (adding a column, adding a table, widening a grain) are governed changes reviewed against the substitution test -- never incidental edits folded into an unrelated ETL change. devops owns the test; enceladus applies it.",
+      "fields": {
+        "heartbeat": {
+          "type": "object",
+          "definition": "ENC-TSK-O81 dead-man's-switch. backend/lambda/governance_mart/lambda_function.py::_emit_heartbeat publishes CloudWatch metric Enceladus/GovernanceMart MartLastSuccess=1, dimensioned by FunctionName, from the SUCCESS PATH ONLY. This is the only signal that can detect a run that NEVER HAPPENED: an error-rate alarm and a failure metric structurally cannot, because a job that does not run emits no log line and no exit code. That failure mode is ENC-ISS-667, where a scheduled job stopped for fifteen days in silence.",
+          "namespace": "Enceladus/GovernanceMart",
+          "metric_name": "MartLastSuccess",
+          "dimensions": [
+            "FunctionName"
+          ],
+          "emission_contract": "Emitted only when the refresh genuinely landed. NOT emitted when refresh_mart raises (the handler re-raises so the invocation fails loudly), NOT on dry_run (nothing was written), and NOT when full_refresh_violations is non-empty (objects landed in the wrong shape). Deliberately NOT placed in a finally block. A heartbeat that can fire when the work did not land reconstructs the ENC-ISS-665 self-fulfilling-signal defect, where a freshness signal reported health because it was asked rather than because the work happened.",
+          "failure_semantics": "A PutMetricData failure is logged at [ERROR] and swallowed rather than raised: the refresh has already succeeded at that point, and turning a telemetry fault into a data outage is the wrong trade. The resulting failure mode is safe in the correct direction -- a missing datapoint breaches the alarm, which is a false alarm rather than a silent stop.",
+          "alarms": {
+            "GovernanceMartHeartbeatAlarm": "enceladus-governance-mart-heartbeat-missing{EnvironmentSuffix}. Namespace Enceladus/GovernanceMart, MetricName MartLastSuccess, Statistic Sum, Period 86400, EvaluationPeriods 1, Threshold 1, ComparisonOperator LessThanThreshold, TreatMissingData: BREACHING. TreatMissingData is the load-bearing property -- ABSENCE is the alarm condition, the inverse of every other alarm in 02-compute.yaml. Condition: IsGamma.",
+            "GovernanceMartScheduleDlqDepthAlarm": "enceladus-governance-mart-schedule-dlq-depth{EnvironmentSuffix}. Namespace AWS/SQS, MetricName ApproximateNumberOfMessagesVisible on devops-governance-mart-schedule-dlq{EnvironmentSuffix}, Statistic Maximum, Period 300, Threshold 0, ComparisonOperator GreaterThanThreshold, TreatMissingData: notBreaching. The heartbeat catches 'never ran'; this catches 'EventBridge Scheduler tried and could not deliver'. Condition: IsGamma."
+          },
+          "iam": "GovernanceMartRole policy HeartbeatMetricPublish grants cloudwatch:PutMetricData on Resource '*' narrowed by Condition StringEquals cloudwatch:namespace = Enceladus/GovernanceMart. PutMetricData carries no resource ARN in IAM -- the API is account-scoped -- so a namespace condition is the only available narrowing.",
+          "usage_guidance": "Do not emit this metric from any other code path or component. Its entire value is that its ABSENCE is trustworthy; a second emitter would make a missing datapoint ambiguous and silently disarm the alarm. ENC-TSK-O81 AC-1 requires the alarm be OBSERVED firing against a deliberately DISABLED schedule -- an alarm never seen red is not evidence that it works."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
   "change_log": [
+    {
+      "version": "2026-08-23.3",
+      "date": "2026-08-23",
+      "record": "ENC-TSK-O81",
+      "summary": "ENC-TSK-O81: documented the governance mart's dead-man's-switch heartbeat (Enceladus/GovernanceMart MartLastSuccess), its success-path-only emission contract, the paired TreatMissingData:breaching missing-data alarm and Scheduler DLQ-depth alarm, and the namespace-scoped cloudwatch:PutMetricData grant on GovernanceMartRole."
+    },
     {
       "version": "2026-08-23.1",
       "date": "2026-08-23",
