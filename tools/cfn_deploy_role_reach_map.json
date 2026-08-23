@@ -1,0 +1,454 @@
+{
+  "_doc": "ENC-TSK-O99 / ENC-ISS-660 -- resource-type reach map for the CloudFormation deploy role (enceladus-cloudformation-deploy-github-role). Consumed by tools/cfn_deploy_role_reach_guard.py.\n\nTHIS FILE HOLDS AWS FACTS, NOT OUR POLICY. The guard derives what the role is GRANTED from infrastructure/cloudformation/04-github-roles.yaml plus the checked-in iam-*patch*.yml workflows, so widening the role in a PR updates the guard in the same diff and there is no second ledger to drift. What lives here is the per-type knowledge the guard cannot infer: which IAM action creates the type, and what its ARN looks like.\n\nreach=verified -- tier 2. The guard renders each resource's ARN (per plane, honouring its CFN Condition) and requires the create action to be granted on it.\nreach=baseline -- tier 1. The type is classified as one this role manages today, but no ARN shape is mapped, so only the type is checked. Counted and reported in the guard's summary so the coverage limit is visible rather than mistaken for a clean bill of health.\n\nA type absent from this file FAILS the PR. That is the point: ENC-TSK-O80 introduced AWS::Glue::Database, every guard was green because no guard had an opinion, and the apply-time rollback reverted an unrelated SharedLayerArn parameter across the fleet (ENC-ISS-656).",
+  "_schema": {
+    "types.<AWS::Type>.reach": "verified | baseline",
+    "types.<AWS::Type>.create_actions": "IAM actions CloudFormation calls to create this type (tier 2)",
+    "types.<AWS::Type>.arn": "ARN template with {account} {region} {name} and any extra_fields (tier 2)",
+    "types.<AWS::Type>.name_property": "Property holding the physical name; dotted paths allowed (tier 2)",
+    "types.<AWS::Type>.extra_fields": "Extra ARN fields mapped to their defaults when the property is absent",
+    "types.<AWS::Type>.extra_properties": "Extra ARN field -> template property holding its value",
+    "types.<AWS::Type>.notes": "Why this classification, in prose"
+  },
+  "_exceptions_doc": "Dated, justified reach gaps that already existed when this guard landed (ENC-TSK-O99). The guard is a RATCHET: these do not fail the build, anything new does. An exception that stops firing -- because the reach was granted or the resource removed -- ALSO fails the build, so the list cannot rot the way an unreviewed allowlist always does. Every entry carries the record that owns closing it; an exception without an owner_record is debt with nobody's name on it.",
+  "types": {
+    "AWS::ApiGateway::Deployment": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGateway::Method": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGateway::Resource": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGateway::RestApi": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGateway::Stage": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGatewayV2::Api": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGatewayV2::Authorizer": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGatewayV2::Integration": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGatewayV2::Route": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::ApiGatewayV2::Stage": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::Application": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::ConfigurationProfile": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::Deployment": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::DeploymentStrategy": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::Environment": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppConfig::HostedConfigurationVersion": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppSync::Api": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppSync::ApiKey": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::AppSync::ChannelNamespace": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CloudFront::Distribution": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CloudFront::Function": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CloudFront::OriginAccessControl": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CloudWatch::Alarm": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CloudWatch::Dashboard": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CodeDeploy::Application": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::CodeDeploy::DeploymentGroup": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Cognito::UserPool": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Cognito::UserPoolClient": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Cognito::UserPoolDomain": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Cognito::UserPoolResourceServer": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::DynamoDB::Table": {
+      "reach": "verified",
+      "create_actions": [
+        "dynamodb:CreateTable"
+      ],
+      "arn": "arn:aws:dynamodb:{region}:{account}:table/{name}",
+      "name_property": "TableName",
+      "notes": "DynamoDBTableOps covers table/enceladus-* and table/devops-*; the gamma patch adds table/*-gamma."
+    },
+    "AWS::EC2::EIP": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::Instance": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::NatGateway": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::Route": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::RouteTable": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::SecurityGroup": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::SecurityGroupIngress": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::EC2::SubnetRouteTableAssociation": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Events::Rule": {
+      "reach": "verified",
+      "create_actions": [
+        "events:PutRule"
+      ],
+      "arn": "arn:aws:events:{region}:{account}:rule/{name}",
+      "name_property": "Name",
+      "notes": "EventBridgeRuleOps covers rule/devops-*, rule/enceladus-* and rule/on-project-json-sync*."
+    },
+    "AWS::Glue::Database": {
+      "reach": "verified",
+      "create_actions": [
+        "glue:CreateDatabase"
+      ],
+      "arn": "arn:aws:glue:{region}:{account}:database/{name}",
+      "name_property": "DatabaseInput.Name",
+      "notes": "THE ENC-ISS-660 RESOURCE. Absent from v4/main right now because ENC-TSK-O95 reverted it; mapped in advance so ENC-TSK-O80's re-land is verified by this guard rather than by an apply-time rollback."
+    },
+    "AWS::IAM::InstanceProfile": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::IAM::Policy": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::IAM::Role": {
+      "reach": "verified",
+      "create_actions": [
+        "iam:CreateRole"
+      ],
+      "arn": "arn:aws:iam::{account}:role/{name}",
+      "name_property": "RoleName",
+      "notes": "IAMRoleManagement covers role/devops-*, role/enceladus-* and role/auth-refresh*. A role named outside those prefixes is unreachable."
+    },
+    "AWS::Lambda::Alias": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Lambda::EventSourceMapping": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Lambda::Function": {
+      "reach": "verified",
+      "create_actions": [
+        "lambda:CreateFunction"
+      ],
+      "arn": "arn:aws:lambda:{region}:{account}:function:{name}",
+      "name_property": "FunctionName",
+      "notes": "LambdaComputeOps is Resource '*', so this tier-2 check is currently vacuous -- kept so that narrowing the Lambda grant later starts being checked automatically rather than silently."
+    },
+    "AWS::Lambda::Permission": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Lambda::Url": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Logs::LogGroup": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Logs::MetricFilter": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::Pipes::Pipe": {
+      "reach": "verified",
+      "create_actions": [
+        "pipes:CreatePipe"
+      ],
+      "arn": "arn:aws:pipes:{region}:{account}:pipe/{name}",
+      "name_property": "Name",
+      "notes": "PipesOps covers pipe/devops-* and pipe/enceladus-*."
+    },
+    "AWS::S3::Bucket": {
+      "reach": "verified",
+      "create_actions": [
+        "s3:CreateBucket"
+      ],
+      "arn": "arn:aws:s3:::{name}",
+      "name_property": "BucketName",
+      "notes": "Bucket-level reach is deliberately narrow: enceladus-ui-v2* and, since ENC-TSK-O98, devops-agentcli-compute-gamma. Production's out-of-band mart bucket is intentionally unreachable."
+    },
+    "AWS::S3::BucketPolicy": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::SNS::Subscription": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::SNS::Topic": {
+      "reach": "verified",
+      "create_actions": [
+        "sns:CreateTopic"
+      ],
+      "arn": "arn:aws:sns:{region}:{account}:{name}",
+      "name_property": "TopicName",
+      "notes": "SnsTopicOps covers enceladus-* and devops-* in us-west-2."
+    },
+    "AWS::SQS::Queue": {
+      "reach": "verified",
+      "create_actions": [
+        "sqs:CreateQueue"
+      ],
+      "arn": "arn:aws:sqs:{region}:{account}:{name}",
+      "name_property": "QueueName",
+      "notes": "SqsQueueOps covers enceladus-* and devops-*; the gamma patch adds devops-*-gamma*."
+    },
+    "AWS::Scheduler::Schedule": {
+      "reach": "verified",
+      "create_actions": [
+        "scheduler:CreateSchedule"
+      ],
+      "arn": "arn:aws:scheduler:{region}:{account}:schedule/{group}/{name}",
+      "name_property": "Name",
+      "extra_fields": {
+        "group": "default"
+      },
+      "extra_properties": {
+        "group": "GroupName"
+      },
+      "notes": "ENC-TSK-O98 found the gap this entry exists for: an already-granted TYPE whose ARN fell outside every granted pattern, because it sets no GroupName and so lands in the default group."
+    },
+    "AWS::Scheduler::ScheduleGroup": {
+      "reach": "verified",
+      "create_actions": [
+        "scheduler:CreateScheduleGroup"
+      ],
+      "arn": "arn:aws:scheduler:{region}:{account}:schedule-group/{name}",
+      "name_property": "Name",
+      "notes": "Scheduler groups are granted only for rhythm-* / enceladus-* prefixes plus the default group."
+    },
+    "AWS::SecretsManager::RotationSchedule": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    },
+    "AWS::SecretsManager::Secret": {
+      "reach": "baseline",
+      "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
+    }
+  },
+  "exceptions": [
+    {
+      "template": "01-data.yaml",
+      "logical_id": "CoordinationRequestsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "ProjectsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/projects",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "DocumentsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/documents",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "GovernancePoliciesTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "ComponentRegistryTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/component-registry",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "AgentComplianceViolationsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-compliance-violations",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "CoordinationDeadLetterTopic",
+      "type": "AWS::SNS::Topic",
+      "action": "sns:CreateTopic",
+      "arn": "arn:aws:sns:us-west-2:356364570033:coordination-dead-letter",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "CoordinationDeadLetterTopic",
+      "type": "AWS::SNS::Topic",
+      "action": "sns:CreateTopic",
+      "arn": "arn:aws:sns:us-west-2:356364570033:coordination-dead-letter-gamma",
+      "plane": "gamma",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "AgentSessionsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-sessions",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "AgentTypesTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-types",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "AgentCredentialsTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-credentials",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    },
+    {
+      "template": "01-data.yaml",
+      "logical_id": "GovernanceVersionTable",
+      "type": "AWS::DynamoDB::Table",
+      "action": "dynamodb:CreateTable",
+      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/governance-version",
+      "plane": "production",
+      "recorded": "2026-08-23",
+      "owner_record": "ENC-ISS-662",
+      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
+    }
+  ]
+}

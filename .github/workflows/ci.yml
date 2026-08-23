@@ -107,6 +107,18 @@ jobs:
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.
+      # ENC-TSK-O99 / ENC-ISS-660: nothing in CI had any notion of IAM REACH.
+      # ENC-TSK-O80 introduced an AWS::Glue::Database the CloudFormation deploy
+      # role cannot create; every guard was green, the apply failed, and the
+      # rollback reverted an unrelated SharedLayerArn :12 -> :10 across the
+      # fleet. A dry-run change-set does not substitute -- change-set CREATION
+      # succeeds regardless of execution-time permissions.
+      - name: CFN deploy-role reach guard (ENC-TSK-O99)
+        run: |
+          set -euo pipefail
+          python3 tools/cfn_deploy_role_reach_guard.py
+          python3 -m unittest tools.test_cfn_deploy_role_reach_guard
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail
