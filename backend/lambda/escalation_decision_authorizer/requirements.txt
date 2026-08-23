@@ -1,2 +1,11 @@
 PyJWT>=2.8.0,<3.0.0
 cryptography>=41.0.0
+# TEMP-ENC-TSK-O87: deliberate negative control — tbb publishes x86_64-only
+# wheels on PyPI (zero manylinux aarch64 distributions for any Python version,
+# verified via `pip download --platform manylinux2014_aarch64 --implementation cp
+# --python-version 3.12 --only-binary=:all: tbb`). This line is REVERTED before
+# merge; it exists only to prove the --only-binary=:all: guard in
+# .github/workflows/_build.yml / tools/package_lambda_artifact.sh converts a
+# missing-aarch64-wheel into a loud CI-time pip failure instead of a silent
+# invoke-time exec format error. Do not merge with this line present.
+tbb
