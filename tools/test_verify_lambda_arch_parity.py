@@ -182,5 +182,266 @@ class TestSharedLayerDeployScriptValidator(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-O83: structural selection + count-reconciliation coverage.
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_HEADER = "AWSTemplateFormatVersion: '2010-09-09'\nResources:\n"
+
+# Defect 1 regression: a function whose Environment.Variables block is large
+# enough that FunctionName/Runtime would have fallen outside the old
+# 40-line forward scan window. The structural parser doesn't scan a window
+# at all, so this must still be selected and evaluated.
+_BIG_ENV_VARS = "\n".join(
+    f"          VAR_{i:04d}: \"value-{i:04d}\"" for i in range(45)
+)
+TEMPLATE_BIG_ENV_FUNCTION = _TEMPLATE_HEADER + f"""\
+  BigEnvFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+{_BIG_ENV_VARS}
+      FunctionName: !Sub "big-env-function${{EnvironmentSuffix}}"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+"""
+
+# Defect 1 regression: a container-image function has no Runtime key at
+# all. The old parser required `function_name and runtime_line` to emit a
+# block, so this was silently dropped. It must now be selected (and, since
+# it genuinely has no runtime to check, flagged rather than ignored).
+TEMPLATE_CONTAINER_IMAGE_FUNCTION = _TEMPLATE_HEADER + """\
+  ContainerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "container-fn${EnvironmentSuffix}"
+      PackageType: Image
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Code:
+        ImageUri: "123456789012.dkr.ecr.us-west-2.amazonaws.com/repo:latest"
+"""
+
+TEMPLATE_EMPTY_RESOURCES = "AWSTemplateFormatVersion: '2010-09-09'\nResources: {}\n"
+
+TEMPLATE_TWO_CLEAN_FUNCTIONS = _TEMPLATE_HEADER + """\
+  FirstFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "first-fn${EnvironmentSuffix}"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+  SecondFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "second-fn${EnvironmentSuffix}"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+"""
+
+
+def _write_template(text: str) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(text)
+    return Path(fh.name)
+
+
+class TestStructuralLambdaSelection(unittest.TestCase):
+    """ENC-TSK-O83 Defect 1: structural YAML selection, not a 40-line window."""
+
+    def _parse(self, text: str):
+        path = _write_template(text)
+        try:
+            return vlap._parse_lambda_blocks(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_function_with_oversized_environment_block_is_selected(self):
+        """A function whose Environment.Variables block exceeds 40 lines before
+        FunctionName/Runtime must still be selected — no forward-scan window."""
+        blocks = self._parse(TEMPLATE_BIG_ENV_FUNCTION)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].resource_name, "BigEnvFunction")
+        self.assertEqual(blocks[0].function_name, "big-env-function")
+        self.assertEqual(
+            blocks[0].runtime, {"!If": ["IsGamma", "python3.12", "python3.11"]}
+        )
+
+    def test_container_image_function_without_runtime_is_selected(self):
+        """A container-image function has no Runtime key. It must be selected
+        (not silently dropped) even though it has nothing to check there —
+        and the CFN validator must flag the missing Runtime explicitly."""
+        blocks = self._parse(TEMPLATE_CONTAINER_IMAGE_FUNCTION)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].resource_name, "ContainerFunction")
+        self.assertIsNone(blocks[0].runtime)
+
+        errors = vlap._validate_cfn(blocks)
+        self.assertTrue(
+            any("missing Runtime" in e for e in errors),
+            f"Expected a missing-Runtime error, got: {errors}",
+        )
+
+    def test_gamma_literal_function_is_selected_but_skipped_from_validation(self):
+        """The one hardcoded -gamma FunctionName is selected structurally (it
+        counts toward the census) but intentionally exempt from _validate_cfn."""
+        text = _TEMPLATE_HEADER + """\
+  GammaLiteralFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: enceladus-mcp-code-gamma
+      Runtime: python3.12
+      Architectures:
+        - arm64
+"""
+        blocks = self._parse(text)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(vlap._validate_cfn(blocks), [])
+
+    def test_hardcoded_architecture_is_rejected(self):
+        text = _TEMPLATE_HEADER + """\
+  BadArchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "bad-arch-fn${EnvironmentSuffix}"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Architectures:
+        - arm64
+"""
+        blocks = self._parse(text)
+        errors = vlap._validate_cfn(blocks)
+        self.assertTrue(
+            any("hardcoded Architectures=[arm64]" in e for e in errors), errors
+        )
+
+    def test_real_compute_template_is_selected_and_passes(self):
+        """Smoke test against the real on-disk 02-compute.yaml."""
+        if not vlap.COMPUTE_TEMPLATE.is_file():
+            self.skipTest(f"Real template not present at {vlap.COMPUTE_TEMPLATE}")
+        blocks = vlap._parse_lambda_blocks(vlap.COMPUTE_TEMPLATE)
+        self.assertGreater(len(blocks), 0)
+        self.assertEqual(vlap._validate_cfn(blocks), [])
+
+
+class TestCountReconciliation(unittest.TestCase):
+    """ENC-TSK-O83 Defect 2: the count-reconciliation assertion."""
+
+    def test_matching_counts_produce_no_error(self):
+        path = _write_template(TEMPLATE_TWO_CLEAN_FUNCTIONS)
+        try:
+            blocks = vlap._parse_lambda_blocks(path)
+            self.assertEqual(len(blocks), 2)
+            self.assertEqual(vlap._validate_resource_count_reconciliation(blocks, path), [])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_undercount_is_caught_and_named(self):
+        """If the structural selector evaluates fewer resources than are
+        declared, the reconciliation assertion must fail and name the gap —
+        this is the actual defense against a silent-skip regression."""
+        path = _write_template(TEMPLATE_TWO_CLEAN_FUNCTIONS)
+        try:
+            blocks = vlap._parse_lambda_blocks(path)
+            truncated = blocks[:1]  # simulate a parser that dropped one function
+            errors = vlap._validate_resource_count_reconciliation(truncated, path)
+            self.assertTrue(errors, "Expected a reconciliation failure")
+            joined = "\n".join(errors)
+            self.assertIn("declared=2", joined)
+            self.assertIn("evaluated=1", joined)
+            dropped_name = (set(b.resource_name for b in blocks) - set(b.resource_name for b in truncated)).pop()
+            self.assertIn(dropped_name, joined)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_empty_resources_block_fails_not_passes(self):
+        """An empty Resources block must fail the guard end-to-end, not
+        silently pass because there was 'nothing to check'."""
+        path = _write_template(TEMPLATE_EMPTY_RESOURCES)
+        try:
+            with mock.patch.object(vlap, "COMPUTE_TEMPLATE", path), mock.patch.object(
+                sys, "argv", ["verify_lambda_arch_parity.py"]
+            ):
+                rc = vlap.main()
+            self.assertEqual(rc, 1, "Empty Resources block must fail the guard")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_real_manifest_and_template_counts_reconcile(self):
+        """Locks in the ENC-TSK-O83 identity on the real repo state:
+        declared_lambdas - gamma_skips == manifest_functions - cfn_managed_false.
+        """
+        if not vlap.COMPUTE_TEMPLATE.is_file() or not vlap.MANIFEST_PATH.is_file():
+            self.skipTest("Real template/manifest not present")
+        import json
+
+        blocks = vlap._parse_lambda_blocks(vlap.COMPUTE_TEMPLATE)
+        declared = vlap._count_declared_lambda_resources_by_text(vlap.COMPUTE_TEMPLATE)
+        self.assertEqual(declared, len(blocks))
+
+        gamma_skips = sum(1 for b in blocks if b.function_name.endswith("-gamma"))
+        manifest = json.loads(vlap.MANIFEST_PATH.read_text(encoding="utf-8"))
+        functions = manifest.get("functions", [])
+        cfn_managed_false = sum(1 for f in functions if f.get("cfn_managed") is False)
+
+        self.assertEqual(
+            declared - gamma_skips,
+            len(functions) - cfn_managed_false,
+            "declared Lambda resources minus the -gamma skip must equal "
+            "manifest functions minus cfn_managed:false entries",
+        )
+
+
+class TestManifestExpectationsAbsent(unittest.TestCase):
+    """ENC-TSK-O83 Defect 3: absent manifest expectations must fail, not skip."""
+
+    def _run_with_manifest(self, manifest_obj) -> list[str]:
+        import json
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as fh:
+            json.dump(manifest_obj, fh)
+            tmp_path = Path(fh.name)
+        try:
+            with mock.patch.object(vlap, "MANIFEST_PATH", tmp_path):
+                return vlap._validate_manifest_expectations()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def test_manifest_missing_expectations_entirely_fails(self):
+        """A manifest with no expected_architecture/expected_runtime keys at
+        all (malformed/truncated) must fail, not silently return []."""
+        errors = self._run_with_manifest({"functions": []})
+        self.assertTrue(
+            errors,
+            "A manifest missing expectations entirely must fail the guard, "
+            "not skip validation",
+        )
+
+    def test_manifest_with_correct_expectations_passes(self):
+        errors = self._run_with_manifest(
+            {
+                "expected_architecture": {"prod": "x86_64", "gamma": "arm64"},
+                "expected_runtime": {"prod": "python3.11", "gamma": "python3.12"},
+                "functions": [],
+            }
+        )
+        self.assertEqual(errors, [])
+
+    def test_real_manifest_has_expectations(self):
+        """Smoke test: the real on-disk manifest must carry both keys, or the
+        guard would now (correctly) fail CI."""
+        if not vlap.MANIFEST_PATH.is_file():
+            self.skipTest(f"Real manifest not present at {vlap.MANIFEST_PATH}")
+        errors = vlap._validate_manifest_expectations()
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -18,27 +18,24 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, NamedTuple, Optional
+from typing import Any, Dict, List, Optional
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
 SHARED_LAYER_DEPLOY = REPO_ROOT / "backend/lambda/shared_layer/deploy.sh"
 
-# Expected CFN conditional patterns for prod safety
-EXPECTED_ARCH_PATTERN = re.compile(
-    r"^\s*-\s*!If\s+\[IsGamma,\s*arm64,\s*x86_64\]\s*$"
-)
-EXPECTED_RUNTIME_PATTERN = re.compile(
-    r"^\s*Runtime:\s*!If\s+\[IsGamma,\s*python3\.12,\s*python3\.11\]\s*$"
-)
-
-# Patterns that indicate a hardcoded (non-conditional) architecture or runtime
-# Handles both inline [arm64] and YAML list "- arm64" forms
-HARDCODED_ARCH_INLINE = re.compile(r"^\s*Architectures:\s*\[(arm64|x86_64)\]\s*$")
-HARDCODED_ARCH_LIST = re.compile(r"^\s*-\s*(arm64|x86_64)\s*$")
-HARDCODED_RUNTIME = re.compile(r"^\s*Runtime:\s*(python3\.\d+)\s*$")
+# Expected structural values for prod safety. These are compared directly
+# against the parsed Properties.Runtime / Properties.Architectures values
+# (see LambdaResource below) rather than against raw template text, so
+# formatting differences (spacing, quoting, flow vs. block YAML) can't hide
+# or fabricate a violation.
+EXPECTED_RUNTIME_IF: Dict[str, list] = {"!If": ["IsGamma", "python3.12", "python3.11"]}
+EXPECTED_ARCH_IF_LIST: list = [{"!If": ["IsGamma", "arm64", "x86_64"]}]
 
 # Deploy script patterns
 DEPLOY_PROD_X86 = re.compile(
@@ -64,93 +61,212 @@ _ENC_TSK_E19_BLOCK_RE = re.compile(
 )
 
 
-class LambdaBlock(NamedTuple):
-    """A Lambda function block parsed from the CFN template."""
+class _CfnTagPreservingLoader(yaml.SafeLoader):
+    """SafeLoader that preserves CloudFormation short-form intrinsic tags.
+
+    PyYAML's SafeLoader raises yaml.constructor.ConstructorError on any tag
+    it doesn't recognize, and CFN templates are full of short-form
+    intrinsics (!Sub, !If, !Ref, !GetAtt, !Condition, !Equals, ...) that
+    aren't standard YAML. Registering a multi-constructor for the bare "!"
+    prefix means every such tag round-trips into an inspectable
+    {"!TagName": <value>} dict instead of blowing up the parse.
+    """
+
+
+def _construct_cfn_tag(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Node) -> Dict[str, Any]:
+    if isinstance(node, yaml.ScalarNode):
+        value: Any = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node)
+    elif isinstance(node, yaml.MappingNode):
+        value = loader.construct_mapping(node)
+    else:  # pragma: no cover - defensive, no other yaml.Node subclass exists
+        value = None
+    return {f"!{tag_suffix}": value}
+
+
+_CfnTagPreservingLoader.add_multi_constructor("!", _construct_cfn_tag)
+
+
+@dataclass
+class LambdaResource:
+    """A Lambda function resource selected structurally from Resources{}.
+
+    Replaces the old line-window LambdaBlock (ENC-TSK-O83): runtime and
+    architectures are the actual parsed Properties values (str, dict, list,
+    or None), not text scraped from a fixed-size window after the Type:
+    declaration -- so a large Environment.Variables block or a missing
+    Runtime key (container-image functions) can no longer push a function
+    out of view.
+    """
     resource_name: str
     function_name: str
+    runtime: Any
+    architectures: Any
     line_number: int
-    runtime_line: str
-    runtime_lineno: int
-    arch_line: str
-    arch_lineno: int
 
 
-def _parse_lambda_blocks(template_path: Path) -> List[LambdaBlock]:
-    """Parse Lambda function blocks from the CFN template."""
+def _load_cfn_document(template_path: Path) -> tuple[dict, str]:
+    text = template_path.read_text(encoding="utf-8")
+    document = yaml.load(text, Loader=_CfnTagPreservingLoader) or {}
+    return document, text
+
+
+def _resolve_function_name(raw: Any) -> str:
+    """Resolve a FunctionName property value (literal or !Sub) to a plain string."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict) and "!Sub" in raw:
+        sub_value = raw["!Sub"]
+        template = sub_value[0] if isinstance(sub_value, list) and sub_value else sub_value
+        if isinstance(template, str):
+            return template.replace("${EnvironmentSuffix}", "")
+    return ""
+
+
+def _resource_line_numbers(text: str) -> Dict[str, int]:
+    """Best-effort logical-ID -> 1-based line number map, via yaml.compose().
+
+    yaml.load() discards node position info once it constructs Python
+    objects. yaml.compose() stops one step earlier and keeps the Node tree
+    (with .start_mark), so we do a second, cheap pass purely to recover line
+    numbers for diagnostics. Never raises: a compose failure just means
+    error messages fall back to line 0, it doesn't affect resource selection.
+    """
+    line_numbers: Dict[str, int] = {}
+    try:
+        root = yaml.compose(text, Loader=_CfnTagPreservingLoader)
+    except yaml.YAMLError:
+        return line_numbers
+    if root is None or not hasattr(root, "value"):
+        return line_numbers
+    for key_node, value_node in root.value:
+        if getattr(key_node, "value", None) != "Resources":
+            continue
+        if not hasattr(value_node, "value"):
+            continue
+        for res_key_node, _res_value_node in value_node.value:
+            line_numbers[res_key_node.value] = res_key_node.start_mark.line + 1
+    return line_numbers
+
+
+_LAMBDA_TYPE_LINE_RE = re.compile(r"^\s*Type:\s*AWS::Lambda::Function\s*$")
+
+
+def _count_declared_lambda_resources_by_text(template_path: Path) -> int:
+    """Independent census of declared Lambda resources via a raw-text scan.
+
+    ENC-TSK-O83 AC2: deliberately does NOT reuse the YAML structural parser
+    below. The whole point of the count-reconciliation assertion is to catch
+    a defect in structural selection (an undercount, an exception silently
+    swallowed, an unexpected document shape) -- so the number it reconciles
+    against has to come from an independent method, not the same one being
+    checked. A raw grep for the `Type: AWS::Lambda::Function` line is about
+    as independent and as hard to accidentally break as it gets.
+    """
     lines = template_path.read_text(encoding="utf-8").splitlines()
-    blocks: List[LambdaBlock] = []
+    return sum(1 for line in lines if _LAMBDA_TYPE_LINE_RE.match(line))
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].rstrip()
 
-        # Find resource blocks that are Lambda functions
-        if line.strip().startswith("Type:") and "AWS::Lambda::Function" in line:
-            # Walk back to find the resource name
-            resource_name = ""
-            for j in range(i - 1, max(i - 10, -1), -1):
-                candidate = lines[j].rstrip()
-                if candidate and not candidate.startswith(" ") and not candidate.startswith("#"):
-                    break
-                if re.match(r"^  \w+.*:$", candidate):
-                    resource_name = candidate.strip().rstrip(":")
-                    break
+def _parse_lambda_blocks(template_path: Path) -> List[LambdaResource]:
+    """Structurally select every AWS::Lambda::Function resource in Resources{}.
 
-            # Find FunctionName, Runtime, and Architectures within this block
-            function_name = ""
-            runtime_line = ""
-            runtime_lineno = 0
-            arch_line = ""
-            arch_lineno = 0
+    ENC-TSK-O83: replaces the prior 40-line text-window scan, which walked
+    forward from each `Type: AWS::Lambda::Function` line and silently
+    dropped the function if FunctionName or Runtime hadn't appeared within
+    40 lines (large Environment.Variables blocks push both out of range) or
+    if Runtime was absent entirely (container-image functions). This walks
+    the parsed Resources mapping directly and selects every resource of
+    that Type, unconditionally -- there is no window to fall out of.
+    """
+    document, text = _load_cfn_document(template_path)
+    resources = document.get("Resources") or {}
+    line_numbers = _resource_line_numbers(text)
 
-            for k in range(i + 1, min(i + 40, len(lines))):
-                l = lines[k].rstrip()
-
-                if l.strip().startswith("FunctionName:"):
-                    fn_val = l.split("FunctionName:", 1)[1].strip()
-                    # Handle !Sub patterns
-                    sub_match = re.match(r"""!Sub\s+['"]([^'"]+)['"]""", fn_val)
-                    if sub_match:
-                        function_name = sub_match.group(1).replace(
-                            "${EnvironmentSuffix}", ""
-                        )
-                    else:
-                        function_name = fn_val.strip("'\"")
-
-                if l.strip().startswith("Runtime:"):
-                    runtime_line = l
-                    runtime_lineno = k + 1  # 1-based
-
-                if l.strip().startswith("Architectures:"):
-                    # The value might be on the same line or the next line
-                    if "[" in l:
-                        arch_line = l
-                        arch_lineno = k + 1
-                    elif k + 1 < len(lines):
-                        arch_line = lines[k + 1]
-                        arch_lineno = k + 2
-
-                # Stop at the next resource block
-                if k > i + 2 and re.match(r"^  \w+.*:", l) and not l.startswith("    "):
-                    break
-
-            if function_name and runtime_line:
-                blocks.append(LambdaBlock(
-                    resource_name=resource_name,
-                    function_name=function_name,
-                    line_number=i + 1,
-                    runtime_line=runtime_line,
-                    runtime_lineno=runtime_lineno,
-                    arch_line=arch_line,
-                    arch_lineno=arch_lineno,
-                ))
-        i += 1
-
+    blocks: List[LambdaResource] = []
+    for resource_name, resource in resources.items():
+        if not isinstance(resource, dict):
+            continue
+        if resource.get("Type") != "AWS::Lambda::Function":
+            continue
+        properties = resource.get("Properties") or {}
+        blocks.append(
+            LambdaResource(
+                resource_name=resource_name,
+                function_name=_resolve_function_name(properties.get("FunctionName")),
+                runtime=properties.get("Runtime"),
+                architectures=properties.get("Architectures"),
+                line_number=line_numbers.get(resource_name, 0),
+            )
+        )
     return blocks
 
 
-def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
-    """Validate that all CFN Lambda declarations use IsGamma conditionals."""
+def _validate_nonzero_declared_lambdas(template_path: Path) -> List[str]:
+    """Fail if the template declares zero Lambda resources at all.
+
+    The count-reconciliation assertion alone can't catch this degenerate
+    case: if nothing is declared, evaluated == declared == 0 and the counts
+    trivially reconcile even though there is nothing to check. ENC-TSK-O83:
+    "nothing to check" must be an explicit, visible failure -- never a
+    silent pass (the ENC-ISS-651 census class: 29 false clears from empty
+    lookup lists).
+    """
+    declared = _count_declared_lambda_resources_by_text(template_path)
+    if declared == 0:
+        return [
+            f"Zero AWS::Lambda::Function resources declared in "
+            f"{template_path.name} — the arch-parity guard has nothing to "
+            f"check. Treating this as a failure, not a vacuous pass."
+        ]
+    return []
+
+
+def _validate_resource_count_reconciliation(
+    blocks: List[LambdaResource], template_path: Path
+) -> List[str]:
+    """ENC-TSK-O83 AC2: fail when the structural selector's count doesn't
+    match an independently-derived census of declared Lambda resources.
+
+    This is what actually closes the vacuous-pass mode Defect 1 opened: a
+    parser that silently drops some functions (a bad filter, a swallowed
+    exception, an unanticipated document shape) would previously report
+    success on whatever subset it did see. Now the number evaluated must
+    equal the number declared, or the run fails with a name-level diff.
+    """
+    declared = _count_declared_lambda_resources_by_text(template_path)
+    evaluated = len(blocks)
+    if declared != evaluated:
+        document, _text = _load_cfn_document(template_path)
+        resources = document.get("Resources") or {}
+        declared_names = sorted(
+            name
+            for name, res in resources.items()
+            if isinstance(res, dict) and res.get("Type") == "AWS::Lambda::Function"
+        )
+        evaluated_names = sorted(b.resource_name for b in blocks)
+        missing = sorted(set(declared_names) - set(evaluated_names))
+        extra = sorted(set(evaluated_names) - set(declared_names))
+        return [
+            "Lambda resource count reconciliation FAILED: "
+            f"{declared} AWS::Lambda::Function resources declared in "
+            f"{template_path.name} (independent raw-text census) but "
+            f"{evaluated} were structurally selected and evaluated by the "
+            f"arch-parity guard.",
+            f"  declared={declared} evaluated={evaluated}",
+            f"  declared but NOT evaluated ({len(missing)}): {', '.join(missing) or '(none)'}",
+            f"  evaluated but NOT declared ({len(extra)}): {', '.join(extra) or '(none)'}",
+        ]
+    return []
+
+
+def _validate_cfn(blocks: List[LambdaResource]) -> List[str]:
+    """Validate that all CFN Lambda declarations use IsGamma conditionals.
+
+    ENC-TSK-O83: compares the parsed Properties.Runtime / .Architectures
+    values directly against the expected structural shape (EXPECTED_RUNTIME_IF
+    / EXPECTED_ARCH_IF_LIST) instead of regex-matching raw template text.
+    """
     errors: List[str] = []
 
     for block in blocks:
@@ -163,44 +279,45 @@ def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
         if block.function_name.endswith("-gamma"):
             continue
 
+        label = f"{block.function_name or block.resource_name} ({block.resource_name}, line {block.line_number})"
+
         # Check Runtime
-        if not EXPECTED_RUNTIME_PATTERN.match(block.runtime_line):
-            match = HARDCODED_RUNTIME.match(block.runtime_line.strip())
-            if match:
-                runtime_val = match.group(1)
+        if block.runtime != EXPECTED_RUNTIME_IF:
+            if isinstance(block.runtime, str):
                 errors.append(
-                    f"{block.function_name} (line {block.runtime_lineno}): "
-                    f"hardcoded Runtime={runtime_val}, expected "
+                    f"{label}: hardcoded Runtime={block.runtime}, expected "
                     f"!If [IsGamma, python3.12, python3.11]"
+                )
+            elif block.runtime is None:
+                errors.append(
+                    f"{label}: missing Runtime property (container-image "
+                    f"functions must still be explicitly exempted, not "
+                    f"silently skipped)"
                 )
             else:
                 errors.append(
-                    f"{block.function_name} (line {block.runtime_lineno}): "
-                    f"unexpected Runtime pattern: {block.runtime_line.strip()}"
+                    f"{label}: unexpected Runtime value: {block.runtime!r}, "
+                    f"expected !If [IsGamma, python3.12, python3.11]"
                 )
 
         # Check Architectures
-        if not EXPECTED_ARCH_PATTERN.match(block.arch_line):
-            inline_match = HARDCODED_ARCH_INLINE.match(block.arch_line.strip())
-            list_match = HARDCODED_ARCH_LIST.match(block.arch_line)
-            if inline_match:
-                arch_val = inline_match.group(1)
+        if block.architectures != EXPECTED_ARCH_IF_LIST:
+            if (
+                isinstance(block.architectures, list)
+                and len(block.architectures) == 1
+                and isinstance(block.architectures[0], str)
+            ):
                 errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"hardcoded Architectures=[{arch_val}], expected "
-                    f"!If [IsGamma, arm64, x86_64]"
+                    f"{label}: hardcoded Architectures=[{block.architectures[0]}], "
+                    f"expected !If [IsGamma, arm64, x86_64]"
                 )
-            elif list_match:
-                arch_val = list_match.group(1)
-                errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"hardcoded Architectures=[{arch_val}], expected "
-                    f"!If [IsGamma, arm64, x86_64]"
-                )
+            elif block.architectures is None:
+                errors.append(f"{label}: missing Architectures property")
             else:
                 errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"unexpected Architectures pattern: {block.arch_line.strip()}"
+                    f"{label}: unexpected Architectures value: "
+                    f"{block.architectures!r}, expected "
+                    f"[!If [IsGamma, arm64, x86_64]]"
                 )
 
     return errors
@@ -396,8 +513,19 @@ def _validate_manifest_expectations() -> List[str]:
     expected_arch = manifest.get("expected_architecture", {})
     expected_runtime = manifest.get("expected_runtime", {})
 
+    # ENC-TSK-O83 Defect 3: previously `return []` here — a manifest with no
+    # expected_architecture/expected_runtime keys at all (malformed,
+    # truncated, or a bad hand-edit) silently passed this check because
+    # there was "nothing to validate". That's the same vacuous-pass shape as
+    # Defects 1 and 2, just in a third place. Absent expectations must now
+    # fail, not skip.
     if not expected_arch or not expected_runtime:
-        return []  # No manifest expectations defined yet — skip
+        return [
+            "Manifest is missing expected_architecture and/or "
+            "expected_runtime keys entirely. A malformed or truncated "
+            "manifest must fail this guard, not silently skip validation "
+            "(ENC-TSK-O83)."
+        ]
 
     # Validate manifest expectations match the IsGamma conditional contract
     # The CFN pattern is: !If [IsGamma, <gamma_value>, <prod_value>]
@@ -431,6 +559,22 @@ def _validate_manifest_expectations() -> List[str]:
         )
 
     return errors
+
+
+def _manifest_architecture_exceptions(manifest: dict) -> Dict[str, Any]:
+    """Seam for ENC-TSK-O82 — not wired into any check yet.
+
+    ENC-TSK-O82 (lands after this task, ENC-PLN-086 Wave 2) will define a
+    two-class `architecture_exceptions` block in
+    infrastructure/lambda_workflow_manifest.json for functions intentionally
+    exempt from the IsGamma prod/gamma arch contract (distinct from the
+    single hardcoded `-gamma` literal skip in _validate_cfn above), and wire
+    exemption logic against the structural LambdaResource list this module
+    now produces via _parse_lambda_blocks(). This function only establishes
+    the read point — it deliberately does not define or enforce the
+    contract itself.
+    """
+    return manifest.get("architecture_exceptions", {})
 
 
 # ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
@@ -543,11 +687,24 @@ def main() -> int:
         return 1
 
     blocks = _parse_lambda_blocks(COMPUTE_TEMPLATE)
-    if not blocks:
-        print("[ERROR] No Lambda functions found in compute template")
-        return 1
 
     errors: List[str] = []
+
+    # ENC-TSK-O83: "nothing to check" must be an explicit failure, never a
+    # silent pass. Run before anything else so an empty or malformed
+    # Resources block can't slip through as a trivially-reconciled 0 == 0.
+    nonzero_errors = _validate_nonzero_declared_lambdas(COMPUTE_TEMPLATE)
+    if nonzero_errors:
+        errors.append("=== Lambda resource census violations ===")
+        errors.extend(nonzero_errors)
+
+    # ENC-TSK-O83 AC2: count-reconciliation assertion. Independently counts
+    # declared Lambda resources and fails when that count does not equal
+    # the number the structural selector actually evaluated.
+    reconciliation_errors = _validate_resource_count_reconciliation(blocks, COMPUTE_TEMPLATE)
+    if reconciliation_errors:
+        errors.append("=== Lambda resource count reconciliation violations ===")
+        errors.extend(reconciliation_errors)
 
     # Validate CFN declarations
     cfn_errors = _validate_cfn(blocks)
@@ -593,8 +750,9 @@ def main() -> int:
 
     print(
         f"[SUCCESS] Lambda architecture parity valid: "
-        f"{len(blocks)} CFN Lambdas use IsGamma conditionals "
-        f"(prod=x86_64/py3.11, gamma=arm64/py3.12)"
+        f"{len(blocks)} CFN Lambdas structurally selected and evaluated "
+        f"(count-reconciled against an independent census), all use "
+        f"IsGamma conditionals (prod=x86_64/py3.11, gamma=arm64/py3.12)"
     )
     return 0
 
