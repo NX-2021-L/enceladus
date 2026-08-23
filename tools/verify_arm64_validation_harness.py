@@ -207,6 +207,7 @@ REASON_CODES = {
     "config_read_error": "could not read the function's configuration (transient AWS error, throttling, etc.)",
     "wrong_architecture": "deployed Architectures does not match the expected arch -- wrong build target entirely",
     "no_commit_sha": "no --commit-sha supplied; the expected S3 artifact key cannot be resolved",
+    "artifact_name_unresolved": "the deployed function name has no entry in envs/<env>.yaml's function_name_map, so the artifact's source-directory basename cannot be resolved and the S3 key cannot be built (ENC-TSK-P06)",
     "artifact_missing": "the expected artifact object does not exist at the resolved S3 key",
     "permission_denied": "the calling identity is explicitly denied the AWS action needed to complete this check",
     "s3_read_error": "an S3 error occurred that is not a permission denial or a missing key",
@@ -535,10 +536,57 @@ def inspect_deployed_package(
         f"verified) match {expected_arch!r} -- no contrary evidence; {provenance_caveat}")
 
 
-def _artifact_key(function_name: str, expected_arch: str, py_version: str, commit_sha: str,
+def resolve_artifact_basename(function_name: str, env: str = "v4-gamma") -> Optional[str]:
+    """DEPLOYED function name -> the basename _build.yml actually writes.
+
+    ENC-TSK-P06. Point 1 built its S3 key from the DEPLOYED function name, but
+    .github/workflows/_build.yml names artifacts after the SOURCE DIRECTORY:
+
+        deployed  auth-refresh-gamma
+        artifact  lambda-artifacts/arm64-py3.12/auth_refresh-<sha>.zip
+
+    Hyphens vs underscores, plus the environment suffix, plus names that do not
+    correspond at all (devops-governance-mart-gamma <- governance_mart). So the
+    key was wrong for essentially every function, and point 1 could NEVER have
+    passed -- with or without the s3:GetObject grant.
+
+    Nobody could see it. Before the ENC-ISS-659 grant landed, point 1 returned
+    permission_denied and never reached the comparison, so the check's own
+    defect was hidden by the check being unable to run. It surfaced the instant
+    the permission existed, as a false artifact_missing FAIL.
+
+    A heuristic would be wrong: stripping the suffix and swapping punctuation
+    yields devops_governance_mart, not governance_mart. envs/<env>.yaml's
+    function_name_map is the authoritative source and already exists, so this
+    inverts it. Returns None when the function is unmapped, and the caller must
+    then report UNKNOWN rather than a FAIL -- an unresolvable name is something
+    we could not check, never evidence that the artifact is absent.
+    """
+    try:
+        import yaml  # noqa: PLC0415 - only needed on the live path
+    except ImportError:
+        return None
+    manifest = REPO_ROOT / "envs" / f"{env}.yaml"
+    if not manifest.is_file():
+        return None
+    try:
+        data = yaml.safe_load(manifest.read_text()) or {}
+    except Exception:  # noqa: BLE001 - a malformed env file must not crash the harness
+        return None
+    for source_dir, deployed in (data.get("function_name_map") or {}).items():
+        # one source dir can fan out to several deployed functions
+        for name in str(deployed).split(","):
+            if name.strip() == function_name:
+                return source_dir
+    return None
+
+
+def _artifact_key(artifact_basename: str, expected_arch: str, py_version: str, commit_sha: str,
                    key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT) -> str:
     # DOTTED scheme -- see module docstring "ARTIFACT TAG SCHEME".
-    return f"{key_prefix}/{expected_arch}-py{py_version}/{function_name}-{commit_sha}.zip"
+    # artifact_basename is the SOURCE DIRECTORY name, not the deployed function
+    # name -- see resolve_artifact_basename().
+    return f"{key_prefix}/{expected_arch}-py{py_version}/{artifact_basename}-{commit_sha}.zip"
 
 
 def _with_substitute(
@@ -581,6 +629,8 @@ def check_artifact_identity(
     lambda_client, s3_client, function_name: str, expected_arch: str, py_version: str,
     commit_sha: Optional[str], bucket: str = ARTIFACT_BUCKET_DEFAULT,
     key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT, *,
+    env: str = "v4-gamma",
+    artifact_basename: Optional[str] = None,
     downloader: Callable[[str], bytes] = _default_downloader,
     classify_so: Optional[Callable[[Path], Optional[str]]] = None,
 ) -> PointResult:
@@ -621,7 +671,20 @@ def check_artifact_identity(
                         reason_code="no_commit_sha"),
             lambda_client, function_name, expected_arch, downloader, classify_so)
 
-    key = _artifact_key(function_name, expected_arch, py_version, commit_sha, key_prefix)
+    # An explicit basename wins over the map: a caller that already knows which
+    # source directory built this function should not need envs/ on disk.
+    basename = artifact_basename or resolve_artifact_basename(function_name, env)
+    if basename is None:
+        return _with_substitute(
+            PointResult(1, "artifact_identity", UNKNOWN,
+                        f"{function_name!r} has no function_name_map entry in envs/{env}.yaml, so "
+                        f"the artifact's source-directory basename cannot be resolved. Reporting "
+                        f"UNKNOWN rather than a missing-artifact FAIL: an unresolvable name is "
+                        f"something we could not check, not evidence the artifact is absent.",
+                        reason_code="artifact_name_unresolved"),
+            lambda_client, function_name, expected_arch, downloader, classify_so)
+
+    key = _artifact_key(basename, expected_arch, py_version, commit_sha, key_prefix)
     try:
         obj = s3_client.get_object(Bucket=bucket, Key=key)
         body = obj["Body"].read()
@@ -1018,13 +1081,14 @@ def evaluate_function(
     expected_arch: str = "arm64", py_version: str = "3.12",
     commit_sha: Optional[str] = None, bucket: str = ARTIFACT_BUCKET_DEFAULT,
     key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT, invoke_payload: str = "{}",
+    env: str = "v4-gamma",
     repo: str = DEFAULT_REPO, ci_workflow: str = DEFAULT_CI_WORKFLOW,
     ci_step: str = DEFAULT_CI_STEP, negative_control_test: str = DEFAULT_NEGATIVE_CONTROL_TEST,
     ci_lookback: int = 50,
 ) -> FunctionReport:
     points = [
         check_artifact_identity(lambda_client, s3_client, function_name, expected_arch,
-                                 py_version, commit_sha, bucket, key_prefix),
+                                 py_version, commit_sha, bucket, key_prefix, env=env),
         check_layer_coherence(lambda_client, function_name),
         check_live_invocation(lambda_client, function_name, invoke_payload),
         check_integration_edge(function_name, {"lambda": lambda_client, "logs": logs_client}),
@@ -1047,6 +1111,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Expected deployed commit sha (40-hex) for point 1. Without it, point 1 is unknown.")
     p.add_argument("--bucket", default=ARTIFACT_BUCKET_DEFAULT)
     p.add_argument("--key-prefix", default=ARTIFACT_KEY_PREFIX_DEFAULT)
+    p.add_argument("--env", default="v4-gamma",
+                   help="Environment manifest under envs/ whose function_name_map maps the "
+                        "deployed function name back to the artifact's source-directory "
+                        "basename (ENC-TSK-P06).")
     p.add_argument("--invoke-payload", default="{}")
     p.add_argument("--profile", default=None)
     p.add_argument("--region", default="us-west-2")
@@ -1092,7 +1160,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             lambda_client=lambda_client, s3_client=s3_client, logs_client=logs_client,
             function_name=fn, expected_arch=args.arch, py_version=args.py_version,
             commit_sha=args.commit_sha, bucket=args.bucket, key_prefix=args.key_prefix,
-            invoke_payload=args.invoke_payload, repo=args.repo, ci_workflow=args.ci_workflow,
+            invoke_payload=args.invoke_payload, env=args.env,
+            repo=args.repo, ci_workflow=args.ci_workflow,
             ci_step=args.ci_step, negative_control_test=args.negative_control_test,
             ci_lookback=args.ci_lookback,
         )

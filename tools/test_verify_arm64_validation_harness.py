@@ -111,21 +111,24 @@ def test_point1_pass_when_digest_matches():
     digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
     lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": digest})
     s3 = FakeS3Client(objects={("bkt", "lambda-artifacts/arm64-py3.12/fn-abc123.zip"): body})
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt",
+                                             artifact_basename="fn")
     assert result.state == harness.PASS
 
 
 def test_point1_fail_on_digest_mismatch():
     lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": "wrong-digest"})
     s3 = FakeS3Client(objects={("bkt", "lambda-artifacts/arm64-py3.12/fn-abc123.zip"): b"other-bytes"})
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt",
+                                             artifact_basename="fn")
     assert result.state == harness.FAIL
 
 
 def test_point1_fail_on_wrong_architecture():
     lam = FakeLambdaClient(config={"Architectures": ["x86_64"], "CodeSha256": "irrelevant"})
     s3 = FakeS3Client()
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123",
+                                             artifact_basename="fn")
     assert result.state == harness.FAIL
     assert "not even the right build target" in result.detail
 
@@ -140,7 +143,8 @@ def test_point1_unknown_not_pass_when_no_commit_sha_given():
 def test_point1_unknown_not_pass_when_s3_access_denied():
     lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": "x"})
     s3 = FakeS3Client(get_error=Exception("AccessDenied: not authorized to perform: s3:GetObject"))
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123",
+                                             artifact_basename="fn")
     assert result.state == harness.UNKNOWN
     assert "denied" in result.detail.lower()
     assert result.reason_code == "permission_denied", (
@@ -152,7 +156,8 @@ def test_point1_unknown_not_pass_when_s3_access_denied():
 def test_point1_unknown_not_pass_when_config_read_fails():
     lam = FakeLambdaClient(config_error=Exception("Throttled"))
     s3 = FakeS3Client()
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123",
+                                             artifact_basename="fn")
     assert result.state == harness.UNKNOWN
 
 
@@ -544,7 +549,7 @@ def test_substitute_turns_a_blind_denial_into_a_real_fail():
     package is conclusive on its own and needs no S3 read to be true."""
     lam, body = _lambda_with_package({"pyarrow/lib.so": b"ELF"})
     result = harness.check_artifact_identity(
-        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123", artifact_basename="fn",
         downloader=lambda url: body,
         classify_so=_fake_classifier({"lib.so": "x86_64"}))
     assert result.state == harness.FAIL
@@ -580,7 +585,7 @@ def test_substitute_refuses_to_inspect_bytes_it_cannot_attribute():
     unattributed blob. Anything found in it is evidence about nothing."""
     lam, _ = _lambda_with_package({"native.so": b"ELF"})
     result = harness.check_artifact_identity(
-        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123", artifact_basename="fn",
         downloader=lambda url: b"different-bytes-entirely",
         classify_so=_fake_classifier({"native.so": "x86_64"}))
     assert result.substitute["reason_code"] == "deployed_package_digest_unverified"
@@ -595,7 +600,7 @@ def test_substitute_does_not_erase_the_permission_denied_aggregation():
     or the IAM fact those consumers count silently becomes a probe gap."""
     lam, body = _lambda_with_package({"handler.py": b"x"})
     result = harness.check_artifact_identity(
-        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123", artifact_basename="fn",
         downloader=lambda url: body, classify_so=_fake_classifier({}))
     assert result.reason_code == "permission_denied"
     report = harness.FunctionReport(function_name="fn", points=[result])
@@ -633,9 +638,47 @@ def test_primary_s3_path_still_passes_and_is_unaffected():
     digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
     lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": digest})
     s3 = FakeS3Client(objects={("bkt", "lambda-artifacts/arm64-py3.12/fn-abc123.zip"): body})
-    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt")
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt",
+                                             artifact_basename="fn")
     assert result.state == harness.PASS
     assert result.substitute is None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P06 -- point 1 built its S3 key from the DEPLOYED function name, but
+# _build.yml names artifacts after the SOURCE DIRECTORY. The key was wrong for
+# essentially every function, so point 1 could never have passed with or
+# without the s3:GetObject grant -- and nobody could see it, because it returned
+# permission_denied and never reached the comparison. The check's own defect was
+# hidden by the check being unable to run.
+# ---------------------------------------------------------------------------
+
+def test_artifact_basename_is_the_source_dir_not_the_deployed_name():
+    """A heuristic would be wrong, which is why this reads the real map."""
+    assert harness.resolve_artifact_basename("auth-refresh-gamma") == "auth_refresh"
+    # the case that kills punctuation-swapping: a heuristic yields
+    # devops_governance_mart, which does not exist.
+    assert harness.resolve_artifact_basename("devops-governance-mart-gamma") == "governance_mart"
+    # comma fan-out: one source dir, several deployed functions
+    assert harness.resolve_artifact_basename(
+        "enceladus-checkout-service-auto-gamma") == "checkout_service"
+
+
+def test_unmapped_function_is_unknown_never_a_missing_artifact_fail():
+    """An unresolvable name is something we could not check. Reporting it as
+    artifact_missing would be a fabricated FAIL -- the mirror image of the
+    fabricated PASS this harness exists to prevent."""
+    assert harness.resolve_artifact_basename("no-such-function-anywhere") is None
+    lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": "x"})
+    result = harness.check_artifact_identity(
+        lam, FakeS3Client(), "no-such-function-anywhere", "arm64", "3.12", "abc123")
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "artifact_name_unresolved"
+
+
+def test_artifact_key_uses_the_basename_it_is_given():
+    key = harness._artifact_key("auth_refresh", "arm64", "3.12", "deadbeef")
+    assert key == "lambda-artifacts/arm64-py3.12/auth_refresh-deadbeef.zip"
 
 
 if __name__ == "__main__":
