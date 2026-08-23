@@ -343,5 +343,21 @@
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
     }
-  ]
+  ],
+  "architecture_exceptions": {
+    "prod": {
+      "temporary": {
+        "x86_64": [],
+        "rationale": "BRD DOC-56CFA21523C1 section 6.2 / io Q2 ruling on ENC-PLN-082: expected_architecture.prod flips to arm64, and this class populates with the not-yet-migrated tranche, at the START of Phase 5 -- simultaneously, so CI never asserts a state the fleet contradicts. Phase 5 belongs to ENC-PLN-082, not this task (ENC-PLN-086 Wave 2, gamma-only, no production mutation). Production is 28/28 x86_64 today and Phase 5 has not started, so this class is correctly empty -- not because no exceptions are anticipated, but because the tranched migration that would populate it hasn't begun. See ENC-TSK-O82 worklog for the full reasoning.",
+        "terminal_state": "empty",
+        "ratchet": "may only shrink"
+      },
+      "permanent": {
+        "x86_64": [],
+        "rationale": "SnapStart-retained functions per BRD section 4.4; arm64 SnapStart is Java-only. Seeded empty per ENC-TSK-O72's closed ruling: ENC-TSK-O70's census (28/28 in-scope production functions, cross-verified against a 231-function account-wide scan, corroborated by a 3-leg positive control) found 0 functions with SnapStart.ApplyOn != \"None\". Disposition counts: drop_and_flip=0, retain_and_hold=0, not_applicable=28 -- retain_and_hold's precondition (SnapStart currently enabled) is false for all 28, so the permanent class has no member to seed. This is a positive proof of emptiness, not an absence of evidence.",
+        "terminal_state": "stable",
+        "ratchet": "additions require an io ruling"
+      }
+    }
+  }
 }
