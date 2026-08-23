@@ -268,6 +268,24 @@ ATTESTED = "attested"
 ATTESTABLE_REASON_CODES = {
     "external_dependency_declared",
     "external_dependency_owned_devops",
+    # ENC-TSK-P18 / ENC-ISS-668. Admitted ONLY on an exact, whole-string ARN
+    # match against EXTERNAL_LAYER_ARN_ALLOWLIST. Deliberately NOT accompanied
+    # by "cross_account_layer_unverifiable": that code means "this layer lives
+    # in another account and nothing declares it," which is precisely the
+    # un-attested case the negative control exists to keep un-attested. If a
+    # future edit ever adds cross_account_layer_unverifiable to this set, the
+    # allowlist stops being an allowlist -- every cross-account layer would
+    # inherit the exemption, which is the vacuous pass this task was opened to
+    # prevent.
+    "external_dependency_cross_account_allowlisted",
+    # ENC-TSK-P19 / ENC-ISS-665. A declared OWNERSHIP ceiling, resolved from
+    # infrastructure/devops_lambda_ownership_snapshot.json by exact name
+    # match: this plane does not own the function, so this plane's harness has
+    # no standing to assert its downstream contract. Same shape as
+    # external_dependency_owned_devops one layer up. The point is still
+    # UNKNOWN and still never PASS -- ATTESTED names it as declared rather
+    # than leaving it as undifferentiated silence.
+    "not_applicable_on_plane_devops_owned",
 }
 
 # Machine-readable reason codes -- every PointResult carries one of these, not
@@ -324,6 +342,15 @@ REASON_CODES = {
     # to the named ATTESTED verdict (see ATTESTABLE_REASON_CODES).
     "external_dependency_declared": "the layer is a documented external (commonly cross-account) dependency whose architecture is recorded as a declared fact in EXTERNAL_LAYER_REGISTRY, not independently verified by downloading and inspecting its content -- still unknown, never promoted to pass, but distinguishable from a genuine layer_not_found mystery",
     "external_dependency_owned_devops": "the layer is owned by a separate repo/team (NX-2021-L/devops), recorded in EXTERNAL_LAYER_REGISTRY so it is never folded into a generic layer_not_found -- still unknown, never promoted to pass",
+    # ENC-TSK-P18 / ENC-ISS-668 -- cross-account ceiling, split into the two
+    # cases that must NOT share a bucket. Both are UNKNOWN; only the first is
+    # attestable. Splitting them is the whole point: "another account owns
+    # this and we have declared which one" is a legible ceiling, while
+    # "another account owns this and nothing declares it" is still an open
+    # question, and neither is the same thing as "GetLayerVersion returned
+    # ResourceNotFound and we do not know why" (layer_not_found).
+    "external_dependency_cross_account_allowlisted": "the layer ARN matched EXACTLY (whole-string, never by prefix or wildcard) an entry in EXTERNAL_LAYER_ARN_ALLOWLIST, which records its architecture as a DECLARED fact sourced from infrastructure/component_dependency_closure.json -- a documented cross-account permission ceiling, still unknown and never promoted to pass, but attestable",
+    "cross_account_layer_unverifiable": "the layer is owned by a DIFFERENT AWS account than the function that attaches it, and no exact-ARN entry in EXTERNAL_LAYER_ARN_ALLOWLIST declares it -- a real cross-account ceiling (so: not a plain layer_not_found mystery) but an UNDECLARED one, so it is deliberately NOT attestable and sinks the function to plain unknown",
     "layer_download_error": "the layer's presigned content URL could not be downloaded",
     "layer_content_unclassifiable": "the layer contains compiled objects that could not be architecture-classified",
     "bad_layer_zip": "the downloaded layer content is not a valid zip archive",
@@ -335,6 +362,9 @@ REASON_CODES = {
     "invoked_ok": "the function was invoked and returned without a FunctionError",
     # point 4 -- integration_edge
     "no_probe_registered": "no per-function integration probe is registered -- function-level state says nothing about the downstream contract",
+    # ENC-TSK-P19 / ENC-ISS-665 -- declared ownership, not a skip.
+    "not_applicable_on_plane_devops_owned": "the function is declared, by EXACT name match, in infrastructure/devops_lambda_ownership_snapshot.json's functions[] -- it is owned by NX-2021-L/devops, so enceladus deploy validation has no standing to assert its downstream contract. NOT_APPLICABLE_ON_PLANE: the gate still fires and still records an answer; it is simply a declared answer rather than a probed one. Never a silent skip and never a pass",
+    "devops_ownership_declaration_unreadable": "the devops ownership declaration (infrastructure/devops_lambda_ownership_snapshot.json) could not be read or parsed, so NO function can be resolved to NOT_APPLICABLE_ON_PLANE this run -- a missing declaration is an unknown, never a silent pass and never an assumed non-devops classification (ENC-TSK-P15 AC-3/AC-5 discipline, reused)",
     "probe_error": "the registered probe raised an exception",
     "probe_invalid_state": "the registered probe returned a state outside pass/fail/unknown",
     "probe_result": "the registered probe ran to completion and returned this state",
@@ -943,10 +973,134 @@ EXTERNAL_LAYER_REGISTRY: Dict[str, dict] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-P18 / ENC-ISS-668 -- EXACT-MATCH cross-account layer ARN allowlist.
+#
+# WHY A SECOND TABLE, NEXT TO EXTERNAL_LAYER_REGISTRY, RATHER THAN A WIDER
+# ONE: EXTERNAL_LAYER_REGISTRY above is keyed by layer NAME, because the facts
+# it records (who owns this artifact family, what the vendor's own naming
+# convention declares about its architecture) are properties of the family.
+# That is the right key for what it does and it is left exactly as ENC-TSK-P09
+# built it. It is the WRONG key for an exemption that lifts a function's
+# verdict, because a name key admits every version and every account that ever
+# publishes that name. This table is keyed by the COMPLETE ARN -- region,
+# account, name AND version -- and is matched with `==` on the whole string.
+# No prefix. No wildcard. No normalization, no case-folding, no
+# version-stripping: `arn:...:147` does not admit `arn:...:1470`, and
+# `arn:...:147:anything` is simply a different string that is not in the dict.
+#
+# SOURCE OF TRUTH: infrastructure/component_dependency_closure.json, the
+# governed closure ENC-TSK-P11 landed one commit ago, which already declares
+# this dependency with its architecture:
+#
+#     {"id": "appconfig-extension-arm64", "kind": "external_layer",
+#      "declared_architecture": "arm64",
+#      "layer_arn": "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147"}
+#
+# Reading it there rather than re-typing it here is the same "reused, not
+# reinvented" discipline ENC-TSK-P15's ownership snapshot established: a
+# second hand-maintained copy of a governed fact is a second thing that can
+# drift, and a drifted exemption table is an exemption nobody reviewed.
+#
+# FAIL-CLOSED: if the closure cannot be read or parsed, this returns an EMPTY
+# allowlist. Every cross-account layer then resolves to the NON-attestable
+# cross_account_layer_unverifiable and every affected function sinks to plain
+# UNKNOWN. The failure direction is deliberate -- an unreadable declaration
+# must never widen what is exempt.
+# ---------------------------------------------------------------------------
+
+COMPONENT_CLOSURE_PATH = REPO_ROOT / "infrastructure" / "component_dependency_closure.json"
+
+# A COMPLETE layer version ARN and nothing less. An allowlist key that does not
+# match this is rejected at load time rather than stored: a key like
+# "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64"
+# (no version) or one ending in "*" is an attempt -- accidental or not -- to
+# express a prefix/wildcard exemption in a table whose entire contract is that
+# it has none.
+_FULL_LAYER_VERSION_ARN_RE = re.compile(
+    r"^arn:aws:lambda:[a-z0-9-]+:(\d{12}):layer:[A-Za-z0-9_-]+:(\d+)$")
+
+_ALLOWLIST_CACHE: Dict[str, Dict[str, dict]] = {}
+
+
+def _layer_arn_account(layer_arn: str) -> Optional[str]:
+    """The 12-digit owner account from a complete layer version ARN, or None if
+    the ARN is not one. Used to tell a cross-account ceiling apart from a
+    same-account failure -- never used to grant an exemption."""
+    m = _FULL_LAYER_VERSION_ARN_RE.match(layer_arn or "")
+    return m.group(1) if m else None
+
+
+def load_external_layer_arn_allowlist(
+    path: Optional[Path] = None, *, use_cache: bool = True,
+) -> Dict[str, dict]:
+    """Build the exact-ARN allowlist from the governed component closure.
+
+    Every dependency with kind == "external_layer" that carries a complete
+    layer_arn contributes exactly ONE key: that ARN, verbatim. Entries whose
+    ARN is not a complete layer version ARN are skipped, not coerced.
+    """
+    key = str(path or COMPONENT_CLOSURE_PATH)
+    if use_cache and key in _ALLOWLIST_CACHE:
+        return _ALLOWLIST_CACHE[key]
+
+    allowlist: Dict[str, dict] = {}
+    try:
+        raw = json.loads(Path(key).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - fail closed: no closure => no exemptions
+        if use_cache:
+            _ALLOWLIST_CACHE[key] = allowlist
+        return allowlist
+
+    for component in raw.get("components", []) or []:
+        if not isinstance(component, dict):
+            continue
+        for dep in component.get("dependencies", []) or []:
+            if not isinstance(dep, dict) or dep.get("kind") != "external_layer":
+                continue
+            arn = dep.get("layer_arn")
+            if not isinstance(arn, str) or not _FULL_LAYER_VERSION_ARN_RE.match(arn):
+                # Not a complete ARN -> not admissible as an exact-match key.
+                continue
+            allowlist[arn] = {
+                "declared_arch": dep.get("declared_architecture"),
+                "owner_account": _layer_arn_account(arn),
+                "dependency_id": dep.get("id"),
+                "component": component.get("name"),
+                "owning_repository": dep.get("owning_repository"),
+                "source": "infrastructure/component_dependency_closure.json",
+            }
+    if use_cache:
+        _ALLOWLIST_CACHE[key] = allowlist
+    return allowlist
+
+
+def lookup_allowlisted_layer_arn(
+    layer_arn: str, allowlist: Optional[Dict[str, dict]] = None,
+) -> Optional[dict]:
+    """EXACT whole-string lookup. This function is intentionally three lines
+    long and intentionally boring: there is no startswith, no fnmatch, no
+    rsplit-the-version-off, no .lower(), no .strip(). Any of those would turn
+    one reviewed exemption into an open-ended family of unreviewed ones.
+    """
+    if allowlist is None:
+        allowlist = load_external_layer_arn_allowlist()
+    return allowlist.get(layer_arn)
+
+
 def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                         downloader: Callable[[str], bytes],
-                        classify_so: Callable[[Path], Optional[str]]) -> Tuple[str, str, str]:
-    """Returns (state, reason_code, note) for one attached layer."""
+                        classify_so: Callable[[Path], Optional[str]],
+                        self_account: Optional[str] = None) -> Tuple[str, str, str]:
+    """Returns (state, reason_code, note) for one attached layer.
+
+    `self_account` is the AWS account that owns the FUNCTION attaching this
+    layer (parsed from its FunctionArn by check_layer_coherence). It is used
+    for exactly one thing: telling "this layer lives in someone else's
+    account" apart from "GetLayerVersion failed and we do not know why."
+    When it is None the cross-account branch is skipped entirely rather than
+    guessed at -- an unknown reference point cannot establish a difference.
+    """
     # arn:aws:lambda:REGION:ACCOUNT:layer:NAME:VERSION
     parts = layer_arn.rsplit(":", 2)
     if len(parts) != 3:
@@ -967,6 +1121,51 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
         # permission_denied/layer_not_found branches so a documented external
         # dependency is never folded into either of those undifferentiated
         # buckets.
+        # ENC-TSK-P18 / ENC-ISS-668, FIRST because it is the most specific and
+        # the only REVIEWED signal: an exact, whole-string ARN match against
+        # the governed component closure. This is the single branch that can
+        # produce an attestable cross-account code, and it can only fire for
+        # an ARN a human put in infrastructure/component_dependency_closure.json.
+        allowlisted = lookup_allowlisted_layer_arn(layer_arn)
+        if allowlisted is not None:
+            declared = allowlisted.get("declared_arch")
+            arch_note = ""
+            if declared:
+                arch_note = (
+                    f" Declared arch={declared!r} vs function arch={function_arch!r} "
+                    f"(informational only -- a declared fact is not inspected content, so "
+                    f"this point stays unknown and is never promoted to pass).")
+            return UNKNOWN, "external_dependency_cross_account_allowlisted", (
+                f"{layer_arn}: GetLayerVersion could not complete ({msg}); this EXACT ARN is "
+                f"declared in {allowlisted.get('source')} as dependency "
+                f"{allowlisted.get('dependency_id')!r} of component "
+                f"{allowlisted.get('component')!r} (owner account "
+                f"{allowlisted.get('owner_account')}, owning_repository="
+                f"{allowlisted.get('owning_repository')!r}). A cross-account permission "
+                f"ceiling that has been reviewed and written down -- matched whole-string, "
+                f"never by prefix or wildcard.{arch_note}")
+
+        # ENC-TSK-P18 -- and SECOND, deliberately ahead of the name-keyed
+        # register below. A layer sitting in another account that no exact-ARN
+        # entry declares is an UNDECLARED ceiling. Letting it fall through to
+        # EXTERNAL_LAYER_REGISTRY would let it inherit an attestable code from
+        # a NAME its ARN happens to share -- e.g. a future
+        # AWS-AppConfig-Extension-Arm64:999 nobody has reviewed collecting
+        # :147's exemption. That is the silent over-admission ENC-TSK-P18's
+        # negative control exists to keep impossible. Still distinct from
+        # layer_not_found (AC-0: a ceiling reads as a ceiling), still UNKNOWN,
+        # and pointedly NOT in ATTESTABLE_REASON_CODES.
+        layer_account = _layer_arn_account(layer_arn)
+        if layer_account and self_account and layer_account != self_account:
+            return UNKNOWN, "cross_account_layer_unverifiable", (
+                f"{layer_arn}: GetLayerVersion could not complete ({msg}); the layer is owned "
+                f"by account {layer_account}, not this function's account {self_account} -- a "
+                f"genuine cross-account ceiling, NOT a missing layer. No exact-ARN entry in "
+                f"the governed component closure declares it, so it is NOT attestable: this "
+                f"function's overall verdict stays plain unknown until either the ARN is "
+                f"declared in infrastructure/component_dependency_closure.json or the layer "
+                f"becomes independently readable.")
+
         registered = EXTERNAL_LAYER_REGISTRY.get(layer_name)
         if registered is not None:
             arch_note = ""
@@ -1048,6 +1247,13 @@ def check_layer_coherence(
 
     actual_arch = (cfg.get("Architectures") or ["unknown"])[0]
     layers = cfg.get("Layers") or []
+    # ENC-TSK-P18: the account that owns THIS function, used only as the
+    # reference point for "is that layer in a different account." Parsed from
+    # the live FunctionArn; None (and therefore no cross-account claim) when
+    # the response does not carry one.
+    function_arn = cfg.get("FunctionArn") or ""
+    arn_fields = function_arn.split(":")
+    self_account = arn_fields[4] if len(arn_fields) >= 6 and arn_fields[4].isdigit() else None
 
     if not layers:
         return PointResult(2, "layer_coherence", PASS,
@@ -1060,7 +1266,8 @@ def check_layer_coherence(
     unknown_reason: Optional[str] = None
     for layer in layers:
         arn = layer.get("Arn", "")
-        state, reason, note = _inspect_one_layer(lambda_client, arn, actual_arch, downloader, classify_so)
+        state, reason, note = _inspect_one_layer(lambda_client, arn, actual_arch, downloader,
+                                                  classify_so, self_account)
         notes.append(note)
         if state == FAIL and fail_reason is None:
             fail_reason = reason
@@ -1302,8 +1509,13 @@ def _evaluate_schedule_window(
         f"harness run started -- ENC-ISS-665 remedies 1 and 4)")
 
 
-@register_probe("devops-recompute-governance", "devops-recompute-governance-gamma",
-                "devops-governance-mart", "devops-governance-mart-gamma")
+# ENC-TSK-P19: this probe is NO LONGER registered directly. It checks one half
+# of BRD 8.4's worked example -- "on its schedule" -- and ENC-TSK-P19 AC-0
+# requires the other half, "the mart must PRODUCE a mart," which schedule
+# freshness cannot see: a run can fire on time, log nothing alarming, and
+# still write no mart. _probe_governance_mart below composes the two and is
+# what PROBE_REGISTRY now maps those four names to. This function is unchanged
+# and still directly unit-tested.
 def _probe_governance_mart_schedule(
     function_name: str, clients: Dict[str, object], max_age_hours: float = 26.0, *,
     poll_attempts: int = 3, poll_interval_s: float = 2.0,
@@ -1368,6 +1580,266 @@ def _probe_governance_mart_schedule(
     return UNKNOWN, f"{detail} (gave up after {poll_attempts} attempt(s), still unterminated)"
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-P19 / ENC-ISS-665 -- probe coverage, and declared devops ownership.
+#
+# The first fleet run registered probes for 2 of 51 functions, so point 4 was
+# unknown for 49. ENC-TSK-P08 is NOT the fix for that and must not be read as
+# one: re-reading its diff, it repaired the self-fulfilling freshness signal
+# (remedy 1, run-start anchoring), the mid-flight log race (remedies 2 and 4),
+# and added the cross-point contradiction assertion (remedy 3). Every one of
+# those makes the EXISTING probe honest. None of them registers a new probe,
+# and DOC-868BC8DFB349 warns explicitly against assuming otherwise.
+# ---------------------------------------------------------------------------
+
+# The two routes the escalation decision authorizer must guard. BOTH, not
+# either: an authorizer wired to /approve but not /deny leaves the deny path
+# unauthenticated, and a function-level check ("does the Lambda exist, does it
+# invoke") cannot see the difference -- which is exactly BRD 8.4's "function
+# green is not system green."
+ESCALATION_ROUTE_SUFFIXES = ("/approve", "/deny")
+ESCALATION_ROUTE_MARKER = "/escalations/"
+
+MART_BUCKET_DEFAULT = "devops-agentcli-compute"
+MART_KEY_PREFIX_DEFAULT = "warehouse/devops/"
+MART_DATA_OBJECT_NAME = "data.parquet"
+
+DEVOPS_OWNERSHIP_SNAPSHOT_RELPATH = "infrastructure/devops_lambda_ownership_snapshot.json"
+
+
+def _devops_owned_names() -> Tuple[Optional[set], List[str]]:
+    """(names, errors) from ENC-TSK-P15's pinned ownership snapshot.
+
+    Reuses tools/verify_lambda_arch_parity.py's loader and predicate rather
+    than reimplementing them -- ENC-TSK-P15's explicit instruction is not to
+    build a second ownership mechanism, and a second one would be a second
+    thing that can disagree. Imported lazily so this harness keeps importing
+    cleanly (and its self-tests keep running) in an environment where that
+    module's own optional dependencies are unavailable.
+
+    THE PREDICATE IS EXACT NAME MATCH, NEVER A PREFIX. enceladus owns dozens
+    of its own functions whose names begin with "devops-" (devops-governance-
+    mart, devops-recompute-governance, ... -- both declared in this repo's
+    infrastructure/lambda_workflow_manifest.json with
+    owning_repository=NX-2021-L/enceladus). A startswith("devops-") predicate
+    would hand every one of them a NOT_APPLICABLE exemption and switch off
+    point 4 for the very functions ENC-ISS-667 caught running dead.
+    """
+    try:
+        sys.path.insert(0, str(TOOLS_DIR))
+        import verify_lambda_arch_parity as _arch_parity  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"could not import the ownership predicate: {_err(exc)}"]
+    try:
+        snapshot, errors = _arch_parity._load_devops_ownership_snapshot()
+        if errors or snapshot is None:
+            return None, errors or ["ownership snapshot could not be loaded"]
+        return _arch_parity._devops_owned_function_names(snapshot), []
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"ownership predicate raised: {_err(exc)}"]
+
+
+def _resolve_devops_ownership(function_name: str) -> Optional[PointResult]:
+    """A declared point-4 answer for a NX-2021-L/devops-owned function, or None.
+
+    io's standing ruling, applied at the harness level: a devops-owned
+    resource is outside enceladus deploy validation. The answer is DECLARED --
+    NOT_APPLICABLE_ON_PLANE, carrying the ownership rationale and the file it
+    came from -- rather than probed or skipped.
+
+    THE GATE STILL FIRES. This is not `if devops: return` and it is not a name
+    removed from a list. It runs on every function, every run, and writes a
+    recorded verdict either way, because a removed check is silence, and
+    silence is what let a mart run dead and a schedule stop for fifteen days
+    (DVP-ISS-103, ENC-ISS-667) with every dashboard green. An unreadable
+    declaration is likewise an UNKNOWN that says so, never an assumed
+    "not devops" that quietly resumes probing someone else's estate.
+    """
+    names, errors = _devops_owned_names()
+    if names is None:
+        return PointResult(
+            4, "integration_edge", UNKNOWN,
+            f"the devops ownership declaration ({DEVOPS_OWNERSHIP_SNAPSHOT_RELPATH}) could not "
+            f"be read, so {function_name!r} cannot be resolved to NOT_APPLICABLE_ON_PLANE or "
+            f"confidently probed as enceladus-owned: {'; '.join(errors)}",
+            reason_code="devops_ownership_declaration_unreadable")
+    if function_name not in names:  # EXACT match. Never a prefix.
+        return None
+    return PointResult(
+        4, "integration_edge", UNKNOWN,
+        f"NOT_APPLICABLE_ON_PLANE: {function_name!r} appears by EXACT name match in "
+        f"{DEVOPS_OWNERSHIP_SNAPSHOT_RELPATH}'s functions[], the pinned, hash-verified "
+        f"declaration of NX-2021-L/devops's own Lambda estate (ENC-TSK-P15). Per io's "
+        f"standing ruling a devops-owned resource is outside enceladus deploy validation, so "
+        f"this plane asserts nothing about its downstream contract. This is a DECLARED "
+        f"answer, not a skip -- the gate fired and recorded it -- and it is not a pass: the "
+        f"point stays unknown and the function can reach at most ATTESTED.",
+        reason_code="not_applicable_on_plane_devops_owned")
+
+
+@register_probe("escalation-decision-authorizer", "escalation-decision-authorizer-gamma")
+def _probe_escalation_authorizer_routes(
+    function_name: str, clients: Dict[str, object],
+) -> Tuple[str, str]:
+    """ENC-TSK-P19 AC-0 / ENC-TSK-O90 AC-1: is this authorizer actually
+    attached to BOTH the approve AND the deny route?
+
+    backend/lambda/escalation_decision_authorizer/lambda_function.py exists
+    "for the escalation approve/deny decision routes only." Nothing about the
+    Lambda's own state -- its architecture, its layers, whether it invokes --
+    tells you whether API Gateway routes traffic through it, or through it on
+    only ONE of the two routes. An authorizer on /approve but not /deny is a
+    live authorization hole that every function-level point in this harness
+    reports as perfectly healthy. That gap is the whole reason point 4 exists.
+    """
+    api_client = clients.get("apigatewayv2")
+    if api_client is None:
+        return UNKNOWN, ("no apigatewayv2 client supplied -- route attachment cannot be read, "
+                         "so this probe asserts nothing (it does not pass by default)")
+    try:
+        apis = (api_client.get_apis().get("Items") or [])
+    except Exception as exc:  # noqa: BLE001
+        return UNKNOWN, f"could not list HTTP APIs (apigatewayv2:GetApis): {_err(exc)}"
+
+    found: Dict[str, dict] = {}
+    for api in apis:
+        api_id = api.get("ApiId")
+        if not api_id:
+            continue
+        try:
+            routes = (api_client.get_routes(ApiId=api_id).get("Items") or [])
+        except Exception as exc:  # noqa: BLE001
+            return UNKNOWN, f"could not list routes on API {api_id}: {_err(exc)}"
+        for route in routes:
+            route_key = route.get("RouteKey") or ""
+            if ESCALATION_ROUTE_MARKER not in route_key:
+                continue
+            for suffix in ESCALATION_ROUTE_SUFFIXES:
+                if route_key.endswith(suffix):
+                    found[suffix] = {"api_id": api_id, "route": route, "route_key": route_key}
+
+    missing = [sfx for sfx in ESCALATION_ROUTE_SUFFIXES if sfx not in found]
+    if missing:
+        return FAIL, (
+            f"{function_name}: no escalation route found for {', '.join(missing)} across "
+            f"{len(apis)} HTTP API(s) -- the decision route this authorizer exists to guard "
+            f"is not present, so nothing is guarding it")
+
+    unguarded: List[str] = []
+    guarded: List[str] = []
+    for suffix, hit in found.items():
+        authorizer_id = hit["route"].get("AuthorizerId")
+        if not authorizer_id:
+            unguarded.append(f"{hit['route_key']} (no AuthorizerId at all)")
+            continue
+        try:
+            authorizer = api_client.get_authorizer(ApiId=hit["api_id"], AuthorizerId=authorizer_id)
+        except Exception as exc:  # noqa: BLE001
+            return UNKNOWN, (f"route {hit['route_key']} has AuthorizerId={authorizer_id} but it "
+                             f"could not be read: {_err(exc)}")
+        uri = authorizer.get("AuthorizerUri") or ""
+        if function_name in uri:
+            guarded.append(hit["route_key"])
+        else:
+            unguarded.append(
+                f"{hit['route_key']} (authorizer {authorizer.get('Name')!r} does not resolve to "
+                f"{function_name})")
+
+    if unguarded:
+        return FAIL, (
+            f"{function_name}: guarded {guarded or 'NOTHING'}, but NOT {'; '.join(unguarded)} -- "
+            f"an escalation decision route that this authorizer does not front is a route where "
+            f"the approver allowlist is never consulted. Asymmetric coverage across approve/deny "
+            f"is invisible to every function-level check")
+    return PASS, (
+        f"{function_name} fronts BOTH escalation decision routes: {', '.join(sorted(guarded))} "
+        f"(each route's AuthorizerId resolved and its AuthorizerUri references this function)")
+
+
+def _probe_governance_mart_produced(
+    function_name: str, clients: Dict[str, object], max_age_hours: float = 26.0, *,
+    bucket: str = MART_BUCKET_DEFAULT, prefix: str = MART_KEY_PREFIX_DEFAULT,
+) -> Tuple[str, str]:
+    """ENC-TSK-P19 AC-0, the half schedule freshness cannot see: did the mart
+    actually PRODUCE a mart?
+
+    BRD 8.4's worked example is "the mart must produce a mart on its
+    schedule." _probe_governance_mart_schedule reads the second clause. This
+    one reads the first, against the artifact itself: backend/lambda/
+    governance_mart/mart_schema.py writes to
+    s3://<bucket>/warehouse/devops/<table>/data.parquet. A run that fires on
+    time, exits cleanly, logs no traceback and writes nothing at all is
+    indistinguishable from a healthy one to every check that only reads logs.
+    """
+    s3_client = clients.get("s3")
+    if s3_client is None:
+        return UNKNOWN, "no s3 client supplied -- mart production cannot be read"
+
+    run_start_ms = clients.get("run_start_ms")
+    if run_start_ms is None:
+        run_start_ms = time.time() * 1000.0
+
+    try:
+        resp = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    except Exception as exc:  # noqa: BLE001
+        msg = _err(exc)
+        if "AccessDenied" in msg or "Forbidden" in msg or "403" in msg:
+            return UNKNOWN, (f"s3:ListBucket denied on s3://{bucket}/{prefix} -- this identity "
+                             f"cannot see whether a mart was produced; that is a permission "
+                             f"ceiling, not a pass")
+        if "NoSuchBucket" in msg:
+            return FAIL, (f"s3://{bucket} does not exist -- the mart has nowhere to write "
+                          f"(ENC-TSK-O95 class: a bucket removed while its producer stayed "
+                          f"deployed and enabled)")
+        return UNKNOWN, f"could not list s3://{bucket}/{prefix}: {msg}"
+
+    objects = [o for o in (resp.get("Contents") or [])
+               if str(o.get("Key", "")).endswith(MART_DATA_OBJECT_NAME)]
+    if not objects:
+        return FAIL, (
+            f"{function_name}: zero {MART_DATA_OBJECT_NAME} objects under "
+            f"s3://{bucket}/{prefix} -- the mart produced no mart. A schedule-only check "
+            f"cannot see this: the run can fire on time and write nothing")
+
+    def _epoch_ms(obj: dict) -> float:
+        last = obj.get("LastModified")
+        if hasattr(last, "timestamp"):
+            return float(last.timestamp()) * 1000.0
+        return 0.0
+
+    newest = max(objects, key=_epoch_ms)
+    age_hours = (float(run_start_ms) - _epoch_ms(newest)) / 3_600_000.0
+    if age_hours > max_age_hours:
+        return FAIL, (
+            f"{function_name}: newest mart object s3://{bucket}/{newest.get('Key')} was written "
+            f"{age_hours:.1f}h before this run started (> {max_age_hours}h) -- the mart exists "
+            f"but is stale; production has stopped")
+    return PASS, (
+        f"{function_name}: {len(objects)} mart object(s) under s3://{bucket}/{prefix}; newest "
+        f"({newest.get('Key')}) written {age_hours:.1f}h before this run started, inside the "
+        f"{max_age_hours}h window")
+
+
+@register_probe("devops-recompute-governance", "devops-recompute-governance-gamma",
+                "devops-governance-mart", "devops-governance-mart-gamma")
+def _probe_governance_mart(function_name: str, clients: Dict[str, object]) -> Tuple[str, str]:
+    """Composite: BRD 8.4's example has two clauses and this checks both.
+
+    Combination is worst-wins -- FAIL beats UNKNOWN beats PASS -- so neither
+    half can cover for the other. A fresh schedule with no output is a FAIL,
+    and a fresh output with a dead schedule is a FAIL, and only both-clean is
+    a PASS. Combining them the other way (either-passes) would rebuild the
+    exact vacuity this point exists to eliminate.
+    """
+    schedule_state, schedule_detail = _probe_governance_mart_schedule(function_name, clients)
+    produced_state, produced_detail = _probe_governance_mart_produced(function_name, clients)
+    detail = f"schedule: {schedule_detail} || production: {produced_detail}"
+    for worst in (FAIL, UNKNOWN):
+        if worst in (schedule_state, produced_state):
+            return worst, detail
+    return PASS, detail
+
+
 def _enforce_no_pass_when_point3_failed(
     point4: PointResult, point3: Optional[PointResult],
 ) -> PointResult:
@@ -1401,6 +1873,15 @@ def check_integration_edge(
     function_name: str, clients: Dict[str, object], *,
     point3_result: Optional[PointResult] = None,
 ) -> PointResult:
+    # ENC-TSK-P19 / ENC-ISS-665: ownership is resolved BEFORE probe lookup.
+    # A devops-owned function gets a declared NOT_APPLICABLE_ON_PLANE answer
+    # rather than being probed by a plane that does not own it -- but the gate
+    # still runs and still records a verdict, and remedy 3 below still applies
+    # to whatever it produces. Nothing here short-circuits out of point 4.
+    ownership = _resolve_devops_ownership(function_name)
+    if ownership is not None:
+        return _enforce_no_pass_when_point3_failed(ownership, point3_result)
+
     probe = PROBE_REGISTRY.get(function_name)
     if probe is None:
         result = PointResult(4, "integration_edge", UNKNOWN,
@@ -1531,6 +2012,7 @@ ARTIFACT_TAG_SCHEME_WARNING = (
 
 def evaluate_function(
     *, lambda_client, s3_client, logs_client, function_name: str,
+    apigw_client=None,
     expected_arch: str = "arm64", py_version: str = "3.12",
     commit_sha: Optional[str] = None, bucket: str = ARTIFACT_BUCKET_DEFAULT,
     key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT, invoke_payload: str = "{}",
@@ -1553,7 +2035,13 @@ def evaluate_function(
     point3 = check_live_invocation(lambda_client, function_name, invoke_payload)
     point4 = check_integration_edge(
         function_name,
-        {"lambda": lambda_client, "logs": logs_client, "run_start_ms": run_start_ms},
+        # ENC-TSK-P19: point 4's probes read downstream state that function
+        # configuration cannot express -- S3 for "did the mart produce a mart",
+        # apigatewayv2 for "is the authorizer on BOTH decision routes". A None
+        # client makes the relevant probe report UNKNOWN and say so; it never
+        # makes it pass.
+        {"lambda": lambda_client, "logs": logs_client, "s3": s3_client,
+         "apigatewayv2": apigw_client, "run_start_ms": run_start_ms},
         # ENC-ISS-665 remedy 3 (load-bearing): point 4 is structurally
         # incapable of returning PASS when point 3 FAILED in this same run.
         point3_result=point3,
@@ -1621,11 +2109,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     lambda_client = session.client("lambda", region_name=args.region)
     s3_client = session.client("s3", region_name=args.region)
     logs_client = session.client("logs", region_name=args.region)
+    try:
+        apigw_client = session.client("apigatewayv2", region_name=args.region)
+    except Exception:  # noqa: BLE001 - probe reports UNKNOWN rather than failing the run
+        apigw_client = None
 
     reports = [
         evaluate_function(
             lambda_client=lambda_client, s3_client=s3_client, logs_client=logs_client,
-            function_name=fn, expected_arch=args.arch, py_version=args.py_version,
+            apigw_client=apigw_client, function_name=fn, expected_arch=args.arch, py_version=args.py_version,
             commit_sha=args.commit_sha, bucket=args.bucket, key_prefix=args.key_prefix,
             invoke_payload=args.invoke_payload, env=args.env,
             repo=args.repo, ci_workflow=args.ci_workflow,

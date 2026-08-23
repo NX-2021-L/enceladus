@@ -983,10 +983,19 @@ def test_p09_appconfig_extension_layer_resolves_to_external_dependency_declared(
     result = harness.check_layer_coherence(lam, "auth-refresh-gamma", downloader=lambda url: b"",
                                             classify_so=lambda p: None)
     assert result.state == harness.UNKNOWN
-    assert result.reason_code == "external_dependency_declared", (
+    # ENC-TSK-P18 TIGHTENED THIS, and the tightening is the point. ENC-TSK-P09
+    # classified this by layer NAME as external_dependency_declared. P18 adds an
+    # EXACT-ARN allowlist which is consulted first, so this specific reviewed ARN
+    # now carries the more specific external_dependency_cross_account_allowlisted.
+    # P09's actual guarantee is unchanged and re-asserted below: distinct from a
+    # generic layer_not_found, and still attestable.
+    assert result.reason_code == "external_dependency_cross_account_allowlisted", (
         "must be classified distinctly from a generic layer_not_found mystery -- this is a "
-        "documented, named, cross-account dependency (ENC-TSK-P09/ENC-ISS-668)"
+        "documented, named, cross-account dependency (ENC-TSK-P09/ENC-ISS-668), now matched "
+        "by exact ARN (ENC-TSK-P18)"
     )
+    assert result.reason_code != "layer_not_found"
+    assert result.reason_code in harness.ATTESTABLE_REASON_CODES
     assert "359756378197" in result.detail
     assert "arm64" in result.detail.lower()
 
@@ -1121,3 +1130,508 @@ def test_p09_all_33_appconfig_functions_reach_a_determinate_verdict():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P18 / ENC-ISS-668 -- exact-match cross-account layer ARN allowlist.
+#
+# THE GOVERNING DISTINCTION, because it decides whether this whole change is
+# legitimate: ENC-TSK-O96's rename was legitimate because the check GENUINELY
+# COULD NOT SEE -- lambda:GetLayerVersion cannot read another account's layer
+# version, full stop, and renaming that outcome describes a limit of the
+# vantage point. An ENC-ISS-665-style rename would be illegitimate because
+# there the check SAW WRONGLY -- it looked at real evidence and drew a false
+# conclusion, and renaming that sanctions a lie. This task applies the pattern
+# only in the first shape.
+#
+# An allowlist is a WIDENING, and a widening without a negative control is how
+# the next vacuous pass gets built. Hence
+# test_p18_negative_control_* below: it is not decoration.
+# ---------------------------------------------------------------------------
+
+APPCONFIG_ARN = "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147"
+SELF_ACCOUNT = "111122223333"
+FUNCTION_ARN = f"arn:aws:lambda:us-west-2:{SELF_ACCOUNT}:function:some-fn-gamma"
+# Deliberately unrelated: a DIFFERENT vendor, a DIFFERENT account, appearing
+# in no governed declaration anywhere in this repo.
+UNDECLARED_CROSS_ACCOUNT_ARN = (
+    "arn:aws:lambda:us-west-2:999988887777:layer:Totally-Unrelated-Vendor-Layer:1")
+
+
+def _layer_fn_config(layer_arn):
+    return {"Architectures": ["arm64"],
+            "FunctionArn": FUNCTION_ARN,
+            "Layers": [{"Arn": layer_arn}]}
+
+
+def _cross_account_client(layer_arn):
+    return FakeLambdaClient(
+        config=_layer_fn_config(layer_arn),
+        layer_error=Exception("ResourceNotFoundException: Layer version does not exist"),
+    )
+
+
+def test_p18_allowlist_records_appconfig_147_arch_as_a_declared_fact():
+    """AC-1: the exact ARN is recorded, with its architecture, as a declared fact."""
+    allowlist = harness.load_external_layer_arn_allowlist(use_cache=False)
+    assert APPCONFIG_ARN in allowlist, (
+        "the cross-account AppConfig extension 33 of 51 functions attach must be declared")
+    entry = allowlist[APPCONFIG_ARN]
+    assert entry["declared_arch"] == "arm64"
+    assert entry["owner_account"] == "359756378197"
+    # Sourced from the governed closure, not a second hand-typed table that can drift.
+    assert entry["source"] == "infrastructure/component_dependency_closure.json"
+
+
+@pytest.mark.parametrize("near_miss", [
+    # A version-number prefix relationship: :147 must not admit :1470.
+    "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:1470",
+    # The same layer, a DIFFERENT version nobody reviewed.
+    "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:148",
+    # The family without a version -- a prefix expressed as an ARN.
+    "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64",
+    # An explicit wildcard.
+    "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:*",
+    # Same name and version, DIFFERENT account.
+    "arn:aws:lambda:us-west-2:999988887777:layer:AWS-AppConfig-Extension-Arm64:147",
+    # Same ARN, different region.
+    "arn:aws:lambda:us-east-1:359756378197:layer:AWS-AppConfig-Extension-Arm64:147",
+    # Whitespace and case are NOT normalized away.
+    APPCONFIG_ARN + " ",
+    APPCONFIG_ARN.upper(),
+])
+def test_p18_allowlist_lookup_is_exact_match_never_prefix_or_wildcard(near_miss):
+    """AC-1: exact match only. Every one of these is a string the allowlist
+    does not contain, and 'close to a declared ARN' is not 'declared'."""
+    assert harness.lookup_allowlisted_layer_arn(near_miss) is None, near_miss
+    # ...while the exact string still resolves.
+    assert harness.lookup_allowlisted_layer_arn(APPCONFIG_ARN) is not None
+
+
+def test_p18_declared_cross_account_layer_is_distinct_from_layer_not_found():
+    """AC-0: a cross-account ceiling reads as a ceiling, not a missing layer."""
+    result = harness.check_layer_coherence(
+        _cross_account_client(APPCONFIG_ARN), "some-fn-gamma",
+        downloader=lambda url: b"", classify_so=lambda p: None)
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "external_dependency_cross_account_allowlisted"
+    assert result.reason_code != "layer_not_found"
+    assert "359756378197" in result.detail
+
+
+def test_p18_negative_control_undeclared_cross_account_layer_does_not_inherit_exemption():
+    """AC-4, THE NEGATIVE CONTROL. A synthetic cross-account layer ARN that is
+    NOT on the allowlist must still return unknown and must NOT inherit the
+    exemption. If this test ever passes trivially -- if the reason code it
+    produces is ever added to ATTESTABLE_REASON_CODES -- the allowlist has
+    stopped being an allowlist and every cross-account layer is exempt."""
+    result = harness.check_layer_coherence(
+        _cross_account_client(UNDECLARED_CROSS_ACCOUNT_ARN), "some-fn-gamma",
+        downloader=lambda url: b"", classify_so=lambda p: None)
+
+    assert result.state == harness.UNKNOWN, "still unknown -- never a pass"
+    assert result.reason_code == "cross_account_layer_unverifiable"
+    # It is legible as a cross-account ceiling (AC-0 applies here too)...
+    assert "999988887777" in result.detail
+    # ...but it is NOT attestable, and that is the entire control.
+    assert result.reason_code not in harness.ATTESTABLE_REASON_CODES
+
+    # And the consequence at the rollup: the function does NOT reach ATTESTED.
+    report = harness.FunctionReport(
+        function_name="some-fn-gamma",
+        points=[
+            harness.PointResult(1, "artifact_identity", harness.PASS, "", reason_code="digest_match"),
+            result,
+            harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok"),
+            harness.PointResult(4, "integration_edge", harness.PASS, "", reason_code="probe_result"),
+            harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "",
+                                 reason_code="ci_history_confirmed_red"),
+        ])
+    assert report.overall == harness.UNKNOWN, (
+        "an UNDECLARED cross-account ceiling must sink the verdict to plain unknown -- "
+        "reaching ATTESTED here would mean the allowlist admitted a layer nobody reviewed")
+    assert report.overall != harness.ATTESTED
+    assert report.overall != harness.PASS
+    assert report.attested_points == []
+
+
+def test_p18_cross_account_unverifiable_is_permanently_non_attestable():
+    """A structural guard on the guard: the negative control above is only
+    meaningful while this code stays OUT of the attestable set. Asserting it
+    directly means a future widening trips a named test rather than quietly
+    converting the control into a tautology."""
+    assert "cross_account_layer_unverifiable" not in harness.ATTESTABLE_REASON_CODES
+    assert "external_dependency_cross_account_allowlisted" in harness.ATTESTABLE_REASON_CODES
+
+
+def test_p18_declared_ceiling_reaches_attested_naming_the_unverified_point():
+    """AC-2: a function whose only non-pass point is a DECLARED cross-account
+    ceiling reaches a determinate ATTESTED verdict that NAMES the point."""
+    report = harness.FunctionReport(
+        function_name="auth-refresh-gamma",
+        points=[
+            harness.PointResult(1, "artifact_identity", harness.PASS, "", reason_code="digest_match"),
+            harness.PointResult(2, "layer_coherence", harness.UNKNOWN, APPCONFIG_ARN,
+                                 reason_code="external_dependency_cross_account_allowlisted"),
+            harness.PointResult(3, "live_invocation", harness.PASS, "", reason_code="invoked_ok"),
+            harness.PointResult(4, "integration_edge", harness.PASS, "", reason_code="probe_result"),
+            harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "",
+                                 reason_code="ci_history_confirmed_red"),
+        ])
+    assert report.overall == harness.ATTESTED
+    assert report.overall != harness.PASS, "attested is a determinate verdict, not a pass"
+    assert report.attested_points == [2]
+    assert "point 2 (layer_coherence)" in report.attestation_note
+
+
+def test_p18_unqualified_pass_is_structurally_impossible_with_any_unknown():
+    """AC-2's second half, asserted over the whole reason-code vocabulary: no
+    reason_code, attestable or not, can produce an unqualified PASS while any
+    point is UNKNOWN."""
+    for reason_code in sorted(harness.REASON_CODES):
+        report = harness.FunctionReport(
+            function_name="fn",
+            points=[
+                harness.PointResult(1, "artifact_identity", harness.PASS, "",
+                                     reason_code="digest_match"),
+                harness.PointResult(2, "layer_coherence", harness.UNKNOWN, "",
+                                     reason_code=reason_code),
+            ])
+        assert report.overall != harness.PASS, reason_code
+        assert report.overall in (harness.ATTESTED, harness.UNKNOWN), reason_code
+
+
+def test_p18_all_affected_functions_reach_a_determinate_verdict():
+    """AC-3: all 33 functions blocked by this one layer reach a determinate
+    verdict, where previously every one of them was stuck at plain unknown."""
+    reports = []
+    for i in range(33):
+        name = f"affected-fn-{i}-gamma"
+        point2 = harness.check_layer_coherence(
+            _cross_account_client(APPCONFIG_ARN), name,
+            downloader=lambda url: b"", classify_so=lambda p: None)
+        reports.append(harness.FunctionReport(
+            function_name=name,
+            points=[
+                harness.PointResult(1, "artifact_identity", harness.PASS, "",
+                                     reason_code="digest_match"),
+                point2,
+                harness.PointResult(3, "live_invocation", harness.PASS, "",
+                                     reason_code="invoked_ok"),
+                harness.PointResult(4, "integration_edge", harness.PASS, "",
+                                     reason_code="probe_result"),
+                harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "",
+                                     reason_code="ci_history_confirmed_red"),
+            ]))
+    assert len(reports) == 33
+    assert all(r.overall == harness.ATTESTED for r in reports)
+    assert all(r.overall != harness.PASS for r in reports), "determinate, not fabricated"
+    assert all(2 in r.attested_points for r in reports)
+    assert all(r.attestation_note and "point 2" in r.attestation_note for r in reports)
+
+
+def test_p18_allowlist_fails_closed_when_the_closure_cannot_be_read(tmp_path):
+    """An unreadable declaration must NARROW what is exempt, never widen it."""
+    missing = tmp_path / "does_not_exist.json"
+    assert harness.load_external_layer_arn_allowlist(missing, use_cache=False) == {}
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert harness.load_external_layer_arn_allowlist(corrupt, use_cache=False) == {}
+
+
+def test_p18_same_account_layer_failure_is_not_called_cross_account():
+    """The cross-account code must mean what it says: a layer in the SAME
+    account that fails to resolve is still a layer_not_found mystery."""
+    same_account_arn = f"arn:aws:lambda:us-west-2:{SELF_ACCOUNT}:layer:some-own-layer:4"
+    result = harness.check_layer_coherence(
+        _cross_account_client(same_account_arn), "some-fn-gamma",
+        downloader=lambda url: b"", classify_so=lambda p: None)
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "layer_not_found"
+    assert result.reason_code not in harness.ATTESTABLE_REASON_CODES
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P19 / ENC-ISS-665 -- point-4 probe coverage and declared ownership.
+#
+# ENC-TSK-P08 DID NOT ADD PROBES. Re-reading its diff before writing these:
+# it fixed the self-fulfilling freshness signal (run-start anchoring), the
+# mid-flight log read (terminated-invocation requirement, log-group-wide
+# evaluation), and added the point3/point4 contradiction assertion. Coverage
+# was 2 of 51 before it and 2 of 51 after it.
+# ---------------------------------------------------------------------------
+
+class FakeApiGatewayV2Client:
+    def __init__(self, *, apis=None, routes=None, authorizers=None,
+                 apis_error=None, authorizer_error=None):
+        self._apis = apis or []
+        self._routes = routes or {}
+        self._authorizers = authorizers or {}
+        self._apis_error = apis_error
+        self._authorizer_error = authorizer_error
+
+    def get_apis(self):
+        if self._apis_error:
+            raise self._apis_error
+        return {"Items": self._apis}
+
+    def get_routes(self, ApiId):  # noqa: N803
+        return {"Items": self._routes.get(ApiId, [])}
+
+    def get_authorizer(self, ApiId, AuthorizerId):  # noqa: N803
+        if self._authorizer_error:
+            raise self._authorizer_error
+        return self._authorizers[AuthorizerId]
+
+
+ESC_FN = "escalation-decision-authorizer-gamma"
+ESC_BASE = "POST /api/v1/coordination/escalations/{projectId}/{escalationId}"
+
+
+def _escalation_api(approve_auth, deny_auth):
+    routes = []
+    if approve_auth is not None:
+        routes.append({"RouteKey": f"{ESC_BASE}/approve", "AuthorizerId": approve_auth})
+    else:
+        routes.append({"RouteKey": f"{ESC_BASE}/approve"})
+    if deny_auth is not None:
+        routes.append({"RouteKey": f"{ESC_BASE}/deny", "AuthorizerId": deny_auth})
+    else:
+        routes.append({"RouteKey": f"{ESC_BASE}/deny"})
+    return FakeApiGatewayV2Client(
+        apis=[{"ApiId": "api1"}],
+        routes={"api1": routes},
+        authorizers={
+            "auth-esc": {"Name": "escalation", "AuthorizerUri": f"arn:.../{ESC_FN}/invocations"},
+            "auth-other": {"Name": "cognito", "AuthorizerUri": "arn:.../some-other-fn/invocations"},
+        })
+
+
+def test_p19_escalation_authorizer_probe_is_registered_for_both_planes():
+    """AC-0: coverage extended beyond 2 of 51 -- the edges O90 AC-1 names."""
+    assert "escalation-decision-authorizer" in harness.PROBE_REGISTRY
+    assert "escalation-decision-authorizer-gamma" in harness.PROBE_REGISTRY
+
+
+def test_p19_escalation_probe_passes_only_when_both_routes_are_guarded():
+    state, detail = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": _escalation_api("auth-esc", "auth-esc")})
+    assert state == harness.PASS
+    assert "/approve" in detail and "/deny" in detail
+
+
+def test_p19_escalation_probe_fails_when_only_the_approve_route_is_guarded():
+    """The asymmetry that matters: an authorizer on approve but not deny is a
+    live authorization hole, and every function-level point reports the Lambda
+    as perfectly healthy while it exists."""
+    state, detail = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": _escalation_api("auth-esc", None)})
+    assert state == harness.FAIL
+    assert "/deny" in detail
+
+
+def test_p19_escalation_probe_fails_when_deny_route_uses_a_different_authorizer():
+    state, detail = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": _escalation_api("auth-esc", "auth-other")})
+    assert state == harness.FAIL
+    assert "deny" in detail
+
+
+def test_p19_escalation_probe_is_unknown_not_pass_without_a_client():
+    state, _ = harness._probe_escalation_authorizer_routes(ESC_FN, {})
+    assert state == harness.UNKNOWN
+
+
+def test_p19_escalation_probe_is_unknown_not_pass_when_apis_cannot_be_listed():
+    state, _ = harness._probe_escalation_authorizer_routes(
+        ESC_FN, {"apigatewayv2": FakeApiGatewayV2Client(
+            apis_error=Exception("AccessDeniedException"))})
+    assert state == harness.UNKNOWN
+
+
+class FakeS3ListClient:
+    def __init__(self, *, contents=None, error=None):
+        self._contents = contents
+        self._error = error
+
+    def list_objects_v2(self, Bucket, Prefix):  # noqa: N803
+        if self._error:
+            raise self._error
+        return {"Contents": self._contents or []}
+
+
+def _mart_obj(key, age_hours, now_ms):
+    ts = (now_ms - age_hours * 3_600_000.0) / 1000.0
+    from datetime import datetime as _dt, timezone as _tz
+    return {"Key": key, "LastModified": _dt.fromtimestamp(ts, tz=_tz.utc)}
+
+
+def test_p19_mart_production_probe_fails_when_no_mart_was_produced():
+    """AC-0: 'the mart must PRODUCE a mart' -- the half schedule freshness
+    cannot see. A run can fire on time, exit cleanly and write nothing."""
+    state, detail = harness._probe_governance_mart_produced(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(contents=[]), "run_start_ms": time.time() * 1000.0})
+    assert state == harness.FAIL
+    assert "produced no mart" in detail
+
+
+def test_p19_mart_production_probe_fails_on_a_stale_mart():
+    now_ms = time.time() * 1000.0
+    state, detail = harness._probe_governance_mart_produced(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(contents=[
+            _mart_obj("warehouse/devops/tasks/data.parquet", 400.0, now_ms)]),
+         "run_start_ms": now_ms})
+    assert state == harness.FAIL
+    assert "stale" in detail
+
+
+def test_p19_mart_production_probe_passes_on_a_fresh_mart():
+    now_ms = time.time() * 1000.0
+    state, _ = harness._probe_governance_mart_produced(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(contents=[
+            _mart_obj("warehouse/devops/tasks/data.parquet", 2.0, now_ms)]),
+         "run_start_ms": now_ms})
+    assert state == harness.PASS
+
+
+def test_p19_mart_production_probe_is_unknown_not_pass_when_listing_is_denied():
+    state, detail = harness._probe_governance_mart_produced(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(error=Exception("AccessDenied")),
+         "run_start_ms": time.time() * 1000.0})
+    assert state == harness.UNKNOWN
+    assert "permission ceiling" in detail
+
+
+def test_p19_mart_composite_fails_when_schedule_is_clean_but_no_mart_was_produced(monkeypatch):
+    """The combination is worst-wins. A clean schedule must not cover for an
+    absent mart -- combining these either-passes would rebuild the vacuity
+    point 4 exists to eliminate."""
+    monkeypatch.setattr(harness, "_probe_governance_mart_schedule",
+                        lambda fn, clients: (harness.PASS, "schedule clean"))
+    state, detail = harness._probe_governance_mart(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(contents=[]), "run_start_ms": time.time() * 1000.0})
+    assert state == harness.FAIL
+    assert "schedule clean" in detail and "produced no mart" in detail
+
+
+def test_p19_mart_composite_still_fails_on_a_dead_schedule_with_fresh_output(monkeypatch):
+    now_ms = time.time() * 1000.0
+    monkeypatch.setattr(harness, "_probe_governance_mart_schedule",
+                        lambda fn, clients: (harness.FAIL, "schedule stale"))
+    state, _ = harness._probe_governance_mart(
+        "devops-governance-mart-gamma",
+        {"s3": FakeS3ListClient(contents=[
+            _mart_obj("warehouse/devops/tasks/data.parquet", 1.0, now_ms)]),
+         "run_start_ms": now_ms})
+    assert state == harness.FAIL
+
+
+def test_p19_unregistered_function_declares_no_probe_registered(monkeypatch):
+    """AC-1: a function with no probe returns a DECLARED no_probe_registered
+    verdict, never an implicit pass. Verified here against the real
+    check_integration_edge entry point, not assumed."""
+    monkeypatch.setattr(harness, "_devops_owned_names", lambda: (set(), []))
+    result = harness.check_integration_edge("enceladus-some-unprobed-fn-gamma", {})
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "no_probe_registered"
+    assert result.state != harness.PASS
+
+
+def test_p19_devops_owned_function_resolves_to_not_applicable_from_the_declaration():
+    """AC-2: derived from the ownership DECLARATION, not a hardcoded name list."""
+    names, errors = harness._devops_owned_names()
+    assert not errors and names, "the pinned ownership snapshot must be readable"
+    for devops_fn in sorted(names):
+        result = harness.check_integration_edge(devops_fn, {})
+        assert result.reason_code == "not_applicable_on_plane_devops_owned", devops_fn
+        assert "NOT_APPLICABLE_ON_PLANE" in result.detail
+        assert result.state == harness.UNKNOWN, "declared, but never a pass"
+        # The rationale and its source are carried, not just a bare verdict.
+        assert harness.DEVOPS_OWNERSHIP_SNAPSHOT_RELPATH in result.detail
+
+
+def test_p19_ownership_predicate_is_exact_name_match_never_a_prefix():
+    """AC-2's load-bearing detail. enceladus owns dozens of its own functions
+    whose names START WITH 'devops-'. A startswith predicate would exempt
+    every one of them -- including the very mart functions ENC-ISS-667 caught
+    running dead -- and switch point 4 off exactly where it is needed."""
+    names, _ = harness._devops_owned_names()
+    enceladus_owned_devops_prefixed = "devops-governance-mart-gamma"
+    assert enceladus_owned_devops_prefixed.startswith("devops-")
+    assert enceladus_owned_devops_prefixed not in names, (
+        "this function is enceladus-owned despite its devops- prefix")
+    result = harness.check_integration_edge(enceladus_owned_devops_prefixed, {})
+    assert result.reason_code != "not_applicable_on_plane_devops_owned", (
+        "a devops- PREFIX must never confer the ownership exemption")
+
+
+def test_p19_ownership_gate_fires_on_every_function_and_never_silently_skips(monkeypatch):
+    """The gate STILL FIRES. A removed check is silence, and silence is what
+    let a mart run dead and a schedule stop for fifteen days with every
+    dashboard green."""
+    calls = []
+
+    def _spy():
+        calls.append(1)
+        return {"devops-io-devops-mcp"}, []
+
+    monkeypatch.setattr(harness, "_devops_owned_names", _spy)
+    for fn in ("devops-io-devops-mcp", "enceladus-anything-gamma"):
+        result = harness.check_integration_edge(fn, {})
+        # Either way a verdict is RECORDED -- never a skip, never a None.
+        assert result is not None and result.point == 4
+        assert result.state != harness.PASS
+    assert len(calls) == 2, "ownership resolved on every function, not just some"
+
+
+def test_p19_unreadable_ownership_declaration_is_unknown_not_assumed_non_devops(monkeypatch):
+    """A missing declaration is a failure, never a silent pass and never a
+    quiet 'assume it is ours and probe someone else's estate anyway'."""
+    monkeypatch.setattr(harness, "_devops_owned_names",
+                        lambda: (None, ["snapshot not found"]))
+    result = harness.check_integration_edge("devops-io-devops-mcp", {})
+    assert result.state == harness.UNKNOWN
+    assert result.reason_code == "devops_ownership_declaration_unreadable"
+    assert result.reason_code not in harness.ATTESTABLE_REASON_CODES
+
+
+def test_p19_declared_ownership_still_passes_through_p08_remedy_3(monkeypatch):
+    """ENC-TSK-P08's contradiction assertion is applied on EVERY path out of
+    point 4, including the new ownership path. Preserved, not routed around."""
+    monkeypatch.setattr(harness, "_devops_owned_names",
+                        lambda: ({"devops-io-devops-mcp"}, []))
+    point3 = harness.PointResult(3, "live_invocation", harness.FAIL, "boom",
+                                  reason_code="function_error")
+    result = harness.check_integration_edge(
+        "devops-io-devops-mcp", {}, point3_result=point3)
+    # The declared answer is UNKNOWN, so remedy 3 has nothing to override --
+    # but it ran, and the verdict is still not a pass.
+    assert result.state != harness.PASS
+
+
+def test_p19_not_applicable_reaches_attested_never_an_unqualified_pass():
+    """AC-2 rollup consequence: a declared ownership ceiling yields a named,
+    determinate verdict -- and PASS stays structurally impossible."""
+    report = harness.FunctionReport(
+        function_name="devops-io-devops-mcp",
+        points=[
+            harness.PointResult(1, "artifact_identity", harness.PASS, "",
+                                 reason_code="digest_match"),
+            harness.PointResult(2, "layer_coherence", harness.PASS, "",
+                                 reason_code="zero_layers"),
+            harness.PointResult(3, "live_invocation", harness.PASS, "",
+                                 reason_code="invoked_ok"),
+            harness.PointResult(4, "integration_edge", harness.UNKNOWN, "NOT_APPLICABLE_ON_PLANE",
+                                 reason_code="not_applicable_on_plane_devops_owned"),
+            harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "",
+                                 reason_code="ci_history_confirmed_red"),
+        ])
+    assert report.overall == harness.ATTESTED
+    assert report.overall != harness.PASS
+    assert report.attested_points == [4]
