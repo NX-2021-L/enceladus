@@ -10,6 +10,9 @@ Run from repo root:
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -1174,6 +1177,196 @@ class TestBuildInvocationFlagsValidator(unittest.TestCase):
             errors, [],
             f"On-disk build invocations failed the guard:\n  " + "\n  ".join(errors),
         )
+
+
+class TestEnceladusDeclaredFunctionNamesRealTree(unittest.TestCase):
+    """ENC-TSK-P15 AC-6: 'declared in any source we own' must be a union
+    across every CFN template this repo owns, not just the manifest's own
+    source_of_truth-named template."""
+
+    def test_devops_io_devops_mcp_is_not_declared_by_enceladus(self):
+        """The exact gap ENC-ISS-669 names: enceladus declares nothing
+        called devops-io-devops-mcp anywhere."""
+        names = vlap._enceladus_declared_function_names()
+        self.assertNotIn("devops-io-devops-mcp", names)
+
+    def test_multi_template_sweep_finds_functions_the_manifest_alone_misses(self):
+        """08-agent-auth.yaml declares enceladus-agent-authorizer, but the
+        manifest's functions[] list (scoped to 02-compute.yaml's
+        source_of_truth) does not. The union must still find it -- this is
+        AC-6's generalisation of ENC-ISS-669's own lesson: a census scoped
+        to one file decays the moment a second file exists."""
+        manifest = json.loads(vlap.MANIFEST_PATH.read_text(encoding="utf-8"))
+        manifest_names = {entry["function_name"] for entry in manifest["functions"]}
+        self.assertNotIn("enceladus-agent-authorizer", manifest_names)
+
+        names = vlap._enceladus_declared_function_names()
+        self.assertIn("enceladus-agent-authorizer", names)
+        self.assertTrue(manifest_names.issubset(names))
+
+
+class TestDevopsOwnedFunctionNamesRealTree(unittest.TestCase):
+    def test_real_snapshot_yields_five_names_including_io_devops_mcp(self):
+        snapshot, errors = vlap._load_devops_ownership_snapshot()
+        self.assertEqual(errors, [])
+        names = vlap._devops_owned_function_names(snapshot)
+        self.assertEqual(len(names), 5)
+        self.assertIn("devops-io-devops-mcp", names)
+
+
+class TestEnumerateLiveLambdaFunctions(unittest.TestCase):
+    def test_boto3_unavailable_is_unknown_not_empty_not_a_pass(self):
+        with mock.patch.dict(sys.modules, {"boto3": None}):
+            names, reason = vlap._enumerate_live_lambda_functions()
+        self.assertIsNone(names)
+        self.assertIn("boto3", reason)
+
+    def test_successful_pagination_collects_every_page(self):
+        fake_client = mock.MagicMock()
+        fake_paginator = mock.MagicMock()
+        fake_paginator.paginate.return_value = [
+            {"Functions": [{"FunctionName": "fn-a"}, {"FunctionName": "fn-b"}]},
+            {"Functions": [{"FunctionName": "fn-c"}]},
+        ]
+        fake_client.get_paginator.return_value = fake_paginator
+        fake_boto3 = mock.MagicMock()
+        fake_boto3.client.return_value = fake_client
+        with mock.patch.dict(sys.modules, {"boto3": fake_boto3}):
+            names, reason = vlap._enumerate_live_lambda_functions()
+        self.assertEqual(names, {"fn-a", "fn-b", "fn-c"})
+        self.assertEqual(reason, "")
+
+
+class TestCrossSourceReconciliation(unittest.TestCase):
+    """ENC-TSK-P15 / ENC-ISS-669 AC-6. Every scenario mocks the two static
+    sources (_enceladus_declared_function_names, _load_devops_ownership_snapshot)
+    so these tests are independent of the real repo's current content -- and
+    mocks _enumerate_live_lambda_functions so they never touch real AWS."""
+
+    def _patch_static_sources(self, enceladus_bare, devops_snapshot):
+        p1 = mock.patch.object(vlap, "_enceladus_declared_function_names", return_value=set(enceladus_bare))
+        p2 = mock.patch.object(vlap, "_load_devops_ownership_snapshot", return_value=(devops_snapshot, []))
+        p1.start()
+        p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
+
+    def test_devops_owned_function_is_a_reported_exception_not_a_silent_skip(self):
+        """The positive control this whole AC exists for: a devops-owned
+        live function must surface as a NAMED, PRINTED exception -- never
+        just quietly absent from the violations list."""
+        snapshot = {
+            "owning_repo": "NX-2021-L/devops",
+            "functions": [
+                {"function_name": "devops-widget", "deploy_channel": "Deploy Widget"},
+            ],
+        }
+        self._patch_static_sources({"enceladus-known"}, snapshot)
+        live = {"enceladus-known", "devops-widget"}
+        buf = io.StringIO()
+        with mock.patch.object(vlap, "_enumerate_live_lambda_functions", return_value=(live, "")):
+            with contextlib.redirect_stdout(buf):
+                errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(errors, [])
+        self.assertEqual(status, "RECONCILED")
+        output = buf.getvalue()
+        self.assertIn("NOT_APPLICABLE_ON_PLANE devops-widget", output)
+        self.assertIn("NX-2021-L/devops", output)
+
+    def test_unclassifiable_live_function_fails_not_passes(self):
+        """The negative control: a live, in-scope function owned by NOBODY
+        (neither enceladus's declared sources nor the devops snapshot) must
+        FAIL -- never silently pass just because it isn't devops's."""
+        snapshot = {"owning_repo": "NX-2021-L/devops", "functions": []}
+        self._patch_static_sources({"enceladus-known"}, snapshot)
+        live = {"enceladus-known", "enceladus-owned-by-nobody"}
+        with mock.patch.object(vlap, "_enumerate_live_lambda_functions", return_value=(live, "")):
+            errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(status, "VIOLATIONS_FOUND")
+        self.assertTrue(any("enceladus-owned-by-nobody" in e for e in errors), errors)
+
+    def test_out_of_scope_foreign_tenant_is_excluded_but_visibly_tallied(self):
+        """This AWS account is shared with unrelated tenants (an SST app, a
+        separate project, ...). Those must be excluded from pass/fail --
+        but the exclusion itself must be printed, not a silent filter."""
+        snapshot = {"owning_repo": "NX-2021-L/devops", "functions": []}
+        self._patch_static_sources({"enceladus-known"}, snapshot)
+        live = {"enceladus-known", "mod-jreese-SomeHandlerFunction-abcdef"}
+        buf = io.StringIO()
+        with mock.patch.object(vlap, "_enumerate_live_lambda_functions", return_value=(live, "")):
+            with contextlib.redirect_stdout(buf):
+                errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(errors, [])
+        self.assertEqual(status, "RECONCILED")
+        output = buf.getvalue()
+        self.assertIn("1 in the enceladus/devops naming-family scope", output)
+        self.assertIn("(1 out of scope", output)
+
+    def test_live_unavailable_is_unknown_never_a_pass(self):
+        snapshot = {"owning_repo": "NX-2021-L/devops", "functions": []}
+        self._patch_static_sources({"enceladus-known"}, snapshot)
+        buf = io.StringIO()
+        with mock.patch.object(vlap, "_enumerate_live_lambda_functions", return_value=(None, "no creds configured")):
+            with contextlib.redirect_stdout(buf):
+                errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(errors, [])
+        self.assertEqual(status, "UNKNOWN_NO_LIVE_ACCESS")
+        output = buf.getvalue()
+        self.assertIn("[UNKNOWN]", output)
+        self.assertIn("NOT a pass", output)
+
+    def test_missing_devops_snapshot_is_snapshot_error_not_silent(self):
+        with mock.patch.object(
+            vlap, "_load_devops_ownership_snapshot",
+            return_value=(None, ["devops ownership snapshot not found"]),
+        ):
+            errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(status, "SNAPSHOT_ERROR")
+        self.assertTrue(errors)
+
+    def test_gamma_variant_of_a_declared_name_is_not_a_violation(self):
+        snapshot = {"owning_repo": "NX-2021-L/devops", "functions": []}
+        self._patch_static_sources({"enceladus-known"}, snapshot)
+        live = {"enceladus-known", "enceladus-known-gamma"}
+        with mock.patch.object(vlap, "_enumerate_live_lambda_functions", return_value=(live, "")):
+            errors, status = vlap._validate_cross_source_reconciliation()
+        self.assertEqual(errors, [])
+        self.assertEqual(status, "RECONCILED")
+
+
+class TestLiveReconciliationCliIntegration(unittest.TestCase):
+    """CLI-level proof that --check-live-reconciliation is opt-in (matching
+    the file's own --check-s3-artifacts convention) and that, whenever
+    invoked, it never silently claims success without saying what it did."""
+
+    def test_default_invocation_never_attempts_live_reconciliation(self):
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "tools" / "verify_lambda_arch_parity.py")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Cross-source reconciliation", result.stdout)
+
+    def test_flagged_invocation_never_silently_passes(self):
+        result = subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "tools" / "verify_lambda_arch_parity.py"),
+                "--check-live-reconciliation",
+            ],
+            capture_output=True, text=True,
+        )
+        output = result.stdout + result.stderr
+        self.assertTrue(
+            "[UNKNOWN]" in output or "Cross-source reconciliation" in output,
+            f"Neither an [UNKNOWN] line nor a reconciliation report was printed "
+            f"-- a flagged run must never be quiet about what it did:\n{output}",
+        )
+        if result.returncode == 0:
+            self.assertTrue(
+                "[UNKNOWN]" in output or "reconciliation clear" in output,
+                f"Exit 0 must correspond to an explicit UNKNOWN or RECONCILED "
+                f"state, never a bare pass:\n{output}",
+            )
 
 
 if __name__ == "__main__":

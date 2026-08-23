@@ -30,6 +30,11 @@ COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
 SHARED_LAYER_DEPLOY = REPO_ROOT / "backend/lambda/shared_layer/deploy.sh"
 
+# ENC-TSK-P15 / ENC-ISS-669 AC-6: the pinned, hash-verified devops ownership
+# snapshot (see tools/verify_devops_ownership_snapshot.py and that file's own
+# _doc). Read by _validate_cross_source_reconciliation below.
+DEVOPS_OWNERSHIP_SNAPSHOT_PATH = REPO_ROOT / "infrastructure/devops_lambda_ownership_snapshot.json"
+
 # ENC-TSK-O87: the two real arm64-dependency build paths. Neither is a
 # "deploy script" in the ENVIRONMENT_SUFFIX-conditional sense the two
 # constants above validate, so they get their own dedicated check.
@@ -1135,6 +1140,278 @@ def _validate_artifact_s3_layout(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-P15 / ENC-ISS-669 AC-6: cross-source reconciliation.
+#
+# ENC-TSK-O83 taught this file to reconcile "declared" against "evaluated"
+# WITHIN one template (02-compute.yaml): an independent text-based census
+# had to equal the structural selector's count, or the run failed loudly.
+# ENC-ISS-669 is the same defect one layer up: lambda_workflow_manifest.json
+# declares only what 02-compute.yaml's own author thought to list, and nine
+# more source_of_truth-adjacent facts were true and unchecked --
+#   * three more of THIS repo's OWN CloudFormation templates (05-monitoring,
+#     06-appsync-events, 08-agent-auth) also declare AWS::Lambda::Function
+#     resources the manifest never enumerates;
+#   * a sibling repository (NX-2021-L/devops) owns and deploys five more
+#     Lambdas in the SAME AWS account, one of which (devops-io-devops-mcp)
+#     is declared in neither its own functions.yaml manifest nor anywhere
+#     in this repo.
+# "Declared in the one file I happened to read" is not "declared in any
+# source we own." This section makes "any source we own" a literal union --
+# every CFN template under infrastructure/cloudformation/, plus the pinned
+# devops ownership snapshot -- and reconciles that union against what
+# lambda:ListFunctions says is actually running, so a function invisible to
+# every declared source fails loudly instead of just never being asked
+# about.
+# ---------------------------------------------------------------------------
+
+# The two families whose Lambda naming this reconciliation is scoped to.
+# NOT an ownership predicate (see DEVOPS_OWNERSHIP_SNAPSHOT_PATH / AC-3's own
+# ownership_predicate field for why a prefix can't decide ownership -- dozens
+# of enceladus's OWN functions carry the "devops-" prefix too). This is a
+# SCOPE boundary only: the AWS account behind this identity is shared with
+# several of the account owner's other, unrelated products (an SST app, a
+# separate "io-graph" project, a personal finance MCP server, a family-site
+# support stack, ...) that have nothing to do with enceladus's arm64
+# architecture contract. Reconciling against literally every Lambda in the
+# account would make every one of those unrelated tenants an "unclassifiable
+# failure" and the guard would cry wolf on every run -- exactly the failure
+# mode tools/assert_no_placeholder_lambdas.py's own comments warn about
+# ("a guard that cries wolf on healthy functions gets switched off"). A live
+# function outside this scope is reported as OUT_OF_RECONCILIATION_SCOPE,
+# tallied and printed every run -- never silently dropped -- but is not
+# reconciled against declared sources and can never fail this check.
+_RECONCILIATION_SCOPE_PREFIXES = ("enceladus-", "devops-")
+
+
+def _strip_gamma_suffix(name: str) -> str:
+    suffix = "-gamma"
+    return name[: -len(suffix)] if name.endswith(suffix) else name
+
+
+def _load_devops_ownership_snapshot() -> tuple[Optional[dict], List[str]]:
+    """Load and parse the pinned devops ownership snapshot.
+
+    Returns (snapshot_or_None, errors). A missing or malformed snapshot is
+    always an error -- never a silent empty set of devops-owned names, which
+    would make every live devops function an unclassifiable failure instead
+    of the governed exception AC-3/AC-5 require it to be.
+    """
+    if not DEVOPS_OWNERSHIP_SNAPSHOT_PATH.is_file():
+        return None, [
+            f"devops ownership snapshot not found at "
+            f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH} -- cannot classify any live "
+            f"devops-owned function as a governed exception. Every one of "
+            f"them would resolve to an unclassifiable failure instead "
+            f"(ENC-TSK-P15 AC-3/AC-5: a missing declaration is a failure, "
+            f"never a silent pass)."
+        ]
+
+    import json
+
+    try:
+        snapshot = json.loads(DEVOPS_OWNERSHIP_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, [f"devops ownership snapshot is not valid JSON: {exc}"]
+    return snapshot, []
+
+
+def _devops_owned_function_names(snapshot: dict) -> set:
+    return {
+        entry["function_name"]
+        for entry in (snapshot or {}).get("functions", [])
+        if isinstance(entry, dict) and entry.get("function_name")
+    }
+
+
+def _enceladus_declared_function_names() -> set:
+    """Every Lambda FunctionName declared in ANY source enceladus owns.
+
+    ENC-ISS-669's generalised lesson: lambda_workflow_manifest.json's
+    `functions[]` reflects only what someone remembered to add, scoped to
+    the one template its own `source_of_truth` names. This unions that with
+    an independent structural sweep of EVERY infrastructure/cloudformation/
+    template -- reusing _parse_lambda_blocks exactly as-is, the same
+    selector 02-compute.yaml's own count-reconciliation (ENC-TSK-O83) trusts
+    -- so a Lambda declared in 05-monitoring.yaml, 06-appsync-events.yaml,
+    08-agent-auth.yaml, or any future template is counted as declared even
+    if nobody remembered to also add it to the manifest.
+    """
+    import json
+
+    names: set = set()
+    if MANIFEST_PATH.is_file():
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        for entry in manifest.get("functions", []):
+            name = entry.get("function_name")
+            if name:
+                names.add(name)
+
+    for template_path in sorted(COMPUTE_TEMPLATE.parent.glob("*.yaml")):
+        for block in _parse_lambda_blocks(template_path):
+            if block.function_name:
+                names.add(block.function_name)
+
+    return names
+
+
+def _enumerate_live_lambda_functions(region: str = "us-west-2"):
+    """Enumerate every live Lambda FunctionName in the account via
+    lambda:ListFunctions.
+
+    Returns (names_or_None, reason). `names` is None whenever the live call
+    could not be made -- no boto3, no credentials, an AWS-side failure --
+    and `reason` explains why. Callers MUST treat None as "could not run",
+    never as "zero functions" or as a pass: AC-6 is explicit that an
+    unavailable live call must surface as UNKNOWN, never as a silent pass.
+    """
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError:
+        return None, "boto3 not available"
+
+    try:
+        client = boto3.client("lambda", region_name=region)
+        names: set = set()
+        paginator = client.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page.get("Functions", []):
+                fn_name = fn.get("FunctionName")
+                if fn_name:
+                    names.add(fn_name)
+        return names, ""
+    except (BotoCoreError, ClientError) as exc:
+        return None, f"AWS Lambda ListFunctions call failed: {exc}"
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        return None, f"unexpected error enumerating live Lambda functions: {exc}"
+
+
+def _validate_cross_source_reconciliation(region: str = "us-west-2"):
+    """ENC-TSK-P15 / ENC-ISS-669 AC-6: reconcile "declared in any source we
+    own" against "running in the account" as two distinct sets, scoped to
+    the enceladus/devops naming family (see _RECONCILIATION_SCOPE_PREFIXES).
+
+    Every in-scope live function resolves to exactly one of:
+      * declared (enceladus manifest+templates, or the -gamma variant of a
+        declared name) -- fine, no finding.
+      * NOT_APPLICABLE_ON_PLANE -- its name matches the pinned devops
+        ownership snapshot: a governed exception, printed every run, never
+        a silent skip (AC-5).
+      * VIOLATION -- live, in-scope, and declared by NEITHER source. This
+        is the exact ENC-ISS-669 shape and is a hard failure.
+
+    Returns (errors, status). status is one of:
+      "SNAPSHOT_ERROR"        -- the devops ownership snapshot is missing or
+                                 malformed; errors explains why.
+      "UNKNOWN_NO_LIVE_ACCESS" -- the live lambda:ListFunctions call could
+                                 not be made; errors is empty (this must
+                                 never fail a plain CI run with no AWS
+                                 credentials configured), but this is NEVER
+                                 to be read as a pass -- see the printed
+                                 [UNKNOWN] line, which is the visible half
+                                 of AC-5's "never to silence."
+      "VIOLATIONS_FOUND"      -- at least one in-scope live function is
+                                 declared by neither source.
+      "RECONCILED"            -- every in-scope live function is accounted
+                                 for.
+    """
+    snapshot, snapshot_errors = _load_devops_ownership_snapshot()
+    if snapshot_errors:
+        return snapshot_errors, "SNAPSHOT_ERROR"
+
+    devops_names = _devops_owned_function_names(snapshot)
+    enceladus_bare = _enceladus_declared_function_names()
+    enceladus_all = set(enceladus_bare) | {f"{name}-gamma" for name in enceladus_bare}
+
+    live, unavailable_reason = _enumerate_live_lambda_functions(region=region)
+    if live is None:
+        print(
+            f"[UNKNOWN] Cross-source reconciliation (ENC-TSK-P15 AC-6): live "
+            f"Lambda enumeration unavailable ({unavailable_reason}). This is "
+            f"NOT a pass -- declared-vs-live reconciliation did not run this "
+            f"invocation. {len(enceladus_all)} enceladus-declared name(s) and "
+            f"{len(devops_names)} devops-owned name(s) are known from static "
+            f"sources; neither was checked against the live account."
+        )
+        return [], "UNKNOWN_NO_LIVE_ACCESS"
+
+    def in_scope(name: str) -> bool:
+        base = _strip_gamma_suffix(name)
+        return (
+            base.startswith(_RECONCILIATION_SCOPE_PREFIXES)
+            or base in enceladus_bare
+            or base in devops_names
+        )
+
+    in_scope_live = sorted(name for name in live if in_scope(name))
+    out_of_scope_count = len(live) - len(in_scope_live)
+
+    functions_by_name = {
+        entry.get("function_name"): entry
+        for entry in snapshot.get("functions", [])
+        if isinstance(entry, dict)
+    }
+
+    exceptions_fired: List[str] = []
+    violations: List[str] = []
+    for name in in_scope_live:
+        if name in enceladus_all:
+            continue
+        if name in devops_names:
+            entry = functions_by_name.get(name, {})
+            exceptions_fired.append(
+                f"NOT_APPLICABLE_ON_PLANE {name}: owned by "
+                f"{snapshot.get('owning_repo', 'NX-2021-L/devops')} (source: "
+                f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH.relative_to(REPO_ROOT)}); "
+                f"deploy_channel={entry.get('deploy_channel', '?')}"
+            )
+            continue
+        violations.append(
+            f"{name}: live in the account, in the enceladus/devops naming "
+            f"family scope, but declared in NEITHER lambda_workflow_manifest.json "
+            f"/ any infrastructure/cloudformation/*.yaml template NOR "
+            f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH.relative_to(REPO_ROOT)}. "
+            f"Unclassifiable -- this is exactly the ENC-ISS-669 shape: a live "
+            f"function no declared source accounts for. Either declare it (if "
+            f"it is enceladus's), add it to the devops ownership snapshot with "
+            f"real provenance (if it is devops's and the snapshot is stale), "
+            f"or treat it as drift requiring investigation."
+        )
+
+    declared_not_live = sorted(
+        name for name in enceladus_bare
+        if name not in live and f"{name}-gamma" not in live
+    )
+
+    print(
+        f"[INFO] Cross-source reconciliation (ENC-TSK-P15 AC-6): "
+        f"{len(live)} live Lambda function(s) enumerated in the account, "
+        f"{len(in_scope_live)} in the enceladus/devops naming-family scope "
+        f"({out_of_scope_count} out of scope -- other AWS-account tenants, "
+        f"tallied and reported, not silently dropped, but not this "
+        f"governance's concern), {len(enceladus_all)} enceladus-declared "
+        f"name(s) (manifest + every infrastructure/cloudformation/*.yaml "
+        f"template), {len(devops_names)} devops-owned name(s) (pinned "
+        f"snapshot)."
+    )
+    for line in exceptions_fired:
+        print(f"::notice::{line}")
+    if declared_not_live:
+        print(
+            f"[INFO] {len(declared_not_live)} enceladus-declared name(s) not "
+            f"currently live -- not yet deployed, or a stale declaration; out "
+            f"of scope for ENC-TSK-P15's devops-ownership remediation, "
+            f"reported for visibility only, not failed: "
+            f"{', '.join(declared_not_live)}"
+        )
+
+    if violations:
+        return violations, "VIOLATIONS_FOUND"
+
+    return [], "RECONCILED"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify Lambda architecture parity between CFN, deploy scripts, and S3 artifacts."
@@ -1164,6 +1441,28 @@ def main() -> int:
             "'io ruling: <RECORD-ID>' citation (ENC-TSK-O84). Omit to skip "
             "the ratchet (e.g. for a plain local structural check)."
         ),
+    )
+    parser.add_argument(
+        "--check-live-reconciliation",
+        action="store_true",
+        help=(
+            "Cross-source reconciliation (ENC-TSK-P15 / ENC-ISS-669 AC-6): "
+            "enumerate live Lambda functions via lambda:ListFunctions and "
+            "reconcile them against every declared source this repo owns "
+            "(the manifest plus every infrastructure/cloudformation/*.yaml "
+            "template) union the pinned devops ownership snapshot. Requires "
+            "boto3 + AWS credentials with lambda:ListFunctions; prints "
+            "[UNKNOWN] and does not fail the run when unavailable (never a "
+            "silent pass, but never a hard-required credential either). Not "
+            "part of the default invocation, same convention as "
+            "--check-s3-artifacts -- plain CI has no AWS credentials "
+            "configured today."
+        ),
+    )
+    parser.add_argument(
+        "--live-reconciliation-region",
+        default="us-west-2",
+        help="AWS region for --check-live-reconciliation's lambda:ListFunctions call (default: us-west-2).",
     )
     args = parser.parse_args()
 
@@ -1259,6 +1558,28 @@ def main() -> int:
         if artifact_errors:
             errors.append("=== S3 artifact layout violations ===")
             errors.extend(artifact_errors)
+
+    # ENC-TSK-P15 / ENC-ISS-669 AC-6: cross-source reconciliation when
+    # requested. status "UNKNOWN_NO_LIVE_ACCESS" deliberately contributes no
+    # errors (a plain CI run with no AWS credentials must not fail because
+    # of that alone) but is never printed as a pass either -- see the
+    # [UNKNOWN] line _validate_cross_source_reconciliation itself prints.
+    if args.check_live_reconciliation:
+        reconciliation_errors, reconciliation_status = _validate_cross_source_reconciliation(
+            region=args.live_reconciliation_region
+        )
+        if reconciliation_errors:
+            errors.append(
+                f"=== Cross-source reconciliation violations "
+                f"(ENC-TSK-P15 AC-6, status={reconciliation_status}) ==="
+            )
+            errors.extend(reconciliation_errors)
+        elif reconciliation_status == "RECONCILED":
+            print(
+                "[INFO] Cross-source reconciliation clear: every in-scope live "
+                "Lambda function is either declared by this repo or a governed "
+                "devops-ownership exception."
+            )
 
     if errors:
         print("[ERROR] Lambda architecture parity check FAILED:")
