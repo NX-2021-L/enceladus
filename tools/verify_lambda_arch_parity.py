@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -722,6 +723,225 @@ def _validate_architecture_exceptions(blocks: List[LambdaResource]) -> List[str]
     return errors
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-O84 (ENC-PLN-086 Wave 2, ENC-FTR-135): monotonic ratchet on the
+# temporary exception class, and an io-ruling gate on permanent-class growth.
+#
+# ENC-TSK-O82 wired the two-class contract (a function is exempt if it's
+# named on exactly one of temporary/permanent) but explicitly left the
+# ratchet itself unimplemented -- that a class's membership only ever moves
+# the direction its own "ratchet" field promises, release over release, is
+# this task's job. Neither class's ratchet is enforceable by reading the
+# manifest alone: "may only shrink" and "additions require an io ruling" are
+# both properties of a *transition*, not of a single snapshot. Both checks
+# below therefore take a `baseline` and a `current` architecture_exceptions
+# dict and diff them, rather than inspecting either one in isolation.
+# ---------------------------------------------------------------------------
+
+_EXCEPTION_CLASS_METADATA_KEYS = ("rationale", "terminal_state", "ratchet")
+
+# Required citation shape for a permanent-class addition: the literal marker
+# "io ruling:" (case-insensitive) followed by a tracker-record-ID-shaped
+# token, e.g. "io ruling: ENC-TSK-0102" or "io ruling: DVP-ISS-14". This is
+# deliberately loose about the ID's prefix/shape (this repo runs several:
+# ENC-TSK-, ENC-ISS-, DVP-TSK-, ...) and strict about the marker itself,
+# since the marker -- not the ID format -- is what makes an addition
+# reviewable rather than silent.
+_IO_RULING_RE = re.compile(
+    r"io ruling\s*:\s*([A-Za-z]{2,5}-[A-Za-z]{2,5}-[A-Za-z0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def _class_name_sets(class_block: Optional[Dict[str, Any]]) -> Dict[str, set]:
+    """Map each architecture key in a temporary/permanent class block to the
+    set of function names listed under it, skipping the class's own
+    rationale/terminal_state/ratchet metadata keys.
+
+    Pure and manifest-shape-only: takes an already-parsed class dict (e.g.
+    architecture_exceptions["prod"]["temporary"]), never touches disk or
+    git. That's what makes diff_architecture_exceptions() below directly
+    unit-testable against synthetic before/after manifests (ENC-TSK-O84
+    AC-1/AC-2) without needing a real git history, or either of the real
+    exception lists (both empty today) to have anything in them.
+    """
+    result: Dict[str, set] = {}
+    for key, value in (class_block or {}).items():
+        if key in _EXCEPTION_CLASS_METADATA_KEYS:
+            continue
+        if isinstance(value, list):
+            result[key] = set(value)
+    return result
+
+
+def _ruling_tokens(class_block: Optional[Dict[str, Any]]) -> set:
+    """Extract every 'io ruling: <RECORD-ID>' citation token from a class's
+    rationale prose (case-insensitive marker, any tracker-ID-shaped token).
+    """
+    rationale = (class_block or {}).get("rationale") or ""
+    if not isinstance(rationale, str):
+        return set()
+    return {match.group(1) for match in _IO_RULING_RE.finditer(rationale)}
+
+
+def diff_architecture_exceptions(
+    baseline: Dict[str, Any], current: Dict[str, Any]
+) -> List[str]:
+    """ENC-TSK-O84: enforce both exception-class ratchets across a
+    baseline -> current transition of the manifest's architecture_exceptions
+    block.
+
+    Pure function -- baseline and current are already-parsed
+    architecture_exceptions dicts (e.g. manifest["architecture_exceptions"]),
+    never file paths or git refs -- so both AC-1 and AC-2 can be proven with
+    synthetic manifests in unit tests, independent of git plumbing and of
+    the real exception lists (both empty today; see ENC-TSK-O82/ENC-TSK-O72).
+
+    AC-1 (temporary ratchet): for every plane and every architecture key
+    under a `temporary` class, current membership must be a subset of
+    baseline membership. Any name present at `current` but absent at
+    `baseline` is a ratchet violation -- growth requires a deliberate
+    baseline update (moving what this function is diffed against), not a
+    silent edit. Shrinking, or no change, is always allowed -- that's the
+    entire point of the class existing.
+
+    AC-2 (permanent ruling gate): for every plane and every architecture key
+    under a `permanent` class, a name added relative to baseline is an
+    undocumented decision UNLESS the plane's permanent-class rationale text
+    ALSO gained a fresh `io ruling: <RECORD-ID>` citation in this same
+    baseline -> current transition. A citation already present at baseline
+    does not count: it can't be evidence of a ruling on an addition that
+    didn't exist yet, and would let one stale citation silently cover every
+    future addition forever. The citation is required once per growth
+    event (not once per function name), matching the manifest's existing
+    plane+class-scoped -- not per-function -- rationale granularity.
+
+    Returns a list of human-readable violation strings that name exactly
+    which entries were added and where; an empty list means both class
+    contracts hold.
+    """
+    errors: List[str] = []
+    planes = sorted(set(baseline.keys()) | set(current.keys()))
+
+    for plane in planes:
+        baseline_plane = baseline.get(plane) or {}
+        current_plane = current.get(plane) or {}
+
+        # --- AC-1: the temporary class may only shrink ---
+        temp_baseline = _class_name_sets(baseline_plane.get("temporary"))
+        temp_current = _class_name_sets(current_plane.get("temporary"))
+        for arch in sorted(set(temp_baseline.keys()) | set(temp_current.keys())):
+            added = temp_current.get(arch, set()) - temp_baseline.get(arch, set())
+            if added:
+                errors.append(
+                    f"architecture_exceptions.{plane}.temporary.{arch}: "
+                    f"ratchet violation -- grew by {sorted(added)} relative "
+                    f"to the baseline. The temporary class may only shrink; "
+                    f"growth requires a deliberate baseline update, not a "
+                    f"silent edit (ENC-TSK-O84 AC-1)."
+                )
+
+        # --- AC-2: permanent-class additions require a fresh io ruling ---
+        perm_baseline = _class_name_sets(baseline_plane.get("permanent"))
+        perm_current = _class_name_sets(current_plane.get("permanent"))
+        perm_added: Dict[str, set] = {}
+        for arch in sorted(set(perm_baseline.keys()) | set(perm_current.keys())):
+            added = perm_current.get(arch, set()) - perm_baseline.get(arch, set())
+            if added:
+                perm_added[arch] = added
+
+        if perm_added:
+            ruling_baseline = _ruling_tokens(baseline_plane.get("permanent"))
+            ruling_current = _ruling_tokens(current_plane.get("permanent"))
+            new_rulings = ruling_current - ruling_baseline
+            if not new_rulings:
+                for arch, added in perm_added.items():
+                    errors.append(
+                        f"architecture_exceptions.{plane}.permanent.{arch}: "
+                        f"un-ruled addition -- grew by {sorted(added)} "
+                        f"without a fresh 'io ruling: <RECORD-ID>' citation "
+                        f"added to the permanent class's rationale in this "
+                        f"change. Permanent-class entries are decisions, not "
+                        f"debt -- they may not pass silently (ENC-TSK-O84 "
+                        f"AC-2)."
+                    )
+            else:
+                for arch, added in perm_added.items():
+                    print(
+                        f"[INFO] architecture_exceptions.{plane}.permanent."
+                        f"{arch}: grew by {sorted(added)}, covered by fresh "
+                        f"ruling citation(s): {sorted(new_rulings)}"
+                    )
+
+    return errors
+
+
+def _git_show_manifest_at_ref(ref: str) -> Optional[dict]:
+    """Read infrastructure/lambda_workflow_manifest.json as it existed at
+    `ref`, via `git show`, without touching the working tree or requiring a
+    second on-disk artifact -- history is the baseline.
+
+    Returns None if the ref/path can't be resolved (unknown ref, a shallow
+    clone missing the needed history, or the file not yet existing at that
+    ref). Callers must treat that as a hard failure, not a silent skip: an
+    unresolvable baseline is not evidence of an empty one (ENC-TSK-O83
+    vacuous-pass lesson -- "nothing to check" must be visible, never quiet).
+    """
+    import json
+
+    try:
+        rel_path = MANIFEST_PATH.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        rel_path = "infrastructure/lambda_workflow_manifest.json"
+
+    proc = subprocess.run(
+        ["git", "show", f"{ref}:{rel_path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _validate_architecture_exceptions_ratchet(base_ref: str) -> List[str]:
+    """ENC-TSK-O84: CI-facing glue for diff_architecture_exceptions().
+
+    The baseline is the same manifest file at `base_ref` (the PR's base sha
+    for a pull_request event, or the previous commit for a direct push),
+    read via `git show` -- no new committed artifact. `current` is the
+    on-disk manifest at HEAD, i.e. the working tree CI just checked out.
+    Comparing the file to its own history means the ratchet naturally scopes
+    to exactly what this change did, with no second file to keep in sync
+    or let drift.
+    """
+    baseline_manifest = _git_show_manifest_at_ref(base_ref)
+    if baseline_manifest is None:
+        return [
+            f"Could not read infrastructure/lambda_workflow_manifest.json "
+            f"at base ref {base_ref!r} via `git show` -- cannot evaluate "
+            f"the architecture_exceptions ratchet. Treating an unresolvable "
+            f"baseline as a hard failure, not a silent skip (ENC-TSK-O83 "
+            f"vacuous-pass lesson). Check that the checkout has enough "
+            f"history (fetch-depth: 0) and that {base_ref!r} is a valid ref."
+        ]
+
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found"]
+
+    import json
+
+    current_manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    baseline_exceptions = _manifest_architecture_exceptions(baseline_manifest)
+    current_exceptions = _manifest_architecture_exceptions(current_manifest)
+    return diff_architecture_exceptions(baseline_exceptions, current_exceptions)
+
+
 # ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
 ARTIFACT_ARCH_TAGS = {
     "prod": "x86_64-py311",
@@ -825,6 +1045,17 @@ def main() -> int:
         default="prod,gamma",
         help="Comma-separated environments to check (default: prod,gamma).",
     )
+    parser.add_argument(
+        "--exceptions-base-ref",
+        metavar="REF",
+        help=(
+            "Git ref/sha to diff infrastructure/lambda_workflow_manifest.json's "
+            "architecture_exceptions block against: fails when the temporary "
+            "class grew, or when the permanent class grew without a fresh "
+            "'io ruling: <RECORD-ID>' citation (ENC-TSK-O84). Omit to skip "
+            "the ratchet (e.g. for a plain local structural check)."
+        ),
+    )
     args = parser.parse_args()
 
     if not COMPUTE_TEMPLATE.is_file():
@@ -862,6 +1093,26 @@ def main() -> int:
     if exceptions_errors:
         errors.append("=== Architecture exceptions contract violations ===")
         errors.extend(exceptions_errors)
+
+    # ENC-TSK-O84: monotonic ratchet (temporary) + permanent-class ruling
+    # gate, diffed against the base ref a CI run supplies. Skipped (not
+    # vacuously passed) when no base ref is given -- there is genuinely
+    # nothing to diff against for a plain local structural check.
+    if args.exceptions_base_ref:
+        ratchet_errors = _validate_architecture_exceptions_ratchet(
+            args.exceptions_base_ref
+        )
+        if ratchet_errors:
+            errors.append(
+                "=== Architecture exceptions ratchet violations (ENC-TSK-O84) ==="
+            )
+            errors.extend(ratchet_errors)
+        else:
+            print(
+                f"[INFO] Architecture exceptions ratchet clear against "
+                f"{args.exceptions_base_ref}: temporary class did not grow, "
+                f"no un-ruled permanent-class additions."
+            )
 
     # Validate deploy scripts
     deploy_errors = _validate_deploy_scripts()

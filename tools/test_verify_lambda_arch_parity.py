@@ -10,6 +10,7 @@ Run from repo root:
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -677,6 +678,349 @@ class TestArchitectureExceptions(unittest.TestCase):
             prod["permanent"]["x86_64"], [],
             "ENC-TSK-O72 proved the permanent exception class seeds empty",
         )
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O84: monotonic ratchet (temporary) + permanent-class ruling gate.
+#
+# Both real exception lists are empty today (ENC-TSK-O82/O72), so the ratchet
+# has nothing to bite on in the actual manifest -- these tests construct the
+# failing and passing transitions synthetically, against diff_architecture_
+# exceptions() directly, per the task's own instruction that "a passing run
+# proves nothing" while both lists are empty.
+# ---------------------------------------------------------------------------
+
+
+class TestTemporaryClassRatchet(unittest.TestCase):
+    """AC-1: a CI check fails when the temporary class grows relative to its
+    baseline; shrinking (or no change) is always allowed."""
+
+    @staticmethod
+    def _exceptions(temp_x86_64, perm_x86_64=(), rationale="test"):
+        return {
+            "prod": {
+                "temporary": {
+                    "x86_64": list(temp_x86_64),
+                    "rationale": rationale,
+                    "terminal_state": "empty",
+                    "ratchet": "may only shrink",
+                },
+                "permanent": {
+                    "x86_64": list(perm_x86_64),
+                    "rationale": rationale,
+                    "terminal_state": "stable",
+                    "ratchet": "additions require an io ruling",
+                },
+            }
+        }
+
+    def test_growth_fails(self):
+        baseline = self._exceptions([])
+        current = self._exceptions(["new-fn"])
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertTrue(errors, "A grown temporary class must fail")
+        self.assertTrue(
+            any("ratchet violation" in e and "new-fn" in e for e in errors),
+            f"Expected a named ratchet-violation error, got: {errors}",
+        )
+
+    def test_growth_names_exactly_the_added_entries(self):
+        baseline = self._exceptions(["already-there"])
+        current = self._exceptions(["already-there", "brand-new-1", "brand-new-2"])
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("brand-new-1", errors[0])
+        self.assertIn("brand-new-2", errors[0])
+        self.assertNotIn("already-there", errors[0])
+
+    def test_shrink_passes(self):
+        baseline = self._exceptions(["retiring-fn", "also-retiring"])
+        current = self._exceptions(["retiring-fn"])
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+    def test_unchanged_passes(self):
+        baseline = self._exceptions(["steady-fn"])
+        current = self._exceptions(["steady-fn"])
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+    def test_shrink_to_empty_terminal_state_passes(self):
+        baseline = self._exceptions(["last-one-out"])
+        current = self._exceptions([])
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+    def test_new_architecture_key_with_members_is_growth(self):
+        """A baseline with no 'arm64' key at all is an implicit empty set --
+        introducing architecture_exceptions.prod.temporary.arm64 with members
+        is growth just as surely as adding to an existing x86_64 list."""
+        baseline = {"prod": {"temporary": {"x86_64": [], "rationale": "t"}}}
+        current = {
+            "prod": {"temporary": {"x86_64": [], "arm64": ["sneaky-fn"], "rationale": "t"}}
+        }
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertTrue(errors)
+        self.assertTrue(any("arm64" in e and "sneaky-fn" in e for e in errors))
+
+    def test_new_plane_with_temporary_members_is_growth(self):
+        """A plane entirely absent from baseline (e.g. 'gamma' not yet
+        declared) is an implicit empty exceptions set for that plane too."""
+        baseline = {"prod": {"temporary": {"x86_64": [], "rationale": "t"}}}
+        current = {
+            "prod": {"temporary": {"x86_64": [], "rationale": "t"}},
+            "gamma": {"temporary": {"x86_64": ["new-plane-fn"], "rationale": "t"}},
+        }
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertTrue(errors)
+        self.assertTrue(any("gamma" in e and "new-plane-fn" in e for e in errors))
+
+
+class TestPermanentClassRulingGate(unittest.TestCase):
+    """AC-2: additions to the permanent class must not pass silently -- they
+    require a fresh 'io ruling: <RECORD-ID>' citation added to the same
+    plane's permanent rationale in the same change."""
+
+    @staticmethod
+    def _exceptions(perm_x86_64, rationale):
+        return {
+            "prod": {
+                "temporary": {
+                    "x86_64": [],
+                    "rationale": "unrelated",
+                    "terminal_state": "empty",
+                    "ratchet": "may only shrink",
+                },
+                "permanent": {
+                    "x86_64": list(perm_x86_64),
+                    "rationale": rationale,
+                    "terminal_state": "stable",
+                    "ratchet": "additions require an io ruling",
+                },
+            }
+        }
+
+    def test_growth_without_ruling_fails(self):
+        baseline = self._exceptions([], "SnapStart-retained functions.")
+        current = self._exceptions(["snapstart-fn"], "SnapStart-retained functions.")
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertTrue(errors, "An un-ruled permanent addition must surface")
+        self.assertTrue(
+            any("un-ruled addition" in e and "snapstart-fn" in e for e in errors),
+            f"Expected a named un-ruled-addition error, got: {errors}",
+        )
+
+    def test_growth_with_fresh_ruling_passes(self):
+        baseline = self._exceptions([], "SnapStart-retained functions.")
+        current = self._exceptions(
+            ["snapstart-fn"],
+            "SnapStart-retained functions. io ruling: ENC-TSK-O99 approved "
+            "retaining snapstart-fn on 2026-09-01.",
+        )
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+    def test_growth_with_stale_preexisting_ruling_still_fails(self):
+        """A citation already present at baseline is not evidence of a
+        ruling on THIS addition -- it must be freshly added in this diff, or
+        one stale citation would silently cover every future addition."""
+        stale_rationale = "Prior ruling. io ruling: ENC-TSK-O10 covered fn-a."
+        baseline = self._exceptions(["fn-a"], stale_rationale)
+        current = self._exceptions(["fn-a", "fn-b"], stale_rationale)
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertTrue(
+            errors, "An unchanged, stale ruling citation must not cover a new addition"
+        )
+        self.assertTrue(any("fn-b" in e for e in errors))
+
+    def test_shrink_requires_no_ruling(self):
+        baseline = self._exceptions(["retiring-permanent-fn"], "test")
+        current = self._exceptions([], "test")
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+    def test_ruling_marker_is_case_insensitive(self):
+        baseline = self._exceptions([], "test")
+        current = self._exceptions(["fn"], "test. IO RULING: ENC-ISS-42 signed off.")
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(errors, [])
+
+
+class TestArchitectureExceptionsRatchetMultiPlane(unittest.TestCase):
+    """Both classes, and multiple planes, are evaluated independently in a
+    single diff pass -- a violation in one does not mask or get masked by a
+    clean or ruled change in another."""
+
+    def test_temporary_growth_and_ruled_permanent_growth_are_independent(self):
+        baseline = {
+            "prod": {
+                "temporary": {"x86_64": [], "rationale": "t"},
+                "permanent": {"x86_64": [], "rationale": "p"},
+            },
+            "gamma": {
+                "temporary": {"x86_64": [], "rationale": "t"},
+                "permanent": {"x86_64": [], "rationale": "p"},
+            },
+        }
+        current = {
+            "prod": {
+                # Unruled growth here -- must fail.
+                "temporary": {"x86_64": ["unratcheted-fn"], "rationale": "t"},
+                "permanent": {"x86_64": [], "rationale": "p"},
+            },
+            "gamma": {
+                "temporary": {"x86_64": [], "rationale": "t"},
+                # Ruled growth here -- must pass.
+                "permanent": {
+                    "x86_64": ["ruled-fn"],
+                    "rationale": "p. io ruling: ENC-TSK-O55 approved.",
+                },
+            },
+        }
+        errors = vlap.diff_architecture_exceptions(baseline, current)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("prod", errors[0])
+        self.assertIn("unratcheted-fn", errors[0])
+        self.assertNotIn("ruled-fn", " ".join(errors))
+
+
+class TestGitBackedRatchetGlue(unittest.TestCase):
+    """ENC-TSK-O84: exercise the git-show glue (_git_show_manifest_at_ref /
+    _validate_architecture_exceptions_ratchet) against a disposable, isolated
+    git repo, so these tests don't depend on this worktree's own history."""
+
+    def _init_repo(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+
+    def _commit_manifest(self, tmp_path: Path, manifest_path: Path, obj: dict, message: str) -> str:
+        import json
+
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(obj), encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=tmp_path, check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def test_git_show_reads_manifest_content_at_a_prior_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._init_repo(tmp_path)
+            manifest_path = tmp_path / "infrastructure" / "lambda_workflow_manifest.json"
+            base_sha = self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": []}}}},
+                "base",
+            )
+            self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": ["new-fn"]}}}},
+                "grow",
+            )
+
+            with mock.patch.object(vlap, "REPO_ROOT", tmp_path), mock.patch.object(
+                vlap, "MANIFEST_PATH", manifest_path
+            ):
+                baseline = vlap._git_show_manifest_at_ref(base_sha)
+                self.assertIsNotNone(baseline)
+                self.assertEqual(
+                    baseline["architecture_exceptions"]["prod"]["temporary"]["x86_64"], []
+                )
+
+    def test_end_to_end_ratchet_fails_across_real_git_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._init_repo(tmp_path)
+            manifest_path = tmp_path / "infrastructure" / "lambda_workflow_manifest.json"
+            base_sha = self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": []}}}},
+                "base",
+            )
+            self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": ["new-fn"]}}}},
+                "grow",
+            )
+
+            with mock.patch.object(vlap, "REPO_ROOT", tmp_path), mock.patch.object(
+                vlap, "MANIFEST_PATH", manifest_path
+            ):
+                errors = vlap._validate_architecture_exceptions_ratchet(base_sha)
+                self.assertTrue(errors)
+                self.assertTrue(any("new-fn" in e for e in errors))
+
+    def test_end_to_end_ratchet_passes_on_a_shrink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._init_repo(tmp_path)
+            manifest_path = tmp_path / "infrastructure" / "lambda_workflow_manifest.json"
+            base_sha = self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": ["retiring-fn"]}}}},
+                "base",
+            )
+            self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": []}}}},
+                "shrink",
+            )
+
+            with mock.patch.object(vlap, "REPO_ROOT", tmp_path), mock.patch.object(
+                vlap, "MANIFEST_PATH", manifest_path
+            ):
+                errors = vlap._validate_architecture_exceptions_ratchet(base_sha)
+                self.assertEqual(errors, [])
+
+    def test_unresolvable_base_ref_is_a_hard_failure_not_a_silent_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._init_repo(tmp_path)
+            manifest_path = tmp_path / "infrastructure" / "lambda_workflow_manifest.json"
+            self._commit_manifest(
+                tmp_path,
+                manifest_path,
+                {"architecture_exceptions": {"prod": {"temporary": {"x86_64": []}}}},
+                "base",
+            )
+
+            with mock.patch.object(vlap, "REPO_ROOT", tmp_path), mock.patch.object(
+                vlap, "MANIFEST_PATH", manifest_path
+            ):
+                errors = vlap._validate_architecture_exceptions_ratchet(
+                    "this-ref-does-not-exist"
+                )
+                self.assertTrue(
+                    errors, "An unresolvable baseline must fail, not skip (ENC-TSK-O83)"
+                )
+                self.assertTrue(any("cannot evaluate" in e for e in errors))
+
+    def test_real_repo_ratchet_is_clean_against_its_own_head(self):
+        """Smoke test: diffing the real on-disk manifest against its own
+        current HEAD must be a no-op pass (nothing changed)."""
+        if not vlap.MANIFEST_PATH.is_file():
+            self.skipTest(f"Real manifest not present at {vlap.MANIFEST_PATH}")
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=vlap.REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0 or proc.stdout.strip() != "true":
+            self.skipTest("Not running inside a git work tree")
+        errors = vlap._validate_architecture_exceptions_ratchet("HEAD")
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":
