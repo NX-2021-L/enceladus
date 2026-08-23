@@ -19,7 +19,11 @@ from LIVE state, never from a cached claim or a recorded fact.
 THE FIVE POINTS (BRD section 8, verbatim numbering)
 -----------------------------------------------------------------------------
 1. Artifact identity   -- deployed CodeSha256 == the arm64 build artifact,
-                           not merely Architectures==['arm64'].
+                           not merely Architectures==['arm64']. When the
+                           build artifact cannot be read, falls back to
+                           inspecting the DEPLOYED package for wrong-arch
+                           compiled objects -- which can FAIL but never PASS
+                           (ENC-TSK-O96 / ENC-ISS-658).
 2. Layer coherence      -- every attached layer version is arm64-compatible
                            IN FACT (inspected .so contents), not merely in
                            CompatibleArchitectures metadata.
@@ -90,10 +94,25 @@ KNOWN PERMISSION BOUNDARIES (AWS_PROFILE=enceladus-agent, confirmed live)
     2026-08-23 against auth-refresh). Point 3 reports UNKNOWN under this
     profile, with the reason stated explicitly -- never a fabricated pass.
   - s3:GetObject / s3:ListBucket on the lambda-artifacts bucket (jreese-net):
-    DENIED (explicit deny in enceladus-agent-cli-policy, confirmed live).
-    Point 1's artifact-vs-S3 comparison reports UNKNOWN under this profile
-    for the same reason. A CI OIDC role or broader-scoped credential can
-    complete both checks; this file does not assume it has one.
+    DENIED, and PERMANENTLY so for agent sessions. io's policy inspection on
+    2026-08-23 (ENC-ISS-659) found the denial comes from a `Deny s3:* on
+    NotResource harrisonfamily-frontend` statement -- the S3 security
+    boundary for every enceladus-agent-cli session, which additionally
+    governs a second project's production bucket. The ENC-ISS-658 request
+    for an artifact-read grant was therefore WITHDRAWN rather than pursued:
+    unblocking a validation check is not a good enough reason to edit that
+    statement. Point 1's primary artifact-vs-S3 comparison consequently
+    reports UNKNOWN under this profile forever, and ENC-TSK-O96 added the
+    deployed-package SUBSTITUTE below rather than waiting for a permission
+    that is not coming. A CI OIDC role can still complete the primary check.
+  - lambda:GetFunction's presigned Code.Location for the DEPLOYED package:
+    ALLOWED, and NOT gated by the S3 bucket policy above (AWS-managed
+    storage, same mechanism as GetLayerVersion). This is what makes point
+    1's substitute path possible under the agent identity -- see
+    inspect_deployed_package(). It can produce a real FAIL. It can NEVER
+    produce a PASS: it establishes what is running, not that what is running
+    came from the arm64 build lane, and PointResult enforces that
+    structurally rather than by convention.
   - GetLayerVersion's presigned Content.Location download is NOT gated by
     the S3 bucket policy above (it is AWS-managed Lambda layer storage) --
     confirmed live by downloading enceladus-shared:12 (18124 bytes, zero
@@ -193,6 +212,19 @@ REASON_CODES = {
     "s3_read_error": "an S3 error occurred that is not a permission denial or a missing key",
     "digest_match": "recomputed artifact digest matches the deployed CodeSha256",
     "digest_mismatch": "recomputed artifact digest does not match the deployed CodeSha256",
+    # point 1 -- DEPLOYED-PACKAGE SUBSTITUTE (ENC-TSK-O96 / ENC-ISS-658).
+    # These codes are carried on PointResult.substitute, never as the point's
+    # own reason_code when the point is unknown -- see check_artifact_identity.
+    # NONE of them can produce PASS: this path inspects the deployed package,
+    # which says nothing about whether that package came from the arm64 BUILD.
+    "deployed_package_unavailable": "lambda:GetFunction returned no presigned Code.Location, or the call itself failed -- the deployed package could not be fetched for substitute inspection",
+    "deployed_package_download_error": "the deployed package's presigned Code.Location could not be downloaded",
+    "deployed_package_digest_unverified": "the downloaded bytes do not hash to the deployed CodeSha256 -- they cannot be trusted to BE the deployed package, so nothing inspected in them is evidence about it",
+    "deployed_package_bad_zip": "the downloaded deployed package is not a valid zip archive",
+    "deployed_package_arch_mismatch": "the DEPLOYED package contains compiled objects of the wrong machine type -- direct evidence the live code cannot be the arm64 build",
+    "deployed_package_unclassifiable": "the deployed package contains compiled objects that could not be architecture-classified",
+    "deployed_package_no_native_objects": "the deployed package contains zero compiled objects -- architecture-neutral, so it carries no contrary evidence and also no positive proof of provenance",
+    "deployed_package_arch_consistent": "every compiled object in the deployed package matches the expected architecture -- no contrary evidence, but provenance against the build artifact remains unread",
     # point 2 -- layer_coherence
     "zero_layers": "the function declares no layers at all -- vacuously coherent",
     "layer_contents_verified": "every attached layer's real content was downloaded and inspected (pure-Python or arch-matched compiled objects)",
@@ -297,12 +329,32 @@ class PointResult:
     detail: str
     reason_code: str = "unspecified"
     checked_at: str = field(default_factory=_now)
+    # Populated only by point 1, only when the primary (S3 build-artifact)
+    # check could not complete. Carries its OWN state/reason_code/detail for
+    # the substitute deployed-package inspection, kept separate from the
+    # point's own reason_code on purpose: ENC-TSK-O89 and ENC-TSK-O90
+    # aggregate on FunctionReport.permission_denied_points, and overwriting
+    # the point's reason_code with a substitute code would silently delete
+    # the IAM fact those consumers group by. See check_artifact_identity.
+    substitute: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if self.state not in _VALID_STATES:
             raise ValueError(f"invalid state {self.state!r}; must be one of {_VALID_STATES}")
         if self.reason_code not in REASON_CODES:
             raise ValueError(f"invalid reason_code {self.reason_code!r}; must be one of {sorted(REASON_CODES)}")
+        if self.substitute is not None:
+            sub_state = self.substitute.get("state")
+            sub_reason = self.substitute.get("reason_code")
+            if sub_state not in _VALID_STATES:
+                raise ValueError(f"invalid substitute state {sub_state!r}; must be one of {_VALID_STATES}")
+            if sub_state == PASS:
+                raise ValueError(
+                    "a substitute check may never report PASS -- it is weaker evidence than the "
+                    "check it stands in for, and promoting it would reproduce the vacuous-pass "
+                    "defect this harness exists to eliminate (see ENC-ISS-658)")
+            if sub_reason not in REASON_CODES:
+                raise ValueError(f"invalid substitute reason_code {sub_reason!r}; must be one of {sorted(REASON_CODES)}")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -350,17 +402,201 @@ class FunctionReport:
 # Point 1 -- artifact identity
 # ---------------------------------------------------------------------------
 
+def _classify_so_tree(root: Path, expected_arch: str,
+                       classify_so: Callable[[Path], Optional[str]]) -> Tuple[List[str], List[str], int]:
+    """Classify every compiled object under `root`.
+
+    Returns (mismatches, unclassifiable, total_so_count). Shared by point 2
+    (layer contents) and point 1's deployed-package substitute so the two
+    cannot drift apart on what counts as a compiled object or as a mismatch.
+    """
+    so_files = list(root.rglob("*.so")) + list(root.rglob("*.so.*"))
+    mismatches: List[str] = []
+    unknowns: List[str] = []
+    for so in so_files:
+        arch = classify_so(so)
+        if arch is None:
+            unknowns.append(so.name)
+        elif arch != expected_arch:
+            mismatches.append(f"{so.name}={arch}")
+    return mismatches, unknowns, len(so_files)
+
+
+def inspect_deployed_package(
+    lambda_client, function_name: str, expected_arch: str,
+    downloader: Callable[[str], bytes] = _default_downloader,
+    classify_so: Optional[Callable[[Path], Optional[str]]] = None,
+) -> Tuple[str, str, str]:
+    """SUBSTITUTE evidence for point 1 when the S3 build artifact cannot be read.
+
+    WHY THIS EXISTS (ENC-TSK-O96, remediating ENC-ISS-658)
+    ---------------------------------------------------------------------
+    Point 1's primary check re-reads the arm64 BUILD artifact out of
+    s3://jreese-net/lambda-artifacts/ and compares its digest to the deployed
+    CodeSha256. Under AWS_PROFILE=enceladus-agent that read is denied, and the
+    grant was WITHDRAWN rather than pursued: io's policy inspection on
+    2026-08-23 found the denial comes from a `Deny s3:* on NotResource
+    harrisonfamily-frontend` statement that is the S3 security boundary for
+    every agent session and additionally governs a second project's production
+    bucket (ENC-ISS-659). Editing that to make a validation check convenient is
+    the wrong trade. So the permission is not coming, and point 1 needed
+    another way to say something true.
+
+    `lambda:GetFunction` returns a presigned `Code.Location` for the DEPLOYED
+    package which downloads WITHOUT any bucket permission -- the same
+    AWS-managed mechanism that already makes point 2 work fully under this
+    identity. Inspecting that package's own compiled objects gives DIRECT
+    evidence about the property point 1 exists to protect, and can return a
+    real FAIL with no IAM change at all.
+
+    WHAT IT DELIBERATELY CANNOT DO -- READ BEFORE PROMOTING ANY BRANCH
+    ---------------------------------------------------------------------
+    This function NEVER returns PASS, and PointResult.__post_init__ enforces
+    that structurally. Inspecting the deployed package tells you what is
+    running; it does not tell you that what is running came from the arm64
+    build lane. A pure-Python function has zero compiled objects, so a
+    consistent result there is indistinguishable from a package built from the
+    wrong commit entirely. Promoting that to PASS would be exactly the vacuous
+    pass this harness was built to eliminate -- ENC-ISS-651's census returned
+    29 false clears from empty lookup lists, and DVP-ISS-103's probe returned
+    HTTP 200 with checks_errored:0 while writing nothing. An absence of
+    contrary evidence is not evidence of provenance.
+
+    Returns (state, reason_code, note); state is FAIL or UNKNOWN only.
+    """
+    if classify_so is None:
+        classify_so = _load_classify_so()
+
+    try:
+        fn = lambda_client.get_function(FunctionName=function_name)
+    except Exception as exc:  # noqa: BLE001 - any failure means "no substitute evidence"
+        return UNKNOWN, "deployed_package_unavailable", (
+            f"lambda:GetFunction failed, no substitute inspection possible: {_err(exc)}")
+
+    code = fn.get("Code") or {}
+    url = code.get("Location")
+    if not url:
+        return UNKNOWN, "deployed_package_unavailable", (
+            "lambda:GetFunction returned no Code.Location presigned URL")
+
+    deployed_sha = ((fn.get("Configuration") or {}).get("CodeSha256")) or ""
+
+    try:
+        raw = downloader(url)
+    except Exception as exc:  # noqa: BLE001
+        return UNKNOWN, "deployed_package_download_error", (
+            f"could not download the deployed package: {_err(exc)}")
+
+    # Verify the bytes we are about to inspect really ARE the deployed package.
+    # Without this the whole substitute is an inspection of an unattributed
+    # blob -- and a check whose subject is unproven is not evidence.
+    digest = base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii")
+    if not deployed_sha or digest != deployed_sha:
+        return UNKNOWN, "deployed_package_digest_unverified", (
+            f"downloaded bytes hash to {digest} but the function reports CodeSha256 "
+            f"{deployed_sha or '<absent>'} -- cannot confirm these bytes are the deployed "
+            f"package, so nothing found in them is evidence about it")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="verify_arm64_pkg_") as tmp:
+            tmp_path = Path(tmp)
+            zpath = tmp_path / "package.zip"
+            zpath.write_bytes(raw)
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(tmp_path / "content")
+            mismatches, unknowns, total = _classify_so_tree(
+                tmp_path / "content", expected_arch, classify_so)
+    except zipfile.BadZipFile as exc:
+        return UNKNOWN, "deployed_package_bad_zip", (
+            f"the downloaded deployed package is not a valid zip: {exc}")
+
+    provenance_caveat = (
+        "provenance against the arm64 build artifact remains UNREAD (s3:GetObject withdrawn "
+        "per ENC-ISS-658/ENC-ISS-659) -- this is not a point 1 pass")
+
+    if mismatches:
+        return FAIL, "deployed_package_arch_mismatch", (
+            f"the DEPLOYED package (CodeSha256 {deployed_sha}, verified) contains "
+            f"{len(mismatches)} compiled object(s) that are not {expected_arch!r}: "
+            f"{', '.join(mismatches[:5])} -- direct evidence the live code cannot be the "
+            f"{expected_arch} build, established without reading S3 at all")
+    if unknowns:
+        return UNKNOWN, "deployed_package_unclassifiable", (
+            f"the deployed package contains {len(unknowns)} compiled object(s) that could not "
+            f"be classified: {', '.join(unknowns[:5])}; {provenance_caveat}")
+    if total == 0:
+        return UNKNOWN, "deployed_package_no_native_objects", (
+            f"the deployed package (CodeSha256 {deployed_sha}, verified) contains zero compiled "
+            f"objects, so it is architecture-neutral and CANNOT carry contrary evidence -- a "
+            f"package built from the wrong commit entirely would look identical here; "
+            f"{provenance_caveat}")
+    return UNKNOWN, "deployed_package_arch_consistent", (
+        f"all {total} compiled object(s) in the deployed package (CodeSha256 {deployed_sha}, "
+        f"verified) match {expected_arch!r} -- no contrary evidence; {provenance_caveat}")
+
+
 def _artifact_key(function_name: str, expected_arch: str, py_version: str, commit_sha: str,
                    key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT) -> str:
     # DOTTED scheme -- see module docstring "ARTIFACT TAG SCHEME".
     return f"{key_prefix}/{expected_arch}-py{py_version}/{function_name}-{commit_sha}.zip"
 
 
+def _with_substitute(
+    primary: PointResult, lambda_client, function_name: str, expected_arch: str,
+    downloader: Callable[[str], bytes], classify_so: Optional[Callable[[Path], Optional[str]]],
+) -> PointResult:
+    """Attach deployed-package substitute evidence to a non-conclusive point 1.
+
+    THE MERGE RULE, and why it is not simply "replace the verdict":
+
+      - Substitute says FAIL -> the POINT becomes FAIL. Direct evidence that
+        the deployed package is the wrong architecture is conclusive on its
+        own; it needs no S3 read to be true.
+      - Substitute says UNKNOWN -> the point's own state AND reason_code are
+        left EXACTLY as they were. This is deliberate. ENC-TSK-O89 (26 gamma
+        twins) and ENC-TSK-O90 (Category A) aggregate on
+        FunctionReport.permission_denied_points, which groups on
+        reason_code == "permission_denied". Overwriting that with a substitute
+        code would silently erase the IAM fact those consumers exist to count
+        -- turning "this identity cannot see the answer" into what looks like
+        a per-function probe gap. The substitute verdict rides alongside, in
+        its own field, machine-readable and separately grouped.
+    """
+    sub_state, sub_reason, sub_note = inspect_deployed_package(
+        lambda_client, function_name, expected_arch, downloader, classify_so)
+    substitute = {"check": "deployed_package_inspection", "state": sub_state,
+                  "reason_code": sub_reason, "detail": sub_note}
+
+    if sub_state == FAIL:
+        return PointResult(1, "artifact_identity", FAIL,
+                            f"{primary.detail} || SUBSTITUTE FOUND A REAL FAILURE: {sub_note}",
+                            reason_code=sub_reason, substitute=substitute)
+    return PointResult(1, "artifact_identity", primary.state,
+                        f"{primary.detail} || substitute (deployed-package inspection, "
+                        f"non-passing by construction): {sub_note}",
+                        reason_code=primary.reason_code, substitute=substitute)
+
+
 def check_artifact_identity(
     lambda_client, s3_client, function_name: str, expected_arch: str, py_version: str,
     commit_sha: Optional[str], bucket: str = ARTIFACT_BUCKET_DEFAULT,
-    key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT,
+    key_prefix: str = ARTIFACT_KEY_PREFIX_DEFAULT, *,
+    downloader: Callable[[str], bytes] = _default_downloader,
+    classify_so: Optional[Callable[[Path], Optional[str]]] = None,
 ) -> PointResult:
+    """Point 1 -- artifact identity.
+
+    PRIMARY path: recompute the digest of the arm64 build artifact in S3 and
+    compare it to the deployed CodeSha256. This is the only path that can
+    produce PASS, because it is the only one that reads the build artifact.
+
+    SUBSTITUTE path (ENC-TSK-O96 / ENC-ISS-658): when the primary path cannot
+    complete -- s3:GetObject denied (the grant was withdrawn, see
+    inspect_deployed_package), no --commit-sha supplied, or a transient S3
+    error -- inspect the DEPLOYED package instead, fetched via GetFunction's
+    presigned URL which needs no bucket permission. It can turn a blind
+    unknown into a real FAIL. It can never turn one into a PASS.
+    """
     try:
         cfg = lambda_client.get_function_configuration(FunctionName=function_name)
     except Exception as exc:  # noqa: BLE001 - any client failure is "could not check"
@@ -378,10 +614,12 @@ def check_artifact_identity(
                             reason_code="wrong_architecture")
 
     if not commit_sha:
-        return PointResult(1, "artifact_identity", UNKNOWN,
-                            "no --commit-sha supplied; cannot resolve the expected S3 artifact key "
-                            "without knowing which commit was meant to be deployed",
-                            reason_code="no_commit_sha")
+        return _with_substitute(
+            PointResult(1, "artifact_identity", UNKNOWN,
+                        "no --commit-sha supplied; cannot resolve the expected S3 artifact key "
+                        "without knowing which commit was meant to be deployed",
+                        reason_code="no_commit_sha"),
+            lambda_client, function_name, expected_arch, downloader, classify_so)
 
     key = _artifact_key(function_name, expected_arch, py_version, commit_sha, key_prefix)
     try:
@@ -395,14 +633,19 @@ def check_artifact_identity(
                                 f"the deployed code cannot be this build",
                                 reason_code="artifact_missing")
         if "AccessDenied" in msg or "Forbidden" in msg or "403" in msg:
-            return PointResult(1, "artifact_identity", UNKNOWN,
-                                f"S3 GetObject denied for s3://{bucket}/{key} under the calling identity "
-                                f"(confirmed live: enceladus-agent-cli is explicitly denied s3:GetObject "
-                                f"on this bucket) -- point 1 needs a broader-scoped read role (e.g. the "
-                                f"CI OIDC role) to complete under this credential",
-                                reason_code="permission_denied")
-        return PointResult(1, "artifact_identity", UNKNOWN, f"S3 read error for {key}: {msg}",
-                            reason_code="s3_read_error")
+            return _with_substitute(
+                PointResult(1, "artifact_identity", UNKNOWN,
+                            f"S3 GetObject denied for s3://{bucket}/{key} under the calling identity "
+                            f"(enceladus-agent-cli is denied s3 on this bucket by the NotResource Deny "
+                            f"documented in ENC-ISS-659; the grant was WITHDRAWN rather than pursued, so "
+                            f"this denial is PERMANENT for agent sessions) -- only a broader-scoped read "
+                            f"role (e.g. the CI OIDC role) can complete the primary check",
+                            reason_code="permission_denied"),
+                lambda_client, function_name, expected_arch, downloader, classify_so)
+        return _with_substitute(
+            PointResult(1, "artifact_identity", UNKNOWN, f"S3 read error for {key}: {msg}",
+                        reason_code="s3_read_error"),
+            lambda_client, function_name, expected_arch, downloader, classify_so)
 
     digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
     if digest == actual_sha:
@@ -463,19 +706,12 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
             zpath.write_bytes(raw)
             with zipfile.ZipFile(zpath) as zf:
                 zf.extractall(tmp_path / "content")
-            so_files = list((tmp_path / "content").rglob("*.so")) + list((tmp_path / "content").rglob("*.so.*"))
-            if not so_files:
+            mismatches, unknowns, so_count = _classify_so_tree(
+                tmp_path / "content", function_arch, classify_so)
+            if so_count == 0:
                 return PASS, "layer_contents_verified", (
                     f"{layer_arn}: zero .so files -- genuinely architecture-neutral "
                     f"(CompatibleArchitectures metadata={compat_meta}, not relied on)")
-
-            mismatches, unknowns = [], []
-            for so in so_files:
-                arch = classify_so(so)
-                if arch is None:
-                    unknowns.append(so.name)
-                elif arch != function_arch:
-                    mismatches.append(f"{so.name}={arch}")
 
             if mismatches:
                 return FAIL, "compiled_object_mismatch", (
@@ -488,7 +724,7 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                     f"{layer_arn}: {len(unknowns)} compiled object(s) could not be classified: "
                     f"{', '.join(unknowns[:5])}")
             return PASS, "layer_contents_verified", (
-                f"{layer_arn}: {len(so_files)} compiled object(s), all match function arch "
+                f"{layer_arn}: {so_count} compiled object(s), all match function arch "
                 f"{function_arch!r} (inspected, not inferred from metadata={compat_meta})")
     except zipfile.BadZipFile as exc:
         return UNKNOWN, "bad_layer_zip", f"{layer_arn}: downloaded content is not a valid zip: {exc}"
