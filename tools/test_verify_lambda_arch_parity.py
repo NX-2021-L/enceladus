@@ -443,5 +443,241 @@ class TestManifestExpectationsAbsent(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-O82: two-class architecture_exceptions contract coverage.
+# ---------------------------------------------------------------------------
+
+
+class TestArchitectureExceptions(unittest.TestCase):
+    """ENC-TSK-O82 AC-2: the guard reads both exception classes and passes
+    only when every declared function either matches the plane's target
+    architecture or appears on exactly one of the two exception lists."""
+
+    def _run_with_manifest(self, manifest_obj, blocks) -> list[str]:
+        import json
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as fh:
+            json.dump(manifest_obj, fh)
+            tmp_path = Path(fh.name)
+        try:
+            with mock.patch.object(vlap, "MANIFEST_PATH", tmp_path):
+                return vlap._validate_architecture_exceptions(blocks)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _block(name: str, architectures) -> "vlap.LambdaResource":
+        return vlap.LambdaResource(
+            resource_name=name.replace("-", "_").title().replace("_", "") + "Function",
+            function_name=name,
+            runtime={"!If": ["IsGamma", "python3.12", "python3.11"]},
+            architectures=architectures,
+            line_number=1,
+        )
+
+    def test_function_on_temporary_list_passes(self):
+        """A hardcoded-x86_64 function named on the temporary list must pass
+        even though it doesn't match the (hypothetical, arm64) prod target."""
+        manifest = {
+            "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
+            "architecture_exceptions": {
+                "prod": {
+                    "temporary": {
+                        "x86_64": ["legacy-fn"],
+                        "rationale": "test",
+                        "terminal_state": "empty",
+                        "ratchet": "may only shrink",
+                    },
+                    "permanent": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "stable",
+                        "ratchet": "additions require an io ruling",
+                    },
+                }
+            },
+        }
+        blocks = [self._block("legacy-fn", ["x86_64"])]
+        errors = self._run_with_manifest(manifest, blocks)
+        self.assertEqual(errors, [])
+
+    def test_function_on_permanent_list_passes(self):
+        """A hardcoded-x86_64 function named on the permanent list must pass
+        even though it doesn't match the (hypothetical, arm64) prod target."""
+        manifest = {
+            "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
+            "architecture_exceptions": {
+                "prod": {
+                    "temporary": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "empty",
+                        "ratchet": "may only shrink",
+                    },
+                    "permanent": {
+                        "x86_64": ["snapstart-fn"],
+                        "rationale": "test",
+                        "terminal_state": "stable",
+                        "ratchet": "additions require an io ruling",
+                    },
+                }
+            },
+        }
+        blocks = [self._block("snapstart-fn", ["x86_64"])]
+        errors = self._run_with_manifest(manifest, blocks)
+        self.assertEqual(errors, [])
+
+    def test_function_on_both_lists_fails(self):
+        """A function on BOTH the temporary and permanent lists is a
+        contradiction and must fail regardless of the target mismatch."""
+        manifest = {
+            "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
+            "architecture_exceptions": {
+                "prod": {
+                    "temporary": {
+                        "x86_64": ["contradiction-fn"],
+                        "rationale": "test",
+                        "terminal_state": "empty",
+                        "ratchet": "may only shrink",
+                    },
+                    "permanent": {
+                        "x86_64": ["contradiction-fn"],
+                        "rationale": "test",
+                        "terminal_state": "stable",
+                        "ratchet": "additions require an io ruling",
+                    },
+                }
+            },
+        }
+        blocks = [self._block("contradiction-fn", ["x86_64"])]
+        errors = self._run_with_manifest(manifest, blocks)
+        self.assertTrue(errors, "A function on both exception lists must fail")
+        self.assertTrue(
+            any("BOTH" in e for e in errors),
+            f"Expected a both-lists contradiction error, got: {errors}",
+        )
+
+    def test_function_on_neither_list_with_wrong_architecture_fails(self):
+        """A function matching neither the target nor any exception list
+        must fail."""
+        manifest = {
+            "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
+            "architecture_exceptions": {
+                "prod": {
+                    "temporary": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "empty",
+                        "ratchet": "may only shrink",
+                    },
+                    "permanent": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "stable",
+                        "ratchet": "additions require an io ruling",
+                    },
+                }
+            },
+        }
+        blocks = [self._block("undeclared-fn", ["x86_64"])]
+        errors = self._run_with_manifest(manifest, blocks)
+        self.assertTrue(errors, "An unlisted, mismatched function must fail")
+        self.assertTrue(
+            any("not listed on either" in e for e in errors),
+            f"Expected an unlisted-mismatch error, got: {errors}",
+        )
+
+    def test_function_matching_target_passes_regardless_of_lists(self):
+        """A function whose resolved architecture already matches the plane's
+        target passes outright -- exception-list membership is irrelevant."""
+        manifest = {
+            "expected_architecture": {"prod": "x86_64", "gamma": "arm64"},
+            "architecture_exceptions": {
+                "prod": {
+                    "temporary": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "empty",
+                        "ratchet": "may only shrink",
+                    },
+                    "permanent": {
+                        "x86_64": [],
+                        "rationale": "test",
+                        "terminal_state": "stable",
+                        "ratchet": "additions require an io ruling",
+                    },
+                }
+            },
+        }
+        # The real IsGamma conditional pattern resolves prod to x86_64,
+        # matching the target -- this is the shape every real function in
+        # 02-compute.yaml uses today.
+        blocks = [self._block("normal-fn", vlap.EXPECTED_ARCH_IF_LIST)]
+        errors = self._run_with_manifest(manifest, blocks)
+        self.assertEqual(errors, [])
+
+    def test_real_manifest_and_template_pass_the_exceptions_contract(self):
+        """Smoke test against the real repo state: expected_architecture.prod
+        is unchanged at x86_64 (the Phase 5 flip is ENC-PLN-082's call, not
+        this task's) and both exception classes are seeded empty, so every
+        real function must pass via target match alone."""
+        if not vlap.COMPUTE_TEMPLATE.is_file() or not vlap.MANIFEST_PATH.is_file():
+            self.skipTest("Real template/manifest not present")
+        blocks = vlap._parse_lambda_blocks(vlap.COMPUTE_TEMPLATE)
+        errors = vlap._validate_architecture_exceptions(blocks)
+        self.assertEqual(errors, [])
+
+    def test_validate_cfn_defers_hardcoded_architecture_to_a_named_exception(self):
+        """A hardcoded Architectures value that _validate_cfn would normally
+        reject outright must be waved through when the function is named
+        anywhere in the manifest's architecture_exceptions block -- the
+        actual pass/fail call is _validate_architecture_exceptions's, not
+        _validate_cfn's, once a function is a declared exception."""
+        exceptions = {
+            "prod": {
+                "temporary": {"x86_64": ["legacy-fn"]},
+                "permanent": {"x86_64": []},
+            }
+        }
+        exempt_block = self._block("legacy-fn", ["x86_64"])
+        errors = vlap._validate_cfn([exempt_block], architecture_exceptions=exceptions)
+        self.assertEqual(
+            errors, [],
+            f"A named exception must not be rejected by _validate_cfn; got: {errors}",
+        )
+
+        # A function with the same hardcoded shape but NOT named anywhere is
+        # still rejected exactly as before -- the deferral is name-scoped,
+        # not a blanket relaxation of the hardcoded-architecture rule.
+        unnamed_block = self._block("unnamed-fn", ["x86_64"])
+        errors = vlap._validate_cfn([unnamed_block], architecture_exceptions=exceptions)
+        self.assertTrue(
+            any("hardcoded Architectures" in e for e in errors),
+            f"An unnamed hardcoded-architecture function must still be rejected; got: {errors}",
+        )
+
+    def test_real_manifest_carries_two_class_structure(self):
+        """Smoke test: the real on-disk manifest declares both exception
+        classes with rationale/terminal_state/ratchet fields, and the
+        permanent class is seeded empty per ENC-TSK-O72."""
+        if not vlap.MANIFEST_PATH.is_file():
+            self.skipTest(f"Real manifest not present at {vlap.MANIFEST_PATH}")
+        import json
+
+        manifest = json.loads(vlap.MANIFEST_PATH.read_text(encoding="utf-8"))
+        exceptions = vlap._manifest_architecture_exceptions(manifest)
+        prod = exceptions.get("prod", {})
+        for cls in ("temporary", "permanent"):
+            self.assertIn(cls, prod)
+            for field in ("rationale", "terminal_state", "ratchet"):
+                self.assertIn(field, prod[cls])
+        self.assertEqual(
+            prod["permanent"]["x86_64"], [],
+            "ENC-TSK-O72 proved the permanent exception class seeds empty",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

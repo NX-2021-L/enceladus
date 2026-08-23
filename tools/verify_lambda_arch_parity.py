@@ -260,14 +260,55 @@ def _validate_resource_count_reconciliation(
     return []
 
 
-def _validate_cfn(blocks: List[LambdaResource]) -> List[str]:
+def _is_named_architecture_exception(function_name: str, exceptions: Dict[str, Any]) -> bool:
+    """True if function_name appears on any leaf list inside a manifest's
+    architecture_exceptions block (any plane, any class, any architecture).
+
+    ENC-TSK-O82: used by _validate_cfn below to defer a hardcoded-Architectures
+    finding to _validate_architecture_exceptions (which knows which plane and
+    which class it belongs to, and catches the both-lists contradiction) for
+    any function the manifest has actually named as an exception, rather than
+    unconditionally rejecting it here. A function that ISN'T named anywhere
+    still gets today's unconditional rejection -- this only recognizes
+    exceptions the manifest actually declares.
+    """
+    for plane_exceptions in exceptions.values():
+        for cls in ("temporary", "permanent"):
+            class_block = (plane_exceptions or {}).get(cls) or {}
+            for key, value in class_block.items():
+                if key in ("rationale", "terminal_state", "ratchet"):
+                    continue
+                if isinstance(value, list) and function_name in value:
+                    return True
+    return False
+
+
+def _validate_cfn(
+    blocks: List[LambdaResource], architecture_exceptions: Optional[Dict[str, Any]] = None
+) -> List[str]:
     """Validate that all CFN Lambda declarations use IsGamma conditionals.
 
     ENC-TSK-O83: compares the parsed Properties.Runtime / .Architectures
     values directly against the expected structural shape (EXPECTED_RUNTIME_IF
     / EXPECTED_ARCH_IF_LIST) instead of regex-matching raw template text.
+
+    ENC-TSK-O82: a hardcoded Architectures value is still rejected here
+    unconditionally UNLESS the function is named on the manifest's
+    architecture_exceptions block, in which case this defers entirely to
+    _validate_architecture_exceptions (which is plane- and class-aware, and
+    is what actually decides whether the exception is valid, contradictory,
+    or mismatched). If architecture_exceptions isn't passed explicitly, it's
+    read from the on-disk manifest at MANIFEST_PATH.
     """
     errors: List[str] = []
+
+    if architecture_exceptions is None:
+        import json
+        if MANIFEST_PATH.is_file():
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            architecture_exceptions = _manifest_architecture_exceptions(manifest)
+        else:
+            architecture_exceptions = {}
 
     for block in blocks:
         # ENC-TSK-F74: gamma-only literal Lambdas (e.g. enceladus-mcp-code-gamma)
@@ -302,7 +343,9 @@ def _validate_cfn(blocks: List[LambdaResource]) -> List[str]:
 
         # Check Architectures
         if block.architectures != EXPECTED_ARCH_IF_LIST:
-            if (
+            if _is_named_architecture_exception(block.function_name, architecture_exceptions):
+                pass  # ENC-TSK-O82: deferred to _validate_architecture_exceptions
+            elif (
                 isinstance(block.architectures, list)
                 and len(block.architectures) == 1
                 and isinstance(block.architectures[0], str)
@@ -562,19 +605,121 @@ def _validate_manifest_expectations() -> List[str]:
 
 
 def _manifest_architecture_exceptions(manifest: dict) -> Dict[str, Any]:
-    """Seam for ENC-TSK-O82 — not wired into any check yet.
+    """Read point for the manifest's two-class `architecture_exceptions` block.
 
-    ENC-TSK-O82 (lands after this task, ENC-PLN-086 Wave 2) will define a
-    two-class `architecture_exceptions` block in
-    infrastructure/lambda_workflow_manifest.json for functions intentionally
-    exempt from the IsGamma prod/gamma arch contract (distinct from the
-    single hardcoded `-gamma` literal skip in _validate_cfn above), and wire
-    exemption logic against the structural LambdaResource list this module
-    now produces via _parse_lambda_blocks(). This function only establishes
-    the read point — it deliberately does not define or enforce the
-    contract itself.
+    ENC-TSK-O83 left this as an unwired seam. ENC-TSK-O82 (BRD DOC-56CFA21523C1
+    section 6.2) wires it via _validate_architecture_exceptions() below: each
+    plane's exceptions carry a `temporary` class (monotonically shrinking,
+    terminal state empty) and a `permanent` class (stable; additions require
+    an io ruling), each keyed by the deviant architecture string (e.g.
+    "x86_64") to the list of function names carrying that deviation.
     """
     return manifest.get("architecture_exceptions", {})
+
+
+def _resolve_plane_architecture(architectures: Any, plane: str) -> Optional[str]:
+    """Resolve a LambdaResource.architectures value to a single string for
+    one deploy plane ("prod" or "gamma").
+
+    Two shapes are understood:
+      - The IsGamma conditional list (EXPECTED_ARCH_IF_LIST): resolves to
+        "arm64" on the gamma plane and "x86_64" on the prod plane -- the
+        same fixed literals _validate_cfn compares the raw property against
+        structurally.
+      - A hardcoded single-element list (e.g. ["arm64"]): that literal value
+        applies on every plane, since nothing conditions it on IsGamma.
+
+    Anything else (missing Architectures, an unrecognized shape) resolves to
+    None. The caller treats an unresolved architecture as a mismatch against
+    the plane's target -- it can only pass by exception, never by matching.
+    """
+    if architectures == EXPECTED_ARCH_IF_LIST:
+        return "arm64" if plane == "gamma" else "x86_64"
+    if (
+        isinstance(architectures, list)
+        and len(architectures) == 1
+        and isinstance(architectures[0], str)
+    ):
+        return architectures[0]
+    return None
+
+
+def _validate_architecture_exceptions(blocks: List[LambdaResource]) -> List[str]:
+    """ENC-TSK-O82: enforce the two-class architecture_exceptions contract
+    (BRD DOC-56CFA21523C1 section 6.2) declared in the manifest.
+
+    For every plane the manifest declares an architecture_exceptions entry
+    for (today: "prod" only -- see the manifest's own rationale for why
+    expected_architecture.prod has not yet flipped to arm64; per io's Q2
+    ruling on ENC-PLN-082 that flip happens at the start of BRD Phase 5,
+    simultaneously with populating both exception classes, which is that
+    plan's call and not this gamma-only task's), each non-"-gamma" function
+    passes when its resolved architecture for that plane either:
+
+      (a) matches manifest.expected_architecture[plane], or
+      (b) appears on exactly one of the plane's two exception classes
+          (temporary, permanent) under that resolved architecture value.
+
+    A function listed on BOTH classes for the same resolved architecture is
+    a contradiction -- an exception cannot simultaneously be a stable,
+    permanent decision and a shrinking, temporary one -- and fails
+    regardless of whether it also matches the target. A function matching
+    neither the target nor exactly one exception list fails.
+
+    Does not implement the ratchet check itself (whether a class's
+    membership only ever moves the direction its own "ratchet" field
+    promises, release over release) -- that is ENC-TSK-O84. This only
+    checks that today's manifest + CFN state is internally consistent.
+    """
+    errors: List[str] = []
+
+    import json
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found"]
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    expected_arch = manifest.get("expected_architecture", {})
+    exceptions = _manifest_architecture_exceptions(manifest)
+
+    for plane, plane_exceptions in exceptions.items():
+        target = expected_arch.get(plane)
+        temporary = (plane_exceptions or {}).get("temporary") or {}
+        permanent = (plane_exceptions or {}).get("permanent") or {}
+
+        for block in blocks:
+            if block.function_name.endswith("-gamma"):
+                continue  # gamma-only literals never participate in prod/gamma parity
+
+            name = block.function_name or block.resource_name
+            resolved = _resolve_plane_architecture(block.architectures, plane)
+
+            temp_list = temporary.get(resolved, []) if resolved else []
+            perm_list = permanent.get(resolved, []) if resolved else []
+            on_temp = name in temp_list
+            on_perm = name in perm_list
+
+            if on_temp and on_perm:
+                errors.append(
+                    f"{name} ({plane}): listed on BOTH the temporary and "
+                    f"permanent architecture_exceptions classes for "
+                    f"{resolved!r} -- an exception must be exactly one or "
+                    f"the other."
+                )
+                continue
+
+            if resolved == target:
+                continue
+
+            if on_temp or on_perm:
+                continue
+
+            errors.append(
+                f"{name} ({plane}): resolved architecture {resolved!r} does "
+                f"not match target {target!r} and is not listed on either "
+                f"architecture_exceptions class."
+            )
+
+    return errors
 
 
 # ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
@@ -711,6 +856,12 @@ def main() -> int:
     if cfn_errors:
         errors.append("=== CFN Architecture/Runtime violations ===")
         errors.extend(cfn_errors)
+
+    # ENC-TSK-O82: validate the two-class architecture_exceptions contract
+    exceptions_errors = _validate_architecture_exceptions(blocks)
+    if exceptions_errors:
+        errors.append("=== Architecture exceptions contract violations ===")
+        errors.extend(exceptions_errors)
 
     # Validate deploy scripts
     deploy_errors = _validate_deploy_scripts()
