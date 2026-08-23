@@ -532,6 +532,20 @@ jobs:
             --region "${AWS_REGION}" \
             --stack-name "${{ needs.plan.outputs.stack_name }}"
 
+      # ENC-TSK-O99 / ENC-ISS-660 (secondary). A rollback restores previously
+      # stored parameter values, including ones the failed update was
+      # deliberately changing. On 2026-08-23 that silently reverted
+      # SharedLayerArn :12 -> :10 (ENC-ISS-656) while the only post-deploy check
+      # asked about stack STATUS, which is a different question. `always()` on
+      # purpose: the failure path is the only path where this matters.
+      - name: Post-deploy parameter assertion (ENC-TSK-O99)
+        if: always() && needs.plan.outputs.compute_has_changes == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/assert_post_deploy_stack_parameters.py \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}"
+
       - name: Equalize rhythm-cycle S3 artifact retention (gamma, ENC-TSK-N49)
         if: env.ENVIRONMENT_SUFFIX == '-gamma'
         run: |
