@@ -1,0 +1,7 @@
+[
+  {
+    "ResourceType": "AWS::SQS::Queue",
+    "LogicalResourceId": "GovernanceMartScheduleDlq",
+    "ResourceIdentifier": { "QueueUrl": "https://sqs.us-west-2.amazonaws.com/356364570033/devops-governance-mart-schedule-dlq-gamma" }
+  }
+]
