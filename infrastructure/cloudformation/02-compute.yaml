@@ -332,7 +332,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   CoordinationApiFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
@@ -473,7 +473,7 @@ Resources:
           Value: coordination
 
   TrackerMutationFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
@@ -540,7 +540,7 @@ Resources:
           Value: tracker
 
   DocumentApiFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
@@ -595,7 +595,7 @@ Resources:
   # taxonomy (ENC-FTR-111). Synchronously invoked by tracker_mutation. Pure DynamoDB reader
   # (tracker + component-registry); no GitHub, no AppConfig (never calls flag()).
   LifecycleServiceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
@@ -645,7 +645,7 @@ Resources:
   # resource; importing only the Function avoids any risk of CFN silently
   # clobbering live checkout-service permissions on a future stack update).
   CheckoutServiceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
@@ -789,7 +789,7 @@ Resources:
   # writer (tracker table only). No GitHub, no AppConfig (the flag gates the PUBLISHER, not this
   # consumer). See ScoringServiceSubscription / ScoringServiceSnsPermission for the SNS wiring.
   ScoringServiceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-scoring-service${EnvironmentSuffix}"
@@ -873,7 +873,7 @@ Resources:
   # Service posture exactly). Also owns the trust-score violation counter (AC-4),
   # invoked fire-and-forget (Event) by tracker_mutation's edge-layer rejection guard.
   IdServiceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-id-service${EnvironmentSuffix}"
@@ -912,7 +912,7 @@ Resources:
           Value: id-service
 
   ProjectServiceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
@@ -957,7 +957,7 @@ Resources:
           Value: projects
 
   FeedQueryFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
@@ -1009,7 +1009,7 @@ Resources:
           Value: feed
 
   CoordinationMonitorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
@@ -1049,7 +1049,7 @@ Resources:
           Value: coordination
 
   DeployIntakeFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
@@ -1101,7 +1101,7 @@ Resources:
           Value: deployment
 
   ReferenceSearchFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
@@ -1141,7 +1141,7 @@ Resources:
           Value: reference
 
   AuthRefreshFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
@@ -1190,7 +1190,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   DeployOrchestratorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
@@ -1232,7 +1232,7 @@ Resources:
           Value: deployment
 
   DeployFinalizeFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
@@ -1276,7 +1276,7 @@ Resources:
   # GMF: Deploy Decide Lambda (DOC-63420302EF65 §6.2)
   # Cognito-only auth — human governance decisions for production deployments
   DeployDecideFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
@@ -1323,7 +1323,7 @@ Resources:
 
   # ENC-FTR-091 / ENC-TSK-F87 — Deploy Parity Validator
   DeployParityValidatorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
@@ -1402,7 +1402,7 @@ Resources:
           Value: deployment
 
   FeedPublisherFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
@@ -1480,7 +1480,7 @@ Resources:
           Value: feed
 
   GovernanceAuditFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
@@ -1516,7 +1516,7 @@ Resources:
           Value: governance
 
   DocPrepFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
@@ -1557,7 +1557,7 @@ Resources:
           Value: documents
 
   BedrockAgentActionsFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
@@ -1601,7 +1601,7 @@ Resources:
           Value: bedrock
 
   ChangelogApiFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
@@ -1655,7 +1655,7 @@ Resources:
   # subprocess model; correctness over cold-start optimization for this first cut.
   # Gamma-only (Condition: IsGamma), 15-min timeout per AC.
   McpStreamingGatewayFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -1740,7 +1740,7 @@ Resources:
   # searches, recently-viewed, prefs). Gamma-only (Condition: IsGamma): this is
   # B67 Search2.0 wave work under the v4 gamma freeze (DOC-499FA089EC30).
   UserPreferencesApiFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -1776,7 +1776,7 @@ Resources:
           Value: ENC-FTR-127
 
   GraphSyncFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
@@ -1819,7 +1819,7 @@ Resources:
 
   # ENC-TSK-L41 / B67 Search2.0: CDC indexer Lambda (gamma-only until prod OpenSearch).
   OpenSearchIndexerFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -1853,7 +1853,7 @@ Resources:
 
   # ENC-TSK-L42 / B67 Search2.0: full-corpus backfill + reindex job (gamma-only).
   OpenSearchBackfillFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -1888,7 +1888,7 @@ Resources:
           Value: search
 
   GraphQueryApiFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
@@ -1990,7 +1990,7 @@ Resources:
   # ENC-FTR-086 D1: isolated tier-1 service — its own IAM role, no import path
   # from any governance Lambda; tracker mutations never wait on it.
   ConvergenceTelemetryFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
@@ -2038,7 +2038,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   Neo4jBackupFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
@@ -2084,7 +2084,7 @@ Resources:
   # types; graph_sync untouched (related_items project to existing RELATED_TO).
   # ---------------------------------------------------------------------------
   MemoryConsolidationFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-memory-consolidation${EnvironmentSuffix}"
@@ -2143,7 +2143,7 @@ Resources:
   # via governed Document API invoke (writes never touch DynamoDB/S3 directly).
   # ---------------------------------------------------------------------------
   HandoffConsolidationEngineFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-handoff-consolidation-engine${EnvironmentSuffix}"
@@ -2195,7 +2195,7 @@ Resources:
   # DATA-SAFETY: UNLEARNING_DRY_RUN=1, UNLEARNING_MUTATION_ENABLED=0, IO_APPROVAL_RUNS=3.
   # ---------------------------------------------------------------------------
   UnlearningFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -2256,7 +2256,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   DevopsEnvDriftAuditorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
@@ -2306,7 +2306,7 @@ Resources:
   # table); CONFIRM the gamma projects-table name at deploy time before applying.
   # ---------------------------------------------------------------------------
   StaleCheckoutMonitorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-stale-checkout-monitor${EnvironmentSuffix}"
@@ -2413,7 +2413,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   ProdHealthMonitorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
@@ -2524,7 +2524,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   GraphHealthMetricsFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
@@ -2607,7 +2607,7 @@ Resources:
   # resource they always resolve to python3.12/arm64.
   # ---------------------------------------------------------------------------
   PercolationMonitorFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -2695,7 +2695,7 @@ Resources:
   # in the handler before any governed read is attempted.
   # ---------------------------------------------------------------------------
   CorpusEntropyEngineFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -2799,7 +2799,7 @@ Resources:
   # IsGamma): v3-prod is frozen (DOC-499FA089EC30).
   # ---------------------------------------------------------------------------
   CorpusEntropyGdmpRemediationFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -2900,7 +2900,7 @@ Resources:
   # CloudWatch metrics (Enceladus/ArcWalk).
   # ---------------------------------------------------------------------------
   ArcWalkMetricsFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-arc-walk-metrics${EnvironmentSuffix}"
@@ -7263,7 +7263,7 @@ Resources:
   # ---------------------------------------------------------------------------
 
   EnceladusMcpCodeGammaFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     # ENC-TSK-H29 / ENC-ISS-386: FunctionName is a hardcoded literal (no ${EnvironmentSuffix}),
     # so this resource maps to the SAME physical function in every stack that renders it. The
     # prod stack (enceladus-compute, Environment=production) already owns enceladus-mcp-code-gamma;
@@ -7448,7 +7448,7 @@ Resources:
   # Triggered by S3 ObjectCreated on governance/live/*; writes canonical
   # governance-version DDB record. IAM sole-writer grant (I28).
   RecomputeGovernanceFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-recompute-governance${EnvironmentSuffix}"
@@ -7537,7 +7537,7 @@ Resources:
   # Read-only (never writes the record or governance/live/*); emits a
   # CloudWatch metric + SNS alert on disagreement or recompute failure.
   GovernanceDriftCheckFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
@@ -7774,7 +7774,7 @@ Resources:
   # tools/apply_rhythm_artifact_lifecycle.py (gamma compute-stack deploy step).
   # ---------------------------------------------------------------------------
   RhythmCycleFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
@@ -8188,7 +8188,7 @@ Resources:
           Value: escalation-decision-authorizer
 
   EscalationDecisionAuthorizerFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
@@ -8396,7 +8396,7 @@ Resources:
           Value: governance-mart
 
   GovernanceMartFunction:
-    Type: AWS::Lambda::Function
+    # ENC-TSK-O85 CASE 2 negative control (temporary): Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
