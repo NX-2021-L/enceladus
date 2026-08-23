@@ -42,6 +42,26 @@ CROSS_CUTTING_PATTERNS = [
     re.compile(r"^\.github/workflows/_build\.yml$"),
     re.compile(r"^\.github/workflows/_deploy\.yml$"),
     re.compile(r"^infrastructure/lambda_workflow_manifest\.json$"),
+    # ENC-ISS-663 / ENC-TSK-P03: the compute template DECLARES the Lambda
+    # functions, and CloudFormation creates each one carrying a placeholder
+    # body ("# managed outside CloudFormation") that only deploy.sh replaces.
+    # So a template-only change can CREATE a function while touching no
+    # backend/lambda/ directory at all -- which yields affected_functions=[]
+    # and a deploy that logs "nothing to deploy" and exits GREEN, leaving the
+    # new function permanently stuck on the placeholder.
+    #
+    # That is not hypothetical: PR #1140 (ENC-TSK-O95) changed ONLY
+    # 02-compute.yaml, and CloudFormation created
+    # devops-governance-mart-gamma, enceladus-convergence-telemetry-gamma and
+    # escalation-decision-authorizer-gamma at 2026-08-23T04:50:05-07Z with
+    # 164-byte placeholder bodies. All three returned
+    # Runtime.ImportModuleError on every invocation for the next 90 minutes,
+    # with CloudFormation reporting UPDATE_COMPLETE and every CI guard green.
+    #
+    # A change to the file that declares the fleet is cross-cutting for the
+    # fleet's deploy by definition. This honours the module's own contract:
+    # "ambiguity widens, never narrows".
+    re.compile(r"^infrastructure/cloudformation/02-compute\.yaml$"),
 ]
 
 LAMBDA_DIR_RE = re.compile(r"^backend/lambda/([^/]+)/")
