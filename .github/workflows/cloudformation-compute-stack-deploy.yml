@@ -47,6 +47,23 @@ on:
         type: string
         required: false
         default: "manual compute stack deploy"
+      # ENC-TSK-O61 / ENC-ISS-652. Before this input, the target plane was derived
+      # SOLELY from github.ref, so the cutover's actual pairing -- v4/main's template
+      # against the PROD stack enceladus-compute -- could not be rendered by any lane.
+      # The first sight of the real prod change-set would have been the moment it
+      # executed. Leave EMPTY for the historical ref-derived behaviour; a push event
+      # never supplies it, so the default path is unchanged.
+      target_environment:
+        description: "Override the target plane (empty = derive from ref, as before). 'production' is ALWAYS plan-only."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
+      plan_only:
+        description: "Create the change-sets and stop. Never executes."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -59,7 +76,12 @@ concurrency:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/02-compute.yaml
-  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  # ENC-TSK-O61: gamma when explicitly requested, OR (no override supplied) when the
+  # ref is a v4 branch -- byte-identical to the previous ref-only expression for every
+  # push event. Written gamma-first deliberately: GitHub Actions treats '' as FALSY, so
+  # the natural `cond && '' || fallback` ternary silently falls through and would have
+  # made target_environment=production resolve to the gamma suffix.
+  ENVIRONMENT_SUFFIX: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-compute
   DEFAULT_DATA_STACK_NAME: enceladus-data
 
@@ -456,7 +478,19 @@ jobs:
   apply:
     name: Apply Data + Compute change-sets
     needs: plan
-    if: needs.plan.outputs.data_has_changes == 'true' || needs.plan.outputs.compute_has_changes == 'true'
+    # ENC-TSK-O61: two additional guards, both fail-safe for push events (where
+    # github.event.inputs is null, so each comparison is true and the historical
+    # behaviour is preserved exactly).
+    #   plan_only            -- create the change-sets and stop.
+    #   target_environment   -- an explicit 'production' target is ALWAYS plan-only.
+    # The second is the load-bearing one. Without it this input would become a way to
+    # apply to PROD from a v4 ref, bypassing the v3-prod Environment pause that gates
+    # every production deploy. The input exists to make the prod apply VISIBLE before
+    # it happens, never to make it easier to perform.
+    if: >-
+      (needs.plan.outputs.data_has_changes == 'true' || needs.plan.outputs.compute_has_changes == 'true')
+      && github.event.inputs.plan_only != 'true'
+      && github.event.inputs.target_environment != 'production'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has

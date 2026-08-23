@@ -23,6 +23,12 @@
 # Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-FTR-068.
 # ENC-TSK-H24: Check 5 added — the enceladus-shared :7-vs-:10 layer-version parity gate.
 # ENC-PLN-048 / ENC-FTR-102: Check 6 added — env-var parity gate (H17 resolver + H18 fail-closed).
+# ENC-TSK-O61 / ENC-ISS-652: Check 8 added -- asserts the APPLY DELTA (what this
+# apply would ADD and REMOVE relative to the TARGET STACK's current resource set).
+# No previous check asked that question: Check 7 compares live AWS state against repo
+# template files, which passed cleanly on the exact ref whose apply would have removed
+# nine live prod resources (ENC-ISS-648) and attempted 52 CREATEs including three live
+# name collisions (ENC-ISS-651). Both were found by hand.
 # ENC-TSK-J12 / ENC-ISS-455: Check 7 added — CFN drift regression guard. Adding or
 # adopting an out-of-band-existing resource via a plain deploy fails
 # AWS::EarlyValidation::ResourceExistenceCheck and wedges the stack (R1/R2 in
@@ -89,7 +95,7 @@ ERRORS=0
 SNAPSHOT_FILE="/tmp/pre-deploy-snapshot-${TIMESTAMP}.json"
 
 # --- Check 1: Capture Lambda snapshot ---
-echo "[CHECK 1/7] Capturing current Lambda state snapshot..."
+echo "[CHECK 1/8] Capturing current Lambda state snapshot..."
 
 if [[ ! -f "${MANIFEST}" ]]; then
     echo "[ERROR] Lambda workflow manifest not found: ${MANIFEST}"
@@ -134,7 +140,7 @@ fi
 
 # --- Check 2: Validate IsGamma conditionals ---
 echo ""
-echo "[CHECK 2/7] Validating CFN template architecture parity..."
+echo "[CHECK 2/8] Validating CFN template architecture parity..."
 
 if python3 "${REPO_ROOT}/tools/verify_lambda_arch_parity.py"; then
     echo "[PASS] CFN template uses IsGamma conditionals correctly"
@@ -145,7 +151,7 @@ fi
 
 # --- Check 3: Validate EnvironmentSuffix parameter ---
 echo ""
-echo "[CHECK 3/7] Validating EnvironmentSuffix parameter in template..."
+echo "[CHECK 3/8] Validating EnvironmentSuffix parameter in template..."
 
 if grep -q "EnvironmentSuffix" "${TEMPLATE_FILE}"; then
     echo "[PASS] Template contains EnvironmentSuffix parameter"
@@ -156,7 +162,7 @@ fi
 
 # --- Check 4: Validate deploy scripts ---
 echo ""
-echo "[CHECK 4/7] Validating deploy scripts via manifest..."
+echo "[CHECK 4/8] Validating deploy scripts via manifest..."
 
 # This is already done by verify_lambda_arch_parity.py, but we add a specific
 # check for hardcoded RUNTIME/ARCHITECTURE defaults without conditionals
@@ -171,7 +177,7 @@ fi
 
 # --- Check 5: Validate enceladus-shared layer-version parity (ENC-TSK-H24) ---
 echo ""
-echo "[CHECK 5/7] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
+echo "[CHECK 5/8] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
 
 # Static checks (template Default + workflow --parameter-overrides override) are
 # fail-closed (no AWS creds needed). ENC-TSK-H28 added the workflow-override check that
@@ -198,7 +204,7 @@ fi
 # advisory classification are the single source in env_drift_registry.json;
 # tools/env_parity_waivers.json carries only risk-accepted failure suppressions.
 echo ""
-echo "[CHECK 6/7] Validating env-var parity (no out-of-band vars the deploy would strip)..."
+echo "[CHECK 6/8] Validating env-var parity (no out-of-band vars the deploy would strip)..."
 
 # Infer EnvironmentSuffix from the stack name so gamma stacks resolve their -gamma env.
 PARITY_PARAMS=()
@@ -236,10 +242,10 @@ DRIFT_REPORT="/tmp/pre-deploy-drift-${TIMESTAMP}.json"
 # so the import workflow sets HEALTH_GATE_SKIP_DRIFT=1. Default (unset) is unchanged:
 # a plain 'aws cloudformation deploy' still gets the full fail-on-drift guard.
 if [[ "${HEALTH_GATE_SKIP_DRIFT:-0}" == "1" ]]; then
-    echo "[CHECK 7/7] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
+    echo "[CHECK 7/8] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
     echo "            assert_changeset_safe.py mode=import is the compensating control)."
 else
-    echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
+    echo "[CHECK 7/8] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
     if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
             --environment "${DRIFT_ENV}" \
             --output-json "${DRIFT_REPORT}" \
@@ -263,6 +269,49 @@ else
         echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — live-only resources exist outside CFN (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
         ERRORS=$((ERRORS + 1))
     fi
+fi
+
+# --- Check 8: Assert the apply delta against the target stack (ENC-TSK-O61 / ENC-ISS-652) ---
+# would_remove = stack_logical_ids - template_logical_ids(conditions evaluated)
+# would_create = the reverse difference, each checked for a live physical-name collision.
+# FAILS on a removal with no DeletionPolicy (destruction) and on a CREATE whose name is
+# already taken (CREATE_FAILED rolls back the whole change-set). WARNS on a removal
+# carrying DeletionPolicy: Retain -- survives, but becomes unmanaged, which
+# DOC-AB51FA4D9232 records as worse than never having been codified.
+#
+# Exit convention matches Check 7: 1 = real finding (fail closed), 2 = INDETERMINATE
+# (a live read was denied or a positive control failed) -> flagged, not fatal. The tool
+# refuses to report a clean result it cannot substantiate; a denied lookup is never
+# reported as "absent" (that false negative is exactly what ENC-ISS-651 records).
+echo ""
+DELTA_SUFFIX=""
+DELTA_ENVIRONMENT="production"
+case "${STACK_NAME}" in
+    *gamma*) DELTA_SUFFIX="-gamma"; DELTA_ENVIRONMENT="gamma" ;;
+esac
+DELTA_REPORT="/tmp/pre-deploy-apply-delta-${TIMESTAMP}.json"
+
+echo "[CHECK 8/8] Asserting apply delta vs stack ${STACK_NAME} (suffix='${DELTA_SUFFIX}')..."
+if python3 "${REPO_ROOT}/tools/assert_apply_delta.py" \
+        --stack "${STACK_NAME}" \
+        --template "${TEMPLATE_FILE}" \
+        --region "${REGION}" \
+        --parameter "EnvironmentSuffix=${DELTA_SUFFIX}" \
+        --parameter "Environment=${DELTA_ENVIRONMENT}" \
+        --output-json "${DELTA_REPORT}" \
+        --fail-on-delta; then
+    echo "[PASS] Apply delta is safe: nothing destroyed, no CREATE collisions"
+    DELTA_RC=0
+else
+    DELTA_RC=$?
+fi
+
+if [[ "${DELTA_RC:-0}" -eq 2 ]]; then
+    echo "[WARN] Apply-delta assertion INCONCLUSIVE — a live read was denied or a positive"
+    echo "       control failed. Flagged, NOT treated as a pass (see ${DELTA_REPORT})."
+elif [[ "${DELTA_RC:-0}" -ne 0 ]]; then
+    echo "[FAIL] Apply would destroy a live resource or collide on a CREATE (see ${DELTA_REPORT}; ENC-ISS-652)"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # --- Summary ---
