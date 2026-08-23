@@ -49,6 +49,20 @@ for the self-tests proving this (search for "unknown_not_pass").
 At the function level: overall = FAIL if any point is FAIL; else UNKNOWN if
 any point is UNKNOWN; else PASS. UNKNOWN is non-passing.
 
+Every PointResult also carries a `reason_code` -- a small closed vocabulary
+(REASON_CODES / REASON_CODE_GLOSSARY below) distinguishing WHY a state was
+reached, machine-readably, not just in the free-text `detail`. This matters
+specifically because "unknown" alone conflates unrelated causes: "IAM denied
+this call" (reason_code="permission_denied") and "no probe was ever written"
+(reason_code="no_probe_registered") are both state=unknown but are not the
+same finding -- one is a fleet/IAM fact, the other is a coverage gap.
+FunctionReport.permission_denied_points (and its JSON mirror) surfaces the
+former directly so a caller aggregating many functions (ENC-TSK-O89 across
+26 gamma twins, ENC-TSK-O90 across Category A) can group on it without
+parsing prose. The full glossary is included in every CLI JSON run under
+"reason_code_glossary" so a consumer never has to read this source file to
+know what a code means.
+
 ARTIFACT TAG SCHEME -- A DIVERGENCE THIS HARNESS DOES NOT PAPER OVER
 -----------------------------------------------------------------------------
 Two incompatible S3 key schemes exist in this codebase today:
@@ -153,6 +167,65 @@ FAIL = "fail"
 UNKNOWN = "unknown"
 _VALID_STATES = (PASS, FAIL, UNKNOWN)
 
+# Machine-readable reason codes -- every PointResult carries one of these, not
+# just a prose `detail`. This exists because "unknown" alone does not tell a
+# downstream consumer (ENC-TSK-O89 aggregating 26 functions, ENC-TSK-O90
+# across Category A) WHY a point could not be checked. "permission_denied"
+# in particular is the operationally critical code: under
+# AWS_PROFILE=enceladus-agent, points 1 (partially) and 3 are STRUCTURALLY
+# blocked by IAM (lambda:InvokeFunction and s3:GetObject on jreese-net are
+# both explicitly denied, confirmed live 2026-08-23) and will report
+# "unknown"/"permission_denied" on every run under this identity until
+# either an IAM grant lands or the harness runs from a privileged terminal /
+# CI OIDC role. That is a fleet/IAM fact, not a probe defect -- a consumer
+# grouping by reason_code=="permission_denied" can distinguish "this
+# function is broken" from "this identity cannot see the answer" without
+# re-reading prose. See REASON_CODE_GLOSSARY below for the full vocabulary,
+# which is also emitted in the CLI's JSON output for self-description.
+REASON_CODES = {
+    "unspecified": "reason_code was not set at this call site -- treat as a gap in the harness, not a real classification",
+    # point 1 -- artifact_identity
+    "config_read_error": "could not read the function's configuration (transient AWS error, throttling, etc.)",
+    "wrong_architecture": "deployed Architectures does not match the expected arch -- wrong build target entirely",
+    "no_commit_sha": "no --commit-sha supplied; the expected S3 artifact key cannot be resolved",
+    "artifact_missing": "the expected artifact object does not exist at the resolved S3 key",
+    "permission_denied": "the calling identity is explicitly denied the AWS action needed to complete this check",
+    "s3_read_error": "an S3 error occurred that is not a permission denial or a missing key",
+    "digest_match": "recomputed artifact digest matches the deployed CodeSha256",
+    "digest_mismatch": "recomputed artifact digest does not match the deployed CodeSha256",
+    # point 2 -- layer_coherence
+    "zero_layers": "the function declares no layers at all -- vacuously coherent",
+    "layer_contents_verified": "every attached layer's real content was downloaded and inspected (pure-Python or arch-matched compiled objects)",
+    "compiled_object_mismatch": "a layer's compiled object does not match the function's actual architecture",
+    "layer_arn_unparseable": "a layer ARN could not be parsed into name/version",
+    "layer_not_found": "GetLayerVersion could not find the layer version (commonly a cross-account AWS-managed layer that cannot be introspected from this account)",
+    "layer_download_error": "the layer's presigned content URL could not be downloaded",
+    "layer_content_unclassifiable": "the layer contains compiled objects that could not be architecture-classified",
+    "bad_layer_zip": "the downloaded layer content is not a valid zip archive",
+    # point 3 -- live_invocation
+    "function_not_found": "the target function does not exist",
+    "invoke_error": "the invoke call failed for a reason other than permission or a missing function",
+    "response_unreadable": "the invoke call returned but the response payload could not be read",
+    "function_error": "the function was invoked and returned a FunctionError",
+    "invoked_ok": "the function was invoked and returned without a FunctionError",
+    # point 4 -- integration_edge
+    "no_probe_registered": "no per-function integration probe is registered -- function-level state says nothing about the downstream contract",
+    "probe_error": "the registered probe raised an exception",
+    "probe_invalid_state": "the registered probe returned a state outside pass/fail/unknown",
+    "probe_result": "the registered probe ran to completion and returned this state",
+    # point 5 -- ci_predicate_observed_failing
+    "negative_control_missing": "no negative-control test file exists for the guard covering this function",
+    "negative_control_check_error": "the negative-control test could not be run locally",
+    "negative_control_failing": "the negative-control test does not currently demonstrate the guard can fail",
+    "gh_unavailable": "the gh CLI is not available -- cannot query real CI history",
+    "gh_query_error": "gh run list failed",
+    "gh_output_unparseable": "gh run list returned output that could not be parsed as JSON",
+    "no_ci_history_found": "no failed runs of the guard's workflow were found within the lookback window",
+    "ci_history_confirmed_red": "a real, historical CI run shows the specific guard step failing",
+    "ci_history_inconclusive": "failed workflow runs exist in the lookback window, but none show this guard step failing",
+}
+REASON_CODE_GLOSSARY = REASON_CODES  # exported name used in CLI JSON output
+
 ARTIFACT_BUCKET_DEFAULT = "jreese-net"
 ARTIFACT_KEY_PREFIX_DEFAULT = "lambda-artifacts"
 
@@ -222,11 +295,14 @@ class PointResult:
     name: str
     state: str
     detail: str
+    reason_code: str = "unspecified"
     checked_at: str = field(default_factory=_now)
 
     def __post_init__(self) -> None:
         if self.state not in _VALID_STATES:
             raise ValueError(f"invalid state {self.state!r}; must be one of {_VALID_STATES}")
+        if self.reason_code not in REASON_CODES:
+            raise ValueError(f"invalid reason_code {self.reason_code!r}; must be one of {sorted(REASON_CODES)}")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -248,12 +324,24 @@ class FunctionReport:
             return UNKNOWN
         return PASS
 
+    @property
+    def permission_denied_points(self) -> List[int]:
+        """Points blocked specifically by an IAM/access denial, as opposed to
+        any other reason a point might be unknown (no probe, no CI evidence,
+        transient error, ...). This is the exact aggregation ENC-PLN-086 Wave
+        4 needs: 'unknown because this identity cannot see the answer' is a
+        fleet/IAM fact, not a per-function defect, and must be distinguishable
+        from every other kind of unknown without a human reading `detail`.
+        """
+        return [p.point for p in self.points if p.reason_code == "permission_denied"]
+
     def to_dict(self) -> dict:
         return {
             "function_name": self.function_name,
             "overall": self.overall,
             "generated_at": self.generated_at,
             "points": [p.to_dict() for p in self.points],
+            "permission_denied_points": self.permission_denied_points,
             "warnings": self.warnings,
         }
 
@@ -277,7 +365,8 @@ def check_artifact_identity(
         cfg = lambda_client.get_function_configuration(FunctionName=function_name)
     except Exception as exc:  # noqa: BLE001 - any client failure is "could not check"
         return PointResult(1, "artifact_identity", UNKNOWN,
-                            f"could not read function configuration: {_err(exc)}")
+                            f"could not read function configuration: {_err(exc)}",
+                            reason_code="config_read_error")
 
     actual_arch = (cfg.get("Architectures") or ["unknown"])[0]
     actual_sha = cfg.get("CodeSha256", "")
@@ -285,12 +374,14 @@ def check_artifact_identity(
     if actual_arch != expected_arch:
         return PointResult(1, "artifact_identity", FAIL,
                             f"deployed Architectures={actual_arch!r}, expected {expected_arch!r} "
-                            f"-- this is not even the right build target, regardless of CodeSha256")
+                            f"-- this is not even the right build target, regardless of CodeSha256",
+                            reason_code="wrong_architecture")
 
     if not commit_sha:
         return PointResult(1, "artifact_identity", UNKNOWN,
                             "no --commit-sha supplied; cannot resolve the expected S3 artifact key "
-                            "without knowing which commit was meant to be deployed")
+                            "without knowing which commit was meant to be deployed",
+                            reason_code="no_commit_sha")
 
     key = _artifact_key(function_name, expected_arch, py_version, commit_sha, key_prefix)
     try:
@@ -301,22 +392,27 @@ def check_artifact_identity(
         if "NoSuchKey" in msg or "404" in msg:
             return PointResult(1, "artifact_identity", FAIL,
                                 f"expected artifact s3://{bucket}/{key} does not exist -- "
-                                f"the deployed code cannot be this build")
+                                f"the deployed code cannot be this build",
+                                reason_code="artifact_missing")
         if "AccessDenied" in msg or "Forbidden" in msg or "403" in msg:
             return PointResult(1, "artifact_identity", UNKNOWN,
                                 f"S3 GetObject denied for s3://{bucket}/{key} under the calling identity "
                                 f"(confirmed live: enceladus-agent-cli is explicitly denied s3:GetObject "
                                 f"on this bucket) -- point 1 needs a broader-scoped read role (e.g. the "
-                                f"CI OIDC role) to complete under this credential")
-        return PointResult(1, "artifact_identity", UNKNOWN, f"S3 read error for {key}: {msg}")
+                                f"CI OIDC role) to complete under this credential",
+                                reason_code="permission_denied")
+        return PointResult(1, "artifact_identity", UNKNOWN, f"S3 read error for {key}: {msg}",
+                            reason_code="s3_read_error")
 
     digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
     if digest == actual_sha:
         return PointResult(1, "artifact_identity", PASS,
-                            f"deployed CodeSha256 {actual_sha} matches recomputed digest of s3://{bucket}/{key}")
+                            f"deployed CodeSha256 {actual_sha} matches recomputed digest of s3://{bucket}/{key}",
+                            reason_code="digest_match")
     return PointResult(1, "artifact_identity", FAIL,
                         f"deployed CodeSha256 {actual_sha} != recomputed {digest} for s3://{bucket}/{key} "
-                        f"-- live code diverges from the expected arm64 artifact")
+                        f"-- live code diverges from the expected arm64 artifact",
+                        reason_code="digest_mismatch")
 
 
 # ---------------------------------------------------------------------------
@@ -325,31 +421,40 @@ def check_artifact_identity(
 
 def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                         downloader: Callable[[str], bytes],
-                        classify_so: Callable[[Path], Optional[str]]) -> Tuple[str, str]:
+                        classify_so: Callable[[Path], Optional[str]]) -> Tuple[str, str, str]:
+    """Returns (state, reason_code, note) for one attached layer."""
     # arn:aws:lambda:REGION:ACCOUNT:layer:NAME:VERSION
     parts = layer_arn.rsplit(":", 2)
     if len(parts) != 3:
-        return UNKNOWN, f"{layer_arn}: could not parse layer name/version from ARN"
+        return UNKNOWN, "layer_arn_unparseable", f"{layer_arn}: could not parse layer name/version from ARN"
     layer_name, version_str = parts[1], parts[2]
     try:
         version = int(version_str)
     except ValueError:
-        return UNKNOWN, f"{layer_arn}: non-numeric layer version {version_str!r}"
+        return UNKNOWN, "layer_arn_unparseable", f"{layer_arn}: non-numeric layer version {version_str!r}"
 
     try:
         lv = lambda_client.get_layer_version(LayerName=layer_name, VersionNumber=version)
     except Exception as exc:  # noqa: BLE001
-        return UNKNOWN, f"{layer_arn}: could not read layer version: {_err(exc)}"
+        msg = _err(exc)
+        if "AccessDenied" in msg or "Forbidden" in msg or "403" in msg:
+            return UNKNOWN, "permission_denied", f"{layer_arn}: GetLayerVersion denied: {msg}"
+        if "ResourceNotFoundException" in msg or "404" in msg:
+            return UNKNOWN, "layer_not_found", (
+                f"{layer_arn}: GetLayerVersion could not find this layer version -- commonly a "
+                f"cross-account AWS-managed layer that cannot be introspected from this account "
+                f"(confirmed live for AWS-AppConfig-Extension-Arm64): {msg}")
+        return UNKNOWN, "layer_not_found", f"{layer_arn}: could not read layer version: {msg}"
 
     compat_meta = lv.get("CompatibleArchitectures")
     url = (lv.get("Content") or {}).get("Location")
     if not url:
-        return UNKNOWN, f"{layer_arn}: no Content.Location on layer version response"
+        return UNKNOWN, "layer_not_found", f"{layer_arn}: no Content.Location on layer version response"
 
     try:
         raw = downloader(url)
     except Exception as exc:  # noqa: BLE001
-        return UNKNOWN, f"{layer_arn}: could not download layer content: {_err(exc)}"
+        return UNKNOWN, "layer_download_error", f"{layer_arn}: could not download layer content: {_err(exc)}"
 
     try:
         with tempfile.TemporaryDirectory(prefix="verify_arm64_layer_") as tmp:
@@ -360,8 +465,9 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                 zf.extractall(tmp_path / "content")
             so_files = list((tmp_path / "content").rglob("*.so")) + list((tmp_path / "content").rglob("*.so.*"))
             if not so_files:
-                return PASS, (f"{layer_arn}: zero .so files -- genuinely architecture-neutral "
-                               f"(CompatibleArchitectures metadata={compat_meta}, not relied on)")
+                return PASS, "layer_contents_verified", (
+                    f"{layer_arn}: zero .so files -- genuinely architecture-neutral "
+                    f"(CompatibleArchitectures metadata={compat_meta}, not relied on)")
 
             mismatches, unknowns = [], []
             for so in so_files:
@@ -372,17 +478,20 @@ def _inspect_one_layer(lambda_client, layer_arn: str, function_arch: str,
                     mismatches.append(f"{so.name}={arch}")
 
             if mismatches:
-                return FAIL, (f"{layer_arn}: {len(mismatches)} compiled object(s) do not match function "
-                               f"arch {function_arch!r}: {', '.join(mismatches[:5])} "
-                               f"(CompatibleArchitectures metadata={compat_meta} was NOT trusted, "
-                               f"per BRD 6.5 -- and would have hidden this)")
+                return FAIL, "compiled_object_mismatch", (
+                    f"{layer_arn}: {len(mismatches)} compiled object(s) do not match function "
+                    f"arch {function_arch!r}: {', '.join(mismatches[:5])} "
+                    f"(CompatibleArchitectures metadata={compat_meta} was NOT trusted, "
+                    f"per BRD 6.5 -- and would have hidden this)")
             if unknowns:
-                return UNKNOWN, (f"{layer_arn}: {len(unknowns)} compiled object(s) could not be classified: "
-                                  f"{', '.join(unknowns[:5])}")
-            return PASS, (f"{layer_arn}: {len(so_files)} compiled object(s), all match function arch "
-                           f"{function_arch!r} (inspected, not inferred from metadata={compat_meta})")
+                return UNKNOWN, "layer_content_unclassifiable", (
+                    f"{layer_arn}: {len(unknowns)} compiled object(s) could not be classified: "
+                    f"{', '.join(unknowns[:5])}")
+            return PASS, "layer_contents_verified", (
+                f"{layer_arn}: {len(so_files)} compiled object(s), all match function arch "
+                f"{function_arch!r} (inspected, not inferred from metadata={compat_meta})")
     except zipfile.BadZipFile as exc:
-        return UNKNOWN, f"{layer_arn}: downloaded content is not a valid zip: {exc}"
+        return UNKNOWN, "bad_layer_zip", f"{layer_arn}: downloaded content is not a valid zip: {exc}"
 
 
 def check_layer_coherence(
@@ -397,7 +506,8 @@ def check_layer_coherence(
         cfg = lambda_client.get_function_configuration(FunctionName=function_name)
     except Exception as exc:  # noqa: BLE001
         return PointResult(2, "layer_coherence", UNKNOWN,
-                            f"could not read function configuration: {_err(exc)}")
+                            f"could not read function configuration: {_err(exc)}",
+                            reason_code="config_read_error")
 
     actual_arch = (cfg.get("Architectures") or ["unknown"])[0]
     layers = cfg.get("Layers") or []
@@ -405,20 +515,28 @@ def check_layer_coherence(
     if not layers:
         return PointResult(2, "layer_coherence", PASS,
                             "function declares zero layers -- vacuously coherent "
-                            "(ENC-TSK-O70: this is a legitimate, deliberate state, not a gap)")
+                            "(ENC-TSK-O70: this is a legitimate, deliberate state, not a gap)",
+                            reason_code="zero_layers")
 
     notes: List[str] = []
-    saw_fail = False
-    saw_unknown = False
+    fail_reason: Optional[str] = None
+    unknown_reason: Optional[str] = None
     for layer in layers:
         arn = layer.get("Arn", "")
-        state, note = _inspect_one_layer(lambda_client, arn, actual_arch, downloader, classify_so)
+        state, reason, note = _inspect_one_layer(lambda_client, arn, actual_arch, downloader, classify_so)
         notes.append(note)
-        saw_fail = saw_fail or state == FAIL
-        saw_unknown = saw_unknown or state == UNKNOWN
+        if state == FAIL and fail_reason is None:
+            fail_reason = reason
+        elif state == UNKNOWN and unknown_reason is None:
+            unknown_reason = reason
 
-    overall = FAIL if saw_fail else (UNKNOWN if saw_unknown else PASS)
-    return PointResult(2, "layer_coherence", overall, " | ".join(notes))
+    if fail_reason is not None:
+        overall, overall_reason = FAIL, fail_reason
+    elif unknown_reason is not None:
+        overall, overall_reason = UNKNOWN, unknown_reason
+    else:
+        overall, overall_reason = PASS, "layer_contents_verified"
+    return PointResult(2, "layer_coherence", overall, " | ".join(notes), reason_code=overall_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -435,10 +553,13 @@ def check_live_invocation(lambda_client, function_name: str, payload: str = "{}"
                                 f"IAM identity lacks lambda:InvokeFunction on {function_name} "
                                 f"(confirmed live under AWS_PROFILE=enceladus-agent, 2026-08-23) -- "
                                 f"cannot prove or disprove liveness under this credential; "
-                                f"this is NOT a pass")
+                                f"this is NOT a pass",
+                                reason_code="permission_denied")
         if "ResourceNotFoundException" in msg:
-            return PointResult(3, "live_invocation", FAIL, f"function {function_name} does not exist: {msg}")
-        return PointResult(3, "live_invocation", UNKNOWN, f"invoke call errored: {msg}")
+            return PointResult(3, "live_invocation", FAIL, f"function {function_name} does not exist: {msg}",
+                                reason_code="function_not_found")
+        return PointResult(3, "live_invocation", UNKNOWN, f"invoke call errored: {msg}",
+                            reason_code="invoke_error")
 
     body = b""
     try:
@@ -446,16 +567,19 @@ def check_live_invocation(lambda_client, function_name: str, payload: str = "{}"
         if payload_stream is not None:
             body = payload_stream.read()
     except Exception as exc:  # noqa: BLE001
-        return PointResult(3, "live_invocation", UNKNOWN, f"invoke succeeded but response body unreadable: {_err(exc)}")
+        return PointResult(3, "live_invocation", UNKNOWN, f"invoke succeeded but response body unreadable: {_err(exc)}",
+                            reason_code="response_unreadable")
 
     if resp.get("FunctionError"):
         text = body.decode("utf-8", "replace")
         return PointResult(3, "live_invocation", FAIL,
                             f"FunctionError={resp['FunctionError']}: {text[:400]} "
-                            f"-- native-wheel import failure is the most likely arm64 failure mode here")
+                            f"-- native-wheel import failure is the most likely arm64 failure mode here",
+                            reason_code="function_error")
 
     return PointResult(3, "live_invocation", PASS,
-                        f"StatusCode={resp.get('StatusCode')}, response={body[:200]!r}")
+                        f"StatusCode={resp.get('StatusCode')}, response={body[:200]!r}",
+                        reason_code="invoked_ok")
 
 
 # ---------------------------------------------------------------------------
@@ -537,14 +661,17 @@ def check_integration_edge(function_name: str, clients: Dict[str, object]) -> Po
                             f"no integration probe registered for {function_name!r} -- "
                             f"function-level results say nothing about the downstream contract "
                             f"(BRD 8.4: function green is not system green). Register one in "
-                            f"PROBE_REGISTRY to cover this function.")
+                            f"PROBE_REGISTRY to cover this function.",
+                            reason_code="no_probe_registered")
     try:
         state, detail = probe(function_name, clients)
     except Exception as exc:  # noqa: BLE001
-        return PointResult(4, "integration_edge", UNKNOWN, f"probe raised: {_err(exc)}")
+        return PointResult(4, "integration_edge", UNKNOWN, f"probe raised: {_err(exc)}",
+                            reason_code="probe_error")
     if state not in _VALID_STATES:
-        return PointResult(4, "integration_edge", UNKNOWN, f"probe returned invalid state {state!r}")
-    return PointResult(4, "integration_edge", state, detail)
+        return PointResult(4, "integration_edge", UNKNOWN, f"probe returned invalid state {state!r}",
+                            reason_code="probe_invalid_state")
+    return PointResult(4, "integration_edge", state, detail, reason_code="probe_result")
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +689,8 @@ def check_ci_predicate_observed_failing(
     if not test_path.is_file():
         return PointResult(5, "ci_predicate_observed_failing", FAIL,
                             f"no negative-control test file at {negative_control_test} -- "
-                            f"a guard with no proof it can fail is not evidence (ENC-ISS-556)")
+                            f"a guard with no proof it can fail is not evidence (ENC-ISS-556)",
+                            reason_code="negative_control_missing")
 
     try:
         proc = run_pytest(
@@ -571,18 +699,21 @@ def check_ci_predicate_observed_failing(
         )
     except Exception as exc:  # noqa: BLE001
         return PointResult(5, "ci_predicate_observed_failing", UNKNOWN,
-                            f"could not run negative-control test locally: {_err(exc)}")
+                            f"could not run negative-control test locally: {_err(exc)}",
+                            reason_code="negative_control_check_error")
 
     if proc.returncode not in (0, 5):  # 5 = pytest "no tests collected" for the -k filter
         return PointResult(5, "ci_predicate_observed_failing", FAIL,
                             f"negative-control selection in {negative_control_test} does not currently pass "
                             f"(exit {proc.returncode}) -- the guard's ability to fail on bad input is not "
-                            f"demonstrated: {proc.stdout[-300:]}")
+                            f"demonstrated: {proc.stdout[-300:]}",
+                            reason_code="negative_control_failing")
 
     if which("gh") is None:
         return PointResult(5, "ci_predicate_observed_failing", UNKNOWN,
                             "gh CLI not available -- cannot confirm the guard has been observed red in real "
-                            "CI history (the local negative-control test does pass)")
+                            "CI history (the local negative-control test does pass)",
+                            reason_code="gh_unavailable")
 
     try:
         proc = run_gh(
@@ -591,22 +722,26 @@ def check_ci_predicate_observed_failing(
             capture_output=True, text=True, timeout=30,
         )
     except Exception as exc:  # noqa: BLE001
-        return PointResult(5, "ci_predicate_observed_failing", UNKNOWN, f"gh run list errored: {_err(exc)}")
+        return PointResult(5, "ci_predicate_observed_failing", UNKNOWN, f"gh run list errored: {_err(exc)}",
+                            reason_code="gh_query_error")
 
     if proc.returncode != 0:
         return PointResult(5, "ci_predicate_observed_failing", UNKNOWN,
-                            f"gh run list failed: {proc.stderr.strip()[:300]}")
+                            f"gh run list failed: {proc.stderr.strip()[:300]}",
+                            reason_code="gh_query_error")
 
     try:
         runs = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError as exc:
-        return PointResult(5, "ci_predicate_observed_failing", UNKNOWN, f"could not parse gh output: {exc}")
+        return PointResult(5, "ci_predicate_observed_failing", UNKNOWN, f"could not parse gh output: {exc}",
+                            reason_code="gh_output_unparseable")
 
     if not runs:
         return PointResult(5, "ci_predicate_observed_failing", UNKNOWN,
                             f"no failed runs of {workflow} found in the last {lookback} runs -- the guard "
                             f"exists and can fail locally, but has not been observed red in real CI within "
-                            f"the lookback window (a gate never seen red is not proven, per ENC-ISS-556)")
+                            f"the lookback window (a gate never seen red is not proven, per ENC-ISS-556)",
+                            reason_code="no_ci_history_found")
 
     for run in runs:
         rid = run.get("databaseId")
@@ -618,12 +753,14 @@ def check_ci_predicate_observed_failing(
         if log_proc.returncode == 0 and step_name in log_proc.stdout:
             return PointResult(5, "ci_predicate_observed_failing", PASS,
                                 f"negative-control passes locally AND run {rid} shows '{step_name}' "
-                                f"failing in real CI history")
+                                f"failing in real CI history",
+                                reason_code="ci_history_confirmed_red")
 
     return PointResult(5, "ci_predicate_observed_failing", UNKNOWN,
                         f"found {len(runs)} failed {workflow} run(s) in the last {lookback}, but none had a "
                         f"failing '{step_name}' step in the fetched logs -- those runs may have failed for "
-                        f"an unrelated step")
+                        f"an unrelated step",
+                        reason_code="ci_history_inconclusive")
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +866,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = {
         "generated_at": _now(),
         "artifact_tag_scheme_resolved": f"{args.arch}-py{args.py_version} (dotted)",
+        "reason_code_glossary": REASON_CODE_GLOSSARY,
         "functions": [r.to_dict() for r in reports],
     }
     text = json.dumps(out, indent=2, default=str)

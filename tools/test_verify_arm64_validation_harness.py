@@ -130,6 +130,10 @@ def test_point1_unknown_not_pass_when_s3_access_denied():
     result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123")
     assert result.state == harness.UNKNOWN
     assert "denied" in result.detail.lower()
+    assert result.reason_code == "permission_denied", (
+        "an IAM denial must carry the machine-readable permission_denied code, not just prose, "
+        "so a fleet-wide aggregator can distinguish it from every other kind of unknown"
+    )
 
 
 def test_point1_unknown_not_pass_when_config_read_fails():
@@ -237,6 +241,7 @@ def test_point3_unknown_not_pass_when_invoke_denied():
     ))
     result = harness.check_live_invocation(lam, "fn")
     assert result.state == harness.UNKNOWN, "IAM denial must be unknown, never a fabricated pass"
+    assert result.reason_code == "permission_denied"
 
 
 def test_point3_fail_when_function_does_not_exist():
@@ -253,6 +258,10 @@ def test_point4_unknown_not_pass_when_no_probe_registered():
     result = harness.check_integration_edge("some-function-with-no-probe-xyz", {})
     assert result.state == harness.UNKNOWN
     assert "no integration probe registered" in result.detail
+    assert result.reason_code == "no_probe_registered", (
+        "must be distinguishable from permission_denied -- these are different failure classes "
+        "and an aggregator must not have to parse prose to tell them apart"
+    )
 
 
 def test_point4_uses_registered_probe_result():
@@ -405,6 +414,83 @@ def test_overall_is_pass_only_when_all_five_points_pass():
 def test_point_result_rejects_invalid_state():
     with pytest.raises(ValueError):
         harness.PointResult(1, "a", "vacuous-pass", "")
+
+
+def test_point_result_rejects_unregistered_reason_code():
+    with pytest.raises(ValueError):
+        harness.PointResult(1, "a", harness.UNKNOWN, "", reason_code="made_up_code_xyz")
+
+
+# ---------------------------------------------------------------------------
+# The machine-readable reason_code contract itself (per coordinator review of
+# ENC-TSK-O88): "unknown" alone conflates "IAM cannot see the answer" with
+# "no probe was ever written" with "gh is not installed." A downstream
+# aggregator (ENC-TSK-O89 across 26 functions, ENC-TSK-O90 across Category A)
+# must be able to tell these apart from JSON alone, without a human reading
+# `detail` prose. These tests prove that contract, and that it is distinct
+# from (in addition to, not instead of) the pass/fail/unknown state itself.
+# ---------------------------------------------------------------------------
+
+def test_permission_denied_is_a_distinct_reason_code_from_other_unknowns():
+    """The two operationally critical unknowns (IAM denial vs. no probe
+    registered) must carry different reason codes even though both are
+    state=unknown. Confusing them would hide exactly the fleet/IAM fact
+    ENC-PLN-086 Wave 4 needs to see: two of five points are structurally
+    blocked under AWS_PROFILE=enceladus-agent, and that is not the same
+    kind of gap as 'nobody wrote a probe yet.'"""
+    denied = harness.check_live_invocation(
+        FakeLambdaClient(invoke_error=Exception("AccessDeniedException: not authorized to perform: lambda:InvokeFunction")),
+        "fn",
+    )
+    no_probe = harness.check_integration_edge("fn-with-no-probe", {})
+    assert denied.state == harness.UNKNOWN
+    assert no_probe.state == harness.UNKNOWN
+    assert denied.reason_code == "permission_denied"
+    assert no_probe.reason_code == "no_probe_registered"
+    assert denied.reason_code != no_probe.reason_code
+
+
+def test_function_report_surfaces_permission_denied_points_for_aggregation():
+    """FunctionReport.permission_denied_points (and its JSON mirror) is the
+    concrete aggregation surface: an O89/O90 rollup across dozens of
+    functions can group on this without re-parsing prose per function."""
+    report = harness.FunctionReport(function_name="fn", points=[
+        harness.PointResult(1, "artifact_identity", harness.UNKNOWN, "", reason_code="permission_denied"),
+        harness.PointResult(2, "layer_coherence", harness.PASS, "", reason_code="zero_layers"),
+        harness.PointResult(3, "live_invocation", harness.UNKNOWN, "", reason_code="permission_denied"),
+        harness.PointResult(4, "integration_edge", harness.UNKNOWN, "", reason_code="no_probe_registered"),
+        harness.PointResult(5, "ci_predicate_observed_failing", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+    ])
+    assert report.permission_denied_points == [1, 3]
+    assert report.overall == harness.UNKNOWN
+    as_json = report.to_dict()
+    assert as_json["permission_denied_points"] == [1, 3]
+    assert as_json["overall"] == "unknown", (
+        "a report with 2 of 5 points blocked purely by IAM must never serialize as anything "
+        "that could be mistaken for a pass -- 'mostly fine' is not a state this contract has"
+    )
+
+
+def test_unknown_and_pass_are_never_ambiguous_in_serialized_output():
+    """Guards the exact failure mode named in review: a run where points are
+    unknown must not 'read as mostly fine.' overall is a plain string, not a
+    score or a percentage, and it must differ for an all-pass report vs. one
+    with any unknown -- verified at the to_dict() boundary that O89 actually
+    consumes, not just on the Python property."""
+    all_pass = harness.FunctionReport(function_name="fn", points=[
+        harness.PointResult(i, f"p{i}", harness.PASS, "", reason_code="digest_match" if i == 1 else "unspecified")
+        for i in range(1, 6)
+    ]).to_dict()
+    one_unknown = harness.FunctionReport(function_name="fn", points=[
+        harness.PointResult(1, "p1", harness.PASS, "", reason_code="digest_match"),
+        harness.PointResult(2, "p2", harness.PASS, "", reason_code="zero_layers"),
+        harness.PointResult(3, "p3", harness.UNKNOWN, "", reason_code="permission_denied"),
+        harness.PointResult(4, "p4", harness.PASS, "", reason_code="probe_result"),
+        harness.PointResult(5, "p5", harness.PASS, "", reason_code="ci_history_confirmed_red"),
+    ]).to_dict()
+    assert all_pass["overall"] == "pass"
+    assert one_unknown["overall"] == "unknown"
+    assert all_pass["overall"] != one_unknown["overall"]
 
 
 if __name__ == "__main__":
