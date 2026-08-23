@@ -92,10 +92,15 @@ import subprocess
 import sys
 import tempfile
 
-# AC-4 canonical pin. enceladus-shared:10 = the appconfig_flags-bearing superset of :7,
-# proven-working on coordination-api in prod (ENC-TSK-H24 / ENC-FTR-103).
+# AC-4 canonical pin. ENC-TSK-O94 (ENC-ISS-656) moved this :10 -> :12.
+# History: :10 was the appconfig_flags-bearing superset of :7 (ENC-TSK-H24 / ENC-FTR-103).
+# :12 is in turn a pure-Python superset of :10 adding github_app_auth, record_extensions,
+# relationship_store and version_seq. ENC-TSK-O07 moved three functions onto :12 without
+# bumping this constant, which check 5b (gamma-aware since ENC-TSK-O78) then caught as a
+# would-be downgrade. Moving a function to a new layer version and bumping this pin are
+# ONE change, not two.
 CANONICAL_SHARED_LAYER_ARN = (
-    "arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10"
+    "arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12"
 )
 
 # ENC-TSK-H28 / ENC-ISS-385: the sanctioned compute-deploy workflow that MUST pass
