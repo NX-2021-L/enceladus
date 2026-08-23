@@ -44,6 +44,9 @@ import logging
 import os
 from datetime import date, datetime, timezone
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
 from mart_refresh import refresh_mart
 
 LOGGER = logging.getLogger()
@@ -56,6 +59,61 @@ def _parse_last_day(value):
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+
+
+HEARTBEAT_NAMESPACE = "Enceladus/GovernanceMart"
+HEARTBEAT_METRIC = "MartLastSuccess"
+
+
+def _emit_heartbeat(function_name):
+    """Publish the ENC-TSK-O81 dead-man's-switch heartbeat. SUCCESS PATH ONLY.
+
+    This is the only signal that can catch a job which NEVER RAN. An error-rate
+    alarm and a failure metric structurally cannot: a run that never happens
+    produces no log line and no exit code, so there is nothing for them to
+    measure. The paired alarm therefore sets ``TreatMissingData: breaching`` --
+    ABSENCE is the alarm condition, which is the whole point.
+
+    Deliberately NOT called from a ``finally`` block, NOT called before
+    registration has completed, and NOT called on the dry-run or
+    full-refresh-violation paths. A heartbeat that can fire when the work did
+    not actually land rebuilds precisely the self-fulfilling-signal defect
+    ENC-ISS-665 was filed for -- a freshness signal that reports health because
+    it was asked, rather than because the work happened.
+
+    A failure to PUBLISH is logged and swallowed rather than raised. The refresh
+    genuinely succeeded by this point, and turning a telemetry fault into a data
+    outage would be the wrong trade. The failure mode is safe in the right
+    direction: no datapoint means the alarm breaches, which is a false alarm
+    rather than a silent stop.
+    """
+    try:
+        boto3.client("cloudwatch").put_metric_data(
+            Namespace=HEARTBEAT_NAMESPACE,
+            MetricData=[
+                {
+                    "MetricName": HEARTBEAT_METRIC,
+                    "Dimensions": [{"Name": "FunctionName", "Value": function_name}],
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Timestamp": datetime.now(timezone.utc),
+                }
+            ],
+        )
+        LOGGER.info(
+            "[INFO] heartbeat published: %s/%s FunctionName=%s",
+            HEARTBEAT_NAMESPACE,
+            HEARTBEAT_METRIC,
+            function_name,
+        )
+    except (BotoCoreError, ClientError):
+        LOGGER.exception(
+            "[ERROR] heartbeat publish FAILED for %s. The refresh itself SUCCEEDED; "
+            "this is a telemetry fault, not a data fault. The missing-data alarm will "
+            "breach, which is a false alarm rather than a silent stop -- fail-safe in "
+            "the correct direction.",
+            function_name,
+        )
 
 
 def lambda_handler(event, context):  # noqa: ANN001 - AWS signature
@@ -85,4 +143,12 @@ def lambda_handler(event, context):  # noqa: ANN001 - AWS signature
     summary["full_refresh_violations"] = violations
 
     LOGGER.info("[SUCCESS] %s", json.dumps(summary, default=str))
+
+    # ENC-TSK-O81 dead-man's-switch. Gated on a genuinely clean run: a dry run
+    # wrote nothing, and a full-refresh violation means the objects that landed
+    # are the wrong SHAPE. Neither is a day the daily series should count as
+    # healthy, so neither earns a heartbeat.
+    if not dry_run and not violations:
+        _emit_heartbeat(getattr(context, "function_name", None) or os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "unknown"))
+
     return {"statusCode": 200, "body": summary}

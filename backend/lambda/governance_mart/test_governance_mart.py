@@ -402,3 +402,116 @@ def test_parse_last_day_pins_the_intended_day_across_a_late_retry():
 def test_parse_last_day_treats_falsy_as_unset():
     assert lambda_function._parse_last_day(None) is None
     assert lambda_function._parse_last_day("") is None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O81 -- dead-man's-switch heartbeat.
+#
+# The whole value of this signal is that it is emitted ONLY when the work
+# genuinely landed. The paired alarm sets TreatMissingData: breaching, so a
+# heartbeat on a path where nothing was written would not merely be noise --
+# it would actively suppress the alarm that exists to catch a silent stop.
+# That is the ENC-ISS-665 self-fulfilling-signal defect, and these tests exist
+# to keep it from being reintroduced.
+# ---------------------------------------------------------------------------
+
+
+class _HeartbeatSpy:
+    """Records put_metric_data calls instead of reaching CloudWatch."""
+
+    def __init__(self):
+        self.calls = []
+
+    def put_metric_data(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+@pytest.fixture
+def heartbeat_spy(monkeypatch):
+    spy = _HeartbeatSpy()
+    monkeypatch.setattr(lambda_function.boto3, "client", lambda service: spy)
+    return spy
+
+
+class _Ctx:
+    function_name = "devops-governance-mart-gamma"
+
+
+def _summary(files=1):
+    return {
+        "write_timestamp": "2026-08-23T21:32:33Z",
+        "table_count": 1,
+        "total_rows": 1,
+        "total_bytes": 1,
+        "tables": [{"table": "dim_record", "files": files}],
+    }
+
+
+def _stub_refresh(monkeypatch, files=1):
+    class _Result:
+        def as_dict(self):
+            return _summary(files=files)
+
+    monkeypatch.setattr(lambda_function, "refresh_mart", lambda **kwargs: _Result())
+
+
+def test_heartbeat_is_emitted_on_a_clean_run(monkeypatch, heartbeat_spy):
+    _stub_refresh(monkeypatch)
+    lambda_function.lambda_handler({}, _Ctx())
+
+    assert len(heartbeat_spy.calls) == 1
+    call = heartbeat_spy.calls[0]
+    assert call["Namespace"] == "Enceladus/GovernanceMart"
+    datum = call["MetricData"][0]
+    assert datum["MetricName"] == "MartLastSuccess"
+    assert datum["Value"] == 1
+    assert datum["Dimensions"] == [
+        {"Name": "FunctionName", "Value": "devops-governance-mart-gamma"}
+    ]
+
+
+def test_no_heartbeat_when_the_refresh_raises(monkeypatch, heartbeat_spy):
+    """The failure path must stay silent: absence is what the alarm reads."""
+
+    def _boom(**kwargs):
+        raise RuntimeError("StorageWriteError NoSuchBucket")
+
+    monkeypatch.setattr(lambda_function, "refresh_mart", _boom)
+    with pytest.raises(RuntimeError):
+        lambda_function.lambda_handler({}, _Ctx())
+
+    assert heartbeat_spy.calls == []
+
+
+def test_no_heartbeat_on_a_dry_run(monkeypatch, heartbeat_spy):
+    """A dry run writes nothing, so it is not a day the series should count."""
+    _stub_refresh(monkeypatch)
+    lambda_function.lambda_handler({"dry_run": True}, _Ctx())
+
+    assert heartbeat_spy.calls == []
+
+
+def test_no_heartbeat_on_a_full_refresh_violation(monkeypatch, heartbeat_spy):
+    """Objects landed, but in the WRONG SHAPE -- not a healthy day either."""
+    _stub_refresh(monkeypatch, files=2)
+    result = lambda_function.lambda_handler({}, _Ctx())
+
+    assert result["body"]["full_refresh_violations"] == ["dim_record"]
+    assert heartbeat_spy.calls == []
+
+
+def test_publish_failure_does_not_fail_the_run(monkeypatch):
+    """A telemetry fault must not become a data outage.
+
+    The alarm fails safe in the correct direction: no datapoint breaches, which
+    is a false alarm rather than a silent stop.
+    """
+    _stub_refresh(monkeypatch)
+
+    class _Broken:
+        def put_metric_data(self, **kwargs):
+            raise lambda_function.ClientError({"Error": {"Code": "AccessDenied"}}, "PutMetricData")
+
+    monkeypatch.setattr(lambda_function.boto3, "client", lambda service: _Broken())
+    result = lambda_function.lambda_handler({}, _Ctx())
+    assert result["statusCode"] == 200
