@@ -1,0 +1,23 @@
+# ENC-TSK-G43: cross-Lambda module sharing manifest.
+# Each non-comment line is a repo-relative path to a single file; the build
+# step copies it to the function root so the Lambda can `import` it normally.
+# Honored by .github/workflows/_build.yml.
+#
+# DVP-TSK-649: this is NOT belt-and-braces. mart_refresh.py / mart_schema.py try
+# `from enceladus_shared.warehouse_registration import ...` first and fall back
+# to `from warehouse_registration import ...`. The first path CANNOT resolve on
+# the deployed function today: SharedLayerArn is pinned to enceladus-shared:10,
+# and :10 is defined as ":7 + appconfig_flags" (see the SharedLayerArn Default
+# comment in infrastructure/cloudformation/02-compute.yaml and
+# tools/verify_shared_layer_version.py). The warehouse_registration module landed
+# later, in DVP-TSK-668/669/670, so it is not in the pinned layer. Vendoring it
+# here is what makes the fallback branch resolve and the mart able to write at
+# all. Once a shared-layer version containing warehouse_registration is published
+# AND the canonical pin is bumped, this line becomes redundant (the layer's
+# enceladus_shared.warehouse_registration would win the try branch) and can go.
+#
+# Flattened to the function root by _build.yml's `cp "$extra"
+# "$workdir/$(basename "$extra")"`, so the resulting import name is
+# `warehouse_registration` (top-level module) — NOT
+# `enceladus_shared.warehouse_registration`.
+backend/lambda/shared_layer/python/enceladus_shared/warehouse_registration.py
