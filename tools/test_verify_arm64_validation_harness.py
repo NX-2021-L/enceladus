@@ -46,13 +46,26 @@ class FakeBody:
 
 class FakeLambdaClient:
     def __init__(self, *, config=None, config_error=None, invoke_error=None,
-                 invoke_response=None, layer_versions=None, layer_error=None):
+                 invoke_response=None, layer_versions=None, layer_error=None,
+                 get_function_response=None, get_function_error=None):
         self._config = config or {}
         self._config_error = config_error
         self._invoke_error = invoke_error
         self._invoke_response = invoke_response
         self._layer_versions = layer_versions or {}
         self._layer_error = layer_error
+        self._get_function_response = get_function_response
+        self._get_function_error = get_function_error
+
+    def get_function(self, FunctionName):  # noqa: N803
+        # Deliberately raises when unconfigured: a fake that silently returned
+        # an empty dict would let the substitute path look exercised in tests
+        # that never set it up.
+        if self._get_function_error:
+            raise self._get_function_error
+        if self._get_function_response is None:
+            raise AttributeError("get_function not configured on this fake")
+        return self._get_function_response
 
     def get_function_configuration(self, FunctionName):  # noqa: N803 - matches boto3 signature style
         if self._config_error:
@@ -491,6 +504,138 @@ def test_unknown_and_pass_are_never_ambiguous_in_serialized_output():
     assert all_pass["overall"] == "pass"
     assert one_unknown["overall"] == "unknown"
     assert all_pass["overall"] != one_unknown["overall"]
+
+
+# ---------------------------------------------------------------------------
+# Point 1 -- deployed-package SUBSTITUTE (ENC-TSK-O96 / ENC-ISS-658)
+#
+# The s3:GetObject grant point 1 was written against was WITHDRAWN, not
+# delayed: granting it means editing the NotResource Deny that is the S3
+# security boundary for every agent session (ENC-ISS-659). These tests pin the
+# substitute that replaces it, and above all pin what it must never do.
+# ---------------------------------------------------------------------------
+
+_DENIED = Exception("AccessDenied: not authorized to perform: s3:GetObject")
+
+
+def _fake_classifier(mapping: dict):
+    """classify_so stand-in keyed by file name. Real ELF classification is
+    verify_lambda_package_arch.py's own tested concern -- borrowing it here
+    would test that module, not this one, and would need real binaries."""
+    return lambda path: mapping.get(path.name)
+
+
+def _lambda_with_package(files: dict, *, arch="arm64", sha=None):
+    """A fake whose GetFunction presigned package really hashes to the
+    CodeSha256 it reports -- the substitute refuses to inspect bytes it cannot
+    attribute, so a fake that skipped this would exercise nothing."""
+    body = _zip_bytes(files)
+    digest = sha or base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+    lam = FakeLambdaClient(
+        config={"Architectures": [arch], "CodeSha256": digest},
+        get_function_response={"Code": {"Location": "https://presigned.example/pkg.zip"},
+                               "Configuration": {"CodeSha256": digest}},
+    )
+    return lam, body
+
+
+def test_substitute_turns_a_blind_denial_into_a_real_fail():
+    """The whole point of the substitute: an x86_64 object in the DEPLOYED
+    package is conclusive on its own and needs no S3 read to be true."""
+    lam, body = _lambda_with_package({"pyarrow/lib.so": b"ELF"})
+    result = harness.check_artifact_identity(
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        downloader=lambda url: body,
+        classify_so=_fake_classifier({"lib.so": "x86_64"}))
+    assert result.state == harness.FAIL
+    assert result.reason_code == "deployed_package_arch_mismatch"
+    assert result.substitute["state"] == harness.FAIL
+
+
+def test_substitute_never_upgrades_an_unknown_to_pass():
+    """Every non-failing substitute branch. None may pass: inspecting what is
+    deployed says nothing about whether it came from the arm64 BUILD."""
+    clean, body = _lambda_with_package({"handler.py": b"x", "native.so": b"ELF"})
+    pure, pure_body = _lambda_with_package({"handler.py": b"x"})
+    unclassifiable, unc_body = _lambda_with_package({"weird.so": b"???"})
+    cases = [
+        (clean, lambda u: body, {"native.so": "arm64"}, "deployed_package_arch_consistent"),
+        (pure, lambda u: pure_body, {}, "deployed_package_no_native_objects"),
+        (unclassifiable, lambda u: unc_body, {"weird.so": None}, "deployed_package_unclassifiable"),
+        (FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": "x"},
+                          get_function_error=Exception("AccessDeniedException")),
+         lambda u: b"", {}, "deployed_package_unavailable"),
+    ]
+    for lam, dl, mapping, expected_reason in cases:
+        result = harness.check_artifact_identity(
+            lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+            downloader=dl, classify_so=_fake_classifier(mapping))
+        assert result.state != harness.PASS, f"{expected_reason} must never pass"
+        assert result.substitute["reason_code"] == expected_reason
+        assert result.substitute["state"] == harness.UNKNOWN
+
+
+def test_substitute_refuses_to_inspect_bytes_it_cannot_attribute():
+    """A download that does not hash to the deployed CodeSha256 is an
+    unattributed blob. Anything found in it is evidence about nothing."""
+    lam, _ = _lambda_with_package({"native.so": b"ELF"})
+    result = harness.check_artifact_identity(
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        downloader=lambda url: b"different-bytes-entirely",
+        classify_so=_fake_classifier({"native.so": "x86_64"}))
+    assert result.substitute["reason_code"] == "deployed_package_digest_unverified"
+    assert result.state == harness.UNKNOWN, (
+        "wrong-arch objects in unattributed bytes must NOT produce a fail either -- "
+        "the subject of the check is unproven in both directions")
+
+
+def test_substitute_does_not_erase_the_permission_denied_aggregation():
+    """ENC-TSK-O89 and O90 group 26+ functions on permission_denied_points.
+    An inconclusive substitute must leave the point's own reason_code alone,
+    or the IAM fact those consumers count silently becomes a probe gap."""
+    lam, body = _lambda_with_package({"handler.py": b"x"})
+    result = harness.check_artifact_identity(
+        lam, FakeS3Client(get_error=_DENIED), "fn", "arm64", "3.12", "abc123",
+        downloader=lambda url: body, classify_so=_fake_classifier({}))
+    assert result.reason_code == "permission_denied"
+    report = harness.FunctionReport(function_name="fn", points=[result])
+    assert report.permission_denied_points == [1]
+    assert report.to_dict()["points"][0]["substitute"]["reason_code"] == "deployed_package_no_native_objects"
+
+
+def test_substitute_also_runs_when_no_commit_sha_was_supplied():
+    """Without a commit sha the S3 key cannot even be resolved -- O89 runs
+    across 26 twins where per-function shas are not all known. The substitute
+    still finds a wrong-arch package."""
+    lam, body = _lambda_with_package({"native.so": b"ELF"})
+    result = harness.check_artifact_identity(
+        lam, FakeS3Client(), "fn", "arm64", "3.12", commit_sha=None,
+        downloader=lambda url: body,
+        classify_so=_fake_classifier({"native.so": "x86_64"}))
+    assert result.state == harness.FAIL
+
+
+def test_point_result_structurally_forbids_a_passing_substitute():
+    """Enforced by the type, not by convention -- a future edit that tries to
+    promote substitute evidence to PASS fails loudly at construction."""
+    with pytest.raises(ValueError, match="never report PASS"):
+        harness.PointResult(1, "artifact_identity", harness.UNKNOWN, "",
+                            reason_code="permission_denied",
+                            substitute={"state": harness.PASS,
+                                        "reason_code": "deployed_package_arch_consistent",
+                                        "detail": ""})
+
+
+def test_primary_s3_path_still_passes_and_is_unaffected():
+    """The substitute must not disturb the one path that CAN prove provenance:
+    a real artifact read still passes, with no substitute attached."""
+    body = b"fake-zip-bytes"
+    digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+    lam = FakeLambdaClient(config={"Architectures": ["arm64"], "CodeSha256": digest})
+    s3 = FakeS3Client(objects={("bkt", "lambda-artifacts/arm64-py3.12/fn-abc123.zip"): body})
+    result = harness.check_artifact_identity(lam, s3, "fn", "arm64", "3.12", "abc123", bucket="bkt")
+    assert result.state == harness.PASS
+    assert result.substitute is None
 
 
 if __name__ == "__main__":
