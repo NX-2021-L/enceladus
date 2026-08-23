@@ -564,7 +564,7 @@ def _extract_shell_command_block(text: str, anchor: str) -> Optional[str]:
     shell command. Returns None if `anchor` is not found in `text`.
 
     This mirrors how both real invocations are written: multi-line pip
-    installs with a trailing ``\`` on every line but the last.
+    installs with a trailing backslash on every line but the last.
     """
     idx = text.find(anchor)
     if idx == -1:

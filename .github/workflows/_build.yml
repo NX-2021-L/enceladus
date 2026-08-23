@@ -172,14 +172,11 @@ jobs:
 
             # Install deps to the same dir \u2014 arch-locked wheels only.
             if [ -f "$workdir/requirements.txt" ]; then
-              # TEMP-ENC-TSK-O87: deliberately dropped --only-binary=:all: to
-              # prove tools/verify_lambda_arch_parity.py's new
-              # _validate_build_invocation_flags() guard goes red in CI.
-              # Reverted in the following commit on this same PR.
               python -m pip install \
                 --platform "${{ matrix.pip_platform }}" \
                 --implementation cp \
                 --python-version "${{ matrix.py_version }}" \
+                --only-binary=:all: \
                 --upgrade \
                 --target "$workdir" \
                 -r "$workdir/requirements.txt"
