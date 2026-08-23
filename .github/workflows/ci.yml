@@ -104,6 +104,17 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # ENC-ISS-663 / ENC-TSK-P03: the placeholder-Lambda guard's own predicate.
+      # Its self-tests carry the false-positive cases explicitly -- a legitimately
+      # small index-handler function and a Lambda Web Adapter run.sh entrypoint
+      # both read OK -- because a guard that cries wolf on healthy functions gets
+      # switched off, and then the real finding is lost.
+      - name: Placeholder-Lambda guard self-tests (ENC-ISS-663)
+        run: |
+          set -euo pipefail
+          python3 tools/assert_no_placeholder_lambdas.py --self-test
+          python3 -m unittest tools.test_compute_affected_targets
+
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.

@@ -160,5 +160,52 @@ class ResolveLastDeployedShaDiscriminatorTest(unittest.TestCase):
         self.assertEqual(result["affected_functions"], [])
 
 
+class TestComputeTemplateWidensScope(unittest.TestCase):
+    """ENC-ISS-663 / ENC-TSK-P03.
+
+    02-compute.yaml DECLARES the Lambda functions, and CloudFormation creates
+    each one carrying a placeholder body that only deploy.sh replaces. So a
+    template-only change can CREATE a function while touching no
+    backend/lambda/ directory -- and before this rule that produced
+    affected_functions=[], a deploy that logged "nothing to deploy", a GREEN
+    run, and a function permanently stuck on the placeholder.
+
+    Reproduced live: PR #1140 changed ONLY 02-compute.yaml and left
+    devops-governance-mart-gamma, enceladus-convergence-telemetry-gamma and
+    escalation-decision-authorizer-gamma dead for 90 minutes.
+    """
+
+    def _fake_run(self, changed_files):
+        def run(cmd):
+            if cmd[:2] == ["gh", "api"]:
+                return json.dumps([{"id": 1, "sha": "priorsha",
+                                    "task": cat.LAMBDA_CODE_DEPLOY_TASK}])
+            if "diff" in cmd:
+                return "\n".join(changed_files)
+            return ""
+        return run
+
+    def test_compute_template_change_alone_forces_full_scope(self):
+        with patch.object(cat, "_run", self._fake_run(
+                ["infrastructure/cloudformation/02-compute.yaml"])):
+            result = cat.compute("v4-gamma", "org/repo", "headsha",
+                                 base_sha_override="priorsha")
+        self.assertTrue(
+            result["full_scope"],
+            "a change to the file that declares the fleet must widen the deploy "
+            f"to the fleet; got reason={result['reason']!r}")
+        self.assertIn("02-compute.yaml", result["reason"])
+
+    def test_api_template_alone_does_not_widen(self):
+        # 03-api.yaml declares no Lambda functions, so it must NOT widen -- the
+        # narrowing optimisation still has to be worth having.
+        with patch.object(cat, "_run", self._fake_run(
+                ["infrastructure/cloudformation/03-api.yaml"])):
+            result = cat.compute("v4-gamma", "org/repo", "headsha",
+                                 base_sha_override="priorsha")
+        self.assertFalse(result["full_scope"], result["reason"])
+        self.assertEqual(result["affected_functions"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

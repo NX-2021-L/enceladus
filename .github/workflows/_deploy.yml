@@ -914,6 +914,27 @@ jobs:
             --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
             --region "${{ env.AWS_REGION }}"
 
+      # ENC-ISS-663 / ENC-TSK-P03: CloudFormation owns the function resource and
+      # deploy.sh owns its code, and until now nothing reconciled the two. On
+      # 2026-08-23 a template-only change created three gamma functions carrying
+      # 02-compute.yaml's placeholder body; the deploy narrowed to an empty
+      # affected-set, logged "nothing to deploy" and went GREEN, and all three
+      # returned Runtime.ImportModuleError on every invocation while the stack
+      # read UPDATE_COMPLETE and every other guard passed.
+      #
+      # compute_affected_targets.py now widens to full scope when 02-compute.yaml
+      # changes, which prevents that CAUSE. This asserts the STATE, so a stuck
+      # deploy, a rollback, a manual replacement, or a future edit that removes
+      # the widening rule is still caught. Needs only lambda:GetFunction -- no
+      # invoke permission -- so it runs on every gamma deploy unconditionally.
+      - name: Assert no placeholder Lambdas (ENC-ISS-663)
+        if: contains(needs.resolve.outputs.environment, 'gamma')
+        run: |
+          set -euo pipefail
+          python3 tools/assert_no_placeholder_lambdas.py \
+            --suffix="${{ needs.resolve.outputs.environment_suffix }}" \
+            --region "${{ env.AWS_REGION }}"
+
       - name: Set deployment status → success
         if: success()
         env:
