@@ -8704,29 +8704,6 @@ Resources:
 
   # --- end ENC-TSK-O59 / ENC-ISS-648 forward-port ------------------------------
 
-  # ---------------------------------------------------------------------------
-  # ENC-TSK-O85 CASE 1 NEGATIVE CONTROL — TEMPORARY, DELIBERATE BREAK.
-  # Synthetic function with a hardcoded Architectures value that is neither
-  # the required !If [IsGamma, arm64, x86_64] shape nor named on any
-  # architecture_exceptions list. Must fail "Verify Lambda architecture
-  # parity" in CI. Reverted in the same PR before merge — see ENC-TSK-O85
-  # worklog for the red-run URL and verbatim failure text this proved.
-  # ---------------------------------------------------------------------------
-  SyntheticNegativeControlFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: "enc-tsk-o85-synthetic-wrong-arch"
-      Code:
-        ZipFile: "# ENC-TSK-O85 CASE 1 negative control -- reverted before merge"
-      Runtime: !If [IsGamma, python3.12, python3.11]
-      Handler: lambda_function.lambda_handler
-      MemorySize: 128
-      Timeout: 10
-      Architectures:
-        - arm64
-      Role: !GetAtt CoordinationApiRole.Arn
-  # --- end ENC-TSK-O85 CASE 1 negative control ---------------------------------
-
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
