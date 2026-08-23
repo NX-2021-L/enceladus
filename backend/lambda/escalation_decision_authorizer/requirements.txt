@@ -1,2 +1,6 @@
 PyJWT>=2.8.0,<3.0.0
 cryptography>=41.0.0
+# TEMP-ENC-TSK-O87: touch only, to retrigger build-lambda-artifacts.yml's
+# path filter for the green-confirmation run (net diff vs base was zero
+# after the tbb revert, so the paths filter didn't fire on its own).
+# Removed in the final cleanup commit.
