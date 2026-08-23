@@ -17,8 +17,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # ENC-TSK-O84: full history is needed to resolve the base ref for the
+      # architecture_exceptions ratchet below (git show <base>:<manifest>).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Lint Python files
         run: |
@@ -42,6 +46,24 @@ jobs:
           print(f'  entities: {list(d[\"entities\"].keys())}')
           "
 
+      # ENC-TSK-O84: resolve the base ref the architecture_exceptions ratchet
+      # diffs against -- the PR's base sha for a pull_request event, or the
+      # previous commit for a direct push (same pattern as the governance
+      # dictionary guard's "Resolve diff range" step).
+      - name: Resolve base ref for architecture-exceptions ratchet (ENC-TSK-O84)
+        id: arch_exceptions_range
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            base="${{ github.event.before }}"
+            if [[ -z "${base}" || "${base}" == "0000000000000000000000000000000000000000" ]]; then
+              base="$(git rev-parse HEAD~1)"
+            fi
+            echo "base=${base}" >> "$GITHUB_OUTPUT"
+          fi
+
       # ENC-TSK-O83: the guard now parses 02-compute.yaml structurally
       # instead of scanning raw text, so it needs PyYAML. No earlier step in
       # this job imports yaml, so provision it here (same scoped-install
@@ -50,7 +72,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --quiet pyyaml
-          python3 tools/verify_lambda_arch_parity.py
+          python3 tools/verify_lambda_arch_parity.py \
+            --exceptions-base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
 
       - name: Test Lambda package architecture parity guard (ENC-TSK-E19)
         run: |
