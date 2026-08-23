@@ -8769,6 +8769,22 @@ Resources:
                   # for the same plane-separation reason as the S3 ARNs above.
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/devops${EnvironmentSuffix}"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/devops${EnvironmentSuffix}/*"
+        # ENC-TSK-O81. The dead-man's-switch heartbeat. PutMetricData carries no
+        # resource ARN in IAM -- the API is account-scoped -- so this is narrowed
+        # the only way it can be, by an explicit namespace condition. Without the
+        # condition this grant would let the mart write ANY metric in the account,
+        # including the ones other alarms in this template evaluate.
+        - PolicyName: HeartbeatMetricPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PublishMartHeartbeat
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: "Enceladus/GovernanceMart"
       Tags:
         - Key: Project
           Value: enceladus
@@ -9085,6 +9101,66 @@ Resources:
           MaximumEventAgeInSeconds: 3600
         DeadLetterConfig:
           Arn: !GetAtt GovernanceMartScheduleDlq.Arn
+
+  # ENC-TSK-O81 -- DEAD-MAN'S SWITCH. The only pattern that catches a job which
+  # NEVER RAN. An error-rate alarm and a failure metric structurally cannot: a
+  # run that never happens emits no log line and no exit code, so there is
+  # nothing for them to measure. That is exactly how the sibling job stopped for
+  # fifteen days in silence (ENC-ISS-667).
+  #
+  # TreatMissingData: breaching is the load-bearing property. ABSENCE is the
+  # alarm condition -- the inverse of every other alarm in this template. The
+  # mart publishes MartLastSuccess=1 from its success path ONLY (see
+  # backend/lambda/governance_mart/lambda_function.py::_emit_heartbeat, which is
+  # deliberately not in a finally block and is skipped on dry runs and on
+  # full-refresh violations), so a missing datapoint means the work did not land.
+  GovernanceMartHeartbeatAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-governance-mart-heartbeat-missing${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-O81 dead-man's switch: the gamma governance mart has not
+        published a MartLastSuccess heartbeat within the expected daily window.
+        Absence is the alarm condition (TreatMissingData: breaching) because a
+        job that never runs produces no error to alarm on.
+      Namespace: Enceladus/GovernanceMart
+      MetricName: MartLastSuccess
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref GovernanceMartFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  # ENC-TSK-O81 -- the second half. The heartbeat catches "never ran"; this
+  # catches "Scheduler tried and could not deliver". GovernanceMartScheduleGamma
+  # carries a RetryPolicy and this DLQ, so an exhausted delivery lands here
+  # rather than vanishing -- but a dead-letter nobody looks at is the same
+  # silence in a different place.
+  GovernanceMartScheduleDlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-governance-mart-schedule-dlq-depth${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-O81: the gamma governance mart's EventBridge Scheduler DLQ is
+        non-empty, i.e. a scheduled delivery exhausted its RetryPolicy. Any
+        depth above zero is actionable.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt GovernanceMartScheduleDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
 
   GovernanceAuditStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
