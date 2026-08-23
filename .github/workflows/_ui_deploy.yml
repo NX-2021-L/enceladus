@@ -476,11 +476,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           COMMIT_SHA: ${{ github.sha }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
             --jq '.[0].number // empty' 2>/dev/null || true)
           if [ -z "$PR_NUMBER" ]; then
-            MSG="${{ github.event.head_commit.message }}"
+            MSG="$HEAD_COMMIT_MESSAGE"
             PR_NUMBER=$(echo "$MSG" | grep -oE '(^Merge pull request #|#)[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
           fi
           echo "pr_number=${PR_NUMBER:-0}" >> "$GITHUB_OUTPUT"

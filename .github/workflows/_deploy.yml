@@ -973,6 +973,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           # Primary: GitHub API — find PR(s) associated with this merge commit
           PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
@@ -980,7 +981,7 @@ jobs:
 
           # Fallback: parse "(#NNN)" or "Merge pull request #NNN" from commit message
           if [ -z "$PR_NUMBER" ]; then
-            MSG="${{ github.event.head_commit.message }}"
+            MSG="$HEAD_COMMIT_MESSAGE"
             PR_NUMBER=$(echo "$MSG" | grep -oE '(^Merge pull request #|#)[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
           fi
 
