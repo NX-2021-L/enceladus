@@ -87,6 +87,7 @@ mismatch, a missing/non-canonical workflow override, and a stale :7 live param):
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -370,7 +371,9 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
                 f"(canonical :{canonical})."
             )
 
-    # Check 5: every managed function's live attached layer version.
+    # Check 5: every managed function's live attached layer version (PROD plane).
+    # Unchanged from before ENC-ISS-656 -- prod-named functions only, same classifier,
+    # same failure list. This loop's behavior must not change.
     manifest = os.path.join(repo_root, "infrastructure", "lambda_workflow_manifest.json")
     if not os.path.isfile(manifest):
         failures.append(f"--live: manifest not found: {manifest}")
@@ -386,6 +389,64 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
         if fail:
             failures.append(fail)
     print(f"[INFO] --live{mode}: compared {checked} function(s) against canonical :{canonical}.")
+
+    # Check 5b (ENC-ISS-656): the SAME manifest's live attached layer version, but for
+    # each function's "-gamma" twin. Before this, the gamma plane was structurally
+    # invisible here -- ENC-TSK-O78's manual census found 4 gamma functions (out of 46
+    # attaching enceladus-shared) live on :12 while this gate reported OK, because this
+    # loop simply never queried a "-gamma" name regardless of --stack-name. That is a
+    # blindness, not a tolerance: nothing upstream decided gamma drift was acceptable,
+    # the gate just never looked. This loop closes that gap.
+    #
+    # Deliberately reuses _classify_live_version unchanged (same canonical, same
+    # STALE/REGRESS math, same regress_only semantics) rather than inventing a
+    # gamma-specific canonical -- ENC-ISS-656 explicitly rejected bumping the pin to
+    # :12 for this plan (that is fleet-wide, production-affecting, BRD Phase 5 /
+    # ENC-PLN-082 territory), so the gate must go RED against the live :12 drift, not
+    # quietly grow a second accepted version. The label makes the plane explicit so a
+    # human reading FAIL output does not mistake this for the prod ABI-regression class
+    # checks 1-4 exist to prevent -- ENC-ISS-624 already showed that conflation costs a
+    # P1 investigation. A gamma mismatch is appended to the SAME `failures` list (same
+    # nonzero exit code as every other check here) rather than a separate warn tier:
+    # per ENC-ISS-656, the four drifted functions are confirmed pure-Python and
+    # architecture-neutral at every inspected version (zero .so files), so this is not
+    # the breakage class -- but "not a breakage" must still mean RED, never silently
+    # green, or the next real gamma regression ships behind the same shrug ENC-ISS-385
+    # already taught this platform to fear.
+    #
+    # SCOPED TO A GAMMA-TARGETED INVOCATION ONLY (stack_name ends with "-gamma"). This
+    # is the one condition that must hold for "keep the prod path behaving exactly as
+    # it does now": tools/pre-deploy-health-gate.sh invokes this script once per plane
+    # with --stack-name set to that plane's stack (enceladus-compute or
+    # enceladus-compute-gamma). Without this guard, a PROD-targeted invocation would
+    # start failing on gamma-only drift it has no power to fix and no business gating
+    # on -- exactly the "mandatory guard is red for a reason unrelated to the change
+    # under review" failure mode ENC-ISS-624 already diagnosed as teaching operators to
+    # wave the gate through. check 5 (prod names, above) is intentionally left
+    # unconditional -- that was already its behavior before this change and is
+    # unrelated to stack_name -- only this new gamma loop is gated on the target plane.
+    is_gamma_target = stack_name.endswith("-gamma")
+    if is_gamma_target:
+        checked_gamma = 0
+        for fn in fns:
+            gamma_fn = f"{fn}-gamma"
+            live = _live_layer_version(gamma_fn, region)
+            if live is None:
+                continue  # no gamma twin / no shared layer / no creds -> skip silently
+            checked_gamma += 1
+            fail = _classify_live_version(f"{gamma_fn} (gamma-plane; see ENC-ISS-656)", live, canonical, regress_only)
+            if fail:
+                failures.append(fail)
+        print(
+            f"[INFO] --live{mode}: compared {checked_gamma} gamma-plane function(s) "
+            f"against canonical :{canonical} (ENC-ISS-656)."
+        )
+    else:
+        print(
+            f"[INFO] --live{mode}: stack '{stack_name}' is not gamma-suffixed -- "
+            f"skipping check 5b (gamma-plane drift, ENC-ISS-656); prod-targeted "
+            f"invocations are unaffected by gamma-plane state."
+        )
     return failures
 
 
@@ -533,6 +594,83 @@ def _selftest():
                 _classify_live_version("fn", canonical + 1, canonical, regress_only=True) is not None,
             )
         )
+
+        # ENC-ISS-656: prove check_live's NEW gamma loop (check 5b) is actually wired
+        # and reachable, not just that the underlying _classify_live_version primitive
+        # works in isolation (checks above already cover that). This monkeypatches the
+        # two AWS-calling seams (_live_layer_version, _live_stack_param) so check_live
+        # itself -- the real function, unmodified -- runs end-to-end against synthetic
+        # data with no AWS creds required. Without this, a future edit could silently
+        # turn check 5b into a no-op (e.g. an early continue, a wrong suffix, a typo in
+        # "-gamma") and every case above would keep passing.
+        global _live_layer_version, _live_stack_param
+        _real_live_layer_version = _live_layer_version
+        _real_live_stack_param = _live_stack_param
+        gamma_test_tmpdir = tempfile.mkdtemp(prefix="iss656-gamma-selftest-")
+        try:
+            infra_dir = os.path.join(gamma_test_tmpdir, "infrastructure")
+            os.makedirs(infra_dir, exist_ok=True)
+            with open(os.path.join(infra_dir, "lambda_workflow_manifest.json"), "w") as mf:
+                json.dump({"functions": [{"function_name": "iss656-synthetic-fn"}]}, mf)
+
+            def _fake_stack_param(stack_name, region):
+                return canonical  # keep check 4 quiet; this test is only about check 5b
+
+            def _make_fake_live(gamma_version):
+                def _fake(function_name, region):
+                    if function_name == "iss656-synthetic-fn":
+                        return canonical  # prod twin stays clean/canonical
+                    if function_name == "iss656-synthetic-fn-gamma":
+                        return gamma_version
+                    return None
+                return _fake
+
+            _live_stack_param = _fake_stack_param
+
+            _live_layer_version = _make_fake_live(canonical + 1)
+            drifted_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-ISS-656: synthetic gamma fn on non-canonical version FAILS "
+                    "check_live against a gamma-targeted stack (gamma path is "
+                    "reachable, not skipped)",
+                    any("iss656-synthetic-fn-gamma" in f for f in drifted_failures),
+                )
+            )
+
+            _live_layer_version = _make_fake_live(canonical)
+            clean_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-ISS-656: synthetic gamma fn on canonical version PASSES "
+                    "check_live against a gamma-targeted stack (no false positive "
+                    "once reconciled)",
+                    not any("iss656-synthetic-fn" in f for f in clean_failures),
+                )
+            )
+
+            # The scope guard itself: a PROD-targeted stack name (no "-gamma" suffix)
+            # must NOT see gamma drift at all, even with the exact same drifted
+            # synthetic function live underneath it -- this is what "keep the prod
+            # path behaving exactly as it does now" means operationally, and it is
+            # the one thing that stops this fix from turning into a new way for
+            # unrelated gamma drift to block a prod deploy (the ENC-ISS-624 failure
+            # shape, recurred).
+            _live_layer_version = _make_fake_live(canonical + 1)
+            prod_targeted_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack")
+            cases.append(
+                (
+                    "ENC-ISS-656: a PROD-targeted stack name (no '-gamma' suffix) "
+                    "sees NO gamma-plane check at all, even with live gamma drift "
+                    "present -- prod invocations stay unaffected by gamma state",
+                    not any("gamma" in f for f in prod_targeted_failures),
+                )
+            )
+        finally:
+            _live_layer_version = _real_live_layer_version
+            _live_stack_param = _real_live_stack_param
+            shutil.rmtree(gamma_test_tmpdir, ignore_errors=True)
+
         # ENC-ISS-459: applicability gate
         cases.append(
             (
