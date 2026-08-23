@@ -384,6 +384,13 @@ Resources:
   McpGammaSyntheticFunction:
     Type: AWS::Lambda::Function
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "enceladus-mcp-gamma-synthetic${EnvironmentSuffix}"
       Description: >
         Synthetic canary probing the gamma MCP edge

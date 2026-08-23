@@ -230,6 +230,13 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
       FunctionName: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
