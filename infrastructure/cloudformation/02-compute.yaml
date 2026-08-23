@@ -7463,6 +7463,21 @@ Resources:
   # ENC-TSK-M03: enceladus-checkout-service-auto-gamma exists on gamma (Gen2 map);
   # arm64/py3.12 enforced via _deploy.yml; prod-only rule below targets unsuffixed name.
   # After import, J14 drops the audit's documented-exception for enceladus-checkout-auto.
+  # ENC-TSK-P16 (ENC-ISS-656): the Target Arn below NAMES enceladus-checkout-service-auto
+  # but does not DECLARE it -- this Events::Rule is the function's only appearance in any
+  # CFN template. tools/verify_lambda_arch_parity.py --check-live-reconciliation and
+  # tools/verify_shared_layer_version.py --live both independently classed both planes
+  # (enceladus-checkout-service-auto prod, enceladus-checkout-service-auto-gamma gamma)
+  # as live-but-unclassifiable/UNKNOWN CONSUMER because of that gap. Disposition: OURS,
+  # not a devops exception -- the gamma twin is deployed by this repo's own Gen2
+  # _deploy.yml lane (envs/v4-gamma.yaml checkout_service fan-out to
+  # enceladus-checkout-service-gamma,enceladus-checkout-service-auto-gamma; v3-prod
+  # mirrors it to enceladus-checkout-service,enceladus-checkout-service-auto) and both
+  # are already plane-correct on architecture/runtime. Declared in
+  # infrastructure/lambda_workflow_manifest.json (function_name
+  # "enceladus-checkout-service-auto", cfn_managed: false -- it is not an
+  # AWS::Lambda::Function resource here, only an ARN string) rather than as a second
+  # CFN resource, since this rule's comment already explains why no such resource exists.
   CheckoutAutoScheduleRule:
     Type: AWS::Events::Rule
     Condition: IsProduction

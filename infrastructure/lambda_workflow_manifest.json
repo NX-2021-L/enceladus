@@ -203,6 +203,14 @@
       "cfn_managed": true
     },
     {
+      "function_name": "enceladus-checkout-service-auto",
+      "lambda_dir": "backend/lambda/checkout_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+      "cfn_managed": false,
+      "_note": "ENC-TSK-P16 / ENC-ISS-656: enceladus-checkout-service-auto (prod) and enceladus-checkout-service-auto-gamma are live, plane-correct (arch/runtime match expected_architecture), and the gamma twin is deployed by this same Gen2 _deploy.yml lane via envs/v4-gamma.yaml's checkout_service function_name_map fan-out (checkout_service: enceladus-checkout-service-gamma,enceladus-checkout-service-auto-gamma; v3-prod mirrors this with enceladus-checkout-service,enceladus-checkout-service-auto). Declared here as ours, not excepted -- our own build-and-deploy lane already ships it. cfn_managed:false because CheckoutAutoScheduleRule in 02-compute.yaml names this function only as an EventBridge target ARN string, never as an AWS::Lambda::Function FunctionName; the function itself is not a CFN resource (same pattern as devops-appsync-feed-publisher above). The bare function_name here covers both planes for tools/verify_lambda_arch_parity.py's cross-source reconciliation (_enceladus_declared_function_names unions manifest functions[] with every infrastructure/cloudformation/*.yaml FunctionName, then _validate_cross_source_reconciliation adds the implicit '-gamma' variant of every bare declared name) -- no second manifest entry is needed or wanted for the gamma twin."
+    },
+    {
       "function_name": "enceladus-convergence-telemetry",
       "lambda_dir": "backend/lambda/convergence_telemetry",
       "workflow_file": ".github/workflows/_deploy.yml",
