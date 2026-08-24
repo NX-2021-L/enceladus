@@ -23,63 +23,22 @@ Conditions:
 Resources:
 
   # ---------------------------------------------------------------------------
-  # Health Probe Lambda — reads CodeSize for all prod Lambdas
+  # Health Probe Lambda — ENC-TSK-P32 cross-stack move.
+  # The health monitor Lambda (AWS::Lambda::Function) + its execution role now
+  # live in infrastructure/cloudformation/02-compute.yaml so the Lambda Workflow
+  # Coverage Guard (which only parses that template) recognizes the function,
+  # and so enceladus-compute stops colliding with them at the ENC-PLN-082
+  # cutover apply (ENC-ISS-651 / ENC-ISS-676).
+  # This template keeps the pieces that reference it by name: the EventBridge
+  # 15-min schedule + invoke permission, and the CloudWatch Alarms. Mirrors
+  # the existing cross-stack-by-ARN pattern already used below for
+  # devops-deploy-parity-validator / devops-env-drift-auditor, and matches
+  # origin/v4/main, which already carries this exact shape.
   # ---------------------------------------------------------------------------
-  ProdHealthMonitorRole:
-    Type: AWS::IAM::Role
-    DeletionPolicy: Retain
-    Properties:
-      RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: ProdHealthMonitorPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "arn:aws:logs:*:*:*"
-              - Effect: Allow
-                Action:
-                  - lambda:GetFunctionConfiguration
-                  - lambda:ListFunctions
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                Resource: "*"
-
-  ProdHealthMonitorFunction:
-    Type: AWS::Lambda::Function
-    DeletionPolicy: Retain
-    Properties:
-      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
-      Code:
-        ZipFile: "# managed outside CloudFormation — deployed by deploy.sh"
-      Runtime: !If [IsGamma, python3.12, python3.11]
-      Handler: lambda_function.handler
-      MemorySize: 256
-      Timeout: 120
-      Architectures:
-        - !If [IsGamma, arm64, x86_64]
-      Role: !GetAtt ProdHealthMonitorRole.Arn
-      Environment:
-        Variables:
-          FUNCTION_NAMES: "[]"
-
   ProdHealthMonitorInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref ProdHealthMonitorFunction
+      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt HealthProbeScheduleRule.Arn
@@ -96,7 +55,7 @@ Resources:
       State: ENABLED
       Targets:
         - Id: ProdHealthMonitorTarget
-          Arn: !GetAtt ProdHealthMonitorFunction.Arn
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
@@ -261,8 +220,8 @@ Resources:
 
 Outputs:
   ProdHealthMonitorFunctionArn:
-    Description: ARN of the production health monitor Lambda
-    Value: !GetAtt ProdHealthMonitorFunction.Arn
+    Description: ARN of the production health monitor Lambda (defined in 02-compute.yaml)
+    Value: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
 
   HealthProbeScheduleRuleArn:
     Description: ARN of the EventBridge health probe schedule
