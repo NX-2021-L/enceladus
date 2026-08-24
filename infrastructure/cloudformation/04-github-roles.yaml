@@ -317,11 +317,19 @@ Resources:
                   - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/enceladus-*"
 
               # CloudWatch Logs (for error reporting in workflow)
+              # ENC-TSK-P33: logs:DescribeMetricFilters added. CloudFormation calls it
+              # when it reconciles AWS::Logs::MetricFilter resources, so without it the
+              # monitoring stack cannot deploy at all -- GitHubValidationFailMetricFilter
+              # CREATE_FAILED with AccessDenied, cancelling GitHubValidationFailAlarm and
+              # every in-flight update in the same change-set. That has blocked
+              # enceladus-monitoring since 2026-07-13. ENC-ISS-660 class: a permission the
+              # templates assume and the live role does not hold.
               - Sid: LogsReadOnly
                 Effect: Allow
                 Action:
                   - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
+                  - logs:DescribeMetricFilters
                 Resource: "*"
 
               # S3 staging for `aws cloudformation deploy --s3-bucket` path.

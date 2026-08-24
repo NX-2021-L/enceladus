@@ -177,6 +177,13 @@
       ],
       "notes": "DVP-TSK-704: environment: v3-prod — patches the SHARED CFN deploy role object, extending DynamoDBTableOps in place with the nine legacy un-prefixed 01-data table ARNs; same pattern as iam-cfn-deploy-role-gamma-patch.yml"
     },
+    "iam-cfn-deploy-role-logs-metricfilter-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-P33 / ENC-TSK-P32: environment: v3-prod -- patches the SHARED CFN deploy role object with logs:DescribeMetricFilters. The grant itself is read-only on CloudWatch Logs, but the ROLE is shared and global, so this classifies prod-mutating on the same basis as every other iam-cfn-deploy-role-*-patch entry. Unblocks enceladus-monitoring, undeployable since 2026-07-13 (GitHubValidationFailMetricFilter CREATE_FAILED, ENC-ISS-660 class)."
+    },
     "iam-cfn-deploy-role-nat-gateway-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
