@@ -307,7 +307,7 @@ jobs:
           echo "HEALTH_GATE_SKIP_DRIFT=${HEALTH_GATE_SKIP_DRIFT} (1 = import context; assert_changeset_safe is the drift control)"
           bash tools/pre-deploy-health-gate.sh \
             --stack "${{ inputs.stack_name }}" \
-            --template "${{ inputs.template_file }}"
+            --template "${{ steps.op.outputs.template_file_resolved }}"
 
       - name: "Preview only — delete change-set, do NOT execute"
         if: ${{ inputs.preview_only }}
