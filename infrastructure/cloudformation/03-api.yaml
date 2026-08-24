@@ -325,15 +325,15 @@ Resources:
   # agent-types tables) but were never wired to API Gateway. Wiring them here is
   # the "NEW coordination-api list route" this task's AC calls for -- no new
   # Lambda handler code was needed, only this CFN gap-fill. ENC-TSK-L36 (Agent
-  # detail page) depends on RouteAgentSessionsList with ?agent_type_id=<id>&status=claimed.
-  RouteAgentSessionsList:
+  # detail page) depends on RouteCoordinationAgentSessionList with ?agent_type_id=<id>&status=claimed.
+  RouteCoordinationAgentSessionList:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/coordination/agents/sessions
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteAgentTypesList:
+  RouteCoordinationAgentTypeList:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
@@ -345,14 +345,24 @@ Resources:
   # Gamma MCP embeds server.py inside CoordinationApiFunction and HTTP-loopbacks
   # agent.retire / checkout-release-backfill — these routes must exist on the
   # same gateway the function targets via ENCELADUS_COORDINATION_API_BASE.
-  RouteAgentSessionsRegister:
+
+  # ENC-ISS-694: live on prod, stack-managed, and absent from this template.
+  # Restored so the cutover apply is a no-op for it rather than a DELETE of the
+  # ENC-FTR-117 agent-type registration endpoint.
+  RouteCoordinationAgentTypeRegister:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/types
+      Target: !Sub integrations/${CoordinationApiIntegration}
+  RouteCoordinationAgentSessionRegister:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/agents/sessions
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteAgentSessionsClaim:
+  RouteCoordinationAgentSessionClaim:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
@@ -373,7 +383,7 @@ Resources:
       RouteKey: GET /api/v1/coordination/agents/sessions/{sessionId}
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteAgentSessionRetire:
+  RouteCoordinationAgentSessionRetire:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
@@ -968,7 +978,6 @@ Resources:
   # ---------------------------------------------------------------------------
   GraphQueryIntegration:
     Type: AWS::ApiGatewayV2::Integration
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
@@ -978,7 +987,6 @@ Resources:
 
   GraphQueryApiInvokePermission:
     Type: AWS::Lambda::Permission
-    Condition: IsGamma
     Properties:
       FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
       Action: lambda:InvokeFunction
@@ -987,7 +995,6 @@ Resources:
 
   RouteGraphSearch:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/graphsearch
@@ -995,7 +1002,6 @@ Resources:
 
   RouteGraphSearchHealth:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/graphsearch/health
@@ -1003,7 +1009,6 @@ Resources:
 
   RouteGraphSearchOptions:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/graphsearch
@@ -2756,7 +2761,6 @@ Resources:
   # only actionable while the escalation is io-approved and unapplied.
   RouteEscalationsFeed:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "GET /api/v1/coordination/escalations"
@@ -2765,7 +2769,6 @@ Resources:
   # ENC-TSK-J71 / ENC-FTR-121 Ph4: session-scoped escalation event polling.
   RouteEscalationsWatch:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "GET /api/v1/coordination/escalations/watch"
@@ -2781,7 +2784,6 @@ Resources:
   # io-gated decision (DOC-B716E8FB10B6) this task does not make.
   RouteEscalationsApprove:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
@@ -2791,7 +2793,6 @@ Resources:
 
   RouteEscalationsDeny:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
@@ -2801,7 +2802,6 @@ Resources:
 
   RouteTrackerEscalationApply:
     Type: AWS::ApiGatewayV2::Route
-    Condition: IsGamma
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply"
