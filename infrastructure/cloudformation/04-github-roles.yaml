@@ -317,19 +317,30 @@ Resources:
                   - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/enceladus-*"
 
               # CloudWatch Logs (for error reporting in workflow)
-              # ENC-TSK-P33: logs:DescribeMetricFilters added. CloudFormation calls it
-              # when it reconciles AWS::Logs::MetricFilter resources, so without it the
-              # monitoring stack cannot deploy at all -- GitHubValidationFailMetricFilter
-              # CREATE_FAILED with AccessDenied, cancelling GitHubValidationFailAlarm and
-              # every in-flight update in the same change-set. That has blocked
-              # enceladus-monitoring since 2026-07-13. ENC-ISS-660 class: a permission the
-              # templates assume and the live role does not hold.
+              # ENC-TSK-P33: metric-filter ops. CloudFormation needs all THREE to
+              # reconcile an AWS::Logs::MetricFilter -- Describe is only the pre-check,
+              # Put creates it, Delete removes it. Granting Describe alone is not enough
+              # and was proven so: the monitoring deploy advanced past the Describe
+              # AccessDenied and then failed on logs:PutMetricFilter. That gap blocked
+              # enceladus-monitoring from 2026-07-13 to 2026-08-24. ENC-ISS-660 class.
+              #
+              # LIVE IMPLEMENTATION DIVERGES FROM THIS DECLARATION, DELIBERATELY, AND THAT
+              # IS RECORDED HERE RATHER THAN LEFT FOR SOMEONE TO DISCOVER:
+              # these three actions are granted live by the MANAGED policy
+              # enceladus-cfn-deploy-logs-ops, not by this inline statement, because this
+              # role's INLINE budget is exhausted -- 10089 of 10240 bytes across eight
+              # inline policies, leaving ~151 bytes against a ~180-byte need. PutRolePolicy
+              # returns LimitExceeded. Managed policies are the only surface with headroom
+              # (14 of a 20 quota attached). Future logs grants must extend that managed
+              # policy; do NOT add them here expecting them to apply. See ENC-ISS-692.
               - Sid: LogsReadOnly
                 Effect: Allow
                 Action:
                   - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
                   - logs:DescribeMetricFilters
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
                 Resource: "*"
 
               # S3 staging for `aws cloudformation deploy --s3-bucket` path.
