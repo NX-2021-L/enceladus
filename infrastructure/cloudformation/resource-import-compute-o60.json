@@ -1,0 +1,16 @@
+[
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "CheckoutServiceFunction",
+    "ResourceIdentifier": {
+      "FunctionName": "enceladus-checkout-service"
+    }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "RecomputeGovernanceSchedule",
+    "ResourceIdentifier": {
+      "Arn": "arn:aws:events:us-west-2:356364570033:rule/devops-recompute-governance-backstop"
+    }
+  }
+]
