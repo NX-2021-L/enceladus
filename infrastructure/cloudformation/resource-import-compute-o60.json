@@ -2,21 +2,29 @@
   {
     "ResourceType": "AWS::Lambda::Function",
     "LogicalResourceId": "CheckoutServiceFunction",
-    "ResourceIdentifier": { "FunctionName": "enceladus-checkout-service" }
+    "ResourceIdentifier": {
+      "FunctionName": "enceladus-checkout-service"
+    }
   },
   {
     "ResourceType": "AWS::Lambda::Function",
     "LogicalResourceId": "ProdHealthMonitorFunction",
-    "ResourceIdentifier": { "FunctionName": "enceladus-prod-health-monitor" }
+    "ResourceIdentifier": {
+      "FunctionName": "enceladus-prod-health-monitor"
+    }
   },
   {
     "ResourceType": "AWS::IAM::Role",
     "LogicalResourceId": "ProdHealthMonitorRole",
-    "ResourceIdentifier": { "RoleName": "enceladus-prod-health-monitor-role" }
+    "ResourceIdentifier": {
+      "RoleName": "enceladus-prod-health-monitor-role"
+    }
   },
   {
     "ResourceType": "AWS::Events::Rule",
     "LogicalResourceId": "RecomputeGovernanceSchedule",
-    "ResourceIdentifier": { "Name": "devops-recompute-governance-backstop" }
+    "ResourceIdentifier": {
+      "Arn": "arn:aws:events:us-west-2:356364570033:rule/devops-recompute-governance-backstop"
+    }
   }
 ]
