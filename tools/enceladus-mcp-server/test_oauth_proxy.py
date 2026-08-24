@@ -436,5 +436,147 @@ class TestOauthWellKnownSuffixedRoutes(unittest.TestCase):
             self.assertEqual(result["statusCode"], 200)
 
 
+class TestOauthRegisterDesecretization(unittest.TestCase):
+    """ENC-TSK-P29: the DCR facade must stop handing out client_secret to any
+    anonymous caller (gamma+prod were disclosing the production Cognito
+    client's secret via POST /oauth/register), and the token proxy must
+    inject the real credential server-side so existing (and newly public)
+    clients keep working against Cognito's confidential app client.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cognito_server = _load_server()
+        cls.non_cognito_server = _load_server(
+            ENCELADUS_COGNITO_USER_POOL_ID="",
+            ENCELADUS_COGNITO_CLIENT_ID="",
+            ENCELADUS_COGNITO_CLIENT_SECRET="",
+            ENCELADUS_COGNITO_DOMAIN="",
+            ENCELADUS_OAUTH_CLIENT_ID="oauth-client-id",
+            ENCELADUS_OAUTH_CLIENT_SECRET="oauth-client-secret",
+        )
+
+    def test_cognito_register_omits_client_secret_key(self):
+        event = _make_event(method="POST", path="/oauth/register", body="{}")
+        result = self.cognito_server._handle_cognito_register(event)
+        body = json.loads(result["body"])
+        self.assertNotIn("client_secret", body)
+        self.assertEqual(body["client_id"], "test-client-id")
+
+    def test_oauth_register_omits_client_secret_key(self):
+        event = _make_event(method="POST", path="/oauth/register", body="{}")
+        result = self.non_cognito_server._handle_oauth_register(event)
+        body = json.loads(result["body"])
+        self.assertNotIn("client_secret", body)
+        self.assertEqual(body["client_id"], "oauth-client-id")
+
+    def test_cognito_register_advertises_none_auth_method(self):
+        event = _make_event(method="POST", path="/oauth/register", body="{}")
+        result = self.cognito_server._handle_cognito_register(event)
+        body = json.loads(result["body"])
+        self.assertEqual(body["token_endpoint_auth_method"], "none")
+
+    def test_oauth_register_advertises_none_auth_method(self):
+        event = _make_event(method="POST", path="/oauth/register", body="{}")
+        result = self.non_cognito_server._handle_oauth_register(event)
+        body = json.loads(result["body"])
+        self.assertEqual(body["token_endpoint_auth_method"], "none")
+
+    def test_cognito_asm_advertises_none_auth_methods_supported(self):
+        result = self.cognito_server._handle_cognito_oauth_server_metadata(_make_event())
+        body = json.loads(result["body"])
+        self.assertEqual(body["token_endpoint_auth_methods_supported"], ["none"])
+
+    def test_oauth_asm_advertises_none_auth_methods_supported(self):
+        result = self.non_cognito_server._handle_oauth_server_metadata(_make_event())
+        body = json.loads(result["body"])
+        self.assertEqual(body["token_endpoint_auth_methods_supported"], ["none"])
+
+
+class TestCognitoTokenSecretInjection(unittest.TestCase):
+    """ENC-TSK-P29: since /oauth/register no longer hands out a client_secret,
+    the token proxy must inject the confidential Cognito app client's real
+    secret server-side (overwriting, never duplicating, whatever the caller
+    sent) — otherwise a newly-registered public client is rejected by
+    Cognito on the very next token exchange.
+    """
+
+    @staticmethod
+    def _mock_response():
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b'{"access_token":"tok"}'
+        mock_resp.status = 200
+        return mock_resp
+
+    def test_injects_and_overwrites_client_supplied_secret(self):
+        # Load the server BEFORE patching urlopen: server.py fetches AppConfig
+        # flags via urlopen at module-import time, and that fetch must not be
+        # intercepted by the token-proxy mock below (ENC-TSK-P29 test fix).
+        server = _load_server(
+            ENCELADUS_COGNITO_CLIENT_ID="real-cognito-client-id",
+            ENCELADUS_COGNITO_CLIENT_SECRET="real-cognito-client-secret",
+        )
+        event = _make_event(
+            body=(
+                "grant_type=authorization_code&code=abc"
+                "&client_id=client-supplied-id&client_secret=client-supplied-secret"
+            ),
+            method="POST",
+            path="/oauth/token",
+        )
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._mock_response()
+            result = server._handle_cognito_token(event)
+            sent_body = mock_urlopen.call_args[0][0].data.decode()
+
+        self.assertEqual(result["statusCode"], 200)
+        params = dict(pair.split("=", 1) for pair in sent_body.split("&"))
+        self.assertEqual(params["client_secret"], "real-cognito-client-secret")
+        self.assertEqual(params["client_id"], "real-cognito-client-id")
+        # Overwritten, not duplicated: exactly one occurrence of each key.
+        self.assertEqual(sent_body.count("client_secret="), 1)
+        self.assertEqual(sent_body.count("client_id="), 1)
+        self.assertNotIn("client-supplied-secret", sent_body)
+
+    def test_injects_secret_when_client_sent_none(self):
+        server = _load_server(
+            ENCELADUS_COGNITO_CLIENT_ID="real-cognito-client-id",
+            ENCELADUS_COGNITO_CLIENT_SECRET="real-cognito-client-secret",
+        )
+        event = _make_event(
+            body="grant_type=authorization_code&code=abc",
+            method="POST",
+            path="/oauth/token",
+        )
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._mock_response()
+            result = server._handle_cognito_token(event)
+            sent_body = mock_urlopen.call_args[0][0].data.decode()
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertIn("client_secret=real-cognito-client-secret", sent_body)
+
+    def test_omits_client_secret_when_env_var_empty(self):
+        server = _load_server(
+            ENCELADUS_COGNITO_CLIENT_ID="real-cognito-client-id",
+            ENCELADUS_COGNITO_CLIENT_SECRET="",
+        )
+        event = _make_event(
+            body="grant_type=authorization_code&code=abc&client_secret=client-supplied-secret",
+            method="POST",
+            path="/oauth/token",
+        )
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._mock_response()
+            result = server._handle_cognito_token(event)
+            sent_body = mock_urlopen.call_args[0][0].data.decode()
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertNotIn("client_secret", sent_body)
+        self.assertNotIn("client-supplied-secret", sent_body)
+
+
 if __name__ == "__main__":
     unittest.main()

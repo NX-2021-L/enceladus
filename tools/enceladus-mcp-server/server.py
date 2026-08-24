@@ -10244,7 +10244,7 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
             "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "token_endpoint_auth_methods_supported": ["none"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "scopes_supported": ["openid", "email", "profile"],
@@ -10448,7 +10448,19 @@ def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
     # Replace client's redirect_uri with the server-side callback used in /authorize
     if "redirect_uri" in params:
         params["redirect_uri"] = [f"{base}/callback"]
-        body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
+
+    # Public clients (post-DCR-desecretization, ENC-TSK-P29) no longer receive a
+    # client_secret, so they cannot supply one. Cognito's app client is confidential,
+    # so we inject the real credential server-side, overwriting whatever the caller
+    # sent (existing connectors on the old secret keep working; new ones with none
+    # or a stale value are corrected transparently). If no secret is configured,
+    # forward none — the correct shape for a true public client.
+    params.pop("client_secret", None)
+    if COGNITO_CLIENT_SECRET_CODE:
+        params["client_secret"] = [COGNITO_CLIENT_SECRET_CODE]
+    if COGNITO_CLIENT_ID_CODE:
+        params["client_id"] = [COGNITO_CLIENT_ID_CODE]
+    body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
 
     ctx = ssl.create_default_context()
     try:
@@ -10511,12 +10523,11 @@ def _handle_cognito_register(event: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {"content-type": "application/json", "cache-control": "no-store"},
         "body": json.dumps({
             "client_id": COGNITO_CLIENT_ID_CODE,
-            "client_secret": COGNITO_CLIENT_SECRET_CODE,
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "scope": "openid email profile",
-            "token_endpoint_auth_method": "client_secret_post",
+            "token_endpoint_auth_method": "none",
         }),
         "isBase64Encoded": False,
     }
@@ -10549,7 +10560,7 @@ def _handle_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
             "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "token_endpoint_auth_methods_supported": ["none"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
@@ -10726,11 +10737,10 @@ def _handle_oauth_register(event: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {"content-type": "application/json", "cache-control": "no-store"},
         "body": json.dumps({
             "client_id": OAUTH_CLIENT_ID,
-            "client_secret": OAUTH_CLIENT_SECRET,
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
-            "token_endpoint_auth_method": "client_secret_post",
+            "token_endpoint_auth_method": "none",
         }),
         "isBase64Encoded": False,
     }
