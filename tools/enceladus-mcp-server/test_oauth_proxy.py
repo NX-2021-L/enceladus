@@ -363,5 +363,78 @@ class TestCallbackErrorHtml(unittest.TestCase):
         self.assertIn("close this window", result["body"])
 
 
+class TestOauthWellKnownSuffixedRoutes(unittest.TestCase):
+    """ENC-TSK-P28 AC-4: suffixed /mcp well-known variants must match the bare
+    paths byte-for-byte and resolve unauthenticated via _handle_oauth_route
+    before the step-1 bearer gate is ever reached.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cognito_server = _load_server()
+        cls.non_cognito_server = _load_server(
+            ENCELADUS_COGNITO_USER_POOL_ID="",
+            ENCELADUS_COGNITO_CLIENT_ID="",
+            ENCELADUS_COGNITO_CLIENT_SECRET="",
+            ENCELADUS_COGNITO_DOMAIN="",
+        )
+
+    def test_protected_resource_suffixed_matches_bare_cognito_mode(self):
+        server = self.cognito_server
+        self.assertTrue(server._cognito_mode_active())
+        bare = server._handle_oauth_route(_make_event(path="/.well-known/oauth-protected-resource"))
+        suffixed = server._handle_oauth_route(_make_event(path="/.well-known/oauth-protected-resource/mcp"))
+        self.assertIsNotNone(bare)
+        self.assertIsNotNone(suffixed)
+        self.assertEqual(suffixed["statusCode"], 200)
+        self.assertEqual(suffixed["body"], bare["body"])
+
+    def test_protected_resource_suffixed_matches_bare_non_cognito_mode(self):
+        server = self.non_cognito_server
+        self.assertFalse(server._cognito_mode_active())
+        bare = server._handle_oauth_route(_make_event(path="/.well-known/oauth-protected-resource"))
+        suffixed = server._handle_oauth_route(_make_event(path="/.well-known/oauth-protected-resource/mcp"))
+        self.assertIsNotNone(bare)
+        self.assertIsNotNone(suffixed)
+        self.assertEqual(suffixed["statusCode"], 200)
+        self.assertEqual(suffixed["body"], bare["body"])
+
+    def test_authorization_server_suffixed_matches_bare_cognito_mode(self):
+        server = self.cognito_server
+        self.assertTrue(server._cognito_mode_active())
+        bare = server._handle_oauth_route(_make_event(path="/.well-known/oauth-authorization-server"))
+        suffixed = server._handle_oauth_route(_make_event(path="/.well-known/oauth-authorization-server/mcp"))
+        self.assertIsNotNone(bare)
+        self.assertIsNotNone(suffixed)
+        self.assertEqual(suffixed["statusCode"], 200)
+        self.assertEqual(suffixed["body"], bare["body"])
+
+    def test_authorization_server_suffixed_matches_bare_non_cognito_mode(self):
+        server = self.non_cognito_server
+        self.assertFalse(server._cognito_mode_active())
+        bare = server._handle_oauth_route(_make_event(path="/.well-known/oauth-authorization-server"))
+        suffixed = server._handle_oauth_route(_make_event(path="/.well-known/oauth-authorization-server/mcp"))
+        self.assertIsNotNone(bare)
+        self.assertIsNotNone(suffixed)
+        self.assertEqual(suffixed["statusCode"], 200)
+        self.assertEqual(suffixed["body"], bare["body"])
+
+    def test_suffixed_routes_resolve_without_authorization_header(self):
+        """Both suffixed paths must be handled at step 0 (_handle_oauth_route),
+        i.e. return non-None, so the step-1 bearer gate in _handle_lambda_event
+        is never reached — no Authorization header is present on either event.
+        """
+        server = self.cognito_server
+        for path in (
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server/mcp",
+        ):
+            event = _make_event(path=path, headers={"host": "mcp.example.com", "x-forwarded-proto": "https"})
+            self.assertNotIn("authorization", event["headers"])
+            result = server._handle_oauth_route(event)
+            self.assertIsNotNone(result, f"{path} was not handled unauthenticated at step 0")
+            self.assertEqual(result["statusCode"], 200)
+
+
 if __name__ == "__main__":
     unittest.main()
