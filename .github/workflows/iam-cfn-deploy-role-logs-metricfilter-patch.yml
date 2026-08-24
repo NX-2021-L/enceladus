@@ -1,0 +1,116 @@
+name: IAM CFN Deploy Role — Logs DescribeMetricFilters Patch
+
+# ENC-TSK-P33 / ENC-TSK-P32: CloudFormationDeployRole
+# (enceladus-cloudformation-deploy-github-role) holds logs:DescribeLogGroups and
+# logs:DescribeLogStreams but NOT logs:DescribeMetricFilters. CloudFormation calls
+# DescribeMetricFilters when reconciling AWS::Logs::MetricFilter resources, so the
+# monitoring stack cannot deploy at all:
+#
+#   GitHubValidationFailMetricFilter  CREATE_FAILED
+#     "User: .../enceladus-cloudformation-deploy-github-role/GitHubActions is not
+#      authorized to perform: logs:DescribeMetricFilters on resource:
+#      .../log-group:/aws/lambda/enceladus-checkout-service-gamma"
+#
+# which cancels GitHubValidationFailAlarm and every in-flight update in the same
+# change-set, ending in UPDATE_ROLLBACK_COMPLETE. enceladus-monitoring has been
+# undeployable since 2026-07-13 (three consecutive failures: 32540030598,
+# 32540481434, 32667830708).
+#
+# The durable fix lands the grant in infrastructure/cloudformation/04-github-roles.yaml
+# (Sid LogsReadOnly, alongside the two Describe reads it already has). 04-github-roles
+# has NO push-deploy lane, so this one-off dispatchable patch — matching the eleven
+# existing iam-cfn-deploy-role-*-patch.yml workflows — applies the same statement live
+# immediately, ahead of the next full github-roles stack deploy.
+#
+# ENC-ISS-672 is the reason BOTH halves ship together: a grant that exists only in the
+# template has no runtime effect, and a grant that exists only inline is one stack
+# deploy away from being reverted. Declaration is not existence; neither is application.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "ENC-TSK-P33 — grant logs:DescribeMetricFilters to CloudFormationDeployRole; unblocks enceladus-monitoring (broken since 2026-07-13) and ENC-TSK-P32's cross-stack move"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with logs:DescribeMetricFilters
+    # ENC-TSK-J64 / ENC-FTR-120: live IAM mutation (shared/global role objects) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: NEGATIVE CONTROL — confirm the grant is absent BEFORE patching
+        run: |
+          set -euo pipefail
+          # If this already resolves 'allowed', the patch is a no-op and the run
+          # proves nothing. Fail loudly rather than report a vacuous success.
+          decision="$(aws iam simulate-principal-policy \
+            --policy-source-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/enceladus-cloudformation-deploy-github-role" \
+            --action-names logs:DescribeMetricFilters \
+            --query 'EvaluationResults[0].EvalDecision' --output text)"
+          echo "pre-patch decision: ${decision}"
+          if [ "${decision}" = "allowed" ]; then
+            echo "::error::logs:DescribeMetricFilters is ALREADY allowed — this patch would prove nothing. Investigate before re-running."
+            exit 1
+          fi
+
+      - name: Apply inline policy — logs:DescribeMetricFilters
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          cat > /tmp/cfn-deploy-role-logs-metricfilter.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "CfnMetricFilterRead",
+                "Effect": "Allow",
+                "Action": [
+                  "logs:DescribeMetricFilters"
+                ],
+                "Resource": "arn:aws:logs:us-west-2:${ACCOUNT_ID}:log-group:*"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-logs-metricfilter-v1" \
+            --policy-document "file:///tmp/cfn-deploy-role-logs-metricfilter.json"
+
+      - name: POSITIVE CONTROL — confirm the grant is live AFTER patching
+        run: |
+          set -euo pipefail
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-logs-metricfilter-v1" \
+            --output json
+          decision="$(aws iam simulate-principal-policy \
+            --policy-source-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/enceladus-cloudformation-deploy-github-role" \
+            --action-names logs:DescribeMetricFilters \
+            --query 'EvaluationResults[0].EvalDecision' --output text)"
+          echo "post-patch decision: ${decision}"
+          if [ "${decision}" != "allowed" ]; then
+            echo "::error::grant applied but simulate still reports ${decision} — do NOT treat this run as success"
+            exit 1
+          fi
+          echo "NOTE: simulate is necessary, not sufficient (ENC-ISS-672). The real proof is a"
+          echo "green CloudFormation Monitoring Stack Deploy run past GitHubValidationFailMetricFilter."
