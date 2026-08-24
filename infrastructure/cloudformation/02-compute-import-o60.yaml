@@ -150,11 +150,29 @@ Parameters:
     Type: String
     Default: ""
     Description: >
-      ENC-TSK-O60. Added by the reduced-template import so CheckoutServiceFunction's
-      declaration resolves. Empty default preserves the existing prod/gamma inference
-      derived from EnvironmentSuffix -- this changes no deployed value.
+      Explicit tracker API base URL for this plane, including scheme and path
+      (e.g. https://HOST/api/v1/tracker). When empty, the template falls back to the
+      prod/gamma pair derived from EnvironmentSuffix. A third plane MUST supply this.
+  RhythmCycleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-PLN-068: gamma rhythm tier schedules; when true, legacy superseded
+      gamma EventBridge rules are disabled (K91).
+  RhythmAbsorbLegacy:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-TSK-N19: when true (and RhythmActive), re-enable the absorbed legacy
+      consolidation-arc schedules (RhythmAbsorbed condition). Default false.
 Conditions:
   HasPlaneTrackerApiBase: !Not [!Equals [!Ref PlaneTrackerApiBase, ""]]
+  RhythmAbsorbed: !And
+    - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref RhythmCycleEnabled, "true"]
+    - !Equals [!Ref RhythmAbsorbLegacy, "true"]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-F63 AC-2: SnapStart enabled only when EnableSnapStart=true (arm64/py3.12 targets).
