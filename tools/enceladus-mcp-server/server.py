@@ -10901,12 +10901,12 @@ def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     path = req_ctx.get("path", "")
     method = req_ctx.get("method", "GET").upper()
 
-    if path == "/.well-known/oauth-protected-resource" and method == "GET":
+    if path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp") and method == "GET":
         return _handle_oauth_protected_resource(event)
 
     cognito = _cognito_mode_active()
 
-    if path == "/.well-known/oauth-authorization-server" and method == "GET":
+    if path in ("/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp") and method == "GET":
         return _handle_cognito_oauth_server_metadata(event) if cognito else _handle_oauth_server_metadata(event)
     if path == "/authorize" and method == "GET":
         return _handle_cognito_authorize(event) if cognito else _handle_oauth_authorize(event)
