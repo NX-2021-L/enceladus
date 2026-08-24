@@ -95,7 +95,7 @@ ERRORS=0
 SNAPSHOT_FILE="/tmp/pre-deploy-snapshot-${TIMESTAMP}.json"
 
 # --- Check 1: Capture Lambda snapshot ---
-echo "[CHECK 1/8] Capturing current Lambda state snapshot..."
+echo "[CHECK 1/9] Capturing current Lambda state snapshot..."
 
 if [[ ! -f "${MANIFEST}" ]]; then
     echo "[ERROR] Lambda workflow manifest not found: ${MANIFEST}"
@@ -140,7 +140,7 @@ fi
 
 # --- Check 2: Validate IsGamma conditionals ---
 echo ""
-echo "[CHECK 2/8] Validating CFN template architecture parity..."
+echo "[CHECK 2/9] Validating CFN template architecture parity..."
 
 if python3 "${REPO_ROOT}/tools/verify_lambda_arch_parity.py"; then
     echo "[PASS] CFN template uses IsGamma conditionals correctly"
@@ -151,7 +151,7 @@ fi
 
 # --- Check 3: Validate EnvironmentSuffix parameter ---
 echo ""
-echo "[CHECK 3/8] Validating EnvironmentSuffix parameter in template..."
+echo "[CHECK 3/9] Validating EnvironmentSuffix parameter in template..."
 
 if grep -q "EnvironmentSuffix" "${TEMPLATE_FILE}"; then
     echo "[PASS] Template contains EnvironmentSuffix parameter"
@@ -162,7 +162,7 @@ fi
 
 # --- Check 4: Validate deploy scripts ---
 echo ""
-echo "[CHECK 4/8] Validating deploy scripts via manifest..."
+echo "[CHECK 4/9] Validating deploy scripts via manifest..."
 
 # This is already done by verify_lambda_arch_parity.py, but we add a specific
 # check for hardcoded RUNTIME/ARCHITECTURE defaults without conditionals
@@ -177,7 +177,7 @@ fi
 
 # --- Check 5: Validate enceladus-shared layer-version parity (ENC-TSK-H24) ---
 echo ""
-echo "[CHECK 5/8] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
+echo "[CHECK 5/9] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
 
 # Static checks (template Default + workflow --parameter-overrides override) are
 # fail-closed (no AWS creds needed). ENC-TSK-H28 added the workflow-override check that
@@ -204,12 +204,21 @@ fi
 # advisory classification are the single source in env_drift_registry.json;
 # tools/env_parity_waivers.json carries only risk-accepted failure suppressions.
 echo ""
-echo "[CHECK 6/8] Validating env-var parity (no out-of-band vars the deploy would strip)..."
+echo "[CHECK 6/9] Validating env-var parity (no out-of-band vars the deploy would strip)..."
 
 # Infer EnvironmentSuffix from the stack name so gamma stacks resolve their -gamma env.
 PARITY_PARAMS=()
 case "${STACK_NAME}" in
     *gamma*) PARITY_PARAMS+=(--parameter "EnvironmentSuffix=-gamma") ;;
+esac
+
+# ENC-TSK-P40: the coherence gate renders per-plane, so it needs the same
+# inference. Derived from STACK_NAME rather than from the git ref, for the same
+# reason ENC-TSK-P40 moved the template's ABI selector off IsGamma: the ref is a
+# proxy, the resolved plane is the real variable.
+case "${STACK_NAME}" in
+    *gamma*) COHERENCE_PLANE="gamma" ;;
+    *)       COHERENCE_PLANE="prod" ;;
 esac
 
 if python3 "${REPO_ROOT}/tools/env_parity_gate.py" \
@@ -242,10 +251,10 @@ DRIFT_REPORT="/tmp/pre-deploy-drift-${TIMESTAMP}.json"
 # so the import workflow sets HEALTH_GATE_SKIP_DRIFT=1. Default (unset) is unchanged:
 # a plain 'aws cloudformation deploy' still gets the full fail-on-drift guard.
 if [[ "${HEALTH_GATE_SKIP_DRIFT:-0}" == "1" ]]; then
-    echo "[CHECK 7/8] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
+    echo "[CHECK 7/9] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
     echo "            assert_changeset_safe.py mode=import is the compensating control)."
 else
-    echo "[CHECK 7/8] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
+    echo "[CHECK 7/9] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
     if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
             --environment "${DRIFT_ENV}" \
             --output-json "${DRIFT_REPORT}" \
@@ -291,7 +300,7 @@ case "${STACK_NAME}" in
 esac
 DELTA_REPORT="/tmp/pre-deploy-apply-delta-${TIMESTAMP}.json"
 
-echo "[CHECK 8/8] Asserting apply delta vs stack ${STACK_NAME} (suffix='${DELTA_SUFFIX}')..."
+echo "[CHECK 8/9] Asserting apply delta vs stack ${STACK_NAME} (suffix='${DELTA_SUFFIX}')..."
 if python3 "${REPO_ROOT}/tools/assert_apply_delta.py" \
         --stack "${STACK_NAME}" \
         --template "${TEMPLATE_FILE}" \
@@ -311,6 +320,38 @@ if [[ "${DELTA_RC:-0}" -eq 2 ]]; then
     echo "       control failed. Flagged, NOT treated as a pass (see ${DELTA_REPORT})."
 elif [[ "${DELTA_RC:-0}" -ne 0 ]]; then
     echo "[FAIL] Apply would destroy a live resource or collide on a CREATE (see ${DELTA_REPORT}; ENC-ISS-652)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# --- Check 9: layer/function ARCHITECTURE coherence (ENC-TSK-P40 / ENC-ISS-697) ---
+# Check 5 above covers the enceladus-shared VERSION PIN. It says nothing about
+# whether the layers a function attaches are compatible with the ARCHITECTURE
+# that function renders as -- and those are different questions with different
+# failure modes.
+#
+# ENC-ISS-696 is the instance: IsGamma meant "non-prod plane" but was also
+# selecting the architecture-specific AppConfig extension ARN, so the
+# ENC-TSK-O11 cutover would have rendered 26 prod-plane functions arm64 while
+# still selecting AWS-AppConfig-Extension:147, which DECLARES [x86_64].
+#
+# The two regimes fail in OPPOSITE directions and the predicate handles both:
+# a DECLARED CompatibleArchitectures mismatch is rejected by Lambda at attach
+# (loud -- the apply fails partway and rolls back), while a NULL declaration is
+# unenforced (silent -- the attach succeeds and the function dies at INVOKE
+# while CloudFormation reports UPDATE_COMPLETE). The predicate returns an
+# explicit UNKNOWN rather than a pass whenever it cannot settle a NULL case.
+#
+# Runs BEFORE change-set creation in the compute lane's plan job, which is the
+# whole point: "the apply discovers it" is not an acceptable discovery
+# mechanism for one irreversible in-place apply across 27 production functions.
+echo ""
+echo "[CHECK 9/9] Validating layer/function architecture coherence (ENC-ISS-696 / ENC-ISS-697)..."
+if python3 "${REPO_ROOT}/tools/verify_layer_arch_coherence.py" --plane "${COHERENCE_PLANE}"; then
+    echo "[PASS] Every rendered function's architecture is coherent with every layer it attaches"
+else
+    echo "[FAIL] Layer/function architecture incoherence on plane '${COHERENCE_PLANE}' — an incompatible"
+    echo "       layer attach would either fail the apply partway (declared mismatch) or produce a"
+    echo "       green UPDATE_COMPLETE on a fleet that cannot import (null declaration). ENC-ISS-696."
     ERRORS=$((ERRORS + 1))
 fi
 

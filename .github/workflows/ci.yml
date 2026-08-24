@@ -231,6 +231,22 @@ jobs:
             --base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
           python3 -m unittest tools.test_verify_component_closure
 
+      # ENC-TSK-P40 / ENC-ISS-696 / ENC-ISS-697. Credential-free by design: the
+      # ENC-ISS-696 condition (an arm64 function selecting a layer that DECLARES
+      # CompatibleArchitectures [x86_64]) is decidable from
+      # infrastructure/component_dependency_closure.json alone, so CI can block it
+      # with no AWS access. --scope declared restricts the run to attachments the
+      # governed closure can settle and REPORTS the remainder as out-of-scope
+      # rather than absorbing them; the compute deploy lane additionally runs this
+      # same predicate as CHECK 9/9 with OIDC credentials and --scope all, so
+      # nothing escapes both invocations.
+      - name: Layer/function architecture coherence (ENC-TSK-P40 / ENC-ISS-697)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_layer_arch_coherence.py --plane prod  --offline --scope declared
+          python3 tools/verify_layer_arch_coherence.py --plane gamma --offline --scope declared
+          python3 -m unittest tools.test_verify_layer_arch_coherence
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail

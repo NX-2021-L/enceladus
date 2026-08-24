@@ -3,9 +3,9 @@
 
 CI guard preventing arm64 architecture from reaching production.
 Validates that:
-  1. Every Lambda in 02-compute.yaml uses !If [IsGamma, arm64, x86_64]
+  1. Every Lambda in 02-compute.yaml uses !If [IsArm64, arm64, x86_64]
      for Architectures (prod must resolve to x86_64).
-  2. Every Lambda uses !If [IsGamma, python3.12, python3.11] for Runtime
+  2. Every Lambda uses !If [IsArm64, python3.12, python3.11] for Runtime
      (prod must resolve to python3.11).
   3. Deploy scripts with pip --platform use ENVIRONMENT_SUFFIX conditionals
      that default to x86_64/py3.11 for production (empty suffix).
@@ -46,8 +46,24 @@ PACKAGE_ARTIFACT_SCRIPT = REPO_ROOT / "tools/package_lambda_artifact.sh"
 # (see LambdaResource below) rather than against raw template text, so
 # formatting differences (spacing, quoting, flow vs. block YAML) can't hide
 # or fabricate a violation.
-EXPECTED_RUNTIME_IF: Dict[str, list] = {"!If": ["IsGamma", "python3.12", "python3.11"]}
-EXPECTED_ARCH_IF_LIST: list = [{"!If": ["IsGamma", "arm64", "x86_64"]}]
+# ENC-TSK-P40 / ENC-ISS-696: the ABI-selecting condition is now IsArm64, NOT IsGamma.
+#
+# IsGamma means "this is a suffixed non-prod plane" — PLANE IDENTITY. It used to double as the
+# architecture selector purely because gamma happened to be the arm64 plane, and ENC-ISS-696 is
+# what that conflation cost: the ENC-TSK-O11 cutover flips prod to arm64 while IsGamma stays FALSE
+# for prod, so architecture-derived values that rode IsGamma would NOT flip with it. 02-compute.yaml
+# and 06-appsync-events.yaml now select every ABI-derived value (Architectures, Runtime, and the
+# architecture-specific AppConfig and LambdaAdapter layer ARNs) on IsArm64, leaving the genuinely
+# plane-semantic sites on IsGamma.
+#
+# Named once here so a future rename is a ONE-LINE edit rather than another literal hunt. This guard
+# still does not hardcode an ARCHITECTURE — it reads expected_architecture/expected_runtime from
+# lambda_workflow_manifest.json (see _validate_manifest_expectations) and enforces whatever it finds.
+# It hardcodes only the SHAPE of the conditional and the NAME of the condition.
+ABI_CONDITION = "IsArm64"
+
+EXPECTED_RUNTIME_IF: Dict[str, list] = {"!If": [ABI_CONDITION, "python3.12", "python3.11"]}
+EXPECTED_ARCH_IF_LIST: list = [{"!If": [ABI_CONDITION, "arm64", "x86_64"]}]
 
 # Deploy script patterns
 DEPLOY_PROD_X86 = re.compile(
@@ -298,7 +314,7 @@ def _is_named_architecture_exception(function_name: str, exceptions: Dict[str, A
 def _validate_cfn(
     blocks: List[LambdaResource], architecture_exceptions: Optional[Dict[str, Any]] = None
 ) -> List[str]:
-    """Validate that all CFN Lambda declarations use IsGamma conditionals.
+    """Validate that all CFN Lambda declarations use IsArm64 conditionals.
 
     ENC-TSK-O83: compares the parsed Properties.Runtime / .Architectures
     values directly against the expected structural shape (EXPECTED_RUNTIME_IF
@@ -339,7 +355,7 @@ def _validate_cfn(
             if isinstance(block.runtime, str):
                 errors.append(
                     f"{label}: hardcoded Runtime={block.runtime}, expected "
-                    f"!If [IsGamma, python3.12, python3.11]"
+                    f"!If [{ABI_CONDITION}, python3.12, python3.11]"
                 )
             elif block.runtime is None:
                 errors.append(
@@ -350,7 +366,7 @@ def _validate_cfn(
             else:
                 errors.append(
                     f"{label}: unexpected Runtime value: {block.runtime!r}, "
-                    f"expected !If [IsGamma, python3.12, python3.11]"
+                    f"expected !If [{ABI_CONDITION}, python3.12, python3.11]"
                 )
 
         # Check Architectures
@@ -364,7 +380,7 @@ def _validate_cfn(
             ):
                 errors.append(
                     f"{label}: hardcoded Architectures=[{block.architectures[0]}], "
-                    f"expected !If [IsGamma, arm64, x86_64]"
+                    f"expected !If [{ABI_CONDITION}, arm64, x86_64]"
                 )
             elif block.architectures is None:
                 errors.append(f"{label}: missing Architectures property")
@@ -372,7 +388,7 @@ def _validate_cfn(
                 errors.append(
                     f"{label}: unexpected Architectures value: "
                     f"{block.architectures!r}, expected "
-                    f"[!If [IsGamma, arm64, x86_64]]"
+                    f"[!If [{ABI_CONDITION}, arm64, x86_64]]"
                 )
 
     return errors
@@ -1601,7 +1617,7 @@ def main() -> int:
         f"[SUCCESS] Lambda architecture parity valid: "
         f"{len(blocks)} CFN Lambdas structurally selected and evaluated "
         f"(count-reconciled against an independent census), all use "
-        f"IsGamma conditionals (prod=x86_64/py3.11, gamma=arm64/py3.12)"
+        f"{ABI_CONDITION} conditionals (prod=x86_64/py3.11, gamma=arm64/py3.12)"
     )
     return 0
 

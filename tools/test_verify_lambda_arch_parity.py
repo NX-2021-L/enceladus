@@ -207,9 +207,9 @@ TEMPLATE_BIG_ENV_FUNCTION = _TEMPLATE_HEADER + f"""\
         Variables:
 {_BIG_ENV_VARS}
       FunctionName: !Sub "big-env-function${{EnvironmentSuffix}}"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
 """
 
 # Defect 1 regression: a container-image function has no Runtime key at
@@ -223,7 +223,7 @@ TEMPLATE_CONTAINER_IMAGE_FUNCTION = _TEMPLATE_HEADER + """\
       FunctionName: !Sub "container-fn${EnvironmentSuffix}"
       PackageType: Image
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Code:
         ImageUri: "123456789012.dkr.ecr.us-west-2.amazonaws.com/repo:latest"
 """
@@ -235,16 +235,16 @@ TEMPLATE_TWO_CLEAN_FUNCTIONS = _TEMPLATE_HEADER + """\
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "first-fn${EnvironmentSuffix}"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
   SecondFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "second-fn${EnvironmentSuffix}"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
 """
 
 
@@ -274,7 +274,7 @@ class TestStructuralLambdaSelection(unittest.TestCase):
         self.assertEqual(blocks[0].resource_name, "BigEnvFunction")
         self.assertEqual(blocks[0].function_name, "big-env-function")
         self.assertEqual(
-            blocks[0].runtime, {"!If": ["IsGamma", "python3.12", "python3.11"]}
+            blocks[0].runtime, {"!If": ["IsArm64", "python3.12", "python3.11"]}
         )
 
     def test_container_image_function_without_runtime_is_selected(self):
@@ -314,7 +314,7 @@ class TestStructuralLambdaSelection(unittest.TestCase):
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "bad-arch-fn${EnvironmentSuffix}"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Architectures:
         - arm64
 """
@@ -476,7 +476,7 @@ class TestArchitectureExceptions(unittest.TestCase):
         return vlap.LambdaResource(
             resource_name=name.replace("-", "_").title().replace("_", "") + "Function",
             function_name=name,
-            runtime={"!If": ["IsGamma", "python3.12", "python3.11"]},
+            runtime={"!If": ["IsArm64", "python3.12", "python3.11"]},
             architectures=architectures,
             line_number=1,
         )
@@ -615,7 +615,8 @@ class TestArchitectureExceptions(unittest.TestCase):
                 }
             },
         }
-        # The real IsGamma conditional pattern resolves prod to x86_64,
+        # The real IsArm64 conditional pattern (ENC-TSK-P40: the ABI selector, formerly
+        # IsGamma) resolves prod to x86_64,
         # matching the target -- this is the shape every real function in
         # 02-compute.yaml uses today.
         blocks = [self._block("normal-fn", vlap.EXPECTED_ARCH_IF_LIST)]

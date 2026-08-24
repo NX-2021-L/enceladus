@@ -57,6 +57,14 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-P40 / ENC-ISS-696 — the ABI selector, separate from plane identity. Mirrors the
+  # condition of the same name in 02-compute.yaml; see that file for the full rationale.
+  # AppSyncFeedPublisherFunction below carries NO resource-level Condition, so it renders on the
+  # PROD plane and its two ABI-derived sites are part of the ENC-TSK-O11 cutover. Every prior count
+  # (ENC-TSK-O11 AC-3 and DOC-F3878E7260B6 section 3) said this template held "1 conditional"; it
+  # holds TWO — Runtime and Architectures. Introduced identical to IsGamma so the repoint is a
+  # no-op; the cutover flips this one line to: IsArm64: !Equals ["arm64", "arm64"].
+  IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -240,12 +248,12 @@ Resources:
       FunctionName: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt AppSyncFeedPublisherRole.Arn
       Layers:
         - !Ref SharedLayerArn
