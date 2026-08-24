@@ -337,11 +337,31 @@ jobs:
         if: ${{ !inputs.preview_only }}
         run: |
           set +e
-          # IMPORT completes as IMPORT_COMPLETE; UPDATE/CREATE as *_COMPLETE.
-          aws cloudformation wait stack-import-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
-          aws cloudformation wait stack-update-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
-          aws cloudformation wait stack-create-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
-          status=$(aws cloudformation describe-stacks --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" --query 'Stacks[0].StackStatus' --output text)
+          # ENC-ISS-688 / ENC-TSK-P35. DO NOT CHAIN `aws cloudformation wait`.
+          # The previous form ran wait stack-import-complete, then stack-update-complete,
+          # then stack-create-complete, unconditionally. After an IMPORT the stack is
+          # IMPORT_COMPLETE, so the first returns immediately and the SECOND polls for
+          # UPDATE_COMPLETE -- a state that will never arrive -- for its full default
+          # ceiling of 120 attempts x 30s. Both production imports on 2026-08-24
+          # (ENC-TSK-O60 run 32679134122, ENC-TSK-P32 run 32687669845) executed their
+          # change-set successfully, reached IMPORT_COMPLETE in seconds, and then hung
+          # here until the run was cancelled. That is not merely slow: deploy_evidence
+          # requires a job whose conclusion is success, so a SUCCESSFUL import could not
+          # produce admissible closure evidence and the governed FSM contradicted the lane.
+          #
+          # Poll describe-stacks directly instead and stop at the FIRST terminal state,
+          # whichever one this operation actually produces. Failure semantics below are
+          # unchanged -- *ROLLBACK*/*FAILED* still exit 1, unknown status still exits 1.
+          status="UNKNOWN"
+          for _ in $(seq 1 120); do
+            status=$(aws cloudformation describe-stacks --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" --query 'Stacks[0].StackStatus' --output text 2>/dev/null)
+            [ -z "${status}" ] && status="UNKNOWN"
+            case "${status}" in
+              *_COMPLETE|*_FAILED) break ;;
+            esac
+            echo "  ... ${status}, still settling"
+            sleep 15
+          done
           echo "Final stack status: ${status}"
           case "${status}" in
             *ROLLBACK*|*FAILED*) echo "::error::stack ended in ${status}"; exit 1 ;;
