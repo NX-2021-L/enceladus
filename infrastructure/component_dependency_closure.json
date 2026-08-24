@@ -101,6 +101,17 @@
           "validation_semantics": "NOT_APPLICABLE_ON_PLANE"
         },
         {
+          "id": "appconfig-extension-x86",
+          "kind": "external_layer",
+          "owning_repository": "EXTERNAL",
+          "declared_architecture": "x86_64",
+          "layer_arn": "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension:147",
+          "plane_state": {
+            "prod": "PROVISIONED_ON_PLANE",
+            "gamma": "PROVISIONED_ON_PLANE"
+          }
+        },
+        {
           "id": "appconfig-extension-arm64",
           "kind": "external_layer",
           "owning_repository": "EXTERNAL",

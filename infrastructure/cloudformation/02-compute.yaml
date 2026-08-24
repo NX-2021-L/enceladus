@@ -299,6 +299,37 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-P40 / ENC-ISS-696 / ENC-ISS-697 — THE ABI SELECTOR, SEPARATE FROM PLANE IDENTITY.
+  #
+  # IsGamma above means "this is a suffixed non-prod plane". It is PLANE IDENTITY. It was also,
+  # until this commit, silently doing a SECOND job: selecting every architecture-derived value
+  # (Architectures, Runtime, and the architecture-specific AppConfig and LambdaAdapter layer ARNs).
+  # Those two meanings coincided only because gamma happened to be the arm64 plane. ENC-ISS-696 is
+  # what that coincidence costs: the ENC-TSK-O11 cutover flips prod to arm64 while IsGamma stays
+  # FALSE for prod, so 26 of the 38 prod-plane functions would render arm64 while still selecting
+  # AWS-AppConfig-Extension:147, which DECLARES CompatibleArchitectures [x86_64]. Lambda enforces a
+  # DECLARED CompatibleArchitectures at attach, so the apply fails partway and rolls back v4 code
+  # AND architecture together.
+  #
+  # IsArm64 is introduced here DELIBERATELY IDENTICAL to IsGamma so that repointing the 124
+  # ABI-derived sites in this template is a PROVEN BYTE-IDENTICAL NO-OP on both planes (verified
+  # with tools/cfn_env_resolver.py: 204/204 resources resolve identically, 0 differ, on prod and
+  # on gamma). That decoupling is what lets the mechanical 124-site change land and be exercised on
+  # gamma BEFORE the irreversible cutover, leaving ENC-TSK-P38 a ~10-line diff.
+  #
+  # THE CUTOVER EDIT IS THIS ONE LINE, and nothing else in this template:
+  #     IsArm64: !Equals ["arm64", "arm64"]
+  # Do NOT convert this into a new Parameter. A newly added parameter has no stored value, so the
+  # template Default applies on the first deploy of each stack (ENC-LSN-053 AXIS-2, and this
+  # workflow documents the rule itself) — Default x86_64 would silently flip 46 gamma functions to
+  # x86_64, and Default arm64 would silently perform the irreversible prod cutover BY ACCIDENT.
+  #
+  # Do NOT write `IsArm64: !Condition IsGamma`. tools/cfn_env_resolver.py maps !Condition to
+  # Fn::Condition while its _eval_condition_expr recognises only the bare long-form `Condition`
+  # key, so it raises "unsupported condition expression" and fails the env-parity gate closed. The
+  # expression is duplicated on purpose, for the same reason RhythmAbsorbed inlines its
+  # sub-expressions below.
+  IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-O43: an explicitly supplied PlaneTrackerApiBase overrides plane inference.
   HasPlaneTrackerApiBase: !Not [!Equals [!Ref PlaneTrackerApiBase, ""]]
   RhythmActive: !And
@@ -331,7 +362,14 @@ Conditions:
   # Replaces the old IsProduction-negation pattern (was: !If [IsProduction, NoValue, SnapStart]).
   SnapStartEnabled: !Equals [!Ref EnableSnapStart, "true"]
   # ENC-TSK-F63 AC-1: AppConfig layer conditional — only attach when an ARN is provided.
-  HasAppConfigLayer: !Not [!Equals [!Ref AppConfigExtensionLayerArnX86, ""]]
+  # ENC-TSK-P40 (risk R7): keyed off BOTH ARN parameters, not just the x86_64 one. This condition
+  # gates 96 Fn::If uses (31 Layers[1] wrappers + 64 APPCFG_* env vars). Keyed off X86 alone, the
+  # natural post-cutover cleanup "prod is arm64 now, blank the X86 param" would SILENTLY DETACH the
+  # AppConfig extension and zero its env vars on BOTH planes while CloudFormation reports
+  # UPDATE_COMPLETE. Benign today only because both ARNs are stored non-empty on both stacks.
+  HasAppConfigLayer: !Or
+    - !Not [!Equals [!Ref AppConfigExtensionLayerArnX86, ""]]
+    - !Not [!Equals [!Ref AppConfigExtensionLayerArnArm64, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -352,12 +390,12 @@ Resources:
       FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -374,7 +412,7 @@ Resources:
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arch-conditional)
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -500,12 +538,12 @@ Resources:
       FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -519,7 +557,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -574,12 +612,12 @@ Resources:
       FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -589,7 +627,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -636,12 +674,12 @@ Resources:
       FunctionName: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -693,12 +731,12 @@ Resources:
       FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -844,12 +882,12 @@ Resources:
       FunctionName: !Sub "enceladus-scoring-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -935,12 +973,12 @@ Resources:
       FunctionName: !Sub "enceladus-id-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -981,12 +1019,12 @@ Resources:
       FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -996,7 +1034,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1033,12 +1071,12 @@ Resources:
       FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 60  # ENC-TSK-797: increased from 15 for synchronous feed_publisher invoke
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1048,7 +1086,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1092,12 +1130,12 @@ Resources:
       FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1107,7 +1145,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1139,12 +1177,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1154,7 +1192,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1198,12 +1236,12 @@ Resources:
       FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1213,7 +1251,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1245,12 +1283,12 @@ Resources:
       FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 128
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1263,7 +1301,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1301,12 +1339,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1316,7 +1354,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1350,12 +1388,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1365,7 +1403,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1401,12 +1439,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1416,7 +1454,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1455,7 +1493,7 @@ Resources:
       FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       # ENC-TSK-G43: raised from 120 to 300 to fit chained
@@ -1463,7 +1501,7 @@ Resources:
       # in one EventBridge-triggered invocation.
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1473,7 +1511,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1541,12 +1579,12 @@ Resources:
       FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 512
       Timeout: 600
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1557,7 +1595,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1626,12 +1664,12 @@ Resources:
       FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 128
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1641,7 +1679,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1669,12 +1707,12 @@ Resources:
       FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1684,7 +1722,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1717,12 +1755,12 @@ Resources:
       FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1732,7 +1770,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1768,12 +1806,12 @@ Resources:
       FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1783,7 +1821,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -1830,12 +1868,12 @@ Resources:
       FunctionName: !Sub "enceladus-mcp-streaming-gateway${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: run.sh
       MemorySize: 512
       Timeout: 900
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       # ENC-TSK-M11 / B66 AC-0 / ENC-TSK-K45 AC-0: active X-Ray tracing. This
       # resource is stack-owned (CREATE_COMPLETE via enceladus-compute-gamma,
       # not CFN-IMPORTed), so a normal change-set diffs and applies this
@@ -1847,7 +1885,7 @@ Resources:
       Layers:
         - !Ref SharedLayerArn
         - !If
-          - IsGamma
+          - IsArm64
           - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerArm64:28"
           - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:28"
       Environment:
@@ -1922,12 +1960,12 @@ Resources:
       FunctionName: !Sub "enceladus-user-preferences-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1964,12 +2002,12 @@ Resources:
       FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -1979,7 +2017,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2015,12 +2053,12 @@ Resources:
       FunctionName: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt OpenSearchIndexerRole.Arn
       VpcConfig:
         SecurityGroupIds:
@@ -2056,12 +2094,12 @@ Resources:
       FunctionName: !Sub "devops-opensearch-backfill${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 512
       Timeout: 900
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt OpenSearchBackfillRole.Arn
       VpcConfig:
         SecurityGroupIds:
@@ -2097,7 +2135,7 @@ Resources:
       FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       # ENC-TSK-F36 / ENC-ISS-268: raised from 10s to 180s. Worst-case Bolt
@@ -2107,7 +2145,7 @@ Resources:
       # configuration; this value is the CFN baseline for drift recovery.
       Timeout: 180
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2117,7 +2155,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2206,12 +2244,12 @@ Resources:
       FunctionName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2221,7 +2259,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2261,12 +2299,12 @@ Resources:
       FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2276,7 +2314,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2314,12 +2352,12 @@ Resources:
       FunctionName: !Sub "enceladus-memory-consolidation${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2329,7 +2367,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2380,12 +2418,12 @@ Resources:
       FunctionName: !Sub "enceladus-handoff-consolidation-engine${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2395,7 +2433,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2440,12 +2478,12 @@ Resources:
       FunctionName: !Sub "enceladus-unlearning${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2455,7 +2493,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2507,12 +2545,12 @@ Resources:
       FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2522,7 +2560,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2564,12 +2602,12 @@ Resources:
       FunctionName: !Sub "enceladus-stale-checkout-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2678,12 +2716,12 @@ Resources:
       FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2796,12 +2834,12 @@ Resources:
       FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2811,7 +2849,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2887,12 +2925,12 @@ Resources:
       FunctionName: !Sub "enceladus-percolation-monitor${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 1024
       Timeout: 900
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2902,7 +2940,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -2982,12 +3020,12 @@ Resources:
       FunctionName: !Sub "enceladus-corpus-entropy-engine${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -2997,7 +3035,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -3093,12 +3131,12 @@ Resources:
       FunctionName: !Sub "enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -3108,7 +3146,7 @@ Resources:
         - !Ref SharedLayerArn
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -3200,12 +3238,12 @@ Resources:
       FunctionName: !Sub "enceladus-arc-walk-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -7803,12 +7841,12 @@ Resources:
       FunctionName: !Sub "devops-recompute-governance${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -7899,12 +7937,12 @@ Resources:
       FunctionName: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       SnapStart: !If
         - SnapStartEnabled
         - ApplyOn: PublishedVersions
@@ -8144,12 +8182,12 @@ Resources:
       FunctionName: !Sub "enceladus-rhythm-cycle${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt RhythmCycleRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -8158,7 +8196,7 @@ Resources:
         # same pattern as every other AppConfig-reading function below).
         - !If
           - HasAppConfigLayer
-          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
           - !Ref AWS::NoValue
       Environment:
         Variables:
@@ -8564,12 +8602,12 @@ Resources:
       FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt EscalationDecisionAuthorizerRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -8901,7 +8939,7 @@ Resources:
       FunctionName: !Sub "devops-governance-mart${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsGamma, python3.12, python3.11]
+      Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       # 2048 MB / 900 s: one run scans ~6.3k tracker records + ~1.4k documents
       # (~25 MB corpus) and serialises seven Parquet tables in memory before any
@@ -8909,7 +8947,7 @@ Resources:
       MemorySize: 2048
       Timeout: 900
       Architectures:
-        - !If [IsGamma, arm64, x86_64]
+        - !If [IsArm64, arm64, x86_64]
       Role: !GetAtt GovernanceMartRole.Arn
       Description: DVP-TSK-649 scheduled full-refresh governance analytics mart job (DVP-PLN-001)
       Layers:

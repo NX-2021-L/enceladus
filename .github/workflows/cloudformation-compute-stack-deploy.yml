@@ -64,6 +64,38 @@ on:
         type: boolean
         required: false
         default: false
+      # ENC-TSK-P40 / ENC-TSK-O11. BEFORE this input, the apply job was guarded
+      # `target_environment != 'production'` and took its Environment from
+      # github.ref. Under PLN-006 fork mode (main -> v4/main auto-sync DISABLED)
+      # those two facts combined into a dead end: from any v4/** ref
+      # target_environment=production is ALWAYS plan-only and an empty value
+      # resolves to -gamma, so the ONLY ref that could reach the v3-prod
+      # required-reviewer gate was main -- 796 commits behind v4/main, whose
+      # 02-compute.yaml declares 27 Lambda functions to v4/main's 47. There was
+      # no path from the code to its own approval gate.
+      #
+      # A gate that cannot be satisfied is not a control: it forces a
+      # route-around, and every route-around is worse (merging 796 commits into
+      # the cutover's blast radius, or executing the change-set from a terminal,
+      # which is the direct-CFN-deploy class that caused the Sev1 in
+      # DOC-2CACF0D1E7E6). This is ENC-ISS-624's second-order finding again -- a
+      # mandatory guard that is red for reasons unrelated to the change teaches
+      # operators to wave it through.
+      #
+      # So the control is REPAIRED, not weakened. The v3-prod Environment binding
+      # and its required reviewer are unchanged; only the SELECTOR moves, from
+      # github.ref (a plane proxy that broke) to the resolved suffix (the real
+      # variable). That is the same correction ENC-TSK-P40 makes inside the
+      # template, where IsGamma was standing in for architecture.
+      #
+      # Defaults FALSE. A prod apply therefore requires an explicit, deliberate,
+      # logged affirmative act AND io's approval on the v3-prod Environment --
+      # strictly more visible than the input this replaces, not less.
+      allow_apply:
+        description: "Execute the rendered change-sets on the PROD plane. Requires io approval on the v3-prod Environment. Gamma applies do not need this."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -97,6 +129,7 @@ jobs:
       data_changeset_arn: ${{ steps.data_changeset.outputs.changeset_arn }}
       compute_has_changes: ${{ steps.compute_changeset.outputs.has_changes }}
       compute_changeset_arn: ${{ steps.compute_changeset.outputs.changeset_arn }}
+      environment_suffix: ${{ steps.params.outputs.environment_suffix }}
 
     steps:
       - name: Checkout
@@ -133,6 +166,10 @@ jobs:
           {
             echo "stack_name=${stack_name}"
             echo "data_stack_name=${data_stack_name}"
+            # ENC-TSK-P40: the apply job gates its Environment on the RESOLVED plane
+            # rather than on github.ref. jobs.<id>.environment cannot read the `env`
+            # context, so the resolved suffix has to travel as a job output.
+            echo "environment_suffix=${ENVIRONMENT_SUFFIX}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Guard against unadopted out-of-band Lambdas (ENC-TSK-H29 / ENC-ISS-386)
@@ -491,12 +528,23 @@ jobs:
     if: >-
       (needs.plan.outputs.data_has_changes == 'true' || needs.plan.outputs.compute_has_changes == 'true')
       && github.event.inputs.plan_only != 'true'
-      && github.event.inputs.target_environment != 'production'
+      && (needs.plan.outputs.environment_suffix == '-gamma'
+          || github.event_name == 'push'
+          || github.event.inputs.allow_apply == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
     # none. A main-branch run therefore pauses here as a rejectable request.
-    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    #
+    # ENC-TSK-P40: the `github.event_name == 'push'` arm of the guard above is a
+    # DELIBERATE carve-out that preserves the historical push-to-main behaviour
+    # byte-for-byte -- a push never supplies inputs, so requiring allow_apply
+    # would have silently disabled the existing prod deploy path. What changed is
+    # narrower and strictly tightening: a workflow_dispatch that resolves to the
+    # PROD plane now needs an explicit allow_apply=true instead of merely omitting
+    # target_environment. Both paths still land on the v3-prod Environment and
+    # still wait for io.
+    environment: ${{ needs.plan.outputs.environment_suffix == '-gamma' && 'v4-gamma' || 'v3-prod' }}
 
     steps:
       - name: Checkout
