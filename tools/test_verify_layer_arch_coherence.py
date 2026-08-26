@@ -97,10 +97,27 @@ class TestNegativeControl(unittest.TestCase):
         'collapse the 46' operation that DOC-F3878E7260B6 section 3 prescribed
         and that ENC-ISS-696 is about. On the prod plane the AppConfig selector
         then resolves to AWS-AppConfig-Extension:147, which declares
-        CompatibleArchitectures ["x86_64"], against an arm64 function."""
+        CompatibleArchitectures ["x86_64"], against an arm64 function.
+
+        ENC-TSK-P38: the cutover flipped the committed IsArm64 definition to an
+        unconditional TRUE, under which the historical ISS-696 condition (a
+        selector whose condition is FALSE on prod picking the x86-declared
+        extension against arm64 functions) is no longer expressible. The mutant
+        therefore ALSO reinstates the pre-cutover plane-bound definition -- in
+        memory only -- so this control keeps reproducing the exact ISS-696
+        shape and the gate must keep biting on it."""
         text = COMPUTE.read_text()
         mutant, n = re.subn(re.escape(ARCH_IF), "- arm64", text)
         assert n == 46, f"expected to collapse 46 architecture conditionals, collapsed {n}"
+        mutant, m = re.subn(
+            r'(?m)^(\s*)IsArm64: !Equals \["arm64", "arm64"\]\s*$',
+            r'\1IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]',
+            mutant,
+        )
+        assert m == 1, (
+            f"expected to reinstate exactly 1 pre-cutover IsArm64 definition "
+            f"(anchored to line start, comments excluded), reinstated {m}"
+        )
         return mutant
 
     def test_arm64_function_with_x86_declared_layer_fails_the_gate(self):

@@ -1,5 +1,6 @@
 # ENC-FTR-090 / ENC-TSK-F65 Phase 7
-# v3 production environment manifest (x86_64 / python3.11).
+# v3 production environment manifest (arm64 / python3.12 since ENC-TSK-P38,
+# the ENC-PLN-082 cutover commit — io GO 2026-08-26).
 # Schema validated by tools/cfn-guard/manifest-shape.guard.
 #
 # Gen2 is now the SOLE deploy path for v3-prod. All 31 legacy deploy.sh scripts
@@ -7,8 +8,8 @@
 # This manifest is the canonical state declaration for v3-prod post-cutover.
 
 env_name: v3-prod
-architecture: x86_64
-runtime: python3.11
+architecture: arm64
+runtime: python3.12
 
 stack_name: enceladus-compute
 deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V3Prod-DeployRole
@@ -24,9 +25,10 @@ required_reviewers:
 # observation window before the CloudWatch alarm_arn auto-rollback lands (F63 Phase 5).
 canary_preference: Canary10Percent5Minutes
 
-# GitHub Actions runner label. ubuntu-latest is the x86_64 row in the _build.yml
-# matrix (F59 Phase 1).
-runner_label: ubuntu-latest
+# GitHub Actions runner label. ubuntu-24.04-arm is the arm64 row in the _build.yml
+# matrix (F59 Phase 1; flipped with architecture in ENC-TSK-P38 — cfn-guard
+# manifest-shape.guard requires the arm runner for arm64 manifests).
+runner_label: ubuntu-24.04-arm
 
 # GitHub Environment name. The environment's required-reviewer rule is the
 # human approval gate; OIDC trust policy
@@ -42,7 +44,9 @@ appconfig_application_id: ""
 appconfig_environment_id: ""
 
 # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy settings.
-# v3-prod uses x86_64/py3.11 -- SnapStart NOT supported. Canary via CodeDeploy.
+# v3-prod is arm64/py3.12 (SnapStart-eligible territory per 02-compute.yaml), but
+# SnapStart intent remains "false" — zero account functions carry SnapStart.ApplyOn
+# and enabling it is a separate io decision (ENC-TSK-P38 AC-8). Canary via CodeDeploy.
 enable_snapstart: "false"
 environment_suffix: ""
 codedeploy_app_name: "enceladus-lambda"

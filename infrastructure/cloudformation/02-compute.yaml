@@ -329,7 +329,11 @@ Conditions:
   # key, so it raises "unsupported condition expression" and fails the env-parity gate closed. The
   # expression is duplicated on purpose, for the same reason RhythmAbsorbed inlines its
   # sub-expressions below.
-  IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-P38 (ENC-PLN-082 cutover, io GO 2026-08-26): THE CUTOVER EDIT — IsArm64 is now
+  # unconditionally TRUE on every plane. All 124 ABI-derived sites in this template render arm64/
+  # python3.12/arm64-layer-ARNs permanently, on prod and gamma alike. x86_64 on prod is a FAILURE
+  # from this commit forward (arbiter: lambda_workflow_manifest.json expected_architecture.prod).
+  IsArm64: !Equals ["arm64", "arm64"]
   # ENC-TSK-O43: an explicitly supplied PlaneTrackerApiBase overrides plane inference.
   HasPlaneTrackerApiBase: !Not [!Equals [!Ref PlaneTrackerApiBase, ""]]
   RhythmActive: !And
