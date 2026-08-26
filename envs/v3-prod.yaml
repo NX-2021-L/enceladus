@@ -66,11 +66,19 @@ artifact_version_ids: {}
 #           shared_layer (Lambda Layer -- not a function).
 # deploy_parity_validator: provisioned by CFN stack update; included here so
 # Gen2 covers it immediately post-provision without a manifest update.
+# ENC-TSK-P48: 12 entries added for the prod-rendered functions Gen2 previously
+# could not reach — the 9 new v4 functions the ENC-PLN-082 cutover apply creates
+# (deployable post-provision; not-provisioned skip applies before that) and the
+# 3 legacy prod functions that were never mapped (escalation_decision_authorizer,
+# governance_mart, recompute_governance). Keys mirror envs/v4-gamma.yaml minus
+# the -gamma suffix on values.
 function_name_map:
+  arc_walk_metrics: enceladus-arc-walk-metrics
   auth_refresh: auth-refresh
   bedrock_agent_actions: enceladus-bedrock-agent-actions
   changelog_api: devops-changelog-api
   checkout_service: enceladus-checkout-service,enceladus-checkout-service-auto
+  convergence_telemetry: enceladus-convergence-telemetry
   coordination_api: devops-coordination-api
   coordination_monitor_api: devops-coordination-monitor-api
   deploy_decide: devops-deploy-decide
@@ -81,20 +89,30 @@ function_name_map:
   doc_prep: devops-doc-prep
   document_api: devops-document-api
   env_drift_auditor: devops-env-drift-auditor
+  escalation_decision_authorizer: escalation-decision-authorizer
   feed_publisher: devops-feed-publisher
   feed_query: devops-feed-query-api
   github_integration: devops-github-integration
   glue_crawler_launcher: devops-glue-crawler-launcher
   governance_audit: enceladus-governance-audit
+  governance_drift_check: devops-governance-drift-check
+  governance_mart: devops-governance-mart
   graph_health_metrics: enceladus-graph-health-metrics
   graph_query_api: devops-graph-query-api
   graph_sync: devops-graph-sync
+  handoff_consolidation_engine: enceladus-handoff-consolidation-engine
+  id_service: enceladus-id-service
   json_to_parquet_transformer: devops-json-to-parquet-transformer
+  lifecycle_service: enceladus-lifecycle-service
   mcp_code: enceladus-mcp-code
   mcp_streamable: enceladus-mcp-streamable
+  memory_consolidation: enceladus-memory-consolidation
   neo4j_backup: enceladus-neo4j-backup
   prod_health_monitor: enceladus-prod-health-monitor
   project_service: devops-project-service
+  recompute_governance: devops-recompute-governance
   reference_search: devops-reference-search
+  scoring_service: enceladus-scoring-service
+  stale_checkout_monitor: enceladus-stale-checkout-monitor
   titan_embedding_backfill: devops-titan-embedding-backfill
   tracker_mutation: devops-tracker-mutation-api
