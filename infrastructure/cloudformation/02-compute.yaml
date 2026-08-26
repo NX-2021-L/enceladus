@@ -7754,36 +7754,19 @@ Resources:
   # promotion -> ENC-ISS-313 CFN-stomp class); the Url references the alias by name
   # and the alias stays operationally managed.
   #
-  # ADOPTED OUT-OF-BAND (import-first, like EnceladusMcpCodeLiveFunctionUrl): ops
-  # creates the streamable `live` alias, repoints the Function URL to Qualifier=live,
-  # then a non-destructive CFN IMPORT adopts THIS resource with the identical physical
-  # id (mcp.jreese.net served uninterrupted). Do not let a normal compute deploy try to
-  # CREATE it. Prod-only (Condition: IsProduction) — not rendered on the gamma stack.
+  # TOMBSTONE (ENC-TSK-P47, ENC-PLN-082 cutover night 2026-08-26): the
+  # EnceladusMcpStreamableLiveFunctionUrl resource that stood here was ADOPT-ONLY —
+  # its own directive read "Do not let a normal compute deploy try to CREATE it"
+  # (import-first, like EnceladusMcpCodeLiveFunctionUrl) — but the ops prerequisite
+  # (publish a version, create the streamable `live` alias, repoint the URL) was
+  # never performed: live reads show NO alias on enceladus-mcp-streamable and NO
+  # :live URL config, while the unqualified $LATEST URL serves production traffic.
+  # The cutover apply (ENC-TSK-O22 attempt 4) therefore failed trying to CREATE it.
+  # REMOVED until the ENC-ISS-422 remediation performs the ops sequence and adopts
+  # the URL via a non-destructive CFN IMPORT with the identical physical id
+  # (mcp.jreese.net served uninterrupted). Re-adding this resource without that
+  # sequence recreates the failure.
   # ---------------------------------------------------------------------------
-  EnceladusMcpStreamableLiveFunctionUrl:
-    Type: AWS::Lambda::Url
-    Condition: IsProduction
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streamable"
-      Qualifier: live
-      AuthType: NONE
-      InvokeMode: BUFFERED
-      Cors:
-        AllowCredentials: true
-        AllowHeaders:
-          - content-type
-          - authorization
-          - accept
-          - mcp-session-id
-        AllowMethods:
-          - "*"
-        AllowOrigins:
-          - "https://claude.ai"
-        ExposeHeaders:
-          - mcp-session-id
-        MaxAge: 86400
 
   # ENC-TSK-J13 (ENC-ISS-455): enceladus-checkout-auto — the sole documented prod
   # EventBridge orphan (created out-of-band via CLI for ENC-FTR-037). ADOPTED via
