@@ -37,6 +37,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "coordination-requests${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: request_id
@@ -80,6 +85,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "devops-project-tracker${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
@@ -179,6 +189,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "projects${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
@@ -207,6 +222,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "documents${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
@@ -317,34 +337,91 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "devops-deployment-manager${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: project_id
-          AttributeType: S
-        - AttributeName: record_id
-          AttributeType: S
-        - AttributeName: record_type
-          AttributeType: S
+      # ENC-TSK-P46 / ENC-ISS-702: AttributeDefinitions and GlobalSecondaryIndexes render
+      # PER-PLANE. The PROD stack's STORED template (import-time truth, 2026-08-24) declares
+      # all four GSIs — status-created-index, generation-created-index, target-created-index
+      # (DOC-63420302EF65 §4.2, added via ddb-add-deployment-manager-gsis / ENC-TSK-I27) plus
+      # record-type-index — so the prod branch below copies the stored schemas VERBATIM and a
+      # prod apply renders NO GSI change. The gamma stack's stored template declares only
+      # record-type-index (its extra indexes live out-of-band in DDB by design, per the prior
+      # note here), so the gamma branch keeps exactly that shape and a gamma apply also renders
+      # NO GSI change. Before this, the single flat 1-GSI declaration meant a PROD apply would
+      # have REMOVED three live indexes (and failed CFN's one-GSI-change-per-update rule).
+      AttributeDefinitions: !If
+        - IsGamma
+        - - AttributeName: project_id
+            AttributeType: S
+          - AttributeName: record_id
+            AttributeType: S
+          - AttributeName: record_type
+            AttributeType: S
+        - - AttributeName: project_id
+            AttributeType: S
+          - AttributeName: record_id
+            AttributeType: S
+          - AttributeName: record_type
+            AttributeType: S
+          - AttributeName: status
+            AttributeType: S
+          - AttributeName: created_at
+            AttributeType: S
+          - AttributeName: generation_id
+            AttributeType: S
+          - AttributeName: final_target
+            AttributeType: S
       KeySchema:
         - AttributeName: project_id
           KeyType: HASH
         - AttributeName: record_id
           KeyType: RANGE
-      GlobalSecondaryIndexes:
-        - IndexName: record-type-index
-          KeySchema:
-            - AttributeName: project_id
-              KeyType: HASH
-            - AttributeName: record_type
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-        # NOTE: status-created-index, generation-created-index, target-created-index
-        # (DOC-63420302EF65 §4.2) were added manually via ddb-add-deployment-manager-gsis
-        # workflow (ENC-TSK-I27) because CloudFormation cannot add multiple GSIs in one
-        # UpdateTable call. They exist in DDB but are intentionally omitted here to avoid
-        # CFN drift-update failures. Re-add one-by-one in future template updates if CFN
-        # tracking is needed.
+      GlobalSecondaryIndexes: !If
+        - IsGamma
+        - - IndexName: record-type-index
+            KeySchema:
+              - AttributeName: project_id
+                KeyType: HASH
+              - AttributeName: record_type
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        - - IndexName: record-type-index
+            KeySchema:
+              - AttributeName: project_id
+                KeyType: HASH
+              - AttributeName: record_type
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: status-created-index
+            KeySchema:
+              - AttributeName: status
+                KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: generation-created-index
+            KeySchema:
+              - AttributeName: generation_id
+                KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: target-created-index
+            KeySchema:
+              - AttributeName: final_target
+                KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
       Tags:
         - Key: Project
           Value: enceladus
@@ -356,6 +433,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "governance-policies${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: policy_id
@@ -423,6 +505,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "agent-compliance-violations${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: violation_id
@@ -783,6 +870,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "agent-sessions${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
@@ -812,6 +904,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "agent-types${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       DeletionProtectionEnabled: !If [IsProduction, true, false]
       AttributeDefinitions:
@@ -895,6 +992,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       TableName: !Sub "governance-version${EnvironmentSuffix}"
+      # ENC-TSK-P46 / ENC-ISS-702: PITR declared to match the STORED production template
+      # (which declares it true) and the live tables (ENABLED) — omitting it made every
+      # prod data apply a silent PITR-disable. On gamma this ENABLES PITR (benign gain).
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: version_id
