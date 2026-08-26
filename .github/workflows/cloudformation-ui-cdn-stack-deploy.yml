@@ -39,6 +39,21 @@ on:
         type: string
         required: false
         default: ""
+      # ENC-TSK-P52 / ENC-ISS-708: post-cutover, v4/main is the production branch
+      # of record, but every v4/** ref derives '-gamma' below and the deploy
+      # role's OIDC trust only admits refs main + v4/* (04-github-roles.yaml) —
+      # so the prod half of this lane was unreachable from the code that defines
+      # it (the ENC-TSK-P40 dead-end class: a gate that cannot be satisfied is
+      # not a control). This input mirrors cloudformation-compute-stack-deploy.yml:
+      # empty keeps the historical ref-derived routing (push events never supply
+      # it), 'production' targets the prod stack from a trusted v4 ref — with the
+      # apply job still pausing at the v3-prod required-reviewer Environment.
+      target_environment:
+        description: "Override the target plane (empty = derive from ref, as before). 'production' pauses at the v3-prod required-reviewer gate before applying."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
       reason:
         description: "Why this deploy is being triggered"
         type: string
@@ -56,7 +71,12 @@ concurrency:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/07-ui-cdn.yaml
-  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  # Env-conditional suffix. Resolution order (ENC-TSK-P52, P40 pattern — written
+  # gamma-first because GitHub Actions treats '' as falsy, so a plain ternary
+  # would silently send target_environment=production to the gamma suffix):
+  # explicit 'gamma' input, OR no input + v4/** ref => '-gamma'; anything else
+  # (explicit 'production', or a main-ref event) => '' (prod).
+  ENVIRONMENT_SUFFIX: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-ui-cdn
 
 jobs:
@@ -68,6 +88,10 @@ jobs:
       stack_name: ${{ steps.params.outputs.stack_name }}
       has_changes: ${{ steps.changeset.outputs.has_changes }}
       changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
+      # ENC-TSK-P52: the apply job gates its Environment on the RESOLVED plane
+      # rather than on github.ref. jobs.<id>.environment cannot read the `env`
+      # context, so the resolved suffix has to travel as a job output (P40 pattern).
+      environment_suffix: ${{ steps.params.outputs.environment_suffix }}
 
     steps:
       - name: Checkout
@@ -103,6 +127,7 @@ jobs:
           {
             echo "stack_name=${stack_name}"
             echo "environment=${environment}"
+            echo "environment_suffix=${ENVIRONMENT_SUFFIX}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Recover a failed/rolled-back stack before the change-set (self-heal + diagnostics)
@@ -230,8 +255,11 @@ jobs:
     # distribution room to settle before the CFN wait is cancelled.
     timeout-minutes: 90
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
-    # none. A main-branch run therefore pauses here as a rejectable request.
-    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    # none. A prod-targeted run therefore pauses here as a rejectable request.
+    # ENC-TSK-P52: gate on the RESOLVED plane (plan job output), not the ref,
+    # so a v4/main dispatch with target_environment=production reaches this
+    # gate instead of silently routing to gamma (P40 pattern).
+    environment: ${{ needs.plan.outputs.environment_suffix == '-gamma' && 'v4-gamma' || 'v3-prod' }}
 
     steps:
       - name: Configure AWS credentials (environment-scoped OIDC)

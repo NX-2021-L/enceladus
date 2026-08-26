@@ -53,21 +53,40 @@ on:
         type: string
         required: false
         default: "manual ui-v2 deploy"
+      # ENC-TSK-P52 / ENC-ISS-708: post-cutover, v4/main is the production
+      # branch of record, but ui-v2 exists only on v4/** refs while this lane
+      # derived the prod plane exclusively from ref main — so the prod deploy
+      # was unreachable from the code that defines it (the ENC-TSK-P40 dead-end
+      # class). Mirrors cloudformation-compute-stack-deploy.yml: empty keeps the
+      # historical ref-derived routing (push events never supply it);
+      # 'production' deploys prod from a trusted v4 ref, still pausing at the
+      # v3-prod required-reviewer Environment (ENC-FTR-120 invariant intact).
+      target_environment:
+        description: "Override the target plane (empty = derive from ref, as before). 'production' pauses at the v3-prod required-reviewer gate before deploying."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  # v4/main merges serialize on one gamma lane (last completed wins).
-  group: ui-deploy-${{ github.ref_name == 'v4/main' && 'v4-gamma' || github.ref_name }}
+  # v4/main merges serialize on one gamma lane (last completed wins). A v4/main
+  # dispatch with target_environment=production gets its own ref-named group so
+  # a prod deploy never serializes with (or is blocked by) the gamma push lane.
+  group: ui-deploy-${{ (github.ref_name == 'v4/main' && github.event.inputs.target_environment != 'production') && 'v4-gamma' || github.ref_name }}
   cancel-in-progress: false
 
 env:
   AWS_REGION: us-west-2
   # Env-conditional suffix — mirrors cloudformation-ui-cdn-stack-deploy.yml.
-  # v4/main -> "-gamma" (stack enceladus-ui-cdn-gamma), main -> "" (prod).
-  ENVIRONMENT_SUFFIX: ${{ github.ref_name == 'v4/main' && '-gamma' || '' }}
+  # Resolution order (ENC-TSK-P52, P40 pattern — written gamma-first because
+  # GitHub Actions treats '' as falsy): explicit 'gamma' input, OR no input +
+  # v4/main ref => '-gamma' (stack enceladus-ui-cdn-gamma); anything else
+  # (explicit 'production', or a main-ref event) => '' (prod).
+  ENVIRONMENT_SUFFIX: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && github.ref_name == 'v4/main')) && '-gamma' || '' }}
   UI_CDN_STACK_BASE: enceladus-ui-cdn
 
 jobs:
@@ -160,14 +179,17 @@ jobs:
   # ENC-TSK-M89: gamma publish is v4/main-only; main retains the io-gated prod lane.
   # ---------------------------------------------------------------------------
   deploy:
-    name: Deploy ui-v2 -> ${{ github.ref_name == 'v4/main' && 'v4-gamma' || 'v3-prod' }}
+    # ENC-TSK-P52: plane resolved from target_environment first, ref second
+    # (P40 pattern) — a v4/main dispatch with target_environment=production
+    # deploys prod behind the v3-prod gate instead of silently going to gamma.
+    name: Deploy ui-v2 -> ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && github.ref_name == 'v4/main')) && 'v4-gamma' || 'v3-prod' }}
     needs: build
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && (github.ref_name == 'v4/main' || github.ref_name == 'main'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: ${{ github.ref_name == 'v4/main' && 'v4-gamma' || 'v3-prod' }}
+    environment: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && github.ref_name == 'v4/main')) && 'v4-gamma' || 'v3-prod' }}
     outputs:
       bucket: ${{ steps.resolve.outputs.bucket }}
       distribution_id: ${{ steps.resolve.outputs.distribution_id }}
