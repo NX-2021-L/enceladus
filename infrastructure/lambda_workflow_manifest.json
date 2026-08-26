@@ -1,11 +1,11 @@
 {
   "source_of_truth": "infrastructure/cloudformation/02-compute.yaml",
   "expected_architecture": {
-    "prod": "x86_64",
+    "prod": "arm64",
     "gamma": "arm64"
   },
   "expected_runtime": {
-    "prod": "python3.11",
+    "prod": "python3.12",
     "gamma": "python3.12"
   },
   "functions": [
@@ -356,19 +356,19 @@
     "prod": {
       "temporary": {
         "x86_64": [],
-        "rationale": "BRD DOC-56CFA21523C1 section 6.2 / io Q2 ruling on ENC-PLN-082: expected_architecture.prod flips to arm64, and this class populates with the not-yet-migrated tranche, at the START of Phase 5 -- simultaneously, so CI never asserts a state the fleet contradicts. Phase 5 belongs to ENC-PLN-082, not this task (ENC-PLN-086 Wave 2, gamma-only, no production mutation). Production is 28/28 x86_64 today and Phase 5 has not started, so this class is correctly empty -- not because no exceptions are anticipated, but because the tranched migration that would populate it hasn't begun. See ENC-TSK-O82 worklog for the full reasoning.",
+        "rationale": "ENC-TSK-P38 (ENC-PLN-082 cutover commit, io GO 2026-08-26): expected_architecture.prod flipped to arm64 in this same commit under io's 2026-08-24 ONE-APPLY ruling, which superseded the earlier tranched design (the prior rationale here described a Phase-5 tranche populate that no longer exists -- ENC-TSK-P36 superseded/closed via ENC-ESC-099). A single apply has no later tranches, so this class is empty by construction and the key stays PRESENT (P38 AC-8). Additions would mean a function could not run arm64/py3.12 and require an io ruling.",
         "terminal_state": "empty",
         "ratchet": "may only shrink"
       },
       "permanent": {
         "x86_64": [],
-        "rationale": "SnapStart-retained functions per BRD section 4.4; arm64 SnapStart is Java-only. Seeded empty per ENC-TSK-O72's closed ruling: ENC-TSK-O70's census (28/28 in-scope production functions, cross-verified against a 231-function account-wide scan, corroborated by a 3-leg positive control) found 0 functions with SnapStart.ApplyOn != \"None\". Disposition counts: drop_and_flip=0, retain_and_hold=0, not_applicable=28 -- retain_and_hold's precondition (SnapStart currently enabled) is false for all 28, so the permanent class has no member to seed. This is a positive proof of emptiness, not an absence of evidence.",
+        "rationale": "SnapStart-retained functions per BRD section 4.4. The earlier claim here that 'arm64 SnapStart is Java-only' is WITHDRAWN AS FALSE (ENC-TSK-P38 AC-8): 02-compute.yaml:180-186 and envs/v4-prod.yaml both record that in this repo's framing SnapStart is supported ONLY on arm64/py3.12. The class is empty for a stronger reason -- it has NO MEMBER. Seeded empty per ENC-TSK-O72's closed ruling: ENC-TSK-O70's census (28/28 in-scope production functions, cross-verified against an account-wide scan -- 231 functions at O70 time, 233 at the 2026-08-25 pass-2 re-census -- corroborated by a 3-leg positive control) found 0 functions with SnapStart.ApplyOn != \"None\", and EnableSnapStart is stored \"false\" on both stacks and never passed in --parameter-overrides. Disposition counts: drop_and_flip=0, retain_and_hold=0, not_applicable=28. This is a positive proof of emptiness, not an absence of evidence.",
         "terminal_state": "stable",
         "ratchet": "additions require an io ruling",
         "_families_doc": "ENC-TSK-P15 / ENC-ISS-669: the permanent class is not one exception, it is a CLASS of exceptions -- a function belongs here when the deviation from expected_architecture is a standing decision, not a migration-in-progress tranche (that's the temporary class, above). 'families' below names each standing decision individually, each with its own scoped rationale/terminal_state/ratchet, so a future addition to one family's reasoning can never be misread as also justifying the other's. The flat x86_64 list and the rationale/terminal_state/ratchet fields directly above are left untouched for backward compatibility with tools/verify_lambda_arch_parity.py's existing per-resource exceptions check (_validate_architecture_exceptions) and the ENC-TSK-O84 ratchet diff (_class_name_sets / diff_architecture_exceptions), both of which read this flat shape and must keep passing unmodified; 'families' is additive, read only by the newer cross-source reconciliation (AC-6, _validate_cross_source_reconciliation) and by humans.",
         "families": {
           "snapstart_retained": {
-            "description": "Functions permanently retained on x86_64 because they depend on SnapStart, which is Java-only on arm64 (BRD section 4.4). Mirrors the flat x86_64 list above verbatim -- this is the same family, named, not a second one.",
+            "description": "Functions that would be permanently retained on x86_64 for SnapStart reasons. The old 'SnapStart is Java-only on arm64' rationale is withdrawn as false (ENC-TSK-P38 AC-8; this repo records SnapStart as supported only on arm64/py3.12) -- the family is empty because zero account functions carry SnapStart.ApplyOn at all. Mirrors the flat x86_64 list above verbatim -- this is the same family, named, not a second one.",
             "members_by_architecture": {
               "x86_64": []
             },

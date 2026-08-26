@@ -62,9 +62,10 @@ Conditions:
   # AppSyncFeedPublisherFunction below carries NO resource-level Condition, so it renders on the
   # PROD plane and its two ABI-derived sites are part of the ENC-TSK-O11 cutover. Every prior count
   # (ENC-TSK-O11 AC-3 and DOC-F3878E7260B6 section 3) said this template held "1 conditional"; it
-  # holds TWO — Runtime and Architectures. Introduced identical to IsGamma so the repoint is a
-  # no-op; the cutover flips this one line to: IsArm64: !Equals ["arm64", "arm64"].
-  IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # holds TWO — Runtime and Architectures. Introduced identical to IsGamma so the repoint was a
+  # no-op; ENC-TSK-P38 (ENC-PLN-082 cutover, io GO 2026-08-26) flipped it to unconditionally TRUE,
+  # mirroring 02-compute.yaml — both ABI sites below render arm64/python3.12 on every plane.
+  IsArm64: !Equals ["arm64", "arm64"]
 
 Resources:
   # ---------------------------------------------------------------------------

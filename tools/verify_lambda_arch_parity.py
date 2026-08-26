@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Verify Lambda architecture parity between CFN and deploy scripts.
 
-CI guard preventing arm64 architecture from reaching production.
+CI guard enforcing the arm64/python3.12 architecture contract on BOTH planes
+(ENC-TSK-P38, the ENC-PLN-082 cutover commit, flipped IsArm64 unconditionally
+true — before it, this guard enforced the inverse: x86_64 kept OUT of prod).
 Validates that:
   1. Every Lambda in 02-compute.yaml uses !If [IsArm64, arm64, x86_64]
-     for Architectures (prod must resolve to x86_64).
+     for Architectures (the shape is unchanged; the condition is now always
+     true, so every plane resolves arm64).
   2. Every Lambda uses !If [IsArm64, python3.12, python3.11] for Runtime
-     (prod must resolve to python3.11).
-  3. Deploy scripts with pip --platform use ENVIRONMENT_SUFFIX conditionals
-     that default to x86_64/py3.11 for production (empty suffix).
+     (every plane resolves python3.12).
+  3. Build lanes carry the four pip ABI flags; the arch/runtime selector is
+     the target env manifest (envs/*.yaml), not per-script pins.
 
-Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown).
+Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown); contract
+flipped to arm64-everywhere by ENC-PLN-082.
 """
 
 from __future__ import annotations
@@ -56,10 +60,14 @@ PACKAGE_ARTIFACT_SCRIPT = REPO_ROOT / "tools/package_lambda_artifact.sh"
 # architecture-specific AppConfig and LambdaAdapter layer ARNs) on IsArm64, leaving the genuinely
 # plane-semantic sites on IsGamma.
 #
-# Named once here so a future rename is a ONE-LINE edit rather than another literal hunt. This guard
-# still does not hardcode an ARCHITECTURE — it reads expected_architecture/expected_runtime from
-# lambda_workflow_manifest.json (see _validate_manifest_expectations) and enforces whatever it finds.
-# It hardcodes only the SHAPE of the conditional and the NAME of the condition.
+# Named once here so a future rename is a ONE-LINE edit rather than another literal hunt.
+# ENC-TSK-P38 correction: the claim that previously stood here — "this guard does not hardcode an
+# ARCHITECTURE" — was FALSE. _validate_manifest_expectations pins the per-plane targets as literals
+# (now arm64/python3.12 on BOTH planes, flipped by the ENC-PLN-082 cutover commit), and
+# _resolve_plane_architecture/ARTIFACT_ARCH_TAGS encode the same targets. The guard hardcodes the
+# SHAPE of the conditional, the NAME of the condition, AND the per-plane target pairing; the
+# manifest must AGREE with those targets, which is what couples the manifest flip and the template
+# flip into one commit (runbook DOC-F3878E7260B6 §3.3).
 ABI_CONDITION = "IsArm64"
 
 EXPECTED_RUNTIME_IF: Dict[str, list] = {"!If": [ABI_CONDITION, "python3.12", "python3.11"]}
@@ -683,7 +691,8 @@ def _validate_manifest_expectations() -> List[str]:
 
     The manifest serves as the single source of truth for what each environment should use.
     This check ensures the manifest expectations are internally consistent and that the
-    CFN template's IsGamma conditionals resolve to the manifest's declared values.
+    CFN template's IsArm64 conditionals resolve to the manifest's declared values
+    (arm64/python3.12 on both planes since ENC-TSK-P38).
 
     Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7.
     """
@@ -711,28 +720,30 @@ def _validate_manifest_expectations() -> List[str]:
             "(ENC-TSK-O83)."
         ]
 
-    # Validate manifest expectations match the IsGamma conditional contract
-    # The CFN pattern is: !If [IsGamma, <gamma_value>, <prod_value>]
-    # So prod=x86_64 and gamma=arm64 must match manifest
-    if expected_arch.get("prod") != "x86_64":
+    # Validate manifest expectations match the IsArm64 conditional contract.
+    # ENC-TSK-P38 (ENC-PLN-082 cutover): the IsArm64 condition definition is now
+    # unconditionally TRUE, so the CFN pattern !If [IsArm64, <arm64_value>, <x86_value>]
+    # resolves its arm64 branch on EVERY plane. Both planes must therefore declare
+    # arm64/python3.12 — x86_64 on prod is a FAILURE from the cutover commit forward.
+    if expected_arch.get("prod") != "arm64":
         errors.append(
             f"Manifest expected_architecture.prod={expected_arch.get('prod')}, "
-            f"but CFN IsGamma resolves prod to x86_64"
+            f"but CFN IsArm64 (unconditionally true since ENC-TSK-P38) resolves prod to arm64"
         )
     if expected_arch.get("gamma") != "arm64":
         errors.append(
             f"Manifest expected_architecture.gamma={expected_arch.get('gamma')}, "
-            f"but CFN IsGamma resolves gamma to arm64"
+            f"but CFN IsArm64 resolves gamma to arm64"
         )
-    if expected_runtime.get("prod") != "python3.11":
+    if expected_runtime.get("prod") != "python3.12":
         errors.append(
             f"Manifest expected_runtime.prod={expected_runtime.get('prod')}, "
-            f"but CFN IsGamma resolves prod to python3.11"
+            f"but CFN IsArm64 (unconditionally true since ENC-TSK-P38) resolves prod to python3.12"
         )
     if expected_runtime.get("gamma") != "python3.12":
         errors.append(
             f"Manifest expected_runtime.gamma={expected_runtime.get('gamma')}, "
-            f"but CFN IsGamma resolves gamma to python3.12"
+            f"but CFN IsArm64 resolves gamma to python3.12"
         )
 
     if not errors:
@@ -763,19 +774,20 @@ def _resolve_plane_architecture(architectures: Any, plane: str) -> Optional[str]
     one deploy plane ("prod" or "gamma").
 
     Two shapes are understood:
-      - The IsGamma conditional list (EXPECTED_ARCH_IF_LIST): resolves to
-        "arm64" on the gamma plane and "x86_64" on the prod plane -- the
-        same fixed literals _validate_cfn compares the raw property against
-        structurally.
+      - The IsArm64 conditional list (EXPECTED_ARCH_IF_LIST): resolves to
+        "arm64" on EVERY plane. ENC-TSK-P38 (ENC-PLN-082 cutover) made the
+        IsArm64 condition definition unconditionally true, so the !If's arm64
+        branch is taken on prod and gamma alike; the structural shape at the
+        call sites is unchanged.
       - A hardcoded single-element list (e.g. ["arm64"]): that literal value
-        applies on every plane, since nothing conditions it on IsGamma.
+        applies on every plane, since nothing conditions it.
 
     Anything else (missing Architectures, an unrecognized shape) resolves to
     None. The caller treats an unresolved architecture as a mismatch against
     the plane's target -- it can only pass by exception, never by matching.
     """
     if architectures == EXPECTED_ARCH_IF_LIST:
-        return "arm64" if plane == "gamma" else "x86_64"
+        return "arm64"
     if (
         isinstance(architectures, list)
         and len(architectures) == 1
@@ -790,12 +802,11 @@ def _validate_architecture_exceptions(blocks: List[LambdaResource]) -> List[str]
     (BRD DOC-56CFA21523C1 section 6.2) declared in the manifest.
 
     For every plane the manifest declares an architecture_exceptions entry
-    for (today: "prod" only -- see the manifest's own rationale for why
-    expected_architecture.prod has not yet flipped to arm64; per io's Q2
-    ruling on ENC-PLN-082 that flip happens at the start of BRD Phase 5,
-    simultaneously with populating both exception classes, which is that
-    plan's call and not this gamma-only task's), each non-"-gamma" function
-    passes when its resolved architecture for that plane either:
+    for (today: "prod" only -- expected_architecture.prod flipped to arm64 in
+    ENC-TSK-P38, the ENC-PLN-082 one-apply cutover commit, with both
+    exception classes verified empty rather than populated: a single apply
+    has no tranches), each non-"-gamma" function passes when its resolved
+    architecture for that plane either:
 
       (a) matches manifest.expected_architecture[plane], or
       (b) appears on exactly one of the plane's two exception classes
@@ -1083,8 +1094,10 @@ def _validate_architecture_exceptions_ratchet(base_ref: str) -> List[str]:
 
 
 # ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
+# ENC-TSK-P38: prod flipped to the arm64-py312 artifact family with the cutover —
+# both planes now deploy from the same arch tag.
 ARTIFACT_ARCH_TAGS = {
-    "prod": "x86_64-py311",
+    "prod": "arm64-py312",
     "gamma": "arm64-py312",
 }
 ARTIFACT_BUCKET = "jreese-net"
@@ -1098,9 +1111,9 @@ def _validate_artifact_s3_layout(
     """Check S3 bucket for correct arch-tagged artifact structure per manifest function.
 
     For each function in the manifest, verifies that a zip artifact exists at
-    the expected S3 key for each target environment:
-      lambda-artifacts/{git_sha}/x86_64-py311/{function_name}.zip  (prod)
-      lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip   (gamma)
+    the expected S3 key for each target environment (both arm64-py312 since
+    ENC-TSK-P38):
+      lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip  (prod and gamma)
 
     Returns a list of error strings for missing or misplaced artifacts.
     Requires boto3 and AWS credentials with S3 read access.
@@ -1617,7 +1630,7 @@ def main() -> int:
         f"[SUCCESS] Lambda architecture parity valid: "
         f"{len(blocks)} CFN Lambdas structurally selected and evaluated "
         f"(count-reconciled against an independent census), all use "
-        f"{ABI_CONDITION} conditionals (prod=x86_64/py3.11, gamma=arm64/py3.12)"
+        f"{ABI_CONDITION} conditionals (prod=arm64/py3.12, gamma=arm64/py3.12)"
     )
     return 0
 

@@ -450,12 +450,29 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
     for fn in fns:
         live = _live_layer_version(fn, region)
         if live is None:
-            continue  # function not found / no shared layer / no creds -> skip silently
+            continue  # function not found / no shared layer for THIS fn -> skip
         checked += 1
         fail = _classify_live_version(fn, live, canonical, regress_only)
         if fail:
             failures.append(fail)
-    print(f"[INFO] --live{mode}: compared {checked} function(s) against canonical :{canonical}.")
+    print(
+        f"[INFO] --live{mode}: compared {checked} of {len(fns)} manifest function(s) "
+        f"against canonical :{canonical}."
+    )
+    # ENC-TSK-P38 AC-6 (residual risk R5, ENC-ISS-675/677 class): FAIL CLOSED on an
+    # empty enumeration. Before this, a wholesale query failure (no creds / AccessDenied /
+    # missing CLI) made every per-function lookup return None, the loop compared ZERO
+    # functions, and the check printed an INFO line and PASSED -- a vacuous pass inside
+    # the very guard built to prevent the ENC-LSN-053 Sev1. Comparing nothing certifies
+    # nothing: with a non-empty manifest, zero comparable functions can only mean the
+    # enumeration itself failed (27+ live prod functions are known shared-layer carriers).
+    if fns and checked == 0:
+        failures.append(
+            f"FAIL-CLOSED (ENC-TSK-P38 AC-6): check 5 compared 0 of {len(fns)} manifest "
+            f"function(s) -- the live enumeration failed wholesale (no creds / denied / "
+            f"cli missing). An empty comparison certifies nothing and must not pass "
+            f"(ENC-ISS-675/677 vacuous-pass class)."
+        )
 
     # Check 5b (ENC-ISS-656): the SAME manifest's live attached layer version, but for
     # each function's "-gamma" twin. Before this, the gamma plane was structurally
@@ -508,6 +525,15 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
             f"[INFO] --live{mode}: compared {checked_gamma} gamma-plane function(s) "
             f"against canonical :{canonical} (ENC-ISS-656)."
         )
+        # ENC-TSK-P38 AC-6: same fail-closed rule as check 5 -- a gamma-targeted
+        # invocation that could compare ZERO gamma twins has not verified the plane.
+        if fns and checked_gamma == 0:
+            failures.append(
+                f"FAIL-CLOSED (ENC-TSK-P38 AC-6): check 5b compared 0 gamma-plane "
+                f"function(s) of {len(fns)} manifest names -- the live enumeration "
+                f"failed wholesale. An empty comparison certifies nothing "
+                f"(ENC-ISS-675/677 vacuous-pass class)."
+            )
     else:
         print(
             f"[INFO] --live{mode}: stack '{stack_name}' is not gamma-suffixed -- "
@@ -540,10 +566,26 @@ def check_live(repo_root, region, stack_name=DEFAULT_STACK_NAME, regress_only=Fa
     # plane test in this file: a "-gamma" name suffix.
     live_map = _live_functions_with_layer(region)
     if live_map is None:
-        print(
-            f"[INFO] --live{mode}: could not enumerate live functions via "
-            f"`aws lambda list-functions` (no creds / denied / cli missing) -- "
-            f"skipped check 6 (live-derived consumer census, ENC-TSK-P13 AC-5)."
+        # ENC-TSK-P38 AC-6: this used to be an INFO-and-skip -- the check that exists
+        # to catch consumers the manifest cannot see would silently vanish exactly when
+        # the account could not be read. Could-not-query is now a FAILURE, not a skip.
+        failures.append(
+            f"FAIL-CLOSED (ENC-TSK-P38 AC-6): check 6 could not enumerate live "
+            f"functions via `aws lambda list-functions` (no creds / denied / cli "
+            f"missing) -- the live-derived consumer census (ENC-TSK-P13 AC-5) did not "
+            f"run, and a census that did not run must not pass "
+            f"(ENC-ISS-675/677 vacuous-pass class)."
+        )
+    elif not live_map:
+        # ENC-TSK-P38 AC-6: `{}` means "queried successfully, found ZERO functions
+        # account-wide carrying enceladus-shared". On this fleet (30 known live
+        # attachments across both planes) that is a definitionally impossible result --
+        # it indicates a truncated/failed enumeration presenting as success. Fail closed.
+        failures.append(
+            f"FAIL-CLOSED (ENC-TSK-P38 AC-6): check 6 enumerated the account and found "
+            f"ZERO functions carrying enceladus-shared -- impossible on this fleet "
+            f"(30 known live attachments). Treating the empty enumeration as a failed "
+            f"query, not a real absence (ENC-ISS-675/677 vacuous-pass class)."
         )
     else:
         known = set(fns)
@@ -733,12 +775,16 @@ def _selftest():
         # Check 6 (ENC-TSK-P13 AC-5) is unconditional in check_live, so every case
         # below must also stub this seam -- otherwise the "offline, no AWS creds
         # required" selftest would shell out to the real `aws lambda list-functions`
-        # on every check_live() call in this block. Default: no live-derived
-        # consumers at all, so cases that are not specifically testing check 6 see
-        # zero contribution from it (an empty dict, not None -- None means
-        # "could not query" and would just print an INFO skip, which is also
-        # exercised explicitly below).
-        _live_functions_with_layer = lambda region: {}
+        # on every check_live() call in this block. Default: a VALID, NON-EMPTY
+        # enumeration covering exactly the manifest's synthetic twins, so cases that
+        # are not specifically testing check 6 see zero contribution from it.
+        # (ENC-TSK-P38 AC-6 changed the empty-dict and None shapes into FAIL-CLOSED
+        # failures -- both are exercised explicitly below, and neither may be the
+        # default any longer.)
+        _live_functions_with_layer = lambda region: {
+            "iss656-synthetic-fn": canonical,
+            "iss656-synthetic-fn-gamma": canonical,
+        }
         gamma_test_tmpdir = tempfile.mkdtemp(prefix="iss656-gamma-selftest-")
         try:
             infra_dir = os.path.join(gamma_test_tmpdir, "infrastructure")
@@ -869,16 +915,63 @@ def _selftest():
                 )
             )
 
-            # Case C: _live_functions_with_layer returning None (no creds / denied /
-            # cli missing) must skip check 6 quietly -- never a crash, never a
-            # spurious failure.
+            # Case C (REWRITTEN by ENC-TSK-P38 AC-6): _live_functions_with_layer
+            # returning None (no creds / denied / cli missing) must now FAIL CLOSED --
+            # the census that did not run must not pass. It must still never crash,
+            # and must never masquerade as an UNKNOWN CONSUMER version finding.
             _live_functions_with_layer = lambda region: None
             no_creds_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
             cases.append(
                 (
-                    "ENC-TSK-P13 AC-5: check 6 with no queryable live data (None) "
-                    "contributes zero failures rather than crashing or false-firing",
-                    not any("UNKNOWN CONSUMER" in f for f in no_creds_failures),
+                    "ENC-TSK-P38 AC-6: check 6 with no queryable live data (None) "
+                    "FAILS CLOSED (a census that did not run must not pass)",
+                    any(
+                        "FAIL-CLOSED" in f and "could not enumerate" in f
+                        for f in no_creds_failures
+                    )
+                    and not any("UNKNOWN CONSUMER" in f for f in no_creds_failures),
+                )
+            )
+
+            # Case D (ENC-TSK-P38 AC-6): an EMPTY enumeration ({} -- queried
+            # successfully, zero shared-layer carriers account-wide) is impossible on
+            # this fleet and must FAIL CLOSED rather than vacuously pass.
+            _live_functions_with_layer = lambda region: {}
+            empty_enum_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-TSK-P38 AC-6: check 6 with an EMPTY enumeration ({}) fails "
+                    "closed (ENC-ISS-675/677 vacuous-pass class)",
+                    any(
+                        "FAIL-CLOSED" in f and "ZERO functions" in f
+                        for f in empty_enum_failures
+                    ),
+                )
+            )
+
+            # Case E (ENC-TSK-P38 AC-6): check 5 comparing ZERO of a non-empty
+            # manifest's functions (every per-function lookup failed -- the no-creds /
+            # wholesale-enumeration-failure shape) must FAIL CLOSED, with the count
+            # reconciliation stated. Restore a valid check-6 seam so the only failure
+            # under test is check 5's.
+            _live_functions_with_layer = lambda region: {
+                "iss656-synthetic-fn": canonical,
+                "iss656-synthetic-fn-gamma": canonical,
+            }
+            _live_layer_version = lambda function_name, region: None
+            zero_checked_failures = check_live(gamma_test_tmpdir, "us-west-2", "synthetic-stack-gamma")
+            cases.append(
+                (
+                    "ENC-TSK-P38 AC-6: check 5 comparing 0 of a non-empty manifest's "
+                    "functions fails closed with count reconciliation",
+                    any(
+                        "FAIL-CLOSED" in f and "check 5 compared 0 of 1" in f
+                        for f in zero_checked_failures
+                    )
+                    and any(
+                        "FAIL-CLOSED" in f and "check 5b" in f
+                        for f in zero_checked_failures
+                    ),
                 )
             )
         finally:

@@ -429,10 +429,11 @@ class TestManifestExpectationsAbsent(unittest.TestCase):
         )
 
     def test_manifest_with_correct_expectations_passes(self):
+        # ENC-TSK-P38: both planes arm64/python3.12 since the cutover commit.
         errors = self._run_with_manifest(
             {
-                "expected_architecture": {"prod": "x86_64", "gamma": "arm64"},
-                "expected_runtime": {"prod": "python3.11", "gamma": "python3.12"},
+                "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
+                "expected_runtime": {"prod": "python3.12", "gamma": "python3.12"},
                 "functions": [],
             }
         )
@@ -597,7 +598,7 @@ class TestArchitectureExceptions(unittest.TestCase):
         """A function whose resolved architecture already matches the plane's
         target passes outright -- exception-list membership is irrelevant."""
         manifest = {
-            "expected_architecture": {"prod": "x86_64", "gamma": "arm64"},
+            "expected_architecture": {"prod": "arm64", "gamma": "arm64"},
             "architecture_exceptions": {
                 "prod": {
                     "temporary": {
@@ -615,19 +616,19 @@ class TestArchitectureExceptions(unittest.TestCase):
                 }
             },
         }
-        # The real IsArm64 conditional pattern (ENC-TSK-P40: the ABI selector, formerly
-        # IsGamma) resolves prod to x86_64,
-        # matching the target -- this is the shape every real function in
-        # 02-compute.yaml uses today.
+        # The real IsArm64 conditional pattern resolves arm64 on EVERY plane
+        # since ENC-TSK-P38 flipped the condition definition unconditionally
+        # true -- matching the arm64 target. This is the shape every real
+        # function in 02-compute.yaml uses today.
         blocks = [self._block("normal-fn", vlap.EXPECTED_ARCH_IF_LIST)]
         errors = self._run_with_manifest(manifest, blocks)
         self.assertEqual(errors, [])
 
     def test_real_manifest_and_template_pass_the_exceptions_contract(self):
         """Smoke test against the real repo state: expected_architecture.prod
-        is unchanged at x86_64 (the Phase 5 flip is ENC-PLN-082's call, not
-        this task's) and both exception classes are seeded empty, so every
-        real function must pass via target match alone."""
+        is arm64 (flipped by ENC-TSK-P38, the ENC-PLN-082 cutover commit) and
+        both exception classes are verified empty, so every real function
+        must pass via target match alone."""
         if not vlap.COMPUTE_TEMPLATE.is_file() or not vlap.MANIFEST_PATH.is_file():
             self.skipTest("Real template/manifest not present")
         blocks = vlap._parse_lambda_blocks(vlap.COMPUTE_TEMPLATE)
