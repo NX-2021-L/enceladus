@@ -96,6 +96,20 @@ on:
         type: boolean
         required: false
         default: false
+      # ENC-TSK-P45 / ENC-TSK-O22 (io ruling 2026-08-26): the cutover apply must be able to
+      # execute the COMPUTE change-set while leaving the DATA change-set unexecuted — pre-dispatch
+      # verification found the v4 01-data.yaml template regressive vs the stored production data
+      # template (PITR true→omitted on 11 tables; DeploymentManagerTable GSIs 4→1), so executing
+      # data as a side effect of a compute apply would mutate the PROTECTED enceladus-data stack.
+      # Default TRUE preserves every existing behavior: push events never supply inputs (the
+      # event_name guard below keeps them executing data as before), and a dispatch that omits
+      # this input behaves exactly as it always has. Only an explicit apply_data=false skips
+      # data execution.
+      apply_data:
+        description: "Execute the rendered DATA stack change-set. Set false to apply compute only (the data-template drift is reconciled under its own record, never as a cutover side effect)."
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -558,7 +572,9 @@ jobs:
 
       - name: Execute Data stack change-set
         id: deploy_data
-        if: needs.plan.outputs.data_has_changes == 'true'
+        # ENC-TSK-P45: skippable via apply_data=false (workflow_dispatch only). Push events carry
+        # no inputs, so the event_name clause keeps their behavior byte-identical to before.
+        if: needs.plan.outputs.data_has_changes == 'true' && (github.event_name != 'workflow_dispatch' || inputs.apply_data == true)
         run: |
           set -euo pipefail
           aws cloudformation execute-change-set \
