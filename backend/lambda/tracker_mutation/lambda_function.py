@@ -5471,6 +5471,14 @@ def _handle_update_field(
             _optout_latch["to"], _optout_latch["reason"],
         ))
 
+    # ENC-TSK-M92/M79: stamp version_seq/feed_scope so the write re-surfaces in
+    # the feed-delta projection. The vseq clause is a SET assignment and MUST be
+    # spliced BEFORE any ADD clause — SET assignments appended after
+    # " ADD closed_count :one" are invalid UpdateExpression syntax (ENC-TSK-P49:
+    # every governed task close failed on exactly that ordering).
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
+
     # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment closed_count on
     # every task->closed transition. The ADD action is appended to the same
     # UpdateExpression as the status SET, so the counter and the state transition
@@ -5489,9 +5497,6 @@ def _handle_update_field(
     if _optout_latch is not None:
         attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
-
-    vseq_expr, vseq_vals = _version_seq_update_parts()
-    update_expr += vseq_expr
     attr_values.update(vseq_vals)
 
     # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
