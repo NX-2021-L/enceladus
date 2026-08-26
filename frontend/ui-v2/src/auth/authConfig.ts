@@ -17,7 +17,13 @@ const COGNITO_HOSTED_UI_DOMAIN =
   'https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com'
 const COGNITO_CLIENT_ID = '6q607dk3liirhtecgps7hifmlk'
 const COGNITO_SCOPES = 'openid email profile'
+// ENC-TSK-P51: per-plane redirect. The deploy lane bakes VITE_OAUTH_REDIRECT_URI
+// at build (prod -> https://enceladus.jreese.net/api/v1/auth/callback); the gamma
+// URI stays as the default so local/dev and gamma builds are unchanged. The value
+// must byte-match auth_refresh's WEBUI_OAUTH_REDIRECT_URI and a registered
+// Cognito callback (redirect_mismatch class: ENC-ISS-124/125).
 const OAUTH_REDIRECT_URI =
+  import.meta.env.VITE_OAUTH_REDIRECT_URI ||
   'https://enceladus-gamma.jreese.net/api/v1/auth/callback'
 
 /** base64url so it round-trips through the Python `base64.urlsafe_b64decode`

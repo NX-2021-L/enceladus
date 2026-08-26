@@ -1319,6 +1319,16 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          # ENC-TSK-P51: fixed token-exchange redirect_uri for the ui-v2 login.
+          # Must byte-match the SPA's authorize redirect_uri (VITE_OAUTH_REDIRECT_URI
+          # baked by _ui_deploy.yml) and a registered callback on the Cognito
+          # client, or the code exchange fails (ENC-ISS-124/125 class). The code
+          # default in auth_refresh is the gamma URI; declared explicitly here on
+          # both planes so the value is CFN-visible instead of a hidden fallback.
+          WEBUI_OAUTH_REDIRECT_URI: !If
+            - IsGamma
+            - https://enceladus-gamma.jreese.net/api/v1/auth/callback
+            - https://enceladus.jreese.net/api/v1/auth/callback
       Tags:
         - Key: Project
           Value: enceladus
