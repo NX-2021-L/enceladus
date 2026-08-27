@@ -395,6 +395,25 @@ def _ddb_bool(item: Dict[str, Any], key: str, default: bool = False) -> bool:
     return default
 
 
+def _ddb_str_list_lenient(item: Dict[str, Any], key: str) -> List[str]:
+    """ENC-TSK-P60 (ENC-ISS-714): read a list attribute, tolerating the
+    string-typed anomaly. A DynamoDB S value is coerced to a one-element list
+    and logged with the item id so the offending record is identifiable."""
+    attr = _ddb_attr(item, key)
+    if "S" in attr:
+        raw = str(attr.get("S") or "").strip()
+        if raw:
+            logger.warning(
+                "feed_query: item %s field %s stored as DynamoDB S (%r) — coerced to one-element list (ENC-ISS-714)",
+                _ddb_str(item, "item_id"),
+                key,
+                raw,
+            )
+            return [raw]
+        return []
+    return _ddb_str_set(item, key)
+
+
 def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     attr = _ddb_attr(item, key)
     ss = attr.get("SS")
@@ -1049,6 +1068,9 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         # Plan tree fields (ENC-ISS-139 / ENC-TSK-A57)
         "subtask_ids": _ddb_str_set(item, "subtask_ids"),
         "transition_type": _ddb_str(item, "transition_type") or None,
+        # ENC-TSK-P60: component chips ride the corpus; lenient reader coerces
+        # the string-typed anomaly instead of hiding it (ENC-ISS-714).
+        "components": _ddb_str_list_lenient(item, "components"),
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -1967,6 +1989,9 @@ def _handle_snapshot() -> Dict[str, Any]:
                     "status": r.get("status") or "open",
                     "record_type": record_type,
                     "updated_at": r.get("updated_at") or None,
+                    # ENC-TSK-P60: governed priority rides the snapshot so the
+                    # client event path stops rendering metadata-less cards.
+                    "priority": r.get("priority") or None,
                 }
             )
         return out
@@ -2002,6 +2027,14 @@ def _delta_corpus_entry(raw_item: Dict[str, Any], project_id: str) -> Optional[D
         value = transformed.get(key)
         if value:
             attrs[key] = value
+    # ENC-TSK-P60: keep delta entries attr-parity with the corpus builder.
+    components = feed_corpus.normalize_str_list(
+        transformed.get("components"), str(item_id), "components"
+    )
+    if components:
+        attrs["components"] = components
+    if transformed.get("checkout_state"):
+        attrs["checkout_state"] = transformed["checkout_state"]
     return feed_corpus.build_tracker_entry(
         record_type,
         str(item_id),

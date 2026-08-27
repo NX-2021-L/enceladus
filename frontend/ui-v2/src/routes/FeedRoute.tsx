@@ -3,6 +3,7 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
 import { Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
+import { feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
 import { Badge } from '../components/Badge'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -34,7 +35,7 @@ import {
   hitFromRecent,
   trackRecentlyViewed,
 } from '../search/recentlyViewed'
-import { buildSearchCorpus } from '../search/searchCorpus'
+import { buildSearchCorpus, mergeEventRowOntoCache } from '../search/searchCorpus'
 import { excludeRecordType } from '../search/recordTypeScope'
 import { sortSearchHits } from '../search/sortSearchHits'
 import { useTieredSearch } from '../search/useTieredSearch'
@@ -101,17 +102,31 @@ export function FeedRoute() {
   const corpus = (() => {
     const fromEvents = buildSearchCorpus(events, projects)
     if (!isWarm) return fromEvents
+    // ENC-TSK-P60 (ENC-ISS-718/719): events used to REPLACE the warm cache
+    // row wholesale, stomping governed status/priority/updatedAt with the
+    // thin event projection and reshuffling counts on every batch. The cache
+    // row is the base; the event contributes only the fields it truly has.
     const byId = new Map(getCacheEngine().searchIndex.all().map((row) => [row.recordId, row]))
-    for (const row of fromEvents) byId.set(row.recordId, row)
+    for (const row of fromEvents) {
+      const existing = byId.get(row.recordId)
+      byId.set(row.recordId, existing ? mergeEventRowOntoCache(existing, row) : row)
+    }
     return [...byId.values()]
   })()
-  // ENC-TSK-L32: feed search is reciprocally scoped to exclude document
-  // records — the Docs page (DocsRoute) owns document-scoped search.
-  const feedCorpus = excludeRecordType(corpus, 'document')
+  // ENC-TSK-P60 (ENC-ISS-718): documents are part of the searchable corpus —
+  // the page promises "every governed record type" and the record_type=
+  // document filter must agree with the server facets. (Supersedes the
+  // ENC-TSK-L32 reciprocal exclusion; /docs remains the doc-first surface
+  // and keeps the suggestion stream to itself below.)
+  const feedCorpus = corpus
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
   const tiered = useTieredSearch({ projectId, query: q }, feedCorpus)
-  const filteredHits = excludeRecordType(sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort), 'document')
+  // ENC-TSK-P60: one limit-1 corpus request — the backend computes
+  // total_matches over the whole set before slicing.
+  const serverCorpusQuery = useQuery(feedCorpusQueryOptions({ limit: 1 }))
+  const serverCorpusTotal = serverCorpusQuery.data?.total_matches ?? null
+  const filteredHits = sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort)
   const visibleHits = filteredHits.slice(0, visibleCount)
 
   const hybridEnabled = Boolean(q.trim())
@@ -384,6 +399,9 @@ export function FeedRoute() {
       <div className="feed-route__meta">
         <span>
           {filteredHits.length} hit{filteredHits.length === 1 ? '' : 's'}
+          {/* ENC-TSK-P60: server corpus total beside the local count makes
+              snapshot staleness visible instead of silent. */}
+          {serverCorpusTotal !== null ? ` · server corpus ${serverCorpusTotal}` : ''}
           {tiered.hybridPending ? ' · hybrid loading…' : ''}
         </span>
         {tiered.hybridError && (

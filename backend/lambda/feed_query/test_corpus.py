@@ -150,3 +150,61 @@ def test_paginate_cursor_key_missing_asc_sort_order_seeks():
         other, {"limit": 2, "sort": "record_id_asc", "cursor": cursor}
     )
     assert [i["record_id"] for i in second["items"]] == ["ENC-TSK-CCC", "ENC-TSK-DDD"]
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P60 — list-field normalisation + tracker attr enrichment
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_str_list_coerces_string_to_one_element_list():
+    assert corpus.normalize_str_list("frontend", "ENC-TSK-XXX", "components") == ["frontend"]
+
+
+def test_normalize_str_list_passes_lists_and_rejects_garbage():
+    assert corpus.normalize_str_list(["a", " b ", ""]) == ["a", "b"]
+    assert corpus.normalize_str_list(None) == []
+    assert corpus.normalize_str_list(123) == []
+    assert corpus.normalize_str_list("   ") == []
+
+
+def test_tracker_entries_carry_components_tags_checkout_state_as_arrays():
+    tasks = [
+        {
+            "task_id": "ENC-TSK-AAA",
+            "project_id": "enceladus",
+            "title": "A task",
+            "status": "open",
+            "priority": "P1",
+            "category": "implementation",
+            "updated_at": "2026-08-27T00:00:00Z",
+            "components": "frontend",  # the string anomaly (ENC-ISS-714)
+            "checkout_state": "checked_out",
+        }
+    ]
+    entries = corpus.build_tracker_entries_from_records(tasks, [], [], [], [])
+    attrs = entries[0]["attrs"]
+    assert attrs["components"] == ["frontend"]
+    assert attrs["checkout_state"] == "checked_out"
+    assert attrs["status"] == "open"
+    assert attrs["priority"] == "P1"
+
+
+def test_tracker_entries_omit_empty_list_fields():
+    plans = [
+        {
+            "plan_id": "ENC-PLN-ZZZ",
+            "project_id": "enceladus",
+            "title": "A plan",
+            "status": "started",
+            "priority": "P0",
+            "category": "operational",
+            "updated_at": "2026-08-27T00:00:00Z",
+        }
+    ]
+    entries = corpus.build_tracker_entries_from_records([], [], [], [], plans)
+    attrs = entries[0]["attrs"]
+    assert "components" not in attrs
+    assert "tags" not in attrs
+    assert attrs["status"] == "started"
+    assert attrs["priority"] == "P0"

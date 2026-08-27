@@ -66,11 +66,20 @@ export function CategoryChip({ category }: { category?: string | null }) {
   return <Chip label={category} color="var(--enc-lavender, var(--accent-secondary, #8A8CB5))" />
 }
 
-export function ComponentChips({ components }: { components?: string[] }) {
-  if (!components?.length) return null
+export function ComponentChips({ components }: { components?: string[] | string | null }) {
+  // ENC-TSK-P60 (ENC-ISS-714): a string has .length too — the old truthiness
+  // guard let a string-typed components field through to .map and crashed the
+  // whole Feed to the error boundary. Coerce defensively; the backend corpus
+  // now also normalises and logs the offending record.
+  const list = Array.isArray(components)
+    ? components
+    : typeof components === 'string' && components.trim()
+      ? [components.trim()]
+      : []
+  if (!list.length) return null
   return (
     <>
-      {components.map((c) => (
+      {list.map((c) => (
         <Chip key={c} label={c} color="var(--enc-teal-light, var(--accent, #7AC8D4))" />
       ))}
     </>

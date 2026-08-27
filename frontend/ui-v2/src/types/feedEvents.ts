@@ -13,6 +13,12 @@ export interface FeedRealtimeEvent {
   summary: string
   cursor: number
   channels: string[]
+  /** ENC-TSK-P60: governed metadata carried by snapshot-origin events so the
+   * search corpus stops deriving status from the event ACTION ("updated"). */
+  recordStatus?: string
+  recordTitle?: string
+  recordUpdatedAt?: string
+  recordPriority?: string
   /**
    * ENC-TSK-L29: the full current record body, present ONLY on events
    * delivered over a per-record `/records/{recordId}` subscription (never on

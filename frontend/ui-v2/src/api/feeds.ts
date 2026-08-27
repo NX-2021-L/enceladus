@@ -27,6 +27,7 @@ interface SnapshotTask {
   status?: string
   record_type?: string
   updated_at?: string
+  priority?: string
 }
 
 interface TasksSnapshot {
@@ -49,6 +50,13 @@ function taskToFeedEvent(task: SnapshotTask, cursor: number): FeedRealtimeEvent 
     summary: `${recordId}: ${title}`,
     cursor,
     channels: ['/feed/updates'],
+    // ENC-TSK-P60: the snapshot row's governed metadata used to be thrown
+    // away here, leaving the search corpus to misuse the event ACTION as a
+    // status. Carry it through explicitly.
+    recordStatus: status,
+    recordTitle: title,
+    recordUpdatedAt: task.updated_at,
+    recordPriority: task.priority,
   }
 }
 
