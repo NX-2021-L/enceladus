@@ -405,3 +405,25 @@
     display: none;
   }
 }
+
+
+/* ENC-TSK-P63 (ENC-ISS-722): neighbors empty state + hydrated row titles. */
+.ev2-rdh__neighbors-empty {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.ev2-rdh__neighbor-title {
+  margin-left: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* ENC-TSK-P63 (obs 11): long vitals values (document FILE names) wrap. */
+.ev2-rdh__vital-value {
+  overflow-wrap: anywhere;
+}

@@ -17,6 +17,7 @@
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useSearch } from '@tanstack/react-router'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { Link } from '@tanstack/react-router'
@@ -75,6 +76,7 @@ export function CoordinationRoute() {
   // ?tab=escalations; any other/missing value falls back to the default.
   const { tab: initialTab } = useSearch({ from: '/coordination' })
   const [activeTabId, setActiveTabId] = useState(initialTab || 'sessions')
+  const navigate = useNavigate()
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
 
   const sessionsQuery = useQuery(agentSessionsQueryOptions)
@@ -259,7 +261,20 @@ export function CoordinationRoute() {
         <p className="coordination-route__empty">Loading coordination monitor data…</p>
       )}
 
-      <Tabs tabs={tabs} activeTabId={activeTabId} onChange={(event) => setActiveTabId(event.detail.activeTabId)} />
+      <Tabs
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onChange={(event) => {
+          setActiveTabId(event.detail.activeTabId)
+          // ENC-TSK-P63 (obs 7): reflect the tab in the URL so deep links
+          // and refreshes land on the same tab.
+          void navigate({
+            to: '/coordination',
+            search: { tab: event.detail.activeTabId },
+            replace: true,
+          })
+        }}
+      />
     </div>
   )
 }

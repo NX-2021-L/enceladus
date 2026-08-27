@@ -267,3 +267,10 @@
     margin-bottom: var(--space-5);
   }
 }
+
+
+/* ENC-TSK-P63 (obs 3): the reading pane showed BOTH hub action toolbars in
+   the accessibility tree; the sticky variant is redundant inside the pane. */
+.feed-route__pane .ev2-rdh__actionbar--sticky {
+  display: none;
+}

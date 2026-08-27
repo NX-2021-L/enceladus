@@ -90,7 +90,14 @@ function linkifyIds(text: string, projectId: string | undefined, keyPrefix: stri
   return nodes
 }
 
-const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)]+\))|(_[^_]+_|\*[^*]+\*)/
+// ENC-TSK-P63 (ENC-ISS-721): emphasis delimiters must not fire INSIDE words —
+// governance prose is full of snake_case identifiers (objectives_set,
+// source_record_id) whose underscores used to pair up across the text and
+// italicise whole spans (and swallow the DOC-* ids inside them, which is why
+// some ids weren't linking). An underscore/asterisk only opens emphasis when
+// it is not butted against a word character on the outside.
+const INLINE_RE =
+  /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)]+\))|((?<![A-Za-z0-9])_[^_\s][^_]*_(?![A-Za-z0-9])|(?<![A-Za-z0-9*])\*[^*\s][^*]*\*(?![A-Za-z0-9]))/
 
 /** Inline pass: code spans, bold, links, and italics are pulled out first
  *  (their contents are never re-processed for emphasis or ID-linked); the
@@ -117,7 +124,11 @@ function renderInline(text: string, projectId: string | undefined, keyPrefix: st
         </code>,
       )
     } else if (m[2]) {
-      nodes.push(<strong key={`${keyPrefix}-${key++}`}>{m[2].slice(2, -2)}</strong>)
+      nodes.push(
+        <strong key={`${keyPrefix}-${key++}`}>
+          {linkifyIds(m[2].slice(2, -2), projectId, `${keyPrefix}-b${key}`)}
+        </strong>,
+      )
     } else if (m[3]) {
       const linkMatch = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(m[3])
       if (linkMatch) {
@@ -134,7 +145,11 @@ function renderInline(text: string, projectId: string | undefined, keyPrefix: st
         )
       }
     } else if (m[4]) {
-      nodes.push(<em key={`${keyPrefix}-${key++}`}>{m[4].slice(1, -1)}</em>)
+      nodes.push(
+        <em key={`${keyPrefix}-${key++}`}>
+          {linkifyIds(m[4].slice(1, -1), projectId, `${keyPrefix}-i${key}`)}
+        </em>,
+      )
     }
     rest = rest.slice(idx + m[0].length)
   }
