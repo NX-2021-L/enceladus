@@ -35,10 +35,15 @@ export interface CacheBudget {
   searchIndexMax: number
 }
 
+// ENC-ISS-711: the prior 5k/2k budgets were smaller than a single project's
+// corpus (enceladus alone is ~4.4k records; all projects ~7.9k), so the search
+// index could never hold the full working set and dropped a recency band. The
+// index rows are lightweight (id/type/title/status/updatedAt) -- ~8k of them is
+// a few MB in memory -- so size the budget above the live corpus with headroom.
 export const DEFAULT_CACHE_BUDGET: CacheBudget = {
-  tier1Max: 5_000,
+  tier1Max: 20_000,
   tier2Max: 500,
-  searchIndexMax: 2_000,
+  searchIndexMax: 20_000,
 }
 
 export interface FeedCorpusItem {

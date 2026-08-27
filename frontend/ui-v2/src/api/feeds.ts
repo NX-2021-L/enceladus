@@ -70,10 +70,22 @@ export async function fetchFeedSnapshot(): Promise<FeedSnapshot> {
     ? Date.parse(data.generated_at) * 1000
     : Date.now() * 1000
 
+  // ENC-ISS-711: order by the record's own updated_at (carried by P60) before
+  // capping at 50. Sorting by `cursor` (file position) kept the last 50 rows of
+  // tasks.json, which the server emits grouped by type and sorted by record_id
+  // ascending -- so first paint was topped by old MOD-* records instead of the
+  // most recently updated ones.
   const events = (data.tasks ?? [])
     .map((task, index) => taskToFeedEvent(task, baseCursor + index))
     .filter((event): event is FeedRealtimeEvent => event !== null)
-    .sort((a, b) => b.cursor - a.cursor)
+    .sort((a, b) => {
+      const ta = a.recordUpdatedAt ? Date.parse(a.recordUpdatedAt) : NaN
+      const tb = b.recordUpdatedAt ? Date.parse(b.recordUpdatedAt) : NaN
+      const va = Number.isNaN(ta) ? -Infinity : ta
+      const vb = Number.isNaN(tb) ? -Infinity : tb
+      if (va !== vb) return vb > va ? 1 : -1
+      return b.cursor - a.cursor
+    })
     .slice(0, 50)
 
   return {

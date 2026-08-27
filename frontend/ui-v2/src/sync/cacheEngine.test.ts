@@ -115,3 +115,87 @@ describe('CacheEngine', () => {
     expect(engine.searchIndex.all()).toHaveLength(0)
   })
 })
+
+// ENC-ISS-711: the search index must be populated by recency, so a corpus
+// larger than the index budget keeps the most-recently-updated records rather
+// than whatever happens to sort first in IndexedDB primary-key order. Before
+// this fix, `finalizeWarm` sliced `listTier1(...)` in key order, filling the cap
+// with alphabetically-early projects/documents and dropping the recent
+// `enceladus:ENC-*` band entirely.
+describe('CacheEngine finalizeWarm recency selection (ENC-ISS-711)', () => {
+  beforeEach(() => {
+    resetCacheEngineForTests()
+  })
+
+  const item = (
+    project: string,
+    id: string,
+    type: 'task' | 'issue',
+    updated: string,
+  ): FeedCorpusItem => ({
+    record_id: id,
+    record_type: type,
+    project_id: project,
+    title: id,
+    updated_at: updated,
+    source: 'tracker',
+    record_key: `tracker:${project}:${id}`,
+  })
+
+  it('keeps the most-recently-updated records when the corpus exceeds searchIndexMax', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const engine = new CacheEngine({ tier1Max: 100, tier2Max: 10, searchIndexMax: 3 })
+    // Insert OLD other-project rows first, then the RECENT cutover-week ENC band
+    // last -- mirroring the prod ordering where ENC-* records sort after other
+    // projects and enceladus documents. A key-order/insertion-order slice would
+    // keep the four old rows and drop the ENC band; recency selection must not.
+    await engine.ingestCorpusPage([
+      item('devops', 'DVP-TSK-100', 'task', '2020-01-01T00:00:00Z'),
+      item('devops', 'DVP-TSK-101', 'task', '2020-02-01T00:00:00Z'),
+      item('chosen-family', 'CFY-TSK-1', 'task', '2019-06-01T00:00:00Z'),
+      item('enceladus', 'DOC-STALE', 'issue', '2018-01-01T00:00:00Z'),
+      item('enceladus', 'ENC-TSK-P56', 'task', '2026-08-27T02:00:00Z'),
+      item('enceladus', 'ENC-TSK-P60', 'task', '2026-08-27T04:00:00Z'),
+      item('enceladus', 'ENC-ISS-711', 'issue', '2026-08-27T04:30:00Z'),
+    ])
+    await engine.finalizeWarm()
+
+    const ids = engine.searchIndex.all().map((r) => r.recordId)
+    expect(ids).toHaveLength(3)
+    expect(new Set(ids)).toEqual(new Set(['ENC-ISS-711', 'ENC-TSK-P60', 'ENC-TSK-P56']))
+    // No silent cap: truncation must be surfaced.
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
+  })
+
+  it('holds the full corpus (no truncation, no warn) when it fits the budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const engine = new CacheEngine({ tier1Max: 100, tier2Max: 10, searchIndexMax: 100 })
+    await engine.ingestCorpusPage([
+      item('devops', 'DVP-TSK-100', 'task', '2020-01-01T00:00:00Z'),
+      item('enceladus', 'ENC-TSK-P56', 'task', '2026-08-27T02:00:00Z'),
+      item('enceladus', 'ENC-ISS-711', 'issue', '2026-08-27T04:30:00Z'),
+    ])
+    await engine.finalizeWarm()
+
+    const ids = engine.searchIndex.all().map((r) => r.recordId)
+    expect(new Set(ids)).toEqual(new Set(['DVP-TSK-100', 'ENC-TSK-P56', 'ENC-ISS-711']))
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('loadSearchSlice reads the full tier1 set and orders it by recency', async () => {
+    const engine = new CacheEngine({ tier1Max: 100, tier2Max: 10, searchIndexMax: 2 })
+    await engine.ingestCorpusPage([
+      item('devops', 'DVP-TSK-1', 'task', '2020-01-01T00:00:00Z'),
+      item('devops', 'DVP-TSK-2', 'task', '2020-02-01T00:00:00Z'),
+      item('enceladus', 'ENC-TSK-P60', 'task', '2026-08-27T04:00:00Z'),
+    ])
+    await engine.loadSearchSlice()
+
+    const ids = engine.searchIndex.all().map((r) => r.recordId)
+    expect(ids).toHaveLength(2)
+    expect(ids).toContain('ENC-TSK-P60')
+    expect(ids).not.toContain('DVP-TSK-1')
+  })
+})
