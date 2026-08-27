@@ -86,3 +86,67 @@ def test_invalid_cursor_decode_returns_none():
 
 def test_document_entry_skips_deleted():
     assert corpus.build_document_entry({"document_id": "DOC-1", "status": "deleted"}) is None
+
+
+def test_paginate_cursor_key_missing_order_seeks_instead_of_restarting():
+    # ENC-ISS-711: a continuation can be served by a container whose per-
+    # container corpus cache lacks the cursor's exact record. The resume must
+    # land order-positionally (first row strictly after the cursor position),
+    # never silently restart from the top.
+    entries = [
+        _entry("ENC-TSK-FFF", updated_at="2026-07-05T15:00:00Z"),
+        _entry("ENC-TSK-EEE", updated_at="2026-07-05T14:00:00Z"),
+        _entry("ENC-TSK-DDD", updated_at="2026-07-05T13:00:00Z"),
+        _entry("ENC-TSK-CCC", updated_at="2026-07-05T12:00:00Z"),
+        _entry("ENC-TSK-BBB", updated_at="2026-07-05T11:00:00Z"),
+        _entry("ENC-TSK-AAA", updated_at="2026-07-05T10:00:00Z"),
+    ]
+    first = corpus.paginate_corpus(entries, {"limit": 2, "sort": "updated_at_desc"})
+    assert [i["record_id"] for i in first["items"]] == ["ENC-TSK-FFF", "ENC-TSK-EEE"]
+    cursor = first["next_cursor"]
+    assert cursor
+
+    # The "other container": ENC-TSK-EEE is absent from its cache entirely.
+    other = [e for e in entries if e["record_id"] != "ENC-TSK-EEE"]
+    second = corpus.paginate_corpus(
+        other, {"limit": 2, "sort": "updated_at_desc", "cursor": cursor}
+    )
+    assert [i["record_id"] for i in second["items"]] == ["ENC-TSK-DDD", "ENC-TSK-CCC"]
+
+
+def test_paginate_cursor_key_missing_desc_tiebreak():
+    # Equal updated_at rows order record_key DESC under the reverse-tuple sort;
+    # the order-seek must resume strictly after (ts, key) in that ordering.
+    ts = "2026-07-05T12:00:00Z"
+    entries = [
+        _entry("ENC-TSK-CCC", updated_at=ts),
+        _entry("ENC-TSK-BBB", updated_at=ts),
+        _entry("ENC-TSK-AAA", updated_at=ts),
+    ]
+    first = corpus.paginate_corpus(entries, {"limit": 1, "sort": "updated_at_desc"})
+    assert first["items"][0]["record_id"] == "ENC-TSK-CCC"
+    cursor = first["next_cursor"]
+
+    other = [e for e in entries if e["record_id"] != "ENC-TSK-CCC"]
+    second = corpus.paginate_corpus(
+        other, {"limit": 2, "sort": "updated_at_desc", "cursor": cursor}
+    )
+    assert [i["record_id"] for i in second["items"]] == ["ENC-TSK-BBB", "ENC-TSK-AAA"]
+
+
+def test_paginate_cursor_key_missing_asc_sort_order_seeks():
+    entries = [
+        _entry("ENC-TSK-AAA", updated_at="2026-07-05T10:00:00Z"),
+        _entry("ENC-TSK-BBB", updated_at="2026-07-05T11:00:00Z"),
+        _entry("ENC-TSK-CCC", updated_at="2026-07-05T12:00:00Z"),
+        _entry("ENC-TSK-DDD", updated_at="2026-07-05T13:00:00Z"),
+    ]
+    first = corpus.paginate_corpus(entries, {"limit": 2, "sort": "record_id_asc"})
+    assert [i["record_id"] for i in first["items"]] == ["ENC-TSK-AAA", "ENC-TSK-BBB"]
+    cursor = first["next_cursor"]
+
+    other = [e for e in entries if e["record_id"] != "ENC-TSK-BBB"]
+    second = corpus.paginate_corpus(
+        other, {"limit": 2, "sort": "record_id_asc", "cursor": cursor}
+    )
+    assert [i["record_id"] for i in second["items"]] == ["ENC-TSK-CCC", "ENC-TSK-DDD"]

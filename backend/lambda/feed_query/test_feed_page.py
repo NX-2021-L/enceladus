@@ -127,3 +127,33 @@ def test_invalid_cursor_falls_back_to_top_defensively():
     # Undecodable cursor -> start from top (handler 400s before this in practice).
     assert len(t) == 10
     assert cur is None
+
+
+def test_cursor_key_missing_order_seeks_instead_of_restarting():
+    # ENC-ISS-711: continuation served by a container whose window no longer
+    # contains the cursor's exact record_key must resume order-positionally
+    # under (updated_at DESC, record_key ASC) — never restart from the top.
+    tasks = _tasks(6)  # T000 newest .. T005 oldest
+    t, i, f, l, p, cursor = feed_page.apply_page_cap(*_all(tasks=tasks), cap=2)
+    assert [r["task_id"] for r in t] == ["ENC-TSK-000", "ENC-TSK-001"]
+    assert cursor
+
+    # The "other container": ENC-TSK-001 (the cursor record) is absent.
+    other = [r for r in tasks if r["task_id"] != "ENC-TSK-001"]
+    t2, i2, f2, l2, p2, _ = feed_page.apply_page_cap(
+        *_all(tasks=other), cursor=cursor, cap=2
+    )
+    assert [r["task_id"] for r in t2] == ["ENC-TSK-002", "ENC-TSK-003"]
+
+
+def test_cursor_key_missing_tiebreak_resumes_after_key():
+    # Equal updated_at ties order record_key ASC; a missing cursor key with the
+    # same timestamp must resume at the first key GREATER than the cursor key.
+    ts = "2026-07-10T30:00:00Z"
+    tasks = [_rec("task_id", f"ENC-TSK-{c}", ts) for c in ("AAA", "BBB", "CCC", "DDD")]
+    t, *_rest, cursor = feed_page.apply_page_cap(*_all(tasks=tasks), cap=2)
+    assert [r["task_id"] for r in t] == ["ENC-TSK-AAA", "ENC-TSK-BBB"]
+
+    other = [r for r in tasks if r["task_id"] != "ENC-TSK-BBB"]
+    t2, *_rest2, _c2 = feed_page.apply_page_cap(*_all(tasks=other), cursor=cursor, cap=2)
+    assert [r["task_id"] for r in t2] == ["ENC-TSK-CCC", "ENC-TSK-DDD"]

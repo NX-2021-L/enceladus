@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -169,11 +172,43 @@ def paginate_corpus(
     cursor = decode_cursor(str(query.get("cursor") or ""))
     start_index = 0
     if cursor is not None:
-        _cursor_sort, cursor_key = cursor
+        cursor_sort, cursor_key = cursor
+        found = False
         for idx, row in enumerate(sorted_rows):
             if str(row.get("record_key") or "") == cursor_key:
                 start_index = idx + 1
+                found = True
                 break
+        if not found:
+            # ENC-ISS-711: the corpus cache is per-container and rebuilt at
+            # container-local times, so a continuation request can land on a
+            # container whose ordering does not contain the cursor's exact
+            # record_key. Restarting from the top silently re-serves the head
+            # and permanently drops the band between the two orderings (the
+            # observed Feed recency-band hole). Resume ORDER-POSITIONALLY
+            # instead: the first row strictly after the cursor's
+            # (sort_value, record_key) under the active sort. Every sort's
+            # comparator is the (primary, record_key) tuple (see sort_entries),
+            # which is exactly what the cursor carries.
+            cursor_pos = (cursor_sort, cursor_key)
+            start_index = len(sorted_rows)
+            for idx, row in enumerate(sorted_rows):
+                row_pos = (
+                    str(row.get("sort_value") or ""),
+                    str(row.get("record_key") or ""),
+                )
+                is_after = row_pos < cursor_pos if sort == "updated_at_desc" else row_pos > cursor_pos
+                if is_after:
+                    start_index = idx
+                    break
+            logger.warning(
+                "corpus cursor record_key=%s absent from this container's cache; "
+                "order-seek resumed at index %d/%d sort=%s (ENC-ISS-711)",
+                cursor_key,
+                start_index,
+                len(sorted_rows),
+                sort,
+            )
 
     limit = int(query.get("limit") or DEFAULT_LIMIT)
     page = sorted_rows[start_index : start_index + limit]
