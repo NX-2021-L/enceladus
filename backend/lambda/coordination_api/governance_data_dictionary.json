@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-27.3",
-  "updated_at": "2026-08-27T05:05:00Z",
-  "last_change_summary": "ENC-TSK-P58/P59/P61 live-verification fixes (ENC-PLN-090): graph_query_api neighbors Cypher now collects path variants PER NEIGHBOR (collect(...)[..8] AS path_lists) so LIMIT bounds neighbors rather than path rows — the DISTINCT-row form let dense near-neighbors' path variants exhaust the LIMIT and silently drop the viewed plan's own first-hop PLAN_CONTAINS edges that verifiably exist in Neo4j. Response shape unchanged (nodes/edges as documented in 2026-08-27.2); only row aggregation moved server-side. No request parameter changed.",
+  "version": "2026-08-27.4",
+  "updated_at": "2026-08-27T05:45:00Z",
+  "last_change_summary": "ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8893,6 +8893,11 @@
       "version": "2026-08-27.3",
       "date": "2026-08-27",
       "summary": "ENC-TSK-P58/P59/P61 live-verification fixes (ENC-PLN-090): graph_query_api neighbors Cypher now collects path variants PER NEIGHBOR (collect(...)[..8] AS path_lists) so LIMIT bounds neighbors rather than path rows — the DISTINCT-row form let dense near-neighbors' path variants exhaust the LIMIT and silently drop the viewed plan's own first-hop PLAN_CONTAINS edges that verifiably exist in Neo4j. Response shape unchanged (nodes/edges as documented in 2026-08-27.2); only row aggregation moved server-side. No request parameter changed."
+    },
+    {
+      "version": "2026-08-27.4",
+      "date": "2026-08-27",
+      "summary": "ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged."
     }
   ]
 }
