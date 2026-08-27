@@ -7,6 +7,27 @@ import { DEFAULT_CACHE_BUDGET } from './types'
 
 const VALID_TYPES: RecordType[] = ['task', 'issue', 'feature', 'plan', 'lesson', 'document']
 
+// ENC-ISS-711: the searchable index must be populated by recency, not by the
+// IndexedDB primary-key order (`projectId:recordId`) that `listTier1` returns.
+// The corpus is far larger than one project (measured: 7940 rows, 4417 of them
+// enceladus), so a key-order slice fills the budget with alphabetically-early
+// projects and enceladus DOC-* documents and never reaches `enceladus:ENC-*`
+// records at all -- hiding a whole contiguous recency band. Order by updated_at
+// descending so, whatever the cap, the most-recently-updated records are kept.
+function updatedAtEpoch(row: Tier1Record): number {
+  const parsed = row.updatedAt ? Date.parse(row.updatedAt) : NaN
+  return Number.isNaN(parsed) ? -Infinity : parsed
+}
+
+function sortByRecencyDesc(rows: Tier1Record[]): Tier1Record[] {
+  return [...rows].sort((a, b) => {
+    const ta = updatedAtEpoch(a)
+    const tb = updatedAtEpoch(b)
+    if (ta === tb) return 0
+    return tb > ta ? 1 : -1
+  })
+}
+
 function normalizeRecordType(raw: string): RecordType | null {
   const value = raw.toLowerCase() as RecordType
   return VALID_TYPES.includes(value) ? value : null
@@ -99,7 +120,15 @@ export class CacheEngine {
 
   async finalizeWarm(): Promise<void> {
     const rows = await idb.listTier1(this.budget.tier1Max)
-    this.searchIndex.rebuild(rows.slice(0, this.budget.searchIndexMax))
+    if (rows.length > this.budget.searchIndexMax) {
+      // ENC-ISS-711: never truncate silently -- a future corpus that outgrows
+      // the budget would otherwise reintroduce a hidden band with no signal.
+      console.warn(
+        `[cacheEngine] searchIndex truncated: ${rows.length} tier1 rows exceed ` +
+          `searchIndexMax=${this.budget.searchIndexMax}; keeping the most-recent ${this.budget.searchIndexMax}`,
+      )
+    }
+    this.searchIndex.rebuild(sortByRecencyDesc(rows))
     this.warmedAt = Date.now()
   }
 
@@ -109,8 +138,12 @@ export class CacheEngine {
   }
 
   async loadSearchSlice(): Promise<void> {
-    const rows = await idb.listTier1(this.budget.searchIndexMax)
-    this.searchIndex.rebuild(rows)
+    // ENC-ISS-711: read the full tier1 set (not just searchIndexMax rows in
+    // key order) so the recency sort selects the most-recent records before the
+    // rebuild applies the cap. Reading only searchIndexMax rows here would drop
+    // the ENC-* tail before it could be considered.
+    const rows = await idb.listTier1(this.budget.tier1Max)
+    this.searchIndex.rebuild(sortByRecencyDesc(rows))
     if (rows.length > 0 && !this.warmedAt) {
       this.warmedAt = Date.now()
     }
