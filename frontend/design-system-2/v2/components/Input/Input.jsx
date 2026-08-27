@@ -15,7 +15,7 @@ const ev2InputCss = `
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-input-css')){const s=document.createElement('style');s.id='ev2-input-css';s.textContent=ev2InputCss;document.head.appendChild(s);}})();
 
-export function Input({ value = '', placeholder, type = 'text', disabled = false, invalid = false, mono = false, icon, onChange, ariaLabel }) {
+export function Input({ value = '', placeholder, type = 'text', disabled = false, invalid = false, mono = false, icon, onChange, ariaLabel, combobox }) {
   const [focused, setFocused] = React.useState(false);
   const cls = [
     'ev2-input',
@@ -35,6 +35,7 @@ export function Input({ value = '', placeholder, type = 'text', disabled = false
         disabled={disabled}
         aria-label={ariaLabel}
         aria-invalid={invalid || undefined}
+        {...(combobox || undefined)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onChange={(e) => onChange && onChange({ detail: { value: e.target.value } })}
