@@ -23,9 +23,12 @@ the set and never mutates a record dict.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from corpus import decode_cursor, encode_cursor, tracker_record_key
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_FEED_PAGE_RECORDS = 75
 
@@ -117,11 +120,34 @@ def apply_page_cap(
     if cursor:
         decoded = decode_cursor(cursor)
         if decoded is not None:
-            _sort_value, cursor_key = decoded
+            cursor_sort, cursor_key = decoded
+            found = False
             for idx, (_updated_at, record_key, _name, _record) in enumerate(ordered):
                 if record_key == cursor_key:
                     start_index = idx + 1
+                    found = True
                     break
+            if not found:
+                # ENC-ISS-711: a continuation can be served by a container whose
+                # record set/ordering no longer contains the cursor's exact
+                # record_key (per-container caches, rebuilt at different times).
+                # Restarting from the top silently drops a contiguous band.
+                # Resume order-positionally: first element strictly after the
+                # cursor position under (updated_at DESC, record_key ASC).
+                start_index = len(ordered)
+                for idx, (updated_at, record_key, _name, _record) in enumerate(ordered):
+                    if updated_at < cursor_sort or (
+                        updated_at == cursor_sort and record_key > cursor_key
+                    ):
+                        start_index = idx
+                        break
+                logger.warning(
+                    "feed page cursor record_key=%s absent from this container's "
+                    "window; order-seek resumed at index %d/%d (ENC-ISS-711)",
+                    cursor_key,
+                    start_index,
+                    len(ordered),
+                )
 
     if cap <= 0:
         window = ordered[start_index:]
