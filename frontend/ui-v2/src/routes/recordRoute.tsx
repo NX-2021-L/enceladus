@@ -48,6 +48,26 @@ function RecordRouteError({ error }: { error: Error }) {
 }
 
 /**
+ * ENC-TSK-P58 verification fix (ENC-ISS-713): a loader that THROWS during the
+ * router's very first load left the page permanently blank on a cold load of
+ * a not-found URL (the error never reached the route-level errorComponent).
+ * The loader now resolves to this sentinel instead of throwing for a 404, and
+ * the component renders the in-shell panel for it — no error-boundary
+ * semantics involved on the happy 404 path. The errorComponent stays as the
+ * backstop for errors thrown later (e.g. useSuspenseQuery on a record deleted
+ * mid-view).
+ */
+export const RECORD_NOT_FOUND = { __recordNotFound: true } as const
+
+export function isRecordNotFound(value: unknown): value is typeof RECORD_NOT_FOUND {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { __recordNotFound?: boolean }).__recordNotFound === true
+  )
+}
+
+/**
  * Builds one tracker record-detail route for a given record type (AC-14). Each route:
  *
  *   1. `loader` calls queryClient.ensureQueryData(queryOptions) so the data is
@@ -70,8 +90,7 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
   const { getParentRoute, path, type, queryOptionsFor } = config
   const Primitive = getPrimitive(type)
 
-  function RecordComponent() {
-    const { project, id } = route.useParams() as { project: string; id: string }
+  function RecordBody({ project, id }: { project: string; id: string }) {
     const { data } = useSuspenseQuery(queryOptionsFor(project, id))
     useRecordRealtimeSync(type, project, id)
     // ENC-TSK-M25: title derives from the resolved record (never the route
@@ -87,6 +106,15 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
     )
   }
 
+  function RecordComponent() {
+    const { project, id } = route.useParams() as { project: string; id: string }
+    const loaderData = route.useLoaderData()
+    // Constant hook count here — the not-found branch renders a different
+    // CHILD, never a different number of hooks in this component.
+    if (isRecordNotFound(loaderData)) return <RecordNotFoundPanel recordId={id} />
+    return <RecordBody project={project} id={id} />
+  }
+
   function RouteComponent() {
     return (
       <Suspense fallback={<SkeletonCard label={`Loading ${type}`} />}>
@@ -98,9 +126,14 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
   const route: AnyRoute = createRoute({
     getParentRoute,
     path,
-    loader: ({ params }) => {
+    loader: async ({ params }) => {
       const { project, id } = params as { project: string; id: string }
-      return queryClient.ensureQueryData(queryOptionsFor(project, id))
+      try {
+        return await queryClient.ensureQueryData(queryOptionsFor(project, id))
+      } catch (error) {
+        if (error instanceof NotFoundError) return RECORD_NOT_FOUND
+        throw error
+      }
     },
     component: RouteComponent,
     errorComponent: RecordRouteError,
@@ -118,8 +151,7 @@ export function createDocumentRecordRoute(config: {
   const { getParentRoute, path, queryOptionsFor } = config
   const Primitive = getPrimitive('document')
 
-  function RecordComponent() {
-    const { id } = route.useParams() as { id: string }
+  function RecordBody({ id }: { id: string }) {
     const { data } = useSuspenseQuery(queryOptionsFor(id))
     useDocumentTitle(`${id}: ${data.title}`)
     return (
@@ -128,6 +160,15 @@ export function createDocumentRecordRoute(config: {
         <Primitive record={data} />
       </>
     )
+  }
+
+  function RecordComponent() {
+    const { id } = route.useParams() as { id: string }
+    const loaderData = route.useLoaderData()
+    // Constant hook count — the not-found branch renders a different child,
+    // never a different number of hooks in this component.
+    if (isRecordNotFound(loaderData)) return <RecordNotFoundPanel recordId={id} />
+    return <RecordBody id={id} />
   }
 
   function RouteComponent() {
@@ -141,8 +182,14 @@ export function createDocumentRecordRoute(config: {
   const route: AnyRoute = createRoute({
     getParentRoute,
     path,
-    loader: ({ params }) =>
-      queryClient.ensureQueryData(queryOptionsFor((params as { id: string }).id)),
+    loader: async ({ params }) => {
+      try {
+        return await queryClient.ensureQueryData(queryOptionsFor((params as { id: string }).id))
+      } catch (error) {
+        if (error instanceof NotFoundError) return RECORD_NOT_FOUND
+        throw error
+      }
+    },
     component: RouteComponent,
     errorComponent: RecordRouteError,
   })

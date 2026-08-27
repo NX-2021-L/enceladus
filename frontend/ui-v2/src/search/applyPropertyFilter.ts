@@ -46,7 +46,15 @@ function compareToken(actual: string, operator: string, expected: string): boole
 
 function tokenMatches<T extends LocalSearchRecord>(hit: T, token: PropertyFilterToken): boolean {
   const actual = fieldValueForProperty(hit, token.propertyKey)
-  if (actual === undefined) return false
+  if (actual === undefined) {
+    // ENC-TSK-P59 verification fix (ENC-ISS-725): "field is not <value>" is
+    // TRUE for a record that does not carry the field at all — the server
+    // counter counts exactly that way (checkout_state absent ≠ checked_out),
+    // and the old blanket false made `checkout_state != checked_out` return
+    // 0 hits against a 588 counter. Every other operator still requires the
+    // field to exist.
+    return token.operator === '!='
+  }
   return compareToken(actual, token.operator, token.value)
 }
 
