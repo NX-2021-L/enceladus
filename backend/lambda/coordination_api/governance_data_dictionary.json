@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-27.2",
-  "updated_at": "2026-08-27T04:30:00Z",
-  "last_change_summary": "ENC-TSK-P61 (ENC-PLN-090 UAT-W4, ENC-ISS-715): graph_query_api neighbors search response shape corrected. The Cypher projection previously returned only the LAST relationship of each path ([-1]) — on a depth>1 traversal this discarded every first-hop edge, which is exactly where a viewed plan's own PLAN_CONTAINS edges live, so the plan graph showed RELATED_TO tails while reporting zero plan-membership edges. neighbors now returns EVERY hop of every path (deduplicated by canonical (start,end,type)) and includes the START node in nodes[] so consumers never fabricate an unlabeled stub for the record the graph is centred on. graph_sync PLAN_CONTAINS emission unchanged (correct since ENC-TSK-E01); missing edges for cutover-era plan updates are backfilled operationally via a governed plan-record touch (tracker.log) that replays the stream reconcile. Additive response-shape change; no request parameter changed.",
+  "version": "2026-08-27.3",
+  "updated_at": "2026-08-27T05:05:00Z",
+  "last_change_summary": "ENC-TSK-P58/P59/P61 live-verification fixes (ENC-PLN-090): graph_query_api neighbors Cypher now collects path variants PER NEIGHBOR (collect(...)[..8] AS path_lists) so LIMIT bounds neighbors rather than path rows — the DISTINCT-row form let dense near-neighbors' path variants exhaust the LIMIT and silently drop the viewed plan's own first-hop PLAN_CONTAINS edges that verifiably exist in Neo4j. Response shape unchanged (nodes/edges as documented in 2026-08-27.2); only row aggregation moved server-side. No request parameter changed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3705,7 +3705,7 @@
         },
         "neighbors_response": {
           "type": "object",
-          "definition": "neighbors search result: nodes[] (every node on every returned path INCLUDING the start node, each with record_id/title/record_type/_labels when projected), edges[] (EVERY hop of every path, deduplicated by canonical (start,end,type) — not only the final hop; ENC-TSK-P61/ENC-ISS-715), paths[], summary, query_cypher."
+          "definition": "neighbors search result: nodes[] (every node on every returned path INCLUDING the start node, each with record_id/title/record_type/_labels when projected), edges[] (EVERY hop of every path, deduplicated by canonical (start,end,type) — not only the final hop; ENC-TSK-P61/ENC-ISS-715), paths[], summary, query_cypher. 2026-08-27.3: path variants are aggregated per neighbor server-side (max 8 per neighbor); LIMIT bounds neighbors, not path rows, so first-hop membership edges always survive."
         }
       },
       "node_labels": [
@@ -8888,6 +8888,11 @@
       "version": "2026-08-27.2",
       "date": "2026-08-27",
       "summary": "ENC-TSK-P61 (ENC-PLN-090 UAT-W4, ENC-ISS-715): graph_query_api neighbors search response shape corrected. The Cypher projection previously returned only the LAST relationship of each path ([-1]) — on a depth>1 traversal this discarded every first-hop edge, which is exactly where a viewed plan's own PLAN_CONTAINS edges live, so the plan graph showed RELATED_TO tails while reporting zero plan-membership edges. neighbors now returns EVERY hop of every path (deduplicated by canonical (start,end,type)) and includes the START node in nodes[] so consumers never fabricate an unlabeled stub for the record the graph is centred on. graph_sync PLAN_CONTAINS emission unchanged (correct since ENC-TSK-E01); missing edges for cutover-era plan updates are backfilled operationally via a governed plan-record touch (tracker.log) that replays the stream reconcile. Additive response-shape change; no request parameter changed."
+    },
+    {
+      "version": "2026-08-27.3",
+      "date": "2026-08-27",
+      "summary": "ENC-TSK-P58/P59/P61 live-verification fixes (ENC-PLN-090): graph_query_api neighbors Cypher now collects path variants PER NEIGHBOR (collect(...)[..8] AS path_lists) so LIMIT bounds neighbors rather than path rows — the DISTINCT-row form let dense near-neighbors' path variants exhaust the LIMIT and silently drop the viewed plan's own first-hop PLAN_CONTAINS edges that verifiably exist in Neo4j. Response shape unchanged (nodes/edges as documented in 2026-08-27.2); only row aggregation moved server-side. No request parameter changed."
     }
   ]
 }

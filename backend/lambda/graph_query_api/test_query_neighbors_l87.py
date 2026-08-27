@@ -79,7 +79,7 @@ class TestQueryNeighborsCrossProject(unittest.TestCase):
         rec = _FakeRecord(
             neighbor=neighbor,
             start=start,
-            edge_infos=[{"type": "MENTIONS", "start": "DVP-TSK-465", "end": "ENC-FTR-049"}],
+            path_lists=[[{"type": "MENTIONS", "start": "DVP-TSK-465", "end": "ENC-FTR-049"}]],
         )
         driver = _FakeDriver(rows=[rec])
         result = lf._query_neighbors(driver, "devops", {
@@ -100,7 +100,7 @@ class TestQueryNeighborsCrossProject(unittest.TestCase):
         neighbor = _FakeNode("ENC-TSK-B01", ["Task"], project_id="enceladus", title="y")
         rec = _FakeRecord(
             neighbor=neighbor,
-            edge_infos=[{"type": "MENTIONS", "start": "ENC-TSK-A01", "end": "ENC-TSK-B01"}],
+            path_lists=[[{"type": "MENTIONS", "start": "ENC-TSK-A01", "end": "ENC-TSK-B01"}]],
         )
         driver = _FakeDriver(rows=[rec])
         result = lf._query_neighbors(driver, "enceladus", {
@@ -127,10 +127,10 @@ class TestQueryNeighborsAllHops(unittest.TestCase):
         rec = _FakeRecord(
             neighbor=related,
             start=plan,
-            edge_infos=[
+            path_lists=[[
                 {"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"},
                 {"type": "RELATED_TO", "start": "ENC-TSK-O59", "end": "ENC-ISS-648"},
-            ],
+            ]],
         )
         driver = _FakeDriver(rows=[rec])
         result = lf._query_neighbors(driver, "enceladus", {
@@ -148,9 +148,9 @@ class TestQueryNeighborsAllHops(unittest.TestCase):
         t2 = _FakeNode("ENC-TSK-P40", ["Task"], project_id="enceladus", title="b")
         rows = [
             _FakeRecord(neighbor=t1, start=plan,
-                        edge_infos=[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}]),
+                        path_lists=[[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}]]),
             _FakeRecord(neighbor=t2, start=plan,
-                        edge_infos=[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-P40"}]),
+                        path_lists=[[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-P40"}]]),
         ]
         driver = _FakeDriver(rows=rows)
         result = lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082"})
@@ -164,14 +164,47 @@ class TestQueryNeighborsAllHops(unittest.TestCase):
         deep = _FakeNode("ENC-ISS-648", ["Issue"], project_id="enceladus", title="i")
         shared = {"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}
         rows = [
-            _FakeRecord(neighbor=t1, start=plan, edge_infos=[dict(shared)]),
+            _FakeRecord(neighbor=t1, start=plan, path_lists=[[dict(shared)]]),
             _FakeRecord(neighbor=deep, start=plan,
-                        edge_infos=[dict(shared),
-                                    {"type": "RELATED_TO", "start": "ENC-TSK-O59", "end": "ENC-ISS-648"}]),
+                        path_lists=[[dict(shared)],
+                                    [{"type": "RELATED_TO", "start": "ENC-TSK-O59", "end": "ENC-ISS-648"}]]),
         ]
         driver = _FakeDriver(rows=rows)
         result = lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082", "depth": 2})
         self.assertEqual(len(result["edges"]), 2)
+
+
+class TestQueryNeighborsPerNeighborLimit(unittest.TestCase):
+    """ENC-TSK-P61 verification fix: paths are collected PER NEIGHBOR (the
+    Cypher's collect(...)[..8]) so LIMIT bounds neighbors, and every
+    neighbor's first-hop edges survive regardless of how many path variants
+    denser neighbors have."""
+
+    def test_multiple_path_variants_per_neighbor_all_flattened(self):
+        plan = _FakeNode("ENC-PLN-082", ["Plan"], project_id="enceladus", title="Cutover")
+        obj = _FakeNode("ENC-TSK-O59", ["Task"], project_id="enceladus", title="a")
+        rec = _FakeRecord(
+            neighbor=obj,
+            start=plan,
+            path_lists=[
+                [{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}],
+                [{"type": "RELATED_TO", "start": "ENC-PLN-082", "end": "ENC-TSK-P37"},
+                 {"type": "RELATED_TO", "start": "ENC-TSK-P37", "end": "ENC-TSK-O59"}],
+            ],
+        )
+        driver = _FakeDriver(rows=[rec])
+        result = lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082", "depth": 2})
+        types = sorted(set(e["type"] for e in result["edges"]))
+        self.assertEqual(types, ["PLAN_CONTAINS", "RELATED_TO"])
+        self.assertTrue(any(e["type"] == "PLAN_CONTAINS" and e["start"] == "ENC-PLN-082" for e in result["edges"]))
+
+    def test_cypher_collects_paths_per_neighbor_with_limit(self):
+        driver = _FakeDriver(rows=[])
+        lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082", "depth": 2})
+        cypher, _params = driver.captured_cypher[0]
+        self.assertIn("WITH start, neighbor, collect(", cypher)
+        self.assertIn("[..8] AS path_lists", cypher)
+        self.assertIn("LIMIT $limit", cypher)
 
 
 if __name__ == "__main__":

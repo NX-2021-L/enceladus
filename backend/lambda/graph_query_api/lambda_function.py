@@ -719,18 +719,25 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     # is scoped to project_id (that's the caller's actual query intent);
     # neighbors may belong to any project.
     # ENC-TSK-P61 (ENC-ISS-715): return EVERY relationship on each path, not
-    # just the last hop. The previous [-1] projection discarded the first hop
-    # of every depth>1 path — which is exactly where the viewed plan's own
-    # PLAN_CONTAINS edges live — so the plan graph showed RELATED_TO tails
-    # while claiming the plan had no membership edges at all. The start node
-    # is also returned so the caller never has to fabricate an unlabeled stub
-    # for the record the graph is centred on.
+    # just the last hop, and include the START node so the caller never has
+    # to fabricate an unlabeled stub for the record the graph is centred on.
+    #
+    # Verification fix (same task): LIMIT must bound NEIGHBORS, not path
+    # rows. The DISTINCT-row form emitted one row per (neighbor, path
+    # variant); on a dense 2-hop neighborhood the path variants of a few
+    # near neighbors exhausted the LIMIT before other neighbors emitted any
+    # row at all — which silently dropped the viewed plan\'s own first-hop
+    # PLAN_CONTAINS edges even though they exist in Neo4j. Paths are now
+    # collected per neighbor (capped at 8 variants each) and LIMIT applies
+    # to the per-neighbor rows.
     cypher = (
         f"MATCH (start)-{edge_pattern}-(neighbor) "
         f"WHERE start.record_id = $record_id AND start.project_id = $project_id "
         f"{weight_filter}"
-        "RETURN DISTINCT neighbor, start, "
-        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}] AS edge_infos "
+        "WITH start, neighbor, collect("
+        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}]"
+        ")[..8] AS path_lists "
+        "RETURN neighbor, start, path_lists "
         "LIMIT $limit"
     )
 
@@ -753,13 +760,14 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
             if rid and rid not in seen_ids:
                 nodes.append(nd)
                 seen_ids.add(rid)
-            for edge in rec.get("edge_infos") or []:
-                e = dict(edge)
-                s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
-                canon = (min(s, t), max(s, t), tp)
-                if canon not in seen_edges:
-                    edges.append(e)
-                    seen_edges.add(canon)
+            for path_edges in rec.get("path_lists") or []:
+                for edge in path_edges or []:
+                    e = dict(edge)
+                    s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
+                    canon = (min(s, t), max(s, t), tp)
+                    if canon not in seen_edges:
+                        edges.append(e)
+                        seen_edges.add(canon)
 
     return {
         "nodes": nodes,

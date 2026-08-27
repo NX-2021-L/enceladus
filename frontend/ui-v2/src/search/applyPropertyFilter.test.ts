@@ -86,3 +86,37 @@ describe('applyPropertyFilter', () => {
     expect(filtered[0]?.recordId).toBe('ENC-TSK-M41')
   })
 })
+
+describe("'!=' on a missing field (ENC-TSK-P59 verification fix / ENC-ISS-725)", () => {
+  const base = {
+    recordId: 'ENC-TSK-XXX',
+    recordType: 'task' as const,
+    projectId: 'enceladus',
+    title: 'x',
+    status: 'open',
+  }
+
+  it('a record WITHOUT the field satisfies !=, matching the server counter semantics', () => {
+    const hits = applyPropertyFilter([base], {
+      tokens: [{ propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' }],
+      operation: 'and',
+    })
+    expect(hits).toHaveLength(1)
+  })
+
+  it('a record WITH the excluded value still fails !=', () => {
+    const hits = applyPropertyFilter([{ ...base, checkoutState: 'checked_out' }], {
+      tokens: [{ propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' }],
+      operation: 'and',
+    })
+    expect(hits).toHaveLength(0)
+  })
+
+  it('other operators still require the field to exist', () => {
+    const hits = applyPropertyFilter([base], {
+      tokens: [{ propertyKey: 'checkout_state', operator: '=', value: 'checked_in' }],
+      operation: 'and',
+    })
+    expect(hits).toHaveLength(0)
+  })
+})
