@@ -75,17 +75,22 @@ class TestQueryNeighborsCrossProject(unittest.TestCase):
         returned -- this is exactly the shape graph_sync's write path
         produces and mentions_drift_audit needs to be able to observe."""
         neighbor = _FakeNode("ENC-FTR-049", ["Feature"], project_id="enceladus", title="x")
+        start = _FakeNode("DVP-TSK-465", ["Task"], project_id="devops", title="src")
         rec = _FakeRecord(
             neighbor=neighbor,
-            edge_info={"type": "MENTIONS", "start": "DVP-TSK-465", "end": "ENC-FTR-049"},
+            start=start,
+            edge_infos=[{"type": "MENTIONS", "start": "DVP-TSK-465", "end": "ENC-FTR-049"}],
         )
         driver = _FakeDriver(rows=[rec])
         result = lf._query_neighbors(driver, "devops", {
             "record_id": "DVP-TSK-465",
             "edge_types": "MENTIONS",
         })
-        self.assertEqual(len(result["nodes"]), 1)
-        self.assertEqual(result["nodes"][0]["record_id"], "ENC-FTR-049")
+        # ENC-TSK-P61: the start node now rides along; the cross-project
+        # neighbor must still be present.
+        ids = [n["record_id"] for n in result["nodes"]]
+        self.assertIn("ENC-FTR-049", ids)
+        self.assertIn("DVP-TSK-465", ids)
         self.assertEqual(len(result["edges"]), 1)
         self.assertEqual(result["edges"][0]["type"], "MENTIONS")
 
@@ -95,7 +100,7 @@ class TestQueryNeighborsCrossProject(unittest.TestCase):
         neighbor = _FakeNode("ENC-TSK-B01", ["Task"], project_id="enceladus", title="y")
         rec = _FakeRecord(
             neighbor=neighbor,
-            edge_info={"type": "MENTIONS", "start": "ENC-TSK-A01", "end": "ENC-TSK-B01"},
+            edge_infos=[{"type": "MENTIONS", "start": "ENC-TSK-A01", "end": "ENC-TSK-B01"}],
         )
         driver = _FakeDriver(rows=[rec])
         result = lf._query_neighbors(driver, "enceladus", {
@@ -104,6 +109,69 @@ class TestQueryNeighborsCrossProject(unittest.TestCase):
         })
         self.assertEqual(len(result["nodes"]), 1)
         self.assertEqual(result["nodes"][0]["record_id"], "ENC-TSK-B01")
+
+
+class TestQueryNeighborsAllHops(unittest.TestCase):
+    """ENC-TSK-P61 (ENC-ISS-715): every hop of every path is returned, and
+    the start node rides along.
+
+    The old projection kept only the LAST relationship of each path
+    ([-1]) -- on a depth-2 plan graph that discarded the plan's own
+    first-hop PLAN_CONTAINS edges while keeping the RELATED_TO tails,
+    which is exactly the UAT R11 symptom (95 edges, zero PLAN_CONTAINS
+    from the viewed plan)."""
+
+    def test_all_hops_of_a_depth2_path_are_returned(self):
+        plan = _FakeNode("ENC-PLN-082", ["Plan"], project_id="enceladus", title="Cutover")
+        related = _FakeNode("ENC-ISS-648", ["Issue"], project_id="enceladus", title="issue")
+        rec = _FakeRecord(
+            neighbor=related,
+            start=plan,
+            edge_infos=[
+                {"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"},
+                {"type": "RELATED_TO", "start": "ENC-TSK-O59", "end": "ENC-ISS-648"},
+            ],
+        )
+        driver = _FakeDriver(rows=[rec])
+        result = lf._query_neighbors(driver, "enceladus", {
+            "record_id": "ENC-PLN-082",
+            "depth": 2,
+        })
+        types = sorted(e["type"] for e in result["edges"])
+        self.assertEqual(types, ["PLAN_CONTAINS", "RELATED_TO"])
+        first_hop = [e for e in result["edges"] if e["type"] == "PLAN_CONTAINS"][0]
+        self.assertEqual(first_hop["start"], "ENC-PLN-082")
+
+    def test_start_node_is_included_once(self):
+        plan = _FakeNode("ENC-PLN-082", ["Plan"], project_id="enceladus", title="Cutover")
+        t1 = _FakeNode("ENC-TSK-O59", ["Task"], project_id="enceladus", title="a")
+        t2 = _FakeNode("ENC-TSK-P40", ["Task"], project_id="enceladus", title="b")
+        rows = [
+            _FakeRecord(neighbor=t1, start=plan,
+                        edge_infos=[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}]),
+            _FakeRecord(neighbor=t2, start=plan,
+                        edge_infos=[{"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-P40"}]),
+        ]
+        driver = _FakeDriver(rows=rows)
+        result = lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082"})
+        ids = [n["record_id"] for n in result["nodes"]]
+        self.assertEqual(ids.count("ENC-PLN-082"), 1)
+        self.assertEqual(sorted(ids), ["ENC-PLN-082", "ENC-TSK-O59", "ENC-TSK-P40"])
+
+    def test_shared_hops_are_deduplicated_across_paths(self):
+        plan = _FakeNode("ENC-PLN-082", ["Plan"], project_id="enceladus", title="Cutover")
+        t1 = _FakeNode("ENC-TSK-O59", ["Task"], project_id="enceladus", title="a")
+        deep = _FakeNode("ENC-ISS-648", ["Issue"], project_id="enceladus", title="i")
+        shared = {"type": "PLAN_CONTAINS", "start": "ENC-PLN-082", "end": "ENC-TSK-O59"}
+        rows = [
+            _FakeRecord(neighbor=t1, start=plan, edge_infos=[dict(shared)]),
+            _FakeRecord(neighbor=deep, start=plan,
+                        edge_infos=[dict(shared),
+                                    {"type": "RELATED_TO", "start": "ENC-TSK-O59", "end": "ENC-ISS-648"}]),
+        ]
+        driver = _FakeDriver(rows=rows)
+        result = lf._query_neighbors(driver, "enceladus", {"record_id": "ENC-PLN-082", "depth": 2})
+        self.assertEqual(len(result["edges"]), 2)
 
 
 if __name__ == "__main__":

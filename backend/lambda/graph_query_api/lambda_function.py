@@ -718,12 +718,19 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     # correctly-written edges permanently unverifiable. Only the START node
     # is scoped to project_id (that's the caller's actual query intent);
     # neighbors may belong to any project.
+    # ENC-TSK-P61 (ENC-ISS-715): return EVERY relationship on each path, not
+    # just the last hop. The previous [-1] projection discarded the first hop
+    # of every depth>1 path — which is exactly where the viewed plan's own
+    # PLAN_CONTAINS edges live — so the plan graph showed RELATED_TO tails
+    # while claiming the plan had no membership edges at all. The start node
+    # is also returned so the caller never has to fabricate an unlabeled stub
+    # for the record the graph is centred on.
     cypher = (
         f"MATCH (start)-{edge_pattern}-(neighbor) "
         f"WHERE start.record_id = $record_id AND start.project_id = $project_id "
         f"{weight_filter}"
-        "RETURN DISTINCT neighbor, "
-        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}][-1] AS edge_info "
+        "RETURN DISTINCT neighbor, start, "
+        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}] AS edge_infos "
         "LIMIT $limit"
     )
 
@@ -734,13 +741,19 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     with driver.session() as session:
         result = session.run(cypher, record_id=record_id, project_id=project_id, limit=MAX_RESULTS)
         for rec in result:
+            start_node = rec.get("start")
+            if start_node is not None:
+                snd = _node_to_dict(start_node)
+                srid = snd.get("record_id", "")
+                if srid and srid not in seen_ids:
+                    nodes.append(snd)
+                    seen_ids.add(srid)
             nd = _node_to_dict(rec["neighbor"])
             rid = nd.get("record_id", "")
             if rid and rid not in seen_ids:
                 nodes.append(nd)
                 seen_ids.add(rid)
-            edge = rec.get("edge_info")
-            if edge:
+            for edge in rec.get("edge_infos") or []:
                 e = dict(edge)
                 s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
                 canon = (min(s, t), max(s, t), tp)
