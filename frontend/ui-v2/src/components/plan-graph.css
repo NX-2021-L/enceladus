@@ -30,7 +30,10 @@
 
 .plan-graph__canvas {
   width: 100%;
-  min-height: calc(var(--space-16) * 14);
+  /* ENC-TSK-P61: column-fit height — the old 14x tower forced a tiny zoom
+     with the layout pinned at the bottom of an empty box. */
+  min-height: calc(var(--space-16) * 7);
+  max-height: calc(var(--space-16) * 8);
   border-radius: var(--radius-sm);
   border: var(--border-subtle);
   background: color-mix(in srgb, var(--bg-surface) 85%, #020617 15%);

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import cytoscape, { type Core } from 'cytoscape'
@@ -20,6 +20,9 @@ export function PlanGraphExplorer({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cyRef = useRef<Core | null>(null)
+  // ENC-TSK-P61: the summary line reports what cytoscape actually holds, so
+  // it can never disagree with the rendered graph (UAT R11 count mismatch).
+  const [cyCounts, setCyCounts] = useState<{ nodes: number; edges: number } | null>(null)
   const navigate = useNavigate()
   // Prefetched at app boot (main.tsx) — resolved from cache by the time a
   // plan page renders, so the effect dependency below is stable in practice.
@@ -129,7 +132,20 @@ export function PlanGraphExplorer({
         },
       ],
       layout: { name: 'concentric', concentric: (node) => (node.id() === planId ? 2 : 1), levelWidth: () => 2 },
+      minZoom: 0.2,
+      maxZoom: 2.5,
     })
+
+    // ENC-TSK-P61 (ENC-ISS-715): fit the graph to the actual column and keep
+    // nodes legible — the first paint used to sit at zoom ~0.13 with ~2px
+    // nodes at the bottom of an over-tall canvas.
+    cy.fit(undefined, 24)
+    if (cy.zoom() < 0.35) {
+      cy.zoom(0.35)
+      const root = cy.getElementById(planId)
+      if (root.nonempty()) cy.center(root)
+    }
+    setCyCounts({ nodes: cy.nodes().length, edges: cy.edges().length })
 
     cy.on('tap', 'node', (evt) => {
       const id = evt.target.id()
@@ -164,7 +180,13 @@ export function PlanGraphExplorer({
         </p>
       ) : null}
       <div ref={containerRef} className="plan-graph__canvas" />
-      {data?.summary ? <p className="plan-graph__summary">{data.summary}</p> : null}
+      {cyCounts ? (
+        <p className="plan-graph__summary">
+          {cyCounts.nodes} nodes, {cyCounts.edges} edges (rendered)
+        </p>
+      ) : data?.summary ? (
+        <p className="plan-graph__summary">{data.summary}</p>
+      ) : null}
     </section>
   )
 }

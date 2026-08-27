@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-27.1",
-  "updated_at": "2026-08-27T04:15:00Z",
-  "last_change_summary": "ENC-TSK-P60 (ENC-PLN-090 UAT-W3, ENC-ISS-714/718/719): feed_query corpus attrs enriched and list-normalised. attrs now additionally carries components (tasks; ALWAYS an array — corpus.normalize_str_list coerces a string-typed anomaly to a one-element list and WARNs with the record id so the ChipRow-crashing record is identifiable in CloudWatch), tags (tracker records when present, always arrays), and checkout_state (tasks/plans when present — feeds the PWA's client-side checkout_state filter). _delta_corpus_entry mirrors the same attrs for parity. The authenticated snapshot (GET /api/v1/feed/tasks.json) rows additionally carry the governed priority. _transform_task_from_ddb reads components via the new lenient _ddb_str_list_lenient (DynamoDB S coerced to one-element list + warning). Additive only; no field removed or renamed.",
+  "version": "2026-08-27.2",
+  "updated_at": "2026-08-27T04:30:00Z",
+  "last_change_summary": "ENC-TSK-P61 (ENC-PLN-090 UAT-W4, ENC-ISS-715): graph_query_api neighbors search response shape corrected. The Cypher projection previously returned only the LAST relationship of each path ([-1]) — on a depth>1 traversal this discarded every first-hop edge, which is exactly where a viewed plan's own PLAN_CONTAINS edges live, so the plan graph showed RELATED_TO tails while reporting zero plan-membership edges. neighbors now returns EVERY hop of every path (deduplicated by canonical (start,end,type)) and includes the START node in nodes[] so consumers never fabricate an unlabeled stub for the record the graph is centred on. graph_sync PLAN_CONTAINS emission unchanged (correct since ENC-TSK-E01); missing edges for cutover-era plan updates are backfilled operationally via a governed plan-record touch (tracker.log) that replays the stream reconcile. Additive response-shape change; no request parameter changed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3702,6 +3702,10 @@
             "max": 1.0
           },
           "usage_guidance": "Minimum weight threshold for edge filtering in neighbors and traversal queries. Legacy edges without a weight property default to 1.0 via COALESCE. Example: 0.5 filters out low-confidence edges."
+        },
+        "neighbors_response": {
+          "type": "object",
+          "definition": "neighbors search result: nodes[] (every node on every returned path INCLUDING the start node, each with record_id/title/record_type/_labels when projected), edges[] (EVERY hop of every path, deduplicated by canonical (start,end,type) — not only the final hop; ENC-TSK-P61/ENC-ISS-715), paths[], summary, query_cypher."
         }
       },
       "node_labels": [
@@ -8879,6 +8883,11 @@
       "version": "2026-08-27.1",
       "date": "2026-08-27",
       "summary": "ENC-TSK-P60 (ENC-PLN-090 UAT-W3, ENC-ISS-714/718/719): feed_query corpus attrs enriched and list-normalised. attrs now additionally carries components (tasks; ALWAYS an array — corpus.normalize_str_list coerces a string-typed anomaly to a one-element list and WARNs with the record id so the ChipRow-crashing record is identifiable in CloudWatch), tags (tracker records when present, always arrays), and checkout_state (tasks/plans when present — feeds the PWA's client-side checkout_state filter). _delta_corpus_entry mirrors the same attrs for parity. The authenticated snapshot (GET /api/v1/feed/tasks.json) rows additionally carry the governed priority. _transform_task_from_ddb reads components via the new lenient _ddb_str_list_lenient (DynamoDB S coerced to one-element list + warning). Additive only; no field removed or renamed."
+    },
+    {
+      "version": "2026-08-27.2",
+      "date": "2026-08-27",
+      "summary": "ENC-TSK-P61 (ENC-PLN-090 UAT-W4, ENC-ISS-715): graph_query_api neighbors search response shape corrected. The Cypher projection previously returned only the LAST relationship of each path ([-1]) — on a depth>1 traversal this discarded every first-hop edge, which is exactly where a viewed plan's own PLAN_CONTAINS edges live, so the plan graph showed RELATED_TO tails while reporting zero plan-membership edges. neighbors now returns EVERY hop of every path (deduplicated by canonical (start,end,type)) and includes the START node in nodes[] so consumers never fabricate an unlabeled stub for the record the graph is centred on. graph_sync PLAN_CONTAINS emission unchanged (correct since ENC-TSK-E01); missing edges for cutover-era plan updates are backfilled operationally via a governed plan-record touch (tracker.log) that replays the stream reconcile. Additive response-shape change; no request parameter changed."
     }
   ]
 }
