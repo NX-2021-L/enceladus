@@ -1077,7 +1077,12 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: !If [IsArm64, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      # ENC-TSK-P55 / ENC-ISS-710: 256MB (~1/8 vCPU) let the full-corpus load
+      # (per-project GSI fan-out + documents table scan) run 29-40s memory-pegged
+      # on prod, past API Gateway's hard 30s integration cap — the Cockpit
+      # rendered an empty Feed/Docs. 1024MB quadruples memory AND CPU; the
+      # in-container corpus cache then holds warm.
+      MemorySize: 1024
       Timeout: 60  # ENC-TSK-797: increased from 15 for synchronous feed_publisher invoke
       Architectures:
         - !If [IsArm64, arm64, x86_64]
