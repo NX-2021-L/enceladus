@@ -39,6 +39,21 @@ on:
         type: string
         required: false
         default: ""
+      # ENC-TSK-P51: custom-domain attachment (07-ui-cdn CustomDomainCutover).
+      # Blank leaves the stack's stored values untouched (aws cloudformation
+      # deploy reuses previous parameter values), so ordinary redeploys never
+      # detach an alias. Set BOTH to attach: the ACM cert must be ISSUED in
+      # us-east-1 and cover the domain, or the CloudFront update fails.
+      custom_domain:
+        description: "FQDN alias for the distribution (e.g. enceladus.jreese.net); blank => keep stored value"
+        type: string
+        required: false
+        default: ""
+      acm_certificate_arn:
+        description: "us-east-1 ACM certificate ARN covering custom_domain; blank => keep stored value"
+        type: string
+        required: false
+        default: ""
       # ENC-TSK-P52 / ENC-ISS-708: post-cutover, v4/main is the production branch
       # of record, but every v4/** ref derives '-gamma' below and the deploy
       # role's OIDC trust only admits refs main + v4/* (04-github-roles.yaml) —
@@ -183,16 +198,24 @@ jobs:
         id: changeset
         env:
           INPUT_API_ORIGIN_DOMAIN_NAME: ${{ github.event.inputs.api_origin_domain_name }}
+          INPUT_CUSTOM_DOMAIN: ${{ github.event.inputs.custom_domain }}
+          INPUT_ACM_CERTIFICATE_ARN: ${{ github.event.inputs.acm_certificate_arn }}
         run: |
           set -euo pipefail
 
-          # Only override ApiOriginDomainName when the dispatch supplied one;
-          # otherwise let the template Default (gamma execute-api host) stand,
-          # and `aws cloudformation deploy` reuse the stack's stored value on
-          # subsequent updates.
+          # Only override parameters the dispatch supplied; otherwise let the
+          # template Default stand on CREATE and `aws cloudformation deploy`
+          # reuse the stack's stored values on subsequent updates.
           extra_overrides=()
           if [ -n "${INPUT_API_ORIGIN_DOMAIN_NAME}" ]; then
             extra_overrides+=("ApiOriginDomainName=${INPUT_API_ORIGIN_DOMAIN_NAME}")
+          fi
+          # ENC-TSK-P51: attach a custom domain + ACM cert (CustomDomainCutover).
+          if [ -n "${INPUT_CUSTOM_DOMAIN}" ]; then
+            extra_overrides+=("CustomDomain=${INPUT_CUSTOM_DOMAIN}")
+          fi
+          if [ -n "${INPUT_ACM_CERTIFICATE_ARN}" ]; then
+            extra_overrides+=("AcmCertificateArn=${INPUT_ACM_CERTIFICATE_ARN}")
           fi
 
           aws cloudformation deploy \
