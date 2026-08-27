@@ -37,6 +37,20 @@ on:
         type: string
         required: false
         default: "devops-tracker-api"
+      # ENC-TSK-P54 / ENC-ISS-708: post-cutover, v4/main is the production
+      # branch of record, but this lane derived the prod plane exclusively from
+      # ref main while the deploy role's OIDC trust admits only refs main + v4/*
+      # (04-github-roles.yaml) — the P40 dead-end class, third instance (fixed
+      # for the compute lane by P40/O61 and the UI lanes by PR #1186/#1187).
+      # Empty keeps the historical ref-derived routing (push events never supply
+      # it); 'production' targets the prod stack from a trusted v4 ref, with the
+      # apply still pausing at the v3-prod required-reviewer Environment.
+      target_environment:
+        description: "Override the target plane (empty = derive from ref, as before). 'production' pauses at the v3-prod required-reviewer gate before applying."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
       reason:
         description: "Why this deploy is being triggered"
         type: string
@@ -54,7 +68,11 @@ concurrency:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/03-api.yaml
-  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  # ENC-TSK-P54: resolution order (P40 pattern — written gamma-first because
+  # GitHub Actions treats '' as falsy): explicit 'gamma' input, OR no input +
+  # v4/** ref => '-gamma'; anything else (explicit 'production', or a main-ref
+  # event) => '' (prod).
+  ENVIRONMENT_SUFFIX: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-api
   DEFAULT_COMPUTE_STACK_NAME: enceladus-compute
   DEFAULT_API_NAME: devops-tracker-api
@@ -234,8 +252,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
-    # none. A main-branch run therefore pauses here as a rejectable request.
-    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    # none. A prod-targeted run therefore pauses here as a rejectable request.
+    # ENC-TSK-P54: gate on the RESOLVED plane (target_environment first, ref
+    # second) so a v4/main dispatch with target_environment=production reaches
+    # this gate instead of silently routing to gamma (P40 pattern).
+    environment: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && 'v4-gamma' || 'v3-prod' }}
 
     steps:
       - name: Configure AWS credentials (environment-scoped OIDC)
