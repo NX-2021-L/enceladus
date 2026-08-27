@@ -40,6 +40,7 @@ import {
   Tabs,
 } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
+import { RecordLink } from '../components/RecordLink'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import {
   approveEscalation,
@@ -154,7 +155,7 @@ export function EscalationsRoute() {
       header: 'Target record',
       cell: (row: EscalationRow) => (
         <span className="ev2-esc__mono">
-          {row.targetRecordId}
+          <RecordLink id={row.targetRecordId} />
           {row.driftDetected && (
             <span className="ev2-esc__drift" title="Target record changed since this was filed">
               drift
@@ -171,7 +172,11 @@ export function EscalationsRoute() {
     {
       id: 'session',
       header: 'Requested by',
-      cell: (row: EscalationRow) => <span className="ev2-esc__mono">{row.requestedBySession}</span>,
+      cell: (row: EscalationRow) => (
+        <span className="ev2-esc__mono">
+          <RecordLink id={row.requestedBySession} />
+        </span>
+      ),
     },
     {
       id: 'age',
@@ -193,6 +198,7 @@ export function EscalationsRoute() {
     label: tab.label,
     count: tab.count,
     content: (
+      <div className="ev2-esc__table-scroll">
       <Table
         columnDefinitions={columnDefinitions}
         items={feedQuery.isPending ? [] : visibleRows}
@@ -205,6 +211,7 @@ export function EscalationsRoute() {
               : 'No escalations in this bucket.'
         }
       />
+      </div>
     ),
   }))
 
@@ -315,12 +322,20 @@ function EscalationDetail({ row }: { row: EscalationRow }) {
         items={[
           { label: 'Status', value: <StatusChip status={row.status} /> },
           { label: 'Mutation type', value: item.mutation_type ?? '—', mono: true },
-          { label: 'Target record', value: row.targetRecordId, mono: true },
-          { label: 'Requested by', value: row.requestedBySession, mono: true },
+          { label: 'Target record', value: <RecordLink id={row.targetRecordId} />, mono: true },
+          { label: 'Requested by', value: <RecordLink id={row.requestedBySession} />, mono: true },
           { label: 'Agent type', value: item.requested_by?.agent_type_id ?? '—', mono: true },
           { label: 'Age', value: row.ageLabel },
           { label: 'Created', value: row.createdAt, mono: true },
-          { label: 'Decided by', value: item.approved_by?.email ?? '—', mono: true },
+          {
+            label: 'Decided by',
+            value: item.approved_by?.email ? (
+              <a href={`mailto:${item.approved_by.email}`}>{item.approved_by.email}</a>
+            ) : (
+              '—'
+            ),
+            mono: true,
+          },
           { label: 'Applied at', value: item.applied_at ?? '—', mono: true },
         ]}
       />

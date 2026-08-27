@@ -75,6 +75,23 @@ export async function fetchAwaitingCheckoutCount(
   return records.filter((r) => r.checkout_state !== 'checked_out').length
 }
 
+/** ENC-TSK-P59 (ENC-ISS-725): cross-project awaiting-checkout count.
+ *
+ * The Home tile used to count ONE project (whichever sorted first in the
+ * registry — agentharmony) while looking like a global number. The corpus
+ * endpoint has no checkout_state filter, so exact truth is a per-project
+ * fan-out over the tracker API, summed. Failed projects count 0 rather than
+ * failing the whole tile. */
+export async function fetchAwaitingCheckoutCountAll(
+  projectIds: string[],
+  init?: { signal?: AbortSignal },
+): Promise<number> {
+  const counts = await Promise.all(
+    projectIds.map((id) => fetchAwaitingCheckoutCount(id, init).catch(() => 0)),
+  )
+  return counts.reduce((sum, n) => sum + n, 0)
+}
+
 /** ENC-TSK-M27 AC1: a GitHub Actions run paused on the v3-prod Environment's
  * required-reviewer gate. */
 export interface PausedApprovalRun {

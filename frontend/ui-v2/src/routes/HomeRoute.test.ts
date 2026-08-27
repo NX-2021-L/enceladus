@@ -1,30 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { openTasksSearchFor } from './HomeRoute'
+import { OPEN_TASKS_SEARCH } from './HomeRoute'
 import { parseFilterQuery } from '../search/feedSearchParams'
 
 /**
- * ENC-TSK-M36 (feed data-truth, AC-3) -- the "Awaiting checkout" Home tile
- * counts a SINGLE project (api/homeQueue.ts::fetchAwaitingCheckoutCount), but
- * its destination Feed link used to carry no project_id token at all, so the
- * number shown on the tile and the number of rows Feed actually displayed
- * could disagree the moment another project also had awaiting-checkout
- * tasks. This locks in that the generated filter always scopes to the same
- * project the count was computed for.
+ * ENC-TSK-P59 (ENC-ISS-725, supersedes the ENC-TSK-M36 single-project
+ * scoping) -- the "Awaiting checkout" Home tile now counts EVERY project
+ * (api/homeQueue.ts::fetchAwaitingCheckoutCountAll sums the per-project
+ * tracker counts), so its destination Feed filter must carry the
+ * status/record_type/checkout_state pills ONLY. A project_id token here
+ * would reintroduce the UAT H3 defect: a global-looking number whose link
+ * opens a single arbitrary project's rows (0 hits). Both sides measuring
+ * all projects is what keeps the tile number and the Feed rows in
+ * agreement -- the M36 data-truth invariant, preserved under the new scope.
  */
-describe('openTasksSearchFor', () => {
-  it('scopes the destination Feed filter to the given project', () => {
-    const search = openTasksSearchFor('enceladus')
-    const parsed = parseFilterQuery(search.f, search.op)
-    const propertyKeys = parsed.tokens.map((t) => t.propertyKey)
-    expect(propertyKeys).toContain('project_id')
-
-    const projectToken = parsed.tokens.find((t) => t.propertyKey === 'project_id')
-    expect(projectToken).toEqual({ propertyKey: 'project_id', operator: '=', value: 'enceladus' })
-  })
-
-  it('still carries the pre-existing status/record_type/checkout_state tokens', () => {
-    const search = openTasksSearchFor('some-other-project')
-    const parsed = parseFilterQuery(search.f, search.op)
+describe('OPEN_TASKS_SEARCH (awaiting-checkout tile destination)', () => {
+  it('carries the status/record_type/checkout_state tokens', () => {
+    const parsed = parseFilterQuery(OPEN_TASKS_SEARCH.f, OPEN_TASKS_SEARCH.op)
     const byKey = Object.fromEntries(parsed.tokens.map((t) => [t.propertyKey, t]))
     expect(byKey.status).toEqual({ propertyKey: 'status', operator: '=', value: 'open' })
     expect(byKey.record_type).toEqual({ propertyKey: 'record_type', operator: '=', value: 'task' })
@@ -35,9 +26,10 @@ describe('openTasksSearchFor', () => {
     })
   })
 
-  it('changes with the project so two different projects never collide', () => {
-    const a = openTasksSearchFor('enceladus')
-    const b = openTasksSearchFor('harrisonfamily')
-    expect(a.f).not.toBe(b.f)
+  it('is NOT scoped to any single project (the count is cross-project)', () => {
+    const parsed = parseFilterQuery(OPEN_TASKS_SEARCH.f, OPEN_TASKS_SEARCH.op)
+    const propertyKeys = parsed.tokens.map((t) => t.propertyKey)
+    expect(propertyKeys).not.toContain('project_id')
+    expect(parsed.tokens).toHaveLength(3)
   })
 })

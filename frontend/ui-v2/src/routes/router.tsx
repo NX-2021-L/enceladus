@@ -94,6 +94,10 @@ const projectsRoute = createRoute({
 const docsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/docs',
+  // ENC-TSK-P59: project-card "Docs" links land pre-filtered by project.
+  validateSearch: (raw: Record<string, unknown>) => ({
+    project: typeof raw.project === 'string' ? raw.project : '',
+  }),
   component: lazyRouteComponent(() => import('./DocsRoute'), 'DocsRoute'),
 })
 const governanceRoute = createRoute({

@@ -11,3 +11,22 @@
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
+
+/* ENC-TSK-P59 (ENC-ISS-723): project cards navigate — header + browse links. */
+.projects-route__card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.projects-route__card-link:hover {
+  color: var(--accent);
+}
+
+.projects-route__browse {
+  display: inline-flex;
+  gap: var(--space-4);
+}
+
+.projects-route__browse a {
+  color: var(--accent);
+}

@@ -21,11 +21,18 @@ export function CommandPalette() {
   const query = useUiStore((s) => s.commandQuery)
   const setCommandQuery = useUiStore((s) => s.setCommandQuery)
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette)
-  const { nav, canGo, submit } = useCommandNavigation(query)
+  const { nav, canGo, freeText, submit } = useCommandNavigation(query)
 
   if (!open) return null
 
-  const hint = canGo && nav ? (
+  const hint = freeText ? (
+    // ENC-TSK-P59 (ENC-ISS-720): non-ID text is a keyword search.
+    <span>
+      Enter to search{' '}
+      <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{freeText}</span>{' '}
+      in the Feed
+    </span>
+  ) : canGo && nav ? (
     <span>
       Enter to open{' '}
       <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
