@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useSearch } from '@tanstack/react-router'
 import { Autosuggest, Cards } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
@@ -45,7 +45,14 @@ export const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
 export function DocsRoute() {
   useDocumentTitle('Docs')
   const [query, setQuery] = useState('')
-  const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>({ tokens: [] })
+  // ENC-TSK-P59: /docs?project=<id> (project-card Docs link) seeds the
+  // attribute filter with a project_id pill the user can see and remove.
+  const { project: projectParam } = useSearch({ from: '/docs' }) as { project: string }
+  const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(() =>
+    projectParam
+      ? { tokens: [{ propertyKey: 'project_id', operator: '=', value: projectParam }], operation: 'and' }
+      : { tokens: [] },
+  )
   const [sort, setSort] = useState<FeedSort>(DEFAULT_DOCS_SORT)
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)

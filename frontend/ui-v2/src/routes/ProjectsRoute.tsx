@@ -33,9 +33,26 @@ import {
   type ProjectSummary,
 } from '../api/projects'
 import { SessionExpiredError } from '../api/client'
+import { Link } from '@tanstack/react-router'
+import {
+  FEED_SEARCH_DEFAULTS,
+  serializeFilterQuery,
+  type FeedRouteSearch,
+} from '../search/feedSearchParams'
 import { StatusChip } from '../components/StatusChip'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import './projects.css'
+
+/** ENC-TSK-P59: Feed destination pre-filtered to one project. */
+export function projectFeedSearch(projectId: string): FeedRouteSearch {
+  return {
+    ...FEED_SEARCH_DEFAULTS,
+    f: serializeFilterQuery({
+      tokens: [{ propertyKey: 'project_id', operator: '=', value: projectId }],
+      operation: 'and',
+    }),
+  }
+}
 
 function formatUpdatedAt(value?: string): string {
   if (!value) return '—'
@@ -146,15 +163,35 @@ export function ProjectsRoute() {
   })()
 
   const cardDefinition = {
+    // ENC-TSK-P59 (ENC-ISS-723): cards were inert — the header is now a real
+    // anchor into the Feed pre-filtered to the project.
     header: (project: ProjectSummary) => (
-      <span>
+      <Link
+        to="/feed"
+        search={projectFeedSearch(project.project_id)}
+        className="projects-route__card-link"
+      >
         <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, opacity: 0.7, marginRight: 8 }}>
           {project.prefix}
         </span>
         {project.name ?? project.project_id}
-      </span>
+      </Link>
     ),
     sections: [
+      {
+        id: 'browse',
+        header: 'Browse',
+        content: (project: ProjectSummary) => (
+          <span className="projects-route__browse">
+            <Link to="/feed" search={projectFeedSearch(project.project_id)}>
+              Feed →
+            </Link>
+            <Link to="/docs" search={{ project: project.project_id }}>
+              Docs →
+            </Link>
+          </span>
+        ),
+      },
       {
         id: 'status',
         header: 'Status',

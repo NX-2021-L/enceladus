@@ -6,7 +6,7 @@ import { feedCorpusByTypeQueryOptions, feedCorpusQueryOptions } from '../api/fee
 import { recordQueryOptions } from '../api/queryOptions'
 import { fetchEscalations } from '../api/coordination'
 import {
-  fetchAwaitingCheckoutCount,
+  fetchAwaitingCheckoutCountAll,
   fetchOpenP0P1Count,
   fetchPausedApprovals,
   fetchStaleLocks,
@@ -126,26 +126,22 @@ const OPEN_SEARCH: FeedRouteSearch = {
     operation: 'and',
   }),
 }
-// ENC-TSK-M36 (feed data-truth, AC-3): `fetchAwaitingCheckoutCount` measures
-// a SINGLE project (api/homeQueue.ts — GET /api/v1/tracker/{projectId}...),
-// but this token set used to omit project_id entirely, so the tile's link
-// opened an UNSCOPED, cross-project Feed view — any other project's
-// awaiting-checkout tasks counted toward the number shown there even though
-// the tile itself never counted them. Scoping the destination filter to the
-// same project the count came from is what makes the two numbers agree.
-export function openTasksSearchFor(projectId: string): FeedRouteSearch {
-  return {
-    ...FEED_SEARCH_DEFAULTS,
-    f: serializeFilterQuery({
-      tokens: [
-        { propertyKey: 'status', operator: '=', value: 'open' },
-        { propertyKey: 'record_type', operator: '=', value: 'task' },
-        { propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' },
-        { propertyKey: 'project_id', operator: '=', value: projectId },
-      ],
-      operation: 'and',
-    }),
-  }
+// ENC-TSK-P59 (ENC-ISS-725, supersedes the M36 single-project scoping): the
+// tile's count is now the CROSS-project sum (homeQueue.ts::
+// fetchAwaitingCheckoutCountAll), so its destination filter carries the
+// status/record_type/checkout_state pills only — both sides measure every
+// project, which is what keeps the tile number and the Feed rows in
+// agreement (the M36 data-truth invariant, preserved under the new scope).
+export const OPEN_TASKS_SEARCH: FeedRouteSearch = {
+  ...FEED_SEARCH_DEFAULTS,
+  f: serializeFilterQuery({
+    tokens: [
+      { propertyKey: 'status', operator: '=', value: 'open' },
+      { propertyKey: 'record_type', operator: '=', value: 'task' },
+      { propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' },
+    ],
+    operation: 'and',
+  }),
 }
 
 function QueueCard({ row }: { row: QueueRow }) {
@@ -205,9 +201,11 @@ export function HomeRoute() {
     queryKey: ['home', 'open-p0-p1'] as const,
     queryFn: ({ signal }) => fetchOpenP0P1Count({ signal }),
   })
+  const projectIds = projects.map((p) => p.project_id)
   const awaitingCheckoutQuery = useQuery({
-    queryKey: ['home', 'awaiting-checkout', projectId] as const,
-    queryFn: ({ signal }) => fetchAwaitingCheckoutCount(projectId, { signal }),
+    queryKey: ['home', 'awaiting-checkout', projectIds.join(',')] as const,
+    queryFn: ({ signal }) => fetchAwaitingCheckoutCountAll(projectIds, { signal }),
+    enabled: projectIds.length > 0,
   })
 
   // Below-fold "recent activity" — dashboard-wide facets, most-recent-per-type
@@ -385,7 +383,7 @@ export function HomeRoute() {
           </span>
           <span className="home-route__count-label">Open P0/P1</span>
         </Link>
-        <Link to="/feed" search={openTasksSearchFor(projectId)} className="home-route__count-tile">
+        <Link to="/feed" search={OPEN_TASKS_SEARCH} className="home-route__count-tile">
           <span className="home-route__count-value">
             {awaitingCheckoutQuery.isLoading ? '…' : (awaitingCheckoutQuery.data ?? 0)}
           </span>

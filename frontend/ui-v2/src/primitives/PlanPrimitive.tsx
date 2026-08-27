@@ -1,14 +1,16 @@
+import type { ReactNode } from 'react'
 import { Map as MapIcon } from 'lucide-react'
 import type { Plan } from '../types/records'
 import { ContextNodeBadges } from '../components/ContextNodeBadges'
 import { ActiveSessionChip, CategoryChip, CheckoutChip, ComponentChips, PriorityChip } from '../components/ChipRow'
 import { PlanGraphExplorer } from '../components/PlanGraphExplorer'
 import { MetaRow, Metric, Prose, SectionHeading } from '../components/PrimitiveCard'
-import { NeighborsTab, RecordDetailHub, WorklogTab } from '../components/RecordDetailHub'
+import { NeighborsTab, RecordDetailHub, WorklogTab, useRecordHubTabJump } from '../components/RecordDetailHub'
 import { isCheckedOut } from '../utils/transitionArcs'
 
 export function PlanPrimitive({ record }: { record: Plan }) {
   const checkedOut = isCheckedOut(record)
+  const description = record.description?.trim() ? record.description : (record.intent ?? '')
   const vitals = [
     { label: 'Priority', value: record.priority },
     { label: 'Project', value: record.project_id },
@@ -52,15 +54,23 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       overview={
         <>
           <SectionHeading>Description</SectionHeading>
-          <Prose projectId={record.project_id}>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{description}</Prose>
+          {record.intent && record.description?.trim() ? (
+            <>
+              <SectionHeading>Intent</SectionHeading>
+              <Prose projectId={record.project_id}>{record.intent}</Prose>
+            </>
+          ) : null}
           <MetaRow label="Objectives">
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+            <TabJumpCounter tabId="neighbors" label="objectives — open Neighbors tab">
               <MapIcon size={14} strokeWidth={1.5} color="var(--accent)" />
               <Metric>{record.objectives_set?.length ?? 0}</Metric>
-            </span>
+            </TabJumpCounter>
           </MetaRow>
           <MetaRow label="Attached docs">
-            <Metric>{record.attached_documents?.length ?? 0}</Metric>
+            <TabJumpCounter tabId="neighbors" label="attached documents — open Neighbors tab">
+              <Metric>{record.attached_documents?.length ?? 0}</Metric>
+            </TabJumpCounter>
           </MetaRow>
           <PlanGraphExplorer
             projectId={record.project_id}
@@ -83,5 +93,47 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       }
       worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
     />
+  )
+}
+
+/** ENC-TSK-P59 (ENC-ISS-724): link-styled counters now DO something — they
+ * jump the hub to the Neighbors tab where the ids are enumerated. */
+function TabJumpCounter({
+  tabId,
+  label,
+  children,
+}: {
+  tabId: string
+  label: string
+  children: ReactNode
+}) {
+  const jump = useRecordHubTabJump()
+  if (!jump) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+        {children}
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="plan-primitive__tabjump"
+      aria-label={label}
+      onClick={() => jump(tabId)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: 'var(--accent)',
+        font: 'inherit',
+      }}
+    >
+      {children}
+    </button>
   )
 }

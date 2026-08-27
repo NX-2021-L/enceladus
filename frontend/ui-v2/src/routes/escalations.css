@@ -155,3 +155,11 @@
     grid-template-columns: repeat(2, 1fr) !important;
   }
 }
+
+
+/* ENC-TSK-P59 (ENC-ISS-717): the all-bucket table is wider than the column at
+   ~1100px — scroll inside its own container instead of clipping AGE. */
+.ev2-esc__table-scroll {
+  overflow-x: auto;
+  min-width: 0;
+}

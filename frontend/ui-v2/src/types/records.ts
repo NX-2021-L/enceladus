@@ -149,6 +149,8 @@ export interface Plan extends GovernedLifecycleMeta {
   project_id: string
   title: string
   description: string
+  /** Plan intent narrative (tracker API); surfaced on Overview (ENC-TSK-P59). */
+  intent?: string
   status: 'drafted' | 'started' | 'complete' | 'incomplete'
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   category: string | null

@@ -19,6 +19,8 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch } from '@tanstack/react-router'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
+import { Link } from '@tanstack/react-router'
+import { RecordLink } from '../components/RecordLink'
 import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
 import { VirtualList } from '../components/VirtualList'
@@ -145,7 +147,8 @@ export function CoordinationRoute() {
           trackBy="agent_type_id"
           columns={2}
           cardDefinition={{
-            header: (row) => row.agent_type_id,
+            // ENC-TSK-P59 (obs 7): cards navigate like the session cards do.
+            header: (row) => <RecordLink id={row.agent_type_id} recordType="agent" />,
             sections: [
               { id: 'surface', header: 'Surface', content: (row) => row.surface },
               { id: 'model', header: 'Model', content: (row) => row.model },
@@ -167,7 +170,8 @@ export function CoordinationRoute() {
           trackBy="item_id"
           columns={2}
           cardDefinition={{
-            header: (row) => row.title,
+            // ENC-TSK-P59 (obs 7): lesson title opens the lesson record page.
+            header: (row) => <RecordLink id={row.item_id}>{row.title}</RecordLink>,
             sections: [
               { id: 'id', header: 'ID', content: (row) => row.item_id },
               { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
@@ -193,7 +197,8 @@ export function CoordinationRoute() {
           trackBy="item_id"
           columns={2}
           cardDefinition={{
-            header: (row) => row.item_id ?? row.record_id ?? '(unknown)',
+            // ENC-TSK-P59 (obs 7): escalation cards open the decision cockpit.
+            header: (row) => <Link to="/escalations">{row.item_id ?? row.record_id ?? '(unknown)'}</Link>,
             sections: [
               { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
               { id: 'target', header: 'Target record', content: (row) => row.target_record_id ?? '—' },

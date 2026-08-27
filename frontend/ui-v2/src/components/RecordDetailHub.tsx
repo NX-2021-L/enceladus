@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
@@ -16,6 +16,17 @@ import { MarkdownContent } from './MarkdownContent'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { computePrimaryActions, type TransitionAction } from '../utils/transitionArcs'
 import './recordDetailHub.css'
+
+/**
+ * ENC-TSK-P59 — lets Overview content (e.g. PlanPrimitive's OBJECTIVES /
+ * ATTACHED DOCS counters) jump the enclosing hub to another tab instead of
+ * rendering link-styled-but-inert numbers. Null outside a hub.
+ */
+const RecordHubTabJumpContext = createContext<((tabId: string) => void) | null>(null)
+
+export function useRecordHubTabJump(): ((tabId: string) => void) | null {
+  return useContext(RecordHubTabJumpContext)
+}
 
 export interface HubVital {
   label: string
@@ -107,6 +118,7 @@ export function RecordDetailHub({
   mutation?: RecordMutationContext
 }) {
   const [copied, setCopied] = useState(false)
+  const [activeTabId, setActiveTabId] = useState('overview')
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [transition, setTransition] = useState<TransitionAction | null>(null)
@@ -266,6 +278,7 @@ export function RecordDetailHub({
   }
 
   return (
+    <RecordHubTabJumpContext.Provider value={setActiveTabId}>
     <div className="ev2-rdh">
       <div className="ev2-rdh__main">
         <header className="ev2-rdh__head">
@@ -299,7 +312,13 @@ export function RecordDetailHub({
         </header>
 
         <section className="ev2-rdh__body">
-          <Tabs tabs={tabs} />
+          <Tabs
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onChange={(event: { detail: { activeTabId: string } }) =>
+              setActiveTabId(event.detail.activeTabId)
+            }
+          />
         </section>
       </div>
 
@@ -421,6 +440,7 @@ export function RecordDetailHub({
         {actionError ? <p className="ev2-rdh__action-feedback is-error">{actionError}</p> : null}
       </Modal>
     </div>
+    </RecordHubTabJumpContext.Provider>
   )
 }
 
