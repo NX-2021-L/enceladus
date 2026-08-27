@@ -302,6 +302,29 @@ def build_document_entry(item: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def normalize_str_list(value: Any, record_id: str = "", field: str = "") -> List[str]:
+    """ENC-TSK-P60 (ENC-ISS-714): list fields must ALWAYS be arrays.
+
+    A record whose components/tags reached DynamoDB as a plain string crashes
+    the PWA's ChipRow (`n.map is not a function`). Coerce a string to a
+    one-element list and WARN with the record id so the offending record is
+    identifiable in CloudWatch; tolerate any other shape as an empty list.
+    """
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and record_id:
+            logger.warning(
+                "feed corpus: %s.%s stored as STRING (%r) — coerced to one-element list (ENC-ISS-714)",
+                record_id,
+                field,
+                cleaned,
+            )
+        return [cleaned] if cleaned else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def build_tracker_entries_from_records(
     tasks: Sequence[Mapping[str, Any]],
     issues: Sequence[Mapping[str, Any]],
@@ -323,6 +346,17 @@ def build_tracker_entries_from_records(
             }
             if record_type == "issue":
                 attrs["severity"] = record.get("severity")
+            # ENC-TSK-P60: list fields always arrays; checkout_state feeds the
+            # client-side checkout_state filter (Home awaiting-checkout link).
+            components = normalize_str_list(record.get("components"), record_id, "components")
+            if components:
+                attrs["components"] = components
+            tags = normalize_str_list(record.get("tags"), record_id, "tags")
+            if tags:
+                attrs["tags"] = tags
+            checkout_state = record.get("checkout_state")
+            if checkout_state:
+                attrs["checkout_state"] = checkout_state
             entries.append(
                 build_tracker_entry(
                     record_type,

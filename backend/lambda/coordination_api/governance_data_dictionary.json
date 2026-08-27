@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-26.1",
-  "updated_at": "2026-08-26T19:25:00Z",
-  "last_change_summary": "ENC-TSK-P49: _handle_update_field (tracker_mutation lambda_function.py) now splices the ENC-TSK-M92 version_seq/feed_scope SET clause BEFORE the ENC-TSK-F41 ' ADD closed_count :one' clause. The prior ordering assembled 'SET ... ADD closed_count :one, version_seq = :vseq, feed_scope = :fscope' -- invalid DynamoDB UpdateExpression syntax -- so every governed task close (checkout.advance to status=closed via the PATCH path) failed with 'Database write failed'. No schema change: field semantics of version_seq, feed_scope and closed_count are unchanged; only the expression assembly order. Regression test test_update_field_close_versionseq_p49.py added (mirror of the M92 PWA-path guard).",
+  "version": "2026-08-27.1",
+  "updated_at": "2026-08-27T04:15:00Z",
+  "last_change_summary": "ENC-TSK-P60 (ENC-PLN-090 UAT-W3, ENC-ISS-714/718/719): feed_query corpus attrs enriched and list-normalised. attrs now additionally carries components (tasks; ALWAYS an array — corpus.normalize_str_list coerces a string-typed anomaly to a one-element list and WARNs with the record id so the ChipRow-crashing record is identifiable in CloudWatch), tags (tracker records when present, always arrays), and checkout_state (tasks/plans when present — feeds the PWA's client-side checkout_state filter). _delta_corpus_entry mirrors the same attrs for parity. The authenticated snapshot (GET /api/v1/feed/tasks.json) rows additionally carry the governed priority. _transform_task_from_ddb reads components via the new lenient _ddb_str_list_lenient (DynamoDB S coerced to one-element list + warning). Additive only; no field removed or renamed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3588,7 +3588,7 @@
         },
         "attrs": {
           "type": "object",
-          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents), document_subtype, subtypepattern."
+          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents; tracker records when present — always arrays), document_subtype, subtypepattern; ENC-TSK-P60 adds components (tasks — always an array; string-typed anomalies are coerced to one-element lists and logged with the record id, ENC-ISS-714) and checkout_state (tasks/plans when present). Delta entries carry the same attrs for parity."
         }
       }
     },
@@ -8874,6 +8874,11 @@
       "version": "2026-08-26.1",
       "date": "2026-08-26",
       "summary": "ENC-TSK-P49: _handle_update_field (tracker_mutation lambda_function.py) now splices the ENC-TSK-M92 version_seq/feed_scope SET clause BEFORE the ENC-TSK-F41 ' ADD closed_count :one' clause. The prior ordering assembled 'SET ... ADD closed_count :one, version_seq = :vseq, feed_scope = :fscope' -- invalid DynamoDB UpdateExpression syntax -- so every governed task close (checkout.advance to status=closed via the PATCH path) failed with 'Database write failed'. No schema change: field semantics of version_seq, feed_scope and closed_count are unchanged; only the expression assembly order. Regression test test_update_field_close_versionseq_p49.py added (mirror of the M92 PWA-path guard)."
+    },
+    {
+      "version": "2026-08-27.1",
+      "date": "2026-08-27",
+      "summary": "ENC-TSK-P60 (ENC-PLN-090 UAT-W3, ENC-ISS-714/718/719): feed_query corpus attrs enriched and list-normalised. attrs now additionally carries components (tasks; ALWAYS an array — corpus.normalize_str_list coerces a string-typed anomaly to a one-element list and WARNs with the record id so the ChipRow-crashing record is identifiable in CloudWatch), tags (tracker records when present, always arrays), and checkout_state (tasks/plans when present — feeds the PWA's client-side checkout_state filter). _delta_corpus_entry mirrors the same attrs for parity. The authenticated snapshot (GET /api/v1/feed/tasks.json) rows additionally carry the governed priority. _transform_task_from_ddb reads components via the new lenient _ddb_str_list_lenient (DynamoDB S coerced to one-element list + warning). Additive only; no field removed or renamed."
     }
   ]
 }
