@@ -12,6 +12,8 @@ import type {
   TypedRelationshipEdge,
 } from '../types/records'
 import { TypedRelationshipSection } from './TypedRelationshipSection'
+import { RecordLink } from './RecordLink'
+import { getCacheEngine } from '../sync/cacheEngine'
 import { MarkdownContent } from './MarkdownContent'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { computePrimaryActions, type TransitionAction } from '../utils/transitionArcs'
@@ -284,7 +286,12 @@ export function RecordDetailHub({
         <header className="ev2-rdh__head">
           <div className="ev2-rdh__kicker">
             <span className="ev2-rdh__kind">{kindLabel}</span>
-            <RecordId id={recordId} />
+            {/* ENC-TSK-P63 (obs 3): the header id is a real anchor to the
+                record's own page — in the Feed preview pane this is the
+                affordance to open the full record. */}
+            <RecordLink id={recordId}>
+              <RecordId id={recordId} />
+            </RecordLink>
             {status ? (
               <StatusChip status={status} priority={priority} recordType={recordType} />
             ) : null}
@@ -550,6 +557,18 @@ export function NeighborGroup({
   type?: RecordType
 }) {
   if (!ids?.length) return null
+  // ENC-TSK-P63 (ENC-ISS-722): hydrate rows with the title the warm search
+  // cache already holds, so neighbors read as records rather than bare ids.
+  const titleFor = (id: string): string | null => {
+    try {
+      const engine = getCacheEngine()
+      if (!engine.isWarm) return null
+      const row = engine.searchIndex.all().find((r) => r.recordId === id)
+      return row?.title && row.title !== id ? row.title : null
+    } catch {
+      return null
+    }
+  }
   return (
     <div className="ev2-rdh__neighbor-group">
       <div className="ev2-rdh__neighbor-label">
@@ -558,6 +577,7 @@ export function NeighborGroup({
       <ul className="ev2-rdh__neighbor-list">
         {ids.map((id) => {
           const t = type ?? inferNeighborType(id)
+          const title = titleFor(id)
           return (
             <li key={id}>
               <Link
@@ -565,6 +585,7 @@ export function NeighborGroup({
                 className="ev2-rdh__neighbor-link"
               >
                 <RecordId id={id} />
+                {title ? <span className="ev2-rdh__neighbor-title">{title}</span> : null}
               </Link>
             </li>
           )
@@ -585,6 +606,18 @@ export function NeighborsTab({
   groups: { label: string; ids: string[] | undefined; type?: RecordType }[]
   typedEdges?: TypedRelationshipEdge[]
 }) {
+  // ENC-TSK-P63 (ENC-ISS-722): a record with nothing linked used to render a
+  // bare empty div — an explicit empty state instead.
+  const hasAny = groups.some((g) => g.ids?.length) || Boolean(typedEdges?.length)
+  if (!hasAny) {
+    return (
+      <div className="ev2-rdh__neighbors">
+        <p className="ev2-rdh__neighbors-empty">
+          No linked records yet — related ids and typed edges appear here as they are created.
+        </p>
+      </div>
+    )
+  }
   return (
     <div className="ev2-rdh__neighbors">
       {groups.map((g) => (

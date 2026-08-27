@@ -10,6 +10,7 @@ const ev2TabsCss = `
 .ev2-tab--zero:not(.ev2-tab--active){opacity:.55}
 .ev2-tab__count{margin-left:6px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--enc-dust,#6B8A94)}
 .ev2-tabs__panel{padding:16px 4px;font-size:14px;line-height:1.6;color:var(--enc-starlight,#EEF2F7)}
+@media (max-width:72rem){.ev2-tab{padding:9px 10px;font-size:13px}.ev2-tab__count{margin-left:4px}}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-tabs-css')){const s=document.createElement('style');s.id='ev2-tabs-css';s.textContent=ev2TabsCss;document.head.appendChild(s);}})();
 

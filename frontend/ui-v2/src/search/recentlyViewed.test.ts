@@ -12,7 +12,7 @@ const HIT = (id: string, type: SearchResultHit['recordType'] = 'task'): SearchRe
 
 describe('recentlyViewed', () => {
   beforeEach(() => {
-    localStorage.clear()
+    sessionStorage.clear()
   })
 
   it('stores entries per record type', () => {

@@ -120,3 +120,57 @@ describe('MarkdownContent', () => {
     expect(container.textContent).toContain(longToken)
   })
 })
+
+describe('MarkdownContent intraword underscores (ENC-TSK-P63 / ENC-ISS-721)', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    container.remove()
+  })
+
+  it('renders snake_case identifiers literally — zero <em> elements', () => {
+    act(() => {
+      root.render(
+        <MarkdownContent text="objectives_set 12 -> 15 then source_record_id and handoff_status=pending, expires_at plus graph_query_api and health_contract.GOVERNED_DATABASES" />,
+      )
+    })
+    expect(container.querySelectorAll('em')).toHaveLength(0)
+    expect(container.textContent).toContain('objectives_set 12 -> 15')
+    expect(container.textContent).toContain('source_record_id')
+    expect(container.textContent).toContain('health_contract.GOVERNED_DATABASES')
+  })
+
+  it('still italicises real standalone emphasis', () => {
+    act(() => {
+      root.render(<MarkdownContent text="this is _actually emphasised_ text" />)
+    })
+    const ems = container.querySelectorAll('em')
+    expect(ems).toHaveLength(1)
+    expect(ems[0].textContent).toBe('actually emphasised')
+  })
+
+  it('does not let a snake_case pair swallow a DOC-* id (the missing-link symptom)', () => {
+    // Link resolution itself is asserted via the pure resolver (this
+    // package's tests render no RouterProvider — see file-level comment);
+    // the rendering assertion pins that the id survives OUTSIDE any <em>,
+    // which is exactly what the runaway emphasis used to break.
+    expect(resolveIdHref('DOC-841F5D649EEF', undefined)).toBe('/document/DOC-841F5D649EEF')
+    act(() => {
+      root.render(
+        <MarkdownContent text="catalog objectives_set now tracks the id via handoff_status updates" />,
+      )
+    })
+    expect(container.querySelectorAll('em')).toHaveLength(0)
+    expect(container.textContent).toContain('objectives_set')
+    expect(container.textContent).toContain('handoff_status')
+  })
+})

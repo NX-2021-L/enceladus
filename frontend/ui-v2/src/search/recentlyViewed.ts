@@ -9,15 +9,18 @@ export interface RecentlyViewedEntry {
   viewedAt: number
 }
 
+// ENC-TSK-P63 (obs 13): sessionStorage, not localStorage — the rail is a
+// per-session trail; a record opened weeks ago in another tab must not
+// resurface as "recently viewed" today.
 const STORAGE_KEY = 'enceladus-ui-v2:recently-viewed'
 const MAX_PER_TYPE = 50
 
 type Store = Partial<Record<RecordType, RecentlyViewedEntry[]>>
 
 function readStore(): Store {
-  if (typeof localStorage === 'undefined') return {}
+  if (typeof sessionStorage === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = sessionStorage.getItem(STORAGE_KEY)
     if (!raw) return {}
     const parsed = JSON.parse(raw) as Store
     return parsed && typeof parsed === 'object' ? parsed : {}
@@ -27,8 +30,8 @@ function readStore(): Store {
 }
 
 function writeStore(store: Store): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+  if (typeof sessionStorage === 'undefined') return
+  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(store))
 }
 
 /** Track a record view; keeps last 50 distinct ids per record type (last-viewed desc). */
