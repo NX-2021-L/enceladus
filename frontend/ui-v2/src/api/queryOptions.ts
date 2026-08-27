@@ -13,6 +13,7 @@
  */
 
 import { queryOptions } from '@tanstack/react-query'
+import { NotFoundError } from './client'
 import {
   readThroughDocumentRecord,
   readThroughTrackerRecord,
@@ -47,12 +48,19 @@ export const recordKeys = {
  */
 const DETAIL_STALE_TIME = 0
 
+/** ENC-TSK-P58 verification fix: a 404 is a definitive answer — retrying it
+ * three times only holds the route loader open for ~7s before the not-found
+ * panel can render. Other failures keep the default retry budget. */
+const detailRetry = (failureCount: number, error: unknown): boolean =>
+  !(error instanceof NotFoundError) && failureCount < 3
+
 export const taskQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('task', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Task>('task', projectId, recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 export const issueQueryOptions = (projectId: string, recordId: string) =>
@@ -61,6 +69,7 @@ export const issueQueryOptions = (projectId: string, recordId: string) =>
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Issue>('issue', projectId, recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 export const featureQueryOptions = (projectId: string, recordId: string) =>
@@ -69,6 +78,7 @@ export const featureQueryOptions = (projectId: string, recordId: string) =>
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Feature>('feature', projectId, recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 export const planQueryOptions = (projectId: string, recordId: string) =>
@@ -77,6 +87,7 @@ export const planQueryOptions = (projectId: string, recordId: string) =>
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Plan>('plan', projectId, recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 export const lessonQueryOptions = (projectId: string, recordId: string) =>
@@ -85,6 +96,7 @@ export const lessonQueryOptions = (projectId: string, recordId: string) =>
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Lesson>('lesson', projectId, recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 export const documentQueryOptions = (recordId: string, projectId = 'global') =>
@@ -92,6 +104,7 @@ export const documentQueryOptions = (recordId: string, projectId = 'global') =>
     queryKey: recordKeys.detail('document', projectId, recordId),
     queryFn: ({ signal }) => readThroughDocumentRecord<Document>(recordId, { signal }),
     staleTime: DETAIL_STALE_TIME,
+    retry: detailRetry,
   })
 
 /**

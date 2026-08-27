@@ -58,22 +58,25 @@ export function Autosuggest({ value = '', options = [], placeholder, onChange, e
   const select = (v) => { onChange && onChange({ detail: { value: v } }); setOpen(false); setActiveIndex(-1); };
   const activeOptionId = open && activeIndex >= 0 && activeIndex < filtered.length ? `${listboxId}-opt-${activeIndex}` : undefined;
   const handleKeyDown = (e) => {
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    // Legacy key aliases (old Edge/IE and some automation stacks emit
+    // 'Down'/'Up'/'Esc' instead of the standard names).
+    const key = e.key === 'Down' ? 'ArrowDown' : e.key === 'Up' ? 'ArrowUp' : e.key === 'Esc' ? 'Escape' : e.key
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
       if (!open && filtered.length === 0) return;
       e.preventDefault();
       if (filtered.length === 0) return;
       if (!open) {
         setOpen(true);
-        setActiveIndex(e.key === 'ArrowDown' ? 0 : filtered.length - 1);
+        setActiveIndex(key === 'ArrowDown' ? 0 : filtered.length - 1);
         return;
       }
       setActiveIndex((i) => {
-        if (e.key === 'ArrowDown') return i >= filtered.length - 1 ? 0 : i + 1;
+        if (key === 'ArrowDown') return i >= filtered.length - 1 ? 0 : i + 1;
         return i <= 0 ? filtered.length - 1 : i - 1;
       });
       return;
     }
-    if (e.key === 'Enter') {
+    if (key === 'Enter') {
       if (open && activeIndex >= 0 && activeIndex < filtered.length) {
         e.preventDefault();
         select(String(filtered[activeIndex].value));
@@ -83,7 +86,7 @@ export function Autosuggest({ value = '', options = [], placeholder, onChange, e
       }
       return;
     }
-    if (e.key === 'Escape') {
+    if (key === 'Escape') {
       if (open) {
         e.preventDefault();
         e.stopPropagation();
@@ -92,7 +95,7 @@ export function Autosuggest({ value = '', options = [], placeholder, onChange, e
       }
       return;
     }
-    if (e.key === 'Tab') {
+    if (key === 'Tab') {
       if (open) { setOpen(false); setActiveIndex(-1); }
     }
   };
