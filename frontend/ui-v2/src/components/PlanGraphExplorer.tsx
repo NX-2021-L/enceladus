@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import cytoscape, { type Core } from 'cytoscape'
 import { fetchGraphNeighbors, graphKeys } from '../api/graph'
-import { recordHref } from '../routes/recordLink'
+import { projectRegistryQueryOptions } from '../api/projectRegistry'
+import { resolveRecordTarget } from '../routes/recordLink'
 import './plan-graph.css'
 
 const PLAN_EDGE_TYPES = ['PLAN_CONTAINS', 'INFORMED_BY', 'LEARNED_FROM', 'RELATED_TO', 'PLAN_ATTACHED_DOC']
@@ -18,6 +20,10 @@ export function PlanGraphExplorer({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cyRef = useRef<Core | null>(null)
+  const navigate = useNavigate()
+  // Prefetched at app boot (main.tsx) — resolved from cache by the time a
+  // plan page renders, so the effect dependency below is stable in practice.
+  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
 
   const { data, isPending, isError, error } = useQuery({
     queryKey: graphKeys.neighbors(projectId, planId, PLAN_EDGE_TYPES.join(',')),
@@ -51,6 +57,10 @@ export function PlanGraphExplorer({
         data: {
           id,
           label: label.length > 28 ? `${label.slice(0, 26)}…` : label,
+          // ENC-TSK-P58: carried through so the tap handler can route by the
+          // server-declared type instead of inferring from the id shape
+          // (UAT-W4 makes graph_query_api emit it on every node).
+          record_type: typeof hit?.record_type === 'string' ? hit.record_type : undefined,
         },
         classes: isPlan ? 'plan-root' : isObjective ? 'plan-objective' : 'plan-neighbor',
       })
@@ -124,8 +134,12 @@ export function PlanGraphExplorer({
     cy.on('tap', 'node', (evt) => {
       const id = evt.target.id()
       if (id === planId) return
-      const type = id.includes('-PLN-') ? 'plan' : 'task'
-      window.location.assign(recordHref(projectId, type, id))
+      // ENC-TSK-P58 (ENC-ISS-712): route through the shared resolver — any
+      // governed type, any project prefix — via SPA navigation, not a full
+      // document load. Unresolvable ids are a no-op, never a guessed route.
+      const target = resolveRecordTarget(id, projects, evt.target.data('record_type'))
+      if (!target) return
+      void navigate(target)
     })
 
     cyRef.current = cy
@@ -133,7 +147,7 @@ export function PlanGraphExplorer({
       cy.destroy()
       cyRef.current = null
     }
-  }, [data, planId, projectId, objectiveIds])
+  }, [data, planId, projectId, objectiveIds, projects, navigate])
 
   return (
     <section className="plan-graph" aria-label="Plan graph explorer">

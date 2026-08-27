@@ -6,6 +6,7 @@ import { sessionQueryOptions } from '../api/sessions'
 import { RecordDetailBreadcrumbs } from '../components/RecordDetailBreadcrumbs'
 import { SkeletonCard } from '../components/SkeletonCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { SESSION_ROUTE_PATH } from './recordLink'
 import { SessionPrimitive } from '../primitives/SessionPrimitive'
 
 /**
@@ -58,7 +59,7 @@ function SessionRecordComponent({ getParams }: { getParams: () => { id: string }
 export function createSessionDetailRoute(getParentRoute: () => AnyRoute) {
   const route: AnyRoute = createRoute({
     getParentRoute,
-    path: '/session/$id',
+    path: SESSION_ROUTE_PATH,
     loader: ({ params }) => {
       const { id } = params as { id: string }
       return queryClient.ensureQueryData(sessionQueryOptions(id))

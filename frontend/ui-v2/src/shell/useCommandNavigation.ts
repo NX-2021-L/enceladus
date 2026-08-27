@@ -2,7 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { projectRegistryQueryOptions, inferRecordNavigation } from '../api/projectRegistry'
 import { useUiStore } from '../store/uiStore'
-import { DOCUMENT_ROUTE_PATH, trackerRoutePath } from '../routes/recordLink'
+import { resolveRecordTarget } from '../routes/recordLink'
 
 /**
  * Shared record-id-to-route resolution for the search box, used by both
@@ -22,16 +22,13 @@ export function useCommandNavigation(query: string) {
 
   function submit() {
     if (!nav || !canGo) return
+    // ENC-TSK-P58: same resolver as the plan-graph tap handler — one
+    // id→route seam for every navigation surface.
+    const target = resolveRecordTarget(nav.id, projects, nav.type)
+    if (!target) return
     selectRecord(nav.id)
     closeCommandPalette()
-    if (nav.type === 'document') {
-      navigate({ to: DOCUMENT_ROUTE_PATH, params: { id: nav.id } })
-      return
-    }
-    navigate({
-      to: trackerRoutePath(nav.type),
-      params: { project: nav.projectId as string, id: nav.id },
-    })
+    void navigate(target)
   }
 
   return { nav, canGo, submit }

@@ -1,0 +1,50 @@
+/* ENC-TSK-P58 — in-shell "record not found" panel (mirrors .ev2-placeholder). */
+
+.ev2-record-notfound {
+  display: flex;
+  flex-direction: column;
+  max-width: calc(var(--space-16) * 40);
+}
+
+.ev2-record-notfound__eyebrow {
+  margin: var(--space-0) var(--space-0) var(--space-2);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+.ev2-record-notfound__title {
+  margin: var(--space-0) var(--space-0) var(--space-4);
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-3xl);
+  line-height: var(--lh-tight);
+  color: var(--fg-display);
+  overflow-wrap: anywhere;
+}
+
+.ev2-record-notfound__id {
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.ev2-record-notfound__body {
+  margin: var(--space-0) var(--space-0) var(--space-4);
+  font-family: var(--font-body);
+  font-size: var(--text-lg);
+  line-height: var(--lh-relaxed);
+  color: var(--fg);
+}
+
+.ev2-record-notfound__links {
+  display: flex;
+  gap: var(--space-5);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+}
+
+.ev2-record-notfound__links a {
+  color: var(--accent);
+}

@@ -10,6 +10,7 @@ import type { AgentSession, AgentSessionStatus } from '../api/agentSessions'
 import { KeyValuePairs, StatusIndicator, Table } from '../design-system'
 import { SkeletonCard } from '../components/SkeletonCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { AGENT_ROUTE_PATH } from './recordLink'
 
 /**
  * Agent detail page (ENC-TSK-L36). Lists the live, currently-claimed,
@@ -41,7 +42,7 @@ export function createAgentDetailRoute(config: {
   getParentRoute: () => AnyRoute
   path?: string
 }): AnyRoute {
-  const { getParentRoute, path = '/agent/$agentTypeId' } = config
+  const { getParentRoute, path = AGENT_ROUTE_PATH } = config
 
   function AgentDetailComponent() {
     const { agentTypeId } = route.useParams() as { agentTypeId: string }
