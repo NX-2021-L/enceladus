@@ -149,7 +149,14 @@ jobs:
           # gamma default inside authConfig.ts. Must stay byte-identical to
           # auth_refresh's WEBUI_OAUTH_REDIRECT_URI and a registered Cognito
           # callback (ENC-ISS-124/125 redirect_mismatch class).
-          VITE_OAUTH_REDIRECT_URI: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && github.ref_name == 'v4/main')) && '' || 'https://enceladus.jreese.net/api/v1/auth/callback' }}
+          #
+          # ENC-TSK-P53: the gamma-first form `cond && '' || prod` can never
+          # yield '' — GitHub expressions treat '' as falsy, so the || branch
+          # always won and EVERY build (gamma included) baked the prod
+          # callback; gamma logins then landed on prod. The condition below is
+          # the exact negation of ENVIRONMENT_SUFFIX's, putting the non-empty
+          # value in the && branch (same reason SUFFIX is written gamma-first).
+          VITE_OAUTH_REDIRECT_URI: ${{ (github.event.inputs.target_environment != 'gamma' && (github.event.inputs.target_environment != '' || github.ref_name != 'v4/main')) && 'https://enceladus.jreese.net/api/v1/auth/callback' || '' }}
         run: npm run build
 
       - name: Upload dist artifact
