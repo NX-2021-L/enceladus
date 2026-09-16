@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 # requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from elr_lib import manifest as elr_manifest  # noqa: E402
 from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
@@ -71,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-dir",
         default=DEFAULT_OUT_DIR,
         help=f"Directory to save the document body into (default: {DEFAULT_OUT_DIR}).",
+    )
+    parser.add_argument(
+        "--docs-dir",
+        default=elr_manifest.DEFAULT_DOCS_DIR,
+        help=(
+            "Directory for the digest side file this fetch also writes "
+            f"(ENC-TSK-P78 AC-1; default: {elr_manifest.DEFAULT_DOCS_DIR})."
+        ),
     )
     parser.add_argument(
         "--json",
@@ -149,6 +158,7 @@ def fetch_document(
     timeout: int = 20,
     profile_name: str = "internal",
     environment_profile_name: Optional[str] = None,
+    docs_dir: str = elr_manifest.DEFAULT_DOCS_DIR,
 ) -> Dict[str, Any]:
     # ENC-TSK-P77: `profile_name` stays the TRANSPORT profile (unchanged
     # contract, always "internal" here); `environment_profile_name` is
@@ -211,6 +221,25 @@ def fetch_document(
                 anomalies.append("content-hash-mismatch")
                 ok = False
 
+    # ENC-TSK-P78 AC-1: elr_doc_get writes the SAME digest side-file
+    # shape elr_doc_digest.py does, on every successful fetch -- a live
+    # documents.manifest call (not a locally-derived outline: the
+    # server's compute_outline is the one elr_doc_patch.py's if_match
+    # cache must match, and this fetch's own local outline above is a
+    # simplified H1-H3-only navigation aid, a DIFFERENT thing). Best
+    # effort: a manifest-fetch failure never flips the overall fetch's
+    # `ok` (the body WAS already fetched and saved successfully), it
+    # only adds an anomaly and omits digest_path.
+    digest_path: Optional[str] = None
+    if ok:
+        manifest_status, manifest_body = elr_manifest.fetch_manifest(client, resolved_document_id, timeout=timeout)
+        if 200 <= manifest_status < 300 and isinstance(manifest_body, dict):
+            digest_path, _written = elr_manifest.write_side_file(
+                resolved_document_id, manifest_body, docs_dir=docs_dir
+            )
+        else:
+            anomalies.append("digest-side-file-manifest-fetch-failed")
+
     digest = build_digest(
         "elr_doc_get.fetch",
         ok,
@@ -225,6 +254,7 @@ def fetch_document(
         compliance_score=compliance_score,
         outline=outline if outline else None,
         local_path=local_path,
+        digest_path=digest_path,
     )
     return digest
 
@@ -238,6 +268,7 @@ def main(argv: Optional[list] = None) -> int:
         args.out_dir,
         timeout=args.timeout,
         environment_profile_name=args.profile,
+        docs_dir=args.docs_dir,
     )
     # Digest-only: the document body is written to disk inside
     # fetch_document() and MUST NEVER be printed here.

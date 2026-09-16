@@ -1,0 +1,20 @@
+{
+  "name": "delete_basic",
+  "request": {
+    "anchor": {
+      "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "op": "delete"
+  },
+  "ok": true,
+  "bytes_changed": 60,
+  "stamped": false,
+  "block_id_was_none_before": false,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

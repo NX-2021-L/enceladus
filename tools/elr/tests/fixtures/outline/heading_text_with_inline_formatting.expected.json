@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 6,
+    "section_bytes": 120
+  },
+  {
+    "heading_path": [
+      "**Bold** and `code` and _emphasis_"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 6,
+    "section_bytes": 81
+  }
+]

@@ -1,0 +1,33 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 10,
+    "section_bytes": 98
+  },
+  {
+    "heading_path": [
+      ""
+    ],
+    "level": 3,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 6,
+    "section_bytes": 31
+  },
+  {
+    "heading_path": [
+      ""
+    ],
+    "level": 3,
+    "ordinal": 2,
+    "block_id": null,
+    "line_start": 8,
+    "line_end": 10,
+    "section_bytes": 53
+  }
+]
