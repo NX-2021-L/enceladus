@@ -7,6 +7,8 @@ for .md documents stored on S3 with metadata in DynamoDB.
 Routes (via API Gateway proxy):
     PUT    /api/v1/documents                         — upload new document
     GET    /api/v1/documents/{documentId}             — retrieve document + content
+    GET    /api/v1/documents/{documentId}?digest_only=true — digest projection, no content (ENC-TSK-P69)
+    GET    /api/v1/documents/{documentId}/manifest     — digest projection, no content (ENC-TSK-P69)
     GET    /api/v1/documents?project={id}             — list documents by project
     PATCH  /api/v1/documents/{documentId}             — edit document
     GET    /api/v1/documents/search?<params>          — search documents
@@ -46,6 +48,11 @@ import urllib.request
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+
+# ENC-TSK-P69: pure-function outline parser, shared by the digest/manifest
+# read path (this file) and, later, ELR (via .build_extras). No boto3
+# imports in outline.py — keep it that way.
+import outline as outline_mod
 
 try:
     import jwt
@@ -502,6 +509,24 @@ def _extract_if_match(event: Optional[Dict]) -> Optional[str]:
         return None
     headers = event.get("headers") or {}
     raw = headers.get("if-match") or headers.get("If-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
+
+
+def _extract_if_none_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-None-Match header value (ENC-TSK-P69 digest cache contract).
+
+    Mirrors `_extract_if_match` (quotes stripped per ETag convention).
+    Returns None when the header is absent.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-none-match") or headers.get("If-None-Match")
     if raw is None:
         return None
     raw = str(raw).strip()
@@ -2053,6 +2078,10 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         logger.error("S3 upload failed: %s", exc)
         return _error(500, "Failed to store document content.")
 
+    # ENC-TSK-P69 / AC-4: persist the outline on every write so digest reads
+    # are served from the item alone.
+    outline_entries = outline_mod.compute_outline(content)
+
     # Write metadata to DynamoDB
     ddb = _get_ddb()
     item = {
@@ -2067,6 +2096,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "content_type": {"S": "text/markdown"},
         "content_hash": {"S": content_hash},
         "size_bytes": {"N": str(size_bytes)},
+        "outline": {"S": json.dumps(outline_entries)},
         "related_items": _serialize_list(related_items),
         "keywords": _serialize_list(keywords),
         "created_by": {"S": created_by},
@@ -2171,11 +2201,20 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _handle_get(event: Dict, claims: Dict, document_id: Optional[str]) -> Dict:
+def _handle_get(
+    event: Dict, claims: Dict, document_id: Optional[str], is_manifest: bool = False,
+) -> Dict:
     """Retrieve a single document or list documents."""
     qs = event.get("queryStringParameters") or {}
 
     if document_id and document_id != "search":
+        # ENC-TSK-P69 / AC-1: GET /documents/{id}?digest_only=true and
+        # GET /documents/{id}/manifest are two routes into one handler.
+        digest_only = is_manifest or str(qs.get("digest_only", "")).strip().lower() in (
+            "true", "1", "yes",
+        )
+        if digest_only:
+            return _get_document_digest(document_id, event)
         return _get_single(document_id, qs)
     elif document_id == "search":
         return _handle_search(qs)
@@ -2220,6 +2259,108 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
     # - top-level document fields support legacy/mobile clients reading raw doc.
     payload = {"success": True, "document": doc, **doc}
     return _response(200, payload)
+
+
+# ---------------------------------------------------------------------------
+# Digest / manifest — content-free projection (ENC-TSK-P69, FR-B1-1..8)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_outline(doc: Dict[str, Any], document_id: str) -> List[Dict[str, Any]]:
+    """Return the document's outline entries.
+
+    AC-4: served from the persisted `outline` item attribute when present.
+    When absent (a pre-existing item written before this feature), the body
+    is fetched from S3 and the outline is computed on the fly — this is a
+    READ path and must never write the computed outline back to the item.
+    """
+    raw = doc.get("outline")
+    if raw is not None:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("outline attribute on %s is not valid JSON; recomputing from S3", document_id)
+
+    content = _get_content(
+        doc.get("project_id", ""),
+        document_id,
+        stored_s3_key=doc.get("s3_key"),
+        stored_s3_bucket=doc.get("s3_bucket"),
+    )
+    if content is None:
+        return []
+    return outline_mod.compute_outline(content)
+
+
+def _digest_projection(doc: Dict[str, Any], outline_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build the digest projection shape shared by digest_only GET and GET .../manifest (AC-1).
+
+    Omits `content` entirely — this projection is the content-free surface.
+    """
+    return {
+        "document_id": doc.get("document_id"),
+        "project_id": doc.get("project_id"),
+        "title": doc.get("title"),
+        "document_subtype": doc.get("document_subtype"),
+        "subtypepattern": doc.get("subtypepattern"),
+        "version": doc.get("version"),
+        "content_hash": doc.get("content_hash"),
+        "size_bytes": doc.get("size_bytes"),
+        "updated_at": doc.get("updated_at"),
+        "history_count": doc.get("history_count", 0),
+        "outline": outline_entries,
+    }
+
+
+def _get_document_digest(document_id: str, event: Optional[Dict] = None) -> Dict:
+    """Shared handler for GET /documents/{id}?digest_only=true and GET /documents/{id}/manifest.
+
+    AC-1: both routes resolve to this one function and return the same
+    content-free projection.
+    AC-3: sets the `ETag` response header to the double-quoted content_hash;
+    an `If-None-Match` request for the current hash gets HTTP 304 with an
+    empty body.
+    AC-4: never mutates the item — see `_resolve_outline`.
+    """
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+
+    doc = _deserialize_item(item)
+    content_hash = str(doc.get("content_hash") or "")
+    etag = f'"{content_hash}"'
+
+    if_none_match = _extract_if_none_match(event)
+    if if_none_match is not None and content_hash and if_none_match == content_hash:
+        return {
+            "statusCode": 304,
+            "headers": {
+                **_cors_headers(),
+                "ETag": etag,
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+            },
+            "body": "",
+        }
+
+    outline_entries = _resolve_outline(doc, document_id)
+    projection = _digest_projection(doc, outline_entries)
+
+    resp_obj = _response(200, {"success": True, **projection})
+    resp_obj["headers"]["ETag"] = etag
+    return resp_obj
 
 
 # ENC-TSK-L93: body fields stripped from list responses when include_content=false.
@@ -2899,18 +3040,22 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                     compliance_warnings=compliance["compliance_warnings"],
                 )
             s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+            # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
+            outline_entries = outline_mod.compute_outline(content)
             expr_parts.append("content_hash = :hash")
             expr_parts.append("size_bytes = :size")
             expr_parts.append("s3_key = :s3k")
             expr_parts.append("compliance_score = :cscore")
             expr_parts.append("compliance_warnings = :cwarnings")
             expr_parts.append("compliance_checked_at = :cchecked")
+            expr_parts.append("outline = :outline")
             attr_values[":hash"] = {"S": content_hash}
             attr_values[":size"] = {"N": str(size_bytes)}
             attr_values[":s3k"] = {"S": s3_key}
             attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
             attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
             attr_values[":cchecked"] = {"S": now}
+            attr_values[":outline"] = {"S": json.dumps(outline_entries)}
         except Exception as exc:
             logger.error("S3 upload (edit) failed: %s", exc)
             return _error(500, "Failed to update document content.")
@@ -2977,15 +3122,19 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 return _error(400, f"Appended content exceeds maximum size of {MAX_CONTENT_SIZE} bytes.")
             compliance = _evaluate_markdown_compliance(new_content)
             s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+            # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
+            outline_entries = outline_mod.compute_outline(new_content)
             expr_parts.append("content_hash = :hash")
             expr_parts.append("size_bytes = :size")
             expr_parts.append("s3_key = :s3k")
             expr_parts.append("compliance_score = :cscore")
             expr_parts.append("compliance_warnings = :cwarnings")
             expr_parts.append("compliance_checked_at = :cchecked")
+            expr_parts.append("outline = :outline")
             attr_values[":hash"] = {"S": content_hash}
             attr_values[":size"] = {"N": str(size_bytes)}
             attr_values[":s3k"] = {"S": s3_key}
+            attr_values[":outline"] = {"S": json.dumps(outline_entries)}
             attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
             attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
             attr_values[":cchecked"] = {"S": now}
@@ -3192,8 +3341,14 @@ def _handle_governance_sync_push(event: Dict) -> Dict:
 # Path parsing
 # ---------------------------------------------------------------------------
 
-def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict]:
-    """Parse method, document_id, and query params from event."""
+def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool]:
+    """Parse method, document_id, query params, and manifest-route flag from event.
+
+    ENC-TSK-P69: the trailing 4th element (`is_manifest`) is True for
+    GET /documents/{documentId}/manifest — checked before the bare-ID
+    fallback regex so the "manifest" path segment is never mistaken for
+    part of the document_id itself.
+    """
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
@@ -3206,21 +3361,31 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict]:
         or path_params.get("document_id")
         or None
     )
+    is_manifest = False
 
     if not document_id:
         # Handle arbitrary API mappings/stage prefixes by matching the tail.
-        match = re.search(r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/?$", raw_path)
-        if match:
-            document_id = match.group("documentId")
-        elif re.search(r"/documents/search/?$", raw_path):
-            document_id = "search"
+        manifest_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/manifest/?$", raw_path,
+        )
+        if manifest_match:
+            document_id = manifest_match.group("documentId")
+            is_manifest = True
+        else:
+            match = re.search(r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/?$", raw_path)
+            if match:
+                document_id = match.group("documentId")
+            elif re.search(r"/documents/search/?$", raw_path):
+                document_id = "search"
+    else:
+        is_manifest = bool(re.search(r"/manifest/?$", raw_path))
 
     qs = event.get("queryStringParameters") or {}
     logger.info(
-        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s",
-        method, raw_path, document_id, sorted(qs.keys()),
+        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s is_manifest=%s",
+        method, raw_path, document_id, sorted(qs.keys()), is_manifest,
     )
-    return method, document_id, qs
+    return method, document_id, qs, is_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -3234,7 +3399,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if event.get("_governance_sync_push"):
         return _handle_governance_sync_push(event)
 
-    method, document_id, qs = _parse_request(event)
+    method, document_id, qs, is_manifest = _parse_request(event)
 
     # CORS preflight
     if method == "OPTIONS":
@@ -3250,7 +3415,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if method == "PUT" or method == "POST":
         return _handle_put(event, claims)
     elif method == "GET":
-        return _handle_get(event, claims, document_id)
+        return _handle_get(event, claims, document_id, is_manifest=is_manifest)
     elif method == "PATCH":
         if not document_id:
             return _error(400, "PATCH requires a document ID in the path.")

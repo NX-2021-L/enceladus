@@ -1,0 +1,34 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 10,
+    "section_bytes": 78
+  },
+  {
+    "heading_path": [
+      "Section With Closing Hashes"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 10,
+    "section_bytes": 43
+  },
+  {
+    "heading_path": [
+      "Section With Closing Hashes",
+      "Sub Section"
+    ],
+    "level": 3,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 8,
+    "line_end": 10,
+    "section_bytes": 11
+  }
+]

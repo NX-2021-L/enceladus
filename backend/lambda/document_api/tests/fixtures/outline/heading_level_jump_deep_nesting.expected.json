@@ -1,0 +1,34 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 10,
+    "section_bytes": 150
+  },
+  {
+    "heading_path": [
+      "Jump Straight To H3"
+    ],
+    "level": 3,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 10,
+    "section_bytes": 125
+  },
+  {
+    "heading_path": [
+      "Jump Straight To H3",
+      "Jump Straight To H6"
+    ],
+    "level": 6,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 8,
+    "line_end": 10,
+    "section_bytes": 15
+  }
+]

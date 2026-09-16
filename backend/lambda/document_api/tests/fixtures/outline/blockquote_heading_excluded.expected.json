@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 9,
+    "section_bytes": 89
+  },
+  {
+    "heading_path": [
+      "Real Heading"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 7,
+    "line_end": 9,
+    "section_bytes": 7
+  }
+]
