@@ -2,12 +2,13 @@
 """elr_sync.py -- ELR hash-pinned manifest distribution (ENC-FTR-134 AC-1).
 
 Spec: ENC-TSK-O55. Distributes the ELR runtime file set (elr_lib/*.py,
-top-level elr_*.py scripts, elr_contracts.json, README.md) to a local
-install directory via a manifest that pins every file's sha256 at an
-exact, immutable git commit. Nothing here trusts a branch name, a mutable
-tag, or a "latest" pointer -- ``pull`` refuses anything that is not a full
-40-character commit sha, and refuses to ACTIVATE an install unless every
-listed file verifies byte-for-byte against its recorded hash.
+elr_lib/vendor/*.py, top-level elr_*.py scripts, elr_contracts.json,
+README.md) to a local install directory via a manifest that pins every
+file's sha256 at an exact, immutable git commit. Nothing here trusts a
+branch name, a mutable tag, or a "latest" pointer -- ``pull`` refuses
+anything that is not a full 40-character commit sha, and refuses to
+ACTIVATE an install unless every listed file verifies byte-for-byte
+against its recorded hash.
 
 Three subcommands:
 
@@ -19,7 +20,9 @@ Three subcommands:
       appear in the manifest -- collect_runtime_files() asserts this on
       every candidate path before a manifest is ever built. The manifest
       file never lists itself (its own filename does not match any of
-      the four include patterns).
+      the five include patterns). elr_lib/vendor/PINS.json is the one
+      vendor-directory file deliberately excluded (provenance metadata
+      for re-vendoring, not a runtime import).
 
   pull --ref <40-hex sha> [--source github|local:<path>] [--dest DIR]
       Fetches the manifest AT THE PINNED COMMIT, then every listed file
@@ -132,10 +135,10 @@ def is_valid_ref(ref: Optional[str]) -> bool:
 # ---------------------------------------------------------------------------
 # Runtime file set -- filesystem side (generate-manifest) and path-string
 # side (pull's completeness check against a git ls-tree/contents listing).
-# Both must encode the SAME include rule: elr_lib/*.py, top-level
-# elr_*.py scripts, elr_contracts.json, README.md. Nothing under tests/,
-# fixtures/, or __pycache__/ is ever included (those simply never match
-# the four patterns below).
+# Both must encode the SAME include rule: elr_lib/*.py, elr_lib/vendor/*.py,
+# top-level elr_*.py scripts, elr_contracts.json, README.md. Nothing under
+# tests/, fixtures/, or __pycache__/ is ever included (those simply never
+# match the five patterns below).
 # ---------------------------------------------------------------------------
 
 
@@ -154,6 +157,18 @@ def collect_runtime_files(elr_root: Path) -> List[Path]:
     lib_dir = elr_root / "elr_lib"
     if lib_dir.is_dir():
         candidates.extend(sorted(lib_dir.glob("*.py")))
+
+    # elr_lib/vendor/*.py (ENC-TSK-P79, T-B6): the vendored outline/sections
+    # modules are real runtime imports (elr_lib.sections imports both at
+    # module load time), not test-only fixtures, so they must ship with
+    # every elr-sync install or a pulled install breaks on first import.
+    # vendor/PINS.json is deliberately NOT included here -- it is a
+    # vendoring-provenance record consumed only by
+    # tools/elr/tools/vendor_document_api.py at re-vendor time, never
+    # imported by ELR itself at runtime.
+    vendor_dir = lib_dir / "vendor"
+    if vendor_dir.is_dir():
+        candidates.extend(sorted(vendor_dir.glob("*.py")))
 
     contracts = elr_root / "elr_contracts.json"
     if contracts.is_file():
@@ -187,7 +202,11 @@ def _matches_runtime_pattern(repo_relative_path: str) -> bool:
             return True
         return rel.startswith("elr_") and rel.endswith(".py")
     parts = rel.split("/")
-    return len(parts) == 2 and parts[0] == "elr_lib" and parts[1].endswith(".py")
+    if len(parts) == 2 and parts[0] == "elr_lib" and parts[1].endswith(".py"):
+        return True
+    # elr_lib/vendor/*.py -- see collect_runtime_files()'s matching comment;
+    # PINS.json stays excluded (not a ".py" runtime module).
+    return len(parts) == 3 and parts[0] == "elr_lib" and parts[1] == "vendor" and parts[2].endswith(".py")
 
 
 def _elr_relative_path(repo_relative_path: str) -> str:

@@ -310,7 +310,10 @@ def patch_section(
     client = InternalClient(config, timeout=timeout)
     key_sent = bool(config.key_for("document"))
 
-    pre_state = plane_safety.run_pre_write(client, project, timeout=timeout)
+    env_profile = elr_profiles.get_environment_profile(environment_profile_name)
+    pre_state = plane_safety.run_pre_write(
+        client, project, timeout=timeout, sentinel_document_id=env_profile.sentinel_document_id
+    )
     if pre_state["abort"]:
         return (
             build_digest(

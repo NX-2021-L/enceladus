@@ -305,3 +305,50 @@ class BuildReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerProfileSentinelTests(unittest.TestCase):
+    """ENC-TSK-P79: the sentinel id is profile-scoped; the prod default is unchanged."""
+
+    class _EchoClient:
+        def __init__(self, echo_id, status=200):
+            self.echo_id, self.status, self.calls = echo_id, status, []
+
+        def request(self, method, api, path, query=None, **kwargs):
+            self.calls.append((method, api, path))
+            if self.status != 200:
+                return self.status, {"error": "not found"}
+            return 200, {"document": {"document_id": self.echo_id, "version": 1}}
+
+    def test_profiles_carry_sentinel_ids(self):
+        from elr_lib import profiles as elr_profiles
+        self.assertEqual(elr_profiles.get_environment_profile("prod").sentinel_document_id, "DOC-87EC08ECF51A")
+        self.assertEqual(elr_profiles.get_environment_profile("v4-gamma").sentinel_document_id, "DOC-EF02AE82AD3A")
+
+    def test_default_sentinel_is_prod_constant(self):
+        client = self._EchoClient(ps.SENTINEL_DOCUMENT_ID)
+        probe = ps._sentinel_probe(client)
+        self.assertTrue(probe["ok"])
+        self.assertEqual(probe["sentinel_document_id"], "DOC-87EC08ECF51A")
+        self.assertIn("DOC-87EC08ECF51A", client.calls[0][2])
+
+    def test_gamma_sentinel_echo_passes_and_404_aborts(self):
+        from unittest import mock
+        ok_client = self._EchoClient("DOC-EF02AE82AD3A")
+        bad_client = self._EchoClient("DOC-EF02AE82AD3A", status=404)
+        with mock.patch.object(ps, "_target_count_probe", return_value={"ok": True, "count": 0}), \
+             mock.patch.object(ps, "plane_b_probe", return_value={"configured": False}):
+            good = ps.run_pre_write(ok_client, "enceladus", timeout=1, sentinel_document_id="DOC-EF02AE82AD3A")
+            bad = ps.run_pre_write(bad_client, "enceladus", timeout=1, sentinel_document_id="DOC-EF02AE82AD3A")
+        self.assertFalse(good["abort"])
+        self.assertIn("DOC-EF02AE82AD3A", ok_client.calls[0][2])
+        self.assertTrue(bad["abort"])
+        self.assertEqual(bad["abort_reason"], "plane-safety-sentinel-mismatch")
+
+    def test_prod_shaped_echo_on_gamma_profile_aborts(self):
+        from unittest import mock
+        client = self._EchoClient(ps.SENTINEL_DOCUMENT_ID)
+        with mock.patch.object(ps, "_target_count_probe", return_value={"ok": True, "count": 0}), \
+             mock.patch.object(ps, "plane_b_probe", return_value={"configured": False}):
+            state = ps.run_pre_write(client, "enceladus", timeout=1, sentinel_document_id="DOC-EF02AE82AD3A")
+        self.assertTrue(state["abort"])

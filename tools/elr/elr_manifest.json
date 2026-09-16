@@ -7,8 +7,8 @@
     },
     {
       "path": "tools/elr/elr_batch_get.py",
-      "sha256": "826e91a779e5ee5a1be28ffd01c61de4fc371d4e7514a4c22761678e0138c3e0",
-      "size_bytes": 17363
+      "sha256": "15b218ae97b55ba9e17ee13cfa45f5a6ab55d984c9d7f22e9e7bc898fd245a29",
+      "size_bytes": 19861
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -16,9 +16,19 @@
       "size_bytes": 7694
     },
     {
+      "path": "tools/elr/elr_doc_digest.py",
+      "sha256": "993c8778a86e02092d902cfaa06b3471ef18cc153cc38cd682ef339e2fdc61d5",
+      "size_bytes": 5466
+    },
+    {
       "path": "tools/elr/elr_doc_get.py",
-      "sha256": "b993058c27ca786706380a166ea77c9b9da2327bfcb500a6ae8a797949f6dad9",
-      "size_bytes": 8512
+      "sha256": "d27bee2f7ff1aa46ee598b6fdefb29652eac2685347c92e324d9fab67da5e313",
+      "size_bytes": 10686
+    },
+    {
+      "path": "tools/elr/elr_doc_patch.py",
+      "sha256": "af0ec3f440ffa919403e6c2af6d32134bc3c9ec3f83e25648a00512d538cca95",
+      "size_bytes": 25092
     },
     {
       "path": "tools/elr/elr_lib/__init__.py",
@@ -27,46 +37,91 @@
     },
     {
       "path": "tools/elr/elr_lib/config.py",
-      "sha256": "f6b1ce3c9ed59ca164591cf7e653b1154c021da0f79aa8c5ebdf75451d3ec299",
-      "size_bytes": 8191
+      "sha256": "09ece2b91b3374858e7f2e012d7133e8262aa33283c6e75bad0c858809221cd4",
+      "size_bytes": 10546
     },
     {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "61b6bb4e4b34a3580498b0a8a47e9296ab50357a90d82848d1487cf3d48a7b98",
-      "size_bytes": 5147
+      "sha256": "9be3a3ee9eec7927ed813181fde9ddfd34a1b3d07ce6532ce9a3bbf651fa1bc3",
+      "size_bytes": 8308
+    },
+    {
+      "path": "tools/elr/elr_lib/identity.py",
+      "sha256": "5546cd3b3b2fde302625a5ee4ec00ac3e34be2ce2e31b83e218a67f6d5091a00",
+      "size_bytes": 26886
+    },
+    {
+      "path": "tools/elr/elr_lib/manifest.py",
+      "sha256": "d0339291ff51e5bee423939862fe18d3653bae58043d45896bf50f5764c6ef51",
+      "size_bytes": 5778
     },
     {
       "path": "tools/elr/elr_lib/plane_safety.py",
-      "sha256": "4da7190909731eea31dfe603630e4e12e9faf8a45b1179704941ea62c4205c2d",
-      "size_bytes": 15133
+      "sha256": "eb595a25e4181deed6770e0687690df7254948a6b6c977c82dcc0b896f3c8f75",
+      "size_bytes": 15585
+    },
+    {
+      "path": "tools/elr/elr_lib/prefix.py",
+      "sha256": "6220903dbfeca89ce98081aa54ab8e25b8c98449068d37d6334237a6e1b381a5",
+      "size_bytes": 10914
+    },
+    {
+      "path": "tools/elr/elr_lib/profiles.py",
+      "sha256": "5badda061f8dcc08380a0acda5ccca3a36f1997f14901247d00b1852d4dd9470",
+      "size_bytes": 5603
+    },
+    {
+      "path": "tools/elr/elr_lib/sections.py",
+      "sha256": "31e4ba3cd4150270b1ddfe28cb86a02f7b16f5b1276bd10f31d476d8f0a737d9",
+      "size_bytes": 5227
+    },
+    {
+      "path": "tools/elr/elr_lib/tls.py",
+      "sha256": "cfaa7c1f4f7a35e08efb01244a8bd50c90a92afd2033589d11a52c98eb906ea4",
+      "size_bytes": 5356
     },
     {
       "path": "tools/elr/elr_lib/transport.py",
-      "sha256": "8078efa6361ddd83d160643f89835fac32e6481380fa4f279f590b35b2d6fe77",
-      "size_bytes": 15164
+      "sha256": "505e2c1c6dc7df1c2695c1f31313e7bd3c2fc7d696786f9f7d9eefea15b68c6a",
+      "size_bytes": 17209
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/__init__.py",
+      "sha256": "85bc68ba0344cd559a3d4ad4d2a4989a9e86bedd3359404a52beb750ec0a1a25",
+      "size_bytes": 168
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/document_api_outline.py",
+      "sha256": "4560a61fe8e05f9783398ad8a9cac0f4985a04020ffd8954fdf3d5ca58046427",
+      "size_bytes": 14027
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/document_api_sections.py",
+      "sha256": "3caa33865d06d1c3bea85caaa45e947cf8972fcca02e4f7a1d76ab8eb65ac397",
+      "size_bytes": 19017
     },
     {
       "path": "tools/elr/elr_publish.py",
-      "sha256": "a004009731bf483582b6a90f312568b03b7eced06d295de5a4f88ee785348ffd",
-      "size_bytes": 25755
+      "sha256": "812df2d0eba83964515410dcf48e0491df63b5c75cd0d0f68d1cbf268185a92a",
+      "size_bytes": 30624
     },
     {
       "path": "tools/elr/elr_smoke.py",
-      "sha256": "40c45096e7d5bb035622712470932aff6a71dce49207f2377ef27eb7228da50e",
-      "size_bytes": 2971
+      "sha256": "5e871c9ab05829584283f411aae412424755be48c82d26565ae7f95b2b9c5dbf",
+      "size_bytes": 10184
     },
     {
       "path": "tools/elr/elr_sync.py",
-      "sha256": "4eda382d20d67bf5096eaee8d9078548066fb4427b2677d79eb83bb592f12f64",
-      "size_bytes": 30303
+      "sha256": "b935a5fd407897e4f5f7a5de781970d69c4d790e5e37fc9e4043a64df2088012",
+      "size_bytes": 31410
     },
     {
       "path": "tools/elr/elr_validate.py",
-      "sha256": "e914c7e2ef1db5996421ef216fa6809ce5fb82356ad4b2c934feb9008ac75cea",
-      "size_bytes": 37760
+      "sha256": "967baaf494837533fcfbf4d1ab08d87a039f2dbf816c750f5ee7c0fa6edf03e1",
+      "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-08-22T14:37:42-07:00",
+  "generated_at": "2026-09-16T04:47:29-07:00",
   "manifest_version": 1,
-  "source_ref": "ae64fe1f3b435a726b5d4e6e9e8a82cba4d857d5"
+  "source_ref": "ec0f8157d42d625bdb96325374cc90659f92caf8"
 }

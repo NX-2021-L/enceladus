@@ -127,6 +127,20 @@ class RuntimePatternTests(unittest.TestCase):
     def test_elr_lib_module_matches(self):
         self.assertTrue(elr_sync._matches_runtime_pattern("tools/elr/elr_lib/config.py"))
 
+    def test_elr_lib_vendor_module_matches(self):
+        # ENC-TSK-P79 (T-B6): the vendored outline/sections modules are
+        # real runtime imports of elr_lib.sections, not test-only files.
+        self.assertTrue(elr_sync._matches_runtime_pattern("tools/elr/elr_lib/vendor/document_api_outline.py"))
+        self.assertTrue(elr_sync._matches_runtime_pattern("tools/elr/elr_lib/vendor/document_api_sections.py"))
+
+    def test_elr_lib_vendor_pins_json_does_not_match(self):
+        # PINS.json is re-vendoring provenance metadata, not a ".py"
+        # runtime import -- deliberately excluded from distribution.
+        self.assertFalse(elr_sync._matches_runtime_pattern("tools/elr/elr_lib/vendor/PINS.json"))
+
+    def test_elr_lib_vendor_deeper_nesting_does_not_match(self):
+        self.assertFalse(elr_sync._matches_runtime_pattern("tools/elr/elr_lib/vendor/sub/deep.py"))
+
     def test_contracts_and_readme_match(self):
         self.assertTrue(elr_sync._matches_runtime_pattern("tools/elr/elr_contracts.json"))
         self.assertTrue(elr_sync._matches_runtime_pattern("tools/elr/README.md"))
@@ -166,6 +180,35 @@ class CollectRuntimeFilesTests(unittest.TestCase):
                 names,
                 ["README.md", "elr_contracts.json", "elr_lib/config.py", "elr_ok.py"],
             )
+
+    def test_collects_vendor_py_and_excludes_vendor_pins_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            elr_root = Path(tmp)
+            vendor_dir = elr_root / "elr_lib" / "vendor"
+            vendor_dir.mkdir(parents=True)
+            (elr_root / "elr_lib" / "__init__.py").write_text("")
+            (vendor_dir / "document_api_outline.py").write_text("# outline\n")
+            (vendor_dir / "document_api_sections.py").write_text("# sections\n")
+            (vendor_dir / "PINS.json").write_text("{}")
+
+            files = elr_sync.collect_runtime_files(elr_root)
+            names = sorted(str(p.relative_to(elr_root)) for p in files)
+            self.assertEqual(
+                names,
+                [
+                    "elr_lib/__init__.py",
+                    "elr_lib/vendor/document_api_outline.py",
+                    "elr_lib/vendor/document_api_sections.py",
+                ],
+            )
+
+    def test_no_vendor_dir_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            elr_root = Path(tmp)
+            (elr_root / "elr_lib").mkdir()
+            (elr_root / "elr_lib" / "__init__.py").write_text("")
+            files = elr_sync.collect_runtime_files(elr_root)
+            self.assertEqual([p.name for p in files], ["__init__.py"])
 
     def test_dictionary_filename_raises_assertion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -418,6 +461,57 @@ class PullRefusalTests(_GitFixtureCase):
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-touch")
 
         # No leftover staging siblings next to dest.
+        staging_siblings = [p.name for p in self.dest.parent.iterdir() if ".staging-" in p.name]
+        self.assertEqual(staging_siblings, [])
+
+    def test_corrupted_elr_doc_patch_produces_409_hash_mismatch_refusal_before_activation(self):
+        """ENC-TSK-P79 AC-1: the exact scenario the AC names by filename --
+        a deliberately corrupted elr_doc_patch.py must produce the 409
+        hash-mismatch refusal, and the corrupted bytes must never reach
+        an activated install. Same tamper mechanism as
+        test_corrupted_script_drill_refuses_and_leaves_dest_untouched
+        above, but targeting elr_doc_patch.py by name (not the generic
+        elr_x.py stand-in) and additionally asserting digest["status"].
+        """
+        (self.elr_dir / "elr_doc_patch.py").write_text(
+            "#!/usr/bin/env python3\n\"\"\"elr_doc_patch.py fixture stand-in.\"\"\"\n", encoding="utf-8"
+        )
+        sha2 = _commit_manifest(self.repo_dir, self.elr_dir, message="add elr_doc_patch.py")
+
+        self.dest.mkdir(parents=True)
+        sentinel = self.dest / "SENTINEL.txt"
+        sentinel.write_text("do-not-touch", encoding="utf-8")
+
+        real_source = elr_sync.LocalGitSource(str(self.repo_dir))
+
+        class _TamperingSource:
+            def __init__(self, inner, tamper_path):
+                self._inner = inner
+                self._tamper_path = tamper_path
+
+            def read_file(self, repo_relative_path, ref):
+                data = self._inner.read_file(repo_relative_path, ref)
+                if repo_relative_path == self._tamper_path and data is not None:
+                    return data[:-1] + b"X\n"  # single-byte-ish corruption
+                return data
+
+            def list_tree(self, dir_repo_relative_path, ref):
+                return self._inner.list_tree(dir_repo_relative_path, ref)
+
+        tampering_source = _TamperingSource(real_source, "tools/elr/elr_doc_patch.py")
+
+        with patch.object(elr_sync, "build_source", return_value=tampering_source):
+            digest = elr_sync.pull_manifest_at_ref(sha2, f"local:{self.repo_dir}", str(self.dest))
+
+        self.assertFalse(digest["ok"], digest)
+        self.assertEqual(digest["status"], 409)
+        self.assertEqual(digest["refusal"]["reason"], "hash-mismatch")
+        self.assertEqual(digest["mismatched"], ["tools/elr/elr_doc_patch.py"])
+
+        # Refuse ACTIVATION: dest untouched, corrupted content never lands.
+        remaining = sorted(p.name for p in self.dest.iterdir())
+        self.assertEqual(remaining, ["SENTINEL.txt"])
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-touch")
         staging_siblings = [p.name for p in self.dest.parent.iterdir() if ".staging-" in p.name]
         self.assertEqual(staging_siblings, [])
 

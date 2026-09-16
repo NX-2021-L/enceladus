@@ -87,6 +87,10 @@ class EnvironmentProfile:
     mcp_base_url: str
     coordination_base_url: str
     api_base_overrides: Dict[str, str] = field(default_factory=dict)
+    # ENC-TSK-P79: plane-safety sentinel document that exists ONLY on this
+    # environment; elr_lib.plane_safety proves the plane it is writing to by
+    # asking the target to echo this id. Prod keeps the historical constant.
+    sentinel_document_id: str = "DOC-87EC08ECF51A"
 
 
 _PROFILES: Dict[str, EnvironmentProfile] = {
@@ -101,6 +105,7 @@ _PROFILES: Dict[str, EnvironmentProfile] = {
         mcp_base_url="https://mcp-gamma.jreese.net",
         coordination_base_url=f"{_GAMMA_API_HOST}/api/v1/coordination",
         api_base_overrides=_mirrored_overrides(_GAMMA_API_HOST),
+        sentinel_document_id="DOC-EF02AE82AD3A",
     ),
 }
 
