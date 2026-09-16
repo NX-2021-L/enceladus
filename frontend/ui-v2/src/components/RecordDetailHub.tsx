@@ -96,6 +96,7 @@ export function RecordDetailHub({
   evidence,
   actions = [],
   mutation,
+  initialTabId,
 }: {
   recordId: string
   kindLabel: string
@@ -118,9 +119,15 @@ export function RecordDetailHub({
   /** ENC-TSK-M33 -- when present, renders the state-aware primary
    *  transition button(s) + the Note button, wired to real governed writes. */
   mutation?: RecordMutationContext
+  /** ENC-TSK-P92 -- which tab is active on first render (default 'overview').
+   *  DocumentPrimitive passes 'content' when the URL carries a section deep
+   *  link (a `#block_id`/slug hash), so the Content tab -- and the anchored
+   *  section inside it -- is already in the DOM for the browser's/our own
+   *  scroll-to-hash to find. */
+  initialTabId?: string
 }) {
   const [copied, setCopied] = useState(false)
-  const [activeTabId, setActiveTabId] = useState('overview')
+  const [activeTabId, setActiveTabId] = useState(initialTabId ?? 'overview')
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [transition, setTransition] = useState<TransitionAction | null>(null)
