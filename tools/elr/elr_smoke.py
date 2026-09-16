@@ -37,6 +37,7 @@ from typing import Any, Dict, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elr_lib import identity as elr_identity  # noqa: E402
+from elr_lib import tls as elr_tls  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -88,6 +89,25 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
 
     try:
         status, body = client.health()
+
+        # AC-2 (ENC-TSK-P76): a TLS-unresolvable CA bundle short-circuits
+        # InternalClient before urlopen ever runs -- status is the
+        # TLS_UNRESOLVED_STATUS sentinel (a str), never an HTTP int, so it
+        # must be handled before any int comparison/classification below.
+        if status == elr_tls.TLS_UNRESOLVED_STATUS:
+            extra = dict(client.ca_bundle_digest_fields())
+            if identity_ctx.posture == elr_identity.POSTURE_CREDENTIAL_BOUND:
+                extra["session_id"] = identity_ctx.session_id
+                extra["agent_type_id"] = identity_ctx.agent_type_id
+            return build_digest(
+                "elr_smoke.health_check",
+                False,
+                status,
+                identity_posture=identity_ctx.posture,
+                anomalies=list(identity_ctx.anomalies) + ["tls_ca_bundle_missing"],
+                **extra,
+            )
+
         key_sent = bool(config.key_for("health"))  # health never sends a key (server.py parity)
         # classify_internal_posture's OWN posture return is discarded here
         # -- it can only ever say "server-held-keys" for this keyless
@@ -107,7 +127,9 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
             if "error" in body:
                 anomalies = list(anomalies) + [f"health_body_error: {body['error']}"]
 
-        extra: Dict[str, Any] = {}
+        # AC-1 (ENC-TSK-P76): ca_bundle:{source,path} on every digest, not
+        # only the TLS-unresolvable one above.
+        extra: Dict[str, Any] = dict(client.ca_bundle_digest_fields())
         if identity_ctx.posture == elr_identity.POSTURE_CREDENTIAL_BOUND:
             extra["session_id"] = identity_ctx.session_id
             extra["agent_type_id"] = identity_ctx.agent_type_id
@@ -139,6 +161,10 @@ def main(argv: Optional[list] = None) -> int:
 
     digest = run_health_smoke(args.profile, args.timeout, keep_session=args.keep_session)
     print(json.dumps(digest, sort_keys=True))
+    # AC-2 (ENC-TSK-P76): TLS-unresolvable is always exit code 4, distinct
+    # from a plain network/auth failure (1).
+    if digest.get("status") == elr_tls.TLS_UNRESOLVED_STATUS:
+        return elr_tls.EXIT_CODE_TLS_UNRESOLVED
     return 0 if digest.get("ok") else 1
 
 

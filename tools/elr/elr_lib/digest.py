@@ -44,6 +44,13 @@ CLI's local refusal helper already uses, folded into build_digest so
 elr_sync can reuse ONE digest builder for both its success and its
 refuse-activation paths.
 
+``ca_bundle`` and ``remediation`` (added for ENC-TSK-P76 / elr_lib.tls)
+carry the TLS CA-bundle resolution report: ca_bundle is the small
+{source, path} dict every transport client resolves at construction time
+(never the bundle's contents); remediation is present only when
+ca_bundle.source == "missing" and is always the exact string
+elr_lib.tls.REMEDIATION_MESSAGE.
+
 ``session_id``, ``agent_type_id``, and ``sci_ttl_remaining_s`` (added for
 ENC-TSK-P75 / elr_lib.identity) carry the credential-bound identity
 posture's small, stable summary: the live ENC-SES session_id and
@@ -88,6 +95,8 @@ _OPTIONAL_FIELDS = (
     "session_id",
     "agent_type_id",
     "sci_ttl_remaining_s",
+    "ca_bundle",
+    "remediation",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

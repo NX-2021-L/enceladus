@@ -25,20 +25,19 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as elr_config
+from . import tls as elr_tls
 
 DEFAULT_TIMEOUT_SECONDS = 20
 
 
 def _build_ssl_context() -> ssl.SSLContext:
-    """Mirror server.py's CA-bundle fallback, minus the optional certifi
-    dependency (ELR is stdlib-only, so no soft pip fallback here).
+    """Deprecated shim kept for any external caller that imported this
+    name directly -- resolution now lives in elr_lib.tls (ENC-TSK-P76,
+    T-B3, FR-B4-8..9). Prefer elr_tls.resolve_ca_bundle() +
+    elr_tls.build_ssl_context() directly when the CA bundle source/path
+    needs to be reported (e.g. in a digest).
     """
-    if os.environ.get("SSL_CERT_FILE"):
-        return ssl.create_default_context()
-    paths = ssl.get_default_verify_paths()
-    if paths.cafile and os.path.isfile(paths.cafile):
-        return ssl.create_default_context()
-    return ssl.create_default_context()
+    return elr_tls.build_ssl_context()
 
 
 def _get_header(headers: Dict[str, str], name: str) -> str:
@@ -118,7 +117,9 @@ class InternalClient:
     def __init__(self, config: "elr_config.InternalProfileConfig", timeout: int = DEFAULT_TIMEOUT_SECONDS):
         self.config = config
         self.timeout = timeout
-        self._ssl_ctx = _build_ssl_context()
+        self._ca_bundle = elr_tls.resolve_ca_bundle()
+        self.ca_bundle = self._ca_bundle.as_digest_field()
+        self._ssl_ctx = elr_tls.build_ssl_context(self._ca_bundle)
 
     def request(
         self,
@@ -173,6 +174,14 @@ class InternalClient:
         body: Optional[bytes],
         allow_retry: bool,
     ) -> Tuple[int, Any]:
+        # AC-2 (ENC-TSK-P76): fail fast, BEFORE urlopen ever runs, when the
+        # CA bundle resolution chain came up empty -- never let urllib
+        # surface a raw ssl.SSLCertVerificationError / CERTIFICATE_VERIFY_
+        # FAILED traceback for this, and never attempt the handshake at
+        # all (the constructed context has no CA certs loaded anyway).
+        if self._ca_bundle.unresolved:
+            return elr_tls.TLS_UNRESOLVED_STATUS, {"error": elr_tls.REMEDIATION_MESSAGE}
+
         attempted_retry = False
         while True:
             req = urllib.request.Request(url=url, method=method, headers=headers, data=body)
@@ -205,6 +214,18 @@ class InternalClient:
         No internal key is sent for this endpoint, matching server.py.
         """
         return self.request("GET", "health")
+
+    def ca_bundle_digest_fields(self) -> Dict[str, Any]:
+        """AC-1/AC-2 (ENC-TSK-P76): the {"ca_bundle": ..., "remediation":
+        ...} kwargs every digest should merge in so ca_bundle:{source,path}
+        (and, when unresolved, the remediation string) is reported on
+        every digest a caller builds from this client, not only on a
+        failed network call.
+        """
+        fields: Dict[str, Any] = {"ca_bundle": self.ca_bundle}
+        if self._ca_bundle.unresolved:
+            fields["remediation"] = elr_tls.REMEDIATION_MESSAGE
+        return fields
 
 
 # ---------------------------------------------------------------------------
@@ -294,10 +315,28 @@ class McpHttpClient:
         self.config = config
         self.timeout = timeout
         self.session_id = ""
-        self._ssl_ctx = _build_ssl_context()
+        self._ca_bundle = elr_tls.resolve_ca_bundle()
+        self.ca_bundle = self._ca_bundle.as_digest_field()
+        self._ssl_ctx = elr_tls.build_ssl_context(self._ca_bundle)
         self._next_id = 1
 
+    def ca_bundle_digest_fields(self) -> Dict[str, Any]:
+        """See InternalClient.ca_bundle_digest_fields (ENC-TSK-P76 AC-1)."""
+        fields: Dict[str, Any] = {"ca_bundle": self.ca_bundle}
+        if self._ca_bundle.unresolved:
+            fields["remediation"] = elr_tls.REMEDIATION_MESSAGE
+        return fields
+
     def _post(self, method_name: str, params: Optional[Dict[str, Any]] = None, *, is_notification: bool = False) -> McpResponse:
+        # AC-2 (ENC-TSK-P76): same fail-fast contract as InternalClient._do
+        # -- never attempt the handshake when the CA bundle is unresolved.
+        if self._ca_bundle.unresolved:
+            return McpResponse(
+                status=elr_tls.TLS_UNRESOLVED_STATUS,
+                envelope={"error": elr_tls.REMEDIATION_MESSAGE},
+                session_id=self.session_id,
+            )
+
         req_id: Optional[int] = None
         payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method_name, "params": params or {}}
         if not is_notification:
