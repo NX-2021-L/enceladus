@@ -1,8 +1,12 @@
-import { render, screen } from '@testing-library/react'
+import { render as rtlRender, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import type { ReactElement } from 'react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { DocumentSection } from './DocumentSection'
 import type { DocumentSection as DocumentSectionModel } from '../../lib/documentSections'
+
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>)
 
 function makeSection(overrides: Partial<DocumentSectionModel> = {}): DocumentSectionModel {
   return {
