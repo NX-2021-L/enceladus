@@ -1,0 +1,271 @@
+/* ENC-TSK-P92 -- outline-first document view (ports ENC-TSK-P80 into the
+   production v4 cockpit). Tokens follow the same conventions as
+   recordDetailHub.css / markdownContent.css. */
+
+.ev2-docsec__outline {
+  background: var(--bg-surface);
+  border: var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.ev2-docsec__outline-title {
+  font-family: var(--font-heading);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--fg-muted);
+  margin: 0 0 var(--space-2);
+  padding: 0 var(--space-1);
+}
+
+.ev2-docsec__outline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ev2-docsec__outline-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  text-decoration: none;
+  padding: var(--space-1) var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+.ev2-docsec__outline-link:hover {
+  color: var(--accent);
+}
+
+.ev2-docsec__outline-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ev2-docsec__outline-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--v2-status-warning, #c9a15c);
+  flex-shrink: 0;
+}
+
+.ev2-docsec__section {
+  background: var(--bg-surface);
+  border: var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+  scroll-margin-top: 64px;
+}
+
+.ev2-docsec__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.ev2-docsec__section-title {
+  font-family: var(--font-heading);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
+  color: var(--fg);
+  margin: 0;
+}
+
+.ev2-docsec__section-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.ev2-docsec__badge {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: var(--font-heading);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  background: rgba(201, 161, 92, 0.16);
+  color: var(--v2-status-warning, #c9a15c);
+}
+
+.ev2-docsec__edit-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-family: var(--font-heading);
+  color: var(--accent);
+}
+
+.ev2-docsec__edit-btn:hover {
+  text-decoration: underline;
+}
+
+.ev2-docsec__empty {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-style: italic;
+  margin: 0;
+}
+
+/* Conflict view (AC-3) */
+
+.ev2-docsec__conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ev2-docsec__conflict-banner {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--v2-status-warning, #c9a15c);
+  background: rgba(201, 161, 92, 0.1);
+  padding: var(--space-3);
+}
+
+.ev2-docsec__conflict-banner-title {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+  color: var(--v2-status-warning, #c9a15c);
+}
+
+.ev2-docsec__conflict-banner-hint {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.ev2-docsec__conflict-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+@media (min-width: 40rem) {
+  .ev2-docsec__conflict-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.ev2-docsec__conflict-col-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-muted);
+  margin: 0 0 var(--space-1);
+}
+
+.ev2-docsec__conflict-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--bg-void, var(--enc-void));
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  max-height: 15rem;
+  overflow-y: auto;
+  color: var(--fg);
+  margin: 0;
+}
+
+.ev2-docsec__conflict-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* Editor (AC-2) */
+
+.ev2-docsec__editor-banner {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--v2-status-warning, #c9a15c);
+  background: rgba(201, 161, 92, 0.1);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.ev2-docsec__editor-banner p {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--v2-status-warning, #c9a15c);
+}
+
+.ev2-docsec__editor-loading {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.ev2-docsec__editor-textarea {
+  font-family: var(--font-mono);
+  margin-bottom: var(--space-3);
+}
+
+.ev2-docsec__editor-advanced {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  margin-bottom: var(--space-3);
+}
+
+.ev2-docsec__editor-advanced summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ev2-docsec__editor-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-left: var(--space-1);
+}
+
+.ev2-docsec__editor-advanced-body label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Outline-first content view wrapper */
+
+.ev2-docsec__view {
+  display: block;
+}
+
+.ev2-docsec__live-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent);
+  background: rgba(90, 155, 212, 0.08);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.ev2-docsec__manifest-loading {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  padding: var(--space-3) 0;
+}
