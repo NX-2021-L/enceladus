@@ -6,19 +6,30 @@ across the governed corpus. Telemetry-only in this task -- no corpus mutation.
 GDMP Stage-1 auto-remediation is a separate downstream task; do NOT add
 mutation here.
 
-Five detection categories (full logic in corpus_entropy_core.py, network-free
+Six detection categories (full logic in corpus_entropy_core.py, network-free
 and unit-tested there):
   (a) Orphan       -- records with no parent/plan linkage
   (b) Stagnation   -- open tasks with no worklog above threshold
   (c) Relational   -- declared relational field with no corresponding graph edge
   (d) Retention    -- Lessons with FSRS-6 stability S < T3 (0.7)
   (e) Compliance/Semantic -- compliance_score below threshold AND maturity_state=raw
+  (f) Docstore Integrity -- ENC-TSK-P83: samples up to CEE_DOCSTORE_SAMPLE_N
+      documents/project/run and checks I-D1 (item content_hash == sha256 of
+      the current S3 body), I-D3 (each of the last CEE_DOCSTORE_HISTORY_K
+      accepted history events has a matching versions/{id}/{n}.md object),
+      I-D4 (no two accepted events share before_hash) and I-D6 (persisted
+      outline == outline.compute_outline(body)). Reads: documents.manifest,
+      documents.history (both via DOCUMENT_API_BASE) + S3 GetObject on the
+      existing agent-documents prefix -- no direct DynamoDB access.
 
 Read boundary: this Lambda calls the SAME governed HTTP surface the MCP server
 wraps (tracker API + document API + graph_query_api), authenticated with the
 internal API key -- never raw DynamoDB scans of the corpus tables. This
 mirrors env_drift_auditor (tracker HTTP) and percolation_monitor
-(graph_query_api HTTP) in this repo.
+(graph_query_api HTTP) in this repo. The docstore_integrity detector also
+reads S3 directly (agent-documents/{project_id}/{document_id}.md and
+.../versions/{document_id}/{n}.md), same read-only boundary document_api
+itself uses for document bodies.
 
 Trigger: EventBridge per-invocation (no standing compute). ISS-465
 cost-preflight: see corpus_entropy_deploy_notes.md / task worklog for the
@@ -31,6 +42,7 @@ Enceladus/CEE. OGTM: read-only detection, no new edge types.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -42,15 +54,25 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from corpus_entropy_core import (
+    DEFAULT_DOCSTORE_HISTORY_K,
+    DEFAULT_DOCSTORE_SAMPLE_N,
     build_category_metric_data,
+    build_docstore_invariant_metric_data,
     build_scan_duration_metric_data,
     detect_compliance_semantic_entropy,
+    detect_docstore_integrity,
     detect_orphan_entropy,
     detect_relational_entropy,
     detect_retention_entropy,
     detect_stagnation_entropy,
     is_hard_disabled,
+    sample_document_ids,
 )
+
+# ENC-TSK-P83: shared Markdown outline parser (document_api/outline.py),
+# vendored into this Lambda's build root via .build_extras (co-located here
+# for local test runs; see test_lambda_function.py's sys.path.append).
+from outline import compute_outline
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -71,10 +93,19 @@ CLOUDWATCH_NAMESPACE = os.environ.get("CLOUDWATCH_NAMESPACE", "Enceladus/CEE")
 FUNCTION_NAME = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "enceladus-corpus-entropy-engine")
 STAGNATION_THRESHOLD_DAYS = int(os.environ.get("STAGNATION_THRESHOLD_DAYS", "14"))
 COMPLIANCE_SCORE_THRESHOLD = int(os.environ.get("COMPLIANCE_SCORE_THRESHOLD", "70"))
+# ENC-TSK-P83: docstore_integrity detector config. Same S3 layout document_api
+# uses for document bodies (agent-documents/{project_id}/{document_id}.md and
+# .../versions/{document_id}/{n}.md); own env var names since this Lambda
+# already has an unrelated RHYTHM_RESULTS_BUCKET.
+CEE_DOCSTORE_SAMPLE_N = int(os.environ.get("CEE_DOCSTORE_SAMPLE_N", str(DEFAULT_DOCSTORE_SAMPLE_N)))
+CEE_DOCSTORE_HISTORY_K = int(os.environ.get("CEE_DOCSTORE_HISTORY_K", str(DEFAULT_DOCSTORE_HISTORY_K)))
+DOCSTORE_S3_BUCKET = os.environ.get("DOCSTORE_S3_BUCKET", "jreese-net")
+DOCSTORE_S3_PREFIX = os.environ.get("DOCSTORE_S3_PREFIX", "agent-documents")
 _HTTP_TIMEOUT_S = 30
 _MAX_PAGES = 200  # hard ceiling so a pagination bug can never loop forever
 
 _cw_client = None
+_s3_client = None
 
 
 def _get_cw():
@@ -84,6 +115,15 @@ def _get_cw():
 
         _cw_client = boto3.client("cloudwatch", region_name=REGION)
     return _cw_client
+
+
+def _get_s3():
+    global _s3_client
+    if _s3_client is None:
+        import boto3
+
+        _s3_client = boto3.client("s3", region_name=REGION)
+    return _s3_client
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +238,107 @@ def _fetch_graph_edges() -> List[Any]:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-P83: docstore_integrity reads -- documents.manifest, documents.
+# history (DOCUMENT_API_BASE) + S3 GetObject on the existing agent-documents
+# prefix. No direct DynamoDB access (AC-3). One bad document's fetch failure
+# is swallowed (logged, bundle skipped) so it never aborts the whole sample.
+# ---------------------------------------------------------------------------
+
+def _docstore_s3_key(project_id: str, document_id: str) -> str:
+    return f"{DOCSTORE_S3_PREFIX}/{project_id}/{document_id}.md"
+
+
+def _docstore_version_s3_key(project_id: str, document_id: str, version: Any) -> str:
+    return f"{DOCSTORE_S3_PREFIX}/{project_id}/versions/{document_id}/{version}.md"
+
+
+def _fetch_s3_text(key: str) -> Optional[str]:
+    """GetObject -> decoded text, or None if absent/unreadable. A missing
+    object is an expected, non-exceptional outcome here -- for I-D3 it IS
+    the finding, so it must never raise."""
+    s3 = _get_s3()
+    try:
+        resp = s3.get_object(Bucket=DOCSTORE_S3_BUCKET, Key=key)
+        return resp["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
+        return None
+    except Exception as exc:  # noqa: BLE001 -- one object's failure must never abort the scan
+        logger.warning("[ERROR] docstore S3 get failed key=%s: %s", key, exc)
+        return None
+
+
+def _fetch_docstore_bundle(document_id: str, project_id: str) -> Optional[Dict[str, Any]]:
+    """Assemble one document's docstore_integrity bundle: manifest, current
+    S3 body (+ its sha256 and recomputed outline), and the last
+    CEE_DOCSTORE_HISTORY_K accepted history events with their version-object
+    hashes. Returns None (skip this document) only when the manifest fetch
+    itself fails -- everything else degrades to a None/[] field so the
+    corresponding invariant is simply skipped for this document rather than
+    losing the whole bundle."""
+    manifest_url = (
+        f"{DOCUMENT_API_BASE}/documents/{urllib.parse.quote(document_id, safe='')}"
+        f"/manifest?project_id={urllib.parse.quote(project_id)}"
+    )
+    try:
+        manifest = _http_get(manifest_url)
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        logger.warning("[ERROR] docstore manifest fetch failed document_id=%s: %s", document_id, exc)
+        return None
+
+    body_text = _fetch_s3_text(_docstore_s3_key(project_id, document_id))
+    body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest() if body_text is not None else None
+    computed_outline = compute_outline(body_text) if body_text is not None else None
+
+    history_url = (
+        f"{DOCUMENT_API_BASE}/documents/{urllib.parse.quote(document_id, safe='')}"
+        f"/history?project_id={urllib.parse.quote(project_id)}&page_size={CEE_DOCSTORE_HISTORY_K}"
+    )
+    try:
+        history_payload = _http_get(history_url)
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        logger.warning("[ERROR] docstore history fetch failed document_id=%s: %s", document_id, exc)
+        history_payload = {}
+    accepted_events = [
+        e for e in history_payload.get("events", []) if not e.get("rejection_code")
+    ][-CEE_DOCSTORE_HISTORY_K:]
+
+    version_hashes: Dict[Any, Optional[str]] = {}
+    for event in accepted_events:
+        after_version = event.get("after_version")
+        if after_version is None or after_version in version_hashes:
+            continue
+        version_text = _fetch_s3_text(_docstore_version_s3_key(project_id, document_id, after_version))
+        version_hashes[after_version] = (
+            hashlib.sha256(version_text.encode("utf-8")).hexdigest() if version_text is not None else None
+        )
+
+    return {
+        "document_id": document_id,
+        "content_hash": manifest.get("content_hash"),
+        "body_sha256": body_sha256,
+        "manifest_outline": manifest.get("outline"),
+        "computed_outline": computed_outline,
+        "accepted_events": accepted_events,
+        "version_hashes": version_hashes,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CloudWatch emission
 # ---------------------------------------------------------------------------
 
-def _publish_metrics(counts: Dict[str, int], *, duration_ms: Optional[float] = None) -> None:
+def _publish_metrics(
+    counts: Dict[str, int],
+    *,
+    docstore_findings: Optional[List[Dict[str, Any]]] = None,
+    duration_ms: Optional[float] = None,
+) -> None:
     now = datetime.now(timezone.utc)
     metric_data = build_category_metric_data(counts, function_name=FUNCTION_NAME, timestamp=now)
+    if docstore_findings:
+        metric_data.extend(
+            build_docstore_invariant_metric_data(docstore_findings, function_name=FUNCTION_NAME, timestamp=now)
+        )
     if duration_ms is not None:
         metric_data.append(
             build_scan_duration_metric_data(duration_ms, function_name=FUNCTION_NAME, timestamp=now)
@@ -331,16 +466,34 @@ def _run_scan(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
             documents, score_threshold=COMPLIANCE_SCORE_THRESHOLD
         )
 
+        # ENC-TSK-P83: docstore_integrity -- deterministic rotating sample of
+        # up to CEE_DOCSTORE_SAMPLE_N document_ids (offset by day-of-year so
+        # nightly runs sweep the whole corpus), one bundle fetch per sampled
+        # document, then the pure detector over the assembled bundles.
+        document_ids = [d.get("document_id") for d in documents if d.get("document_id")]
+        sampled_document_ids = sample_document_ids(
+            document_ids,
+            n=CEE_DOCSTORE_SAMPLE_N,
+            day_offset=datetime.now(timezone.utc).timetuple().tm_yday,
+        )
+        docstore_bundles = []
+        for document_id in sampled_document_ids:
+            bundle = _fetch_docstore_bundle(document_id, PROJECT_ID)
+            if bundle is not None:
+                docstore_bundles.append(bundle)
+        docstore_findings = detect_docstore_integrity(docstore_bundles)
+
         counts = {
             "lineage_unanchored": len(orphan_findings),
             "stagnation": len(stagnation_findings),
             "relational": len(relational_findings),
             "retention": len(retention_findings),
             "compliance_semantic": len(compliance_findings),
+            "docstore_integrity": len(docstore_findings),
         }
 
         duration_ms = (time.perf_counter() - started) * 1000.0
-        _publish_metrics(counts, duration_ms=duration_ms)
+        _publish_metrics(counts, docstore_findings=docstore_findings, duration_ms=duration_ms)
 
         result = {
             "success": True,
@@ -356,6 +509,7 @@ def _run_scan(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
                 "documents": len(documents),
                 "lessons": len(lessons),
                 "graph_edges": len(edges),
+                "docstore_documents_sampled": len(sampled_document_ids),
             },
         }
         logger.info("[END] CEE scan complete: %s", json.dumps(counts))
