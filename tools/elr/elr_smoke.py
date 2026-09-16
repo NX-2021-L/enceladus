@@ -181,7 +181,7 @@ def run_health_smoke(
             # ENC-TSK-P77 / BRD elr.smoke_digest schema:
             profile=resolved_profile_name,
             governance_hash=governance_hash,
-            prefix_map_source="none",  # until ENC-TSK-P74's ELR half lands
+            prefix_map_source="none",  # health checks classify no record ids (see elr_lib.prefix)
             unclassified=[],
             **extra,
         )

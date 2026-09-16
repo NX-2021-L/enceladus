@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
+from elr_lib.prefix import PrefixResolver  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
 
 # --- ID classification ------------------------------------------------------
@@ -73,19 +74,19 @@ _TRACKER_TYPE_BY_SEGMENT: Dict[str, str] = {
     "LSN": "lesson",
 }
 
-# Project-prefix -> project_id. server.py resolves this dynamically via
-# the projects LIST API (_resolve_prefix -> _get_prefix_map, which calls
-# _projects_api_request("GET") with no id -- a list route). elr_batch_get
-# deliberately does NOT do that: the HARD RULE for this tool is that it
-# never constructs a list/scan/query route, only entity-specific per-ID
-# GETs. So the one prefix this tool currently classifies as tracker-kind
-# (ENC) is a static literal, not a live lookup. Any other prefix -- even
-# one that *would* resolve via the projects API -- falls through to
-# "unclassified" rather than triggering a list call to find out.
-_PREFIX_TO_PROJECT_ID: Dict[str, str] = {
-    "ENC": "enceladus",
-}
-
+# Project-prefix -> project_id. Historically (pre ENC-TSK-P90) this was a
+# static literal ({"ENC": "enceladus"}) because server.py resolves the
+# full map dynamically via the projects LIST API (_resolve_prefix ->
+# _get_prefix_map(), which calls _projects_api_request("GET") with no
+# id -- a list route), and elr_batch_get's HARD RULE is that it never
+# constructs a list/scan/query route itself, only entity-specific
+# per-ID GETs. ENC-TSK-P90 / FR-B4-3 closes that gap WITHOUT breaking
+# the hard rule: elr_lib.prefix.PrefixResolver resolves the live map via
+# the *entity-specific* projects.prefix_map search action over the
+# mcp-http transport (not a list route), with a 300s-TTL local file
+# cache and a built-in last-resort seed -- see elr_lib/prefix.py. Any
+# prefix still absent from whatever map ends up being used falls through
+# to "unclassified", never guessed.
 _TRACKER_ID_RE = re.compile(
     r"^(?P<prefix>[A-Z]{2,8})-(?P<type_seg>TSK|ISS|FTR|PLN|LSN)-(?P<suffix>[A-Z0-9]+(?:-[A-Z0-9]{1,4})?)$"
 )
@@ -105,10 +106,15 @@ class ClassifiedId:
     record_type: Optional[str] = None
 
 
-def classify_id(raw_id: str) -> ClassifiedId:
+def classify_id(raw_id: str, resolver: PrefixResolver) -> ClassifiedId:
     """Classify one ID by prefix/shape. Never guesses: an ID whose prefix
     or type segment isn't recognized comes back KIND_UNCLASSIFIED and is
     never sent over the network.
+
+    `resolver` supplies the live (network/cache/builtin) prefix->project_id
+    map -- see elr_lib.prefix.PrefixResolver. It is only ever consulted
+    for an id that already matches the tracker id SHAPE (PREFIX-TSK|ISS|
+    FTR|PLN|LSN-suffix); a DOC-* id or outright garbage never touches it.
     """
     normalized = str(raw_id).strip().upper()
 
@@ -118,9 +124,8 @@ def classify_id(raw_id: str) -> ClassifiedId:
     match = _TRACKER_ID_RE.match(normalized)
     if match:
         type_seg = match.group("type_seg")
-        prefix = match.group("prefix")
         record_type = _TRACKER_TYPE_BY_SEGMENT.get(type_seg)
-        project_id = _PREFIX_TO_PROJECT_ID.get(prefix)
+        project_id = resolver.resolve_prefix(normalized) if record_type else None
         if record_type and project_id:
             return ClassifiedId(
                 raw=raw_id,
@@ -333,7 +338,12 @@ def _aggregate_posture(outcomes: List[FetchOutcome]) -> Tuple[str, List[str]]:
     return "unknown", [f"mixed_identity_posture:{','.join(distinct or ['unknown'])}"]
 
 
-def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -> Dict[str, Any]:
+def run_batch_get(
+    ids: List[str],
+    environment_profile_name: str,
+    timeout: int,
+    resolver: Optional[PrefixResolver] = None,
+) -> Dict[str, Any]:
     # ENC-TSK-P77: `environment_profile_name` is the "prod"/"v4-gamma"
     # ENVIRONMENT profile (elr_lib.profiles) coming from --profile; the
     # TRANSPORT profile is always "internal" here (the only one batch
@@ -341,16 +351,25 @@ def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -
     config = get_profile("internal", environment_profile_name=environment_profile_name)
     client = InternalClient(config, timeout=timeout)
 
+    # ENC-TSK-P90: one PrefixResolver per run ("fetched once per run" --
+    # see elr_lib.prefix), reused across every id classified below. A
+    # caller may inject one (tests do, to stay offline/deterministic);
+    # the CLI path leaves this None and gets a live resolver honoring the
+    # SAME --profile environment as the tracker reads themselves.
+    if resolver is None:
+        resolver = PrefixResolver(environment_profile_name=environment_profile_name, timeout=timeout)
+
     rows: List[Dict[str, Any]] = []
     anomalies: List[str] = []
     outcomes: List[FetchOutcome] = []
+    unclassified_ids: List[str] = []
 
     fetched = 0
     failed = 0
     unclassified = 0
 
     for raw_id in ids:
-        classified = classify_id(raw_id)
+        classified = classify_id(raw_id, resolver)
 
         if classified.kind == KIND_TRACKER:
             outcome = fetch_tracker_row(client, classified)
@@ -367,10 +386,16 @@ def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -
 
         if classified.kind == KIND_UNCLASSIFIED:
             unclassified += 1
+            unclassified_ids.append(classified.normalized)
         elif outcome.ok:
             fetched += 1
         else:
             failed += 1
+
+    # ENC-TSK-P90 / AC-1: the resolver's own network/cache/builtin
+    # anomalies (e.g. a stale-cache fallback or the builtin-seed last
+    # resort) belong in every digest alongside the per-id ones.
+    anomalies.extend(resolver.anomalies)
 
     requested = len(ids)
     overall_ok = requested > 0 and failed == 0 and unclassified == 0 and fetched == requested
@@ -410,6 +435,13 @@ def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -
         anomalies=anomalies,
         counts=totals,
         rows=rows,
+        # ENC-TSK-P90 / AC-1: prefix_map_source is one of
+        # network/cache/builtin/none (resolver.source stays "none" when
+        # no id in this batch ever needed prefix resolution at all);
+        # unclassified is the list of normalized ids that fell through
+        # -- always present, possibly empty, never a guess.
+        prefix_map_source=resolver.source,
+        unclassified=unclassified_ids,
     )
 
 

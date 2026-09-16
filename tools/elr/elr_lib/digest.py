@@ -46,11 +46,14 @@ refuse-activation paths.
 
 ``profile``, ``governance_hash``, ``prefix_map_source``, and
 ``unclassified`` (added for ENC-TSK-P77 / elr_smoke.py's elr.smoke_digest
-schema) carry: the ENVIRONMENT profile name ("prod"/"v4-gamma") the run
-used; the live governance_hash echoed by the health endpoint body;
-"none" for prefix_map_source until ENC-TSK-P74's ELR half lands; and an
-always-present (possibly empty) list of unclassified items reserved for
-that same follow-up.
+schema; wired for real by ENC-TSK-P90 / elr_lib.prefix.PrefixResolver)
+carry: the ENVIRONMENT profile name ("prod"/"v4-gamma") the run used;
+the live governance_hash echoed by the health endpoint body;
+prefix_map_source -- one of "network"/"cache"/"builtin"/"none" (the last
+meaning no id in this run ever needed prefix resolution, e.g. elr_smoke's
+health check, which classifies no record ids at all); and an
+always-present (possibly empty) list of unclassified record ids that a
+resolver's map (of whatever provenance) could not classify.
 
 ``ca_bundle`` and ``remediation`` (added for ENC-TSK-P76 / elr_lib.tls)
 carry the TLS CA-bundle resolution report: ca_bundle is the small
