@@ -110,7 +110,12 @@ class TestIfMatchStaleRevisionConflicts(unittest.TestCase):
             _event({"title": "New title"}, if_match="2"), CLAIMS, "DOC-L47TEST0001",
         )
         self.assertEqual(resp["statusCode"], 409)
-        fake_ddb.update_item.assert_not_called()
+        # ENC-TSK-P72 AC-2: a rejected mutation now appends a bookkeeping
+        # history event (+ version_seq counter allocation) via a SEPARATE
+        # unconditional UpdateItem — but must never attempt the guarded
+        # (ConditionExpression-bearing) content/version write itself.
+        for call in fake_ddb.update_item.call_args_list:
+            self.assertNotIn("ConditionExpression", call.kwargs)
         body = json.loads(resp["body"])
         self.assertFalse(body.get("success"))
         envelope = body.get("error_envelope", {})
@@ -133,7 +138,14 @@ class TestIfMatchStaleRevisionConflicts(unittest.TestCase):
             pass
 
         fake_ddb.exceptions.ConditionalCheckFailedException = _FakeConditionalCheckFailedException
-        fake_ddb.update_item.side_effect = _FakeConditionalCheckFailedException()
+
+        def _side_effect(*args, **kwargs):
+            if kwargs.get("Key", {}).get("document_id", {}).get("S") == "DOC-L47TEST0001" \
+                    and "ConditionExpression" in kwargs:
+                raise _FakeConditionalCheckFailedException()
+            return {"Attributes": {"next_num": {"N": "1"}}}
+
+        fake_ddb.update_item.side_effect = _side_effect
 
         resp = document_api._handle_patch(
             _event({"title": "New title"}, if_match="3"), CLAIMS, "DOC-L47TEST0001",
