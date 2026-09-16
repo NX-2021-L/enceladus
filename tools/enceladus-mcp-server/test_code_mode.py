@@ -168,6 +168,79 @@ def test_tracker_embeddings_for_requires_record_ids():
     assert "record_ids is required" in payload["error"]
 
 
+def test_projects_prefix_map_handler_calls_resolver_not_projects_api_directly():
+    """Direct handler test: _projects_prefix_map must go through _get_prefix_map()
+    and must not itself call _projects_api_request (that call belongs solely to
+    the resolver's own cache-miss path)."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("_projects_prefix_map must not call _projects_api_request directly")
+
+    with patch.object(server, "_get_prefix_map", return_value={"ENC": "enceladus"}), patch.object(
+        server, "_projects_api_request", _fail_if_called
+    ):
+        result = _run(server._projects_prefix_map({}))
+
+    payload = json.loads(result[0].text)
+    assert payload == {
+        "prefixes": {"ENC": "enceladus"},
+        "source": "project_service.prefix union alias_prefixes",
+        "generated_at": payload["generated_at"],
+    }
+    assert payload["generated_at"].endswith("Z")
+
+
+def test_search_registers_projects_prefix_map_action():
+    """ENC-TSK-P74 / FR-B4-2: projects.prefix_map is a registered read-only
+    search action that reuses the existing _get_prefix_map() resolver
+    (ENC-TSK-O47) verbatim -- no additional table scan -- and returns only
+    the prefix->project_id mapping plus provenance metadata (no record
+    bodies)."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+
+    assert server._SEARCH_ACTIONS["projects.prefix_map"]["tool"] == "projects_prefix_map"
+    assert "projects_prefix_map" in server._TOOL_HANDLERS
+
+    calls = {"count": 0}
+
+    def _fake_get_prefix_map(*, _refresh=False):
+        calls["count"] += 1
+        return {"ENC": "enceladus", "HFY": "harrisonfamily", "OLD": "enceladus"}
+
+    with patch.object(server, "_get_prefix_map", _fake_get_prefix_map), patch.dict(
+        os.environ, {"COORDINATION_ALLOWED_RAW_TOOLS": "projects_prefix_map"}, clear=False
+    ):
+        payload = json.loads(
+            _run(
+                server.call_tool(
+                    "search",
+                    {"action": "projects.prefix_map", "arguments": {}},
+                )
+            )[0].text
+        )
+
+    assert payload["success"] is True
+    result = payload["result"]
+    assert result["prefixes"] == {"ENC": "enceladus", "HFY": "harrisonfamily", "OLD": "enceladus"}
+    assert result["source"] == "project_service.prefix union alias_prefixes"
+    assert "generated_at" in result and result["generated_at"].endswith("Z")
+    # No additional table scan: the resolver is invoked exactly once, and the
+    # response carries no record bodies -- only prefixes/source/generated_at.
+    assert calls["count"] == 1
+    assert set(result.keys()) == {"prefixes", "source", "generated_at"}
+
+
+def test_projects_prefix_map_is_deferred_not_eager_loaded():
+    """ENC-TSK-G15: projects_prefix_map must not be added to EAGER_LOAD_TOOLS
+    -- it stays reachable only via the 'search' meta-tool (deferred by
+    default), matching every other recently added search action."""
+    from tool_defer_loading import EAGER_LOAD_TOOLS
+
+    assert "projects_prefix_map" not in EAGER_LOAD_TOOLS
+    assert "projects.prefix_map" not in EAGER_LOAD_TOOLS
+
+
 def test_get_compact_context_preserves_existing_codemap_payload():
     server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
 

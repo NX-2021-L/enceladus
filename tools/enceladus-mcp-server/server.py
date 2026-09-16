@@ -5547,6 +5547,21 @@ async def _projects_get(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _projects_prefix_map(args: dict) -> list[TextContent]:
+    """ENC-TSK-P74 / FR-B4-2: read-only prefix -> project_id map.
+
+    Reuses the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim —
+    no additional table scan. Cacheable, no record bodies: the response is
+    just the prefix->project_id mapping plus provenance/generation metadata.
+    """
+    prefix_map = _get_prefix_map()
+    return _result_text({
+        "prefixes": dict(prefix_map),
+        "source": "project_service.prefix union alias_prefixes",
+        "generated_at": _now_z(),
+    })
+
+
 # --- Tracker ---
 
 
@@ -9935,6 +9950,8 @@ _TOOL_HANDLERS = {
     "execute": _execute,
     "projects_list": _projects_list,
     "projects_get": _projects_get,
+    # ENC-TSK-P74 / FR-B4-2: read-only prefix -> project_id map (reuses _get_prefix_map())
+    "projects_prefix_map": _projects_prefix_map,
     "tracker_get": _tracker_get,
     "tracker_validation_rules": _tracker_validation_rules,
     "tracker_creation_rules": _tracker_creation_rules,

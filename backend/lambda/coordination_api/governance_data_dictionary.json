@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-27.4",
-  "updated_at": "2026-08-27T05:45:00Z",
-  "last_change_summary": "ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
+  "version": "2026-09-16.1",
+  "updated_at": "2026-09-16T00:00:00Z",
+  "last_change_summary": "ENC-TSK-P69 / ENC-TSK-P82: registered document.patch_section, document.digest, document.history_event, document.body_versioning, mcp_server.documents_patch_section, mcp_server.projects_prefix_map, elr.identity_posture, and elr.tls_resolution; amended document.doc to note 'research' and 'brd' as observed emergent subtypepattern values (ENC-FTR-078 graduation_pathway) without promoting them to the enum. See DOC-8F6CF7700EAD.\n\nPREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged. PREVIOUS: ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary). PREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1086,6 +1086,15 @@
           "type": "rule",
           "definition": "ENC-FTR-078 AC-18 schema-layer Godel-amendment mechanism. Agents express emergent type patterns via subtypepattern on document_subtype='doc' records. (a) Each subtypepattern value is structured, queryable telemetry for an emergent type primitive. (b) Consistent, high-frequency, cross-project usage of a subtypepattern value is evidence that the value should graduate to a first-class document_subtype enum value. (c) Graduation is performed via a follow-on ENC-FTR that moves the value from subtypepattern land into the document_subtype enum (and adds the new document.<name> entity to this dictionary). (d) The graduation criteria (thresholds, diversity measures) are deliberately unpinned in ENC-FTR-078; the first graduation-candidate ENC-FTR will specify them. This IS the Godel-amendment mechanism (DOC-0CAD28643E2F) applied at the schema layer: the enum is acknowledged as inherently incomplete, and subtypepattern is the structured evidence stream by which the enum learns what to become.",
           "usage_guidance": "Documentation-only. No runtime logic ships in ENC-FTR-078 for graduation. Observability queries to propose graduation candidates: documents.search with subtypepattern filter (exact match) + aggregate by value."
+        },
+        "observed_emergent_subtypepattern_values": {
+          "type": "array",
+          "item_type": "string",
+          "enum": [
+            "research",
+            "brd"
+          ],
+          "definition": "ENC-FTR-078 graduation_pathway telemetry (ENC-TSK-P69/P82, DOC-8F6CF7700EAD): 'research' and 'brd' are observed emergent subtypepattern values on document_subtype='doc' records -- consistent, real-world usage captured as structured evidence per the graduation_pathway field. Listed here for observability/discoverability only; NEITHER value is promoted to the document_subtype enum by this change. A future graduation would follow the existing graduation_pathway mechanism (a dedicated ENC-FTR that adds a document.research and/or document.brd entity and moves the value out of free-form subtypepattern)."
         }
       }
     },
@@ -8356,10 +8365,599 @@
           "usage_guidance": "Do not emit this metric from any other code path or component. Its entire value is that its ABSENCE is trustworthy; a second emitter would make a missing datapoint ambiguous and silently disarm the alarm. ENC-TSK-O81 AC-1 requires the alarm be OBSERVED firing against a deliberately DISABLED schedule -- an alarm never seen red is not evidence that it works."
         }
       }
+    },
+    "mcp_server.projects_prefix_map": {
+      "description": "Cached project_id -> prefix lookup used by MCP-side tools that need to validate or normalize a project_id before forwarding a call to a Lambda HTTP API (e.g. resolving the {project_id} segment used throughout document.body_versioning's S3 key patterns). Governance-dictionary contract carried on behalf of ENC-TSK-P82.",
+      "fields": {
+        "prefixes": {
+          "type": "object",
+          "definition": "Map of project_id -> its canonical prefix string, matching the {project_id} path segment used throughout document.body_versioning's S3 key patterns and the tracker/documents DynamoDB partition keys."
+        },
+        "source": {
+          "type": "string",
+          "definition": "Where the map was loaded from -- e.g. 'projects.list' (a live search(action='projects.list') call) or a cached snapshot. Present so a stale-map bug can be traced to its origin."
+        },
+        "generated_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "UTC timestamp the map was last (re)generated. Callers needing current data should treat a map older than a short TTL as stale and refresh via projects.list."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P73",
+          "ENC-TSK-P74",
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "document.patch_section": {
+      "description": "Heading-anchored PATCH contract for editing one section of a document body without resubmitting the full content (FR-B1 family). Anchors a mutation to a heading resolved via the shared outline parser (backend/lambda/document_api/outline.py, ENC-TSK-P69) rather than a byte offset, so edits survive unrelated changes elsewhere in the document. Every call is conditional on if_match -- there is no unconditional patch_section path, unlike the whole-document PATCH covered by api.if_match_revision_contract. This entity is the governance-dictionary contract carried on behalf of ENC-TSK-P82 (a no_code documentation task that cannot merge its own PR); the endpoint implementation ships in a follow-on task against this same contract.",
+      "fields": {
+        "request": {
+          "type": "object",
+          "definition": "PATCH /documents/{document_id}/sections request body (equivalently, MCP documents.patch_section arguments).",
+          "required_fields": {
+            "document_id": {
+              "type": "string",
+              "definition": "Target document (DOC-XXXXXXXXXXXX)."
+            },
+            "project_id": {
+              "type": "string",
+              "definition": "Owning project, echoed for authorization/scoping."
+            },
+            "anchor": {
+              "type": "object",
+              "definition": "Identifies the target heading. Resolved against the document's persisted outline (document.digest.outline).",
+              "fields": {
+                "heading_path": {
+                  "type": "array",
+                  "item_type": "string",
+                  "definition": "Ancestor-inclusive heading text path, as emitted by outline.py (H1 title line excluded)."
+                },
+                "block_id": {
+                  "type": "string",
+                  "definition": "Optional ULID read from an <!-- enc:block:ULID --> comment immediately following the heading. When present, takes precedence over heading_path for resolution (stable across heading renames)."
+                },
+                "ordinal": {
+                  "type": "integer",
+                  "definition": "1-based position among same-text siblings under the same parent (outline.py 'ordinal'). Required to disambiguate duplicate sibling headings when block_id is absent."
+                }
+              }
+            },
+            "op": {
+              "type": "enum",
+              "enum": [
+                "replace",
+                "append",
+                "prepend",
+                "delete"
+              ],
+              "definition": "Mutation applied to the anchor's section body. See allowed_values.op below."
+            },
+            "if_match": {
+              "type": "string",
+              "constraints": {
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "definition": "REQUIRED sha256 hex content_hash precondition. Every patch_section call is conditional. Mismatch returns CONTENT_HASH_MISMATCH (412)."
+            },
+            "governance_hash": {
+              "type": "string",
+              "definition": "Standard MCP governed-write governance hash, captured from connection_health() / a prior read."
+            }
+          },
+          "optional_fields": {
+            "body": {
+              "type": "string",
+              "definition": "New/inserted markdown content. Required for op in {replace, append, prepend} (OP_BODY_REQUIRED if missing); forbidden for op=delete (OP_BODY_FORBIDDEN if present)."
+            },
+            "include_heading": {
+              "type": "boolean",
+              "definition": "Default false. When true, `body` replaces/extends starting at the heading line itself instead of the section content below it -- lets a caller rename the heading text in the same op."
+            },
+            "rebase_headings": {
+              "type": "boolean",
+              "definition": "Default true. When true, any headings contained within `body` (for replace/append/prepend) are re-leveled so they nest correctly under the anchor instead of being inserted at their literal source level."
+            },
+            "idempotency_key": {
+              "type": "string",
+              "definition": "Caller-supplied dedupe key. A repeat call with the same idempotency_key against an already-applied mutation returns IDEMPOTENT_REPLAY (200) with the original result instead of re-applying the op."
+            },
+            "caused_by": {
+              "type": "string",
+              "definition": "Optional causal reference (record ID, session ID, or handoff ID) stamped onto the resulting document.history_event for provenance."
+            },
+            "dry_run": {
+              "type": "boolean",
+              "definition": "When true, resolves the anchor and validates preconditions but does not write. Returns the same response shape with the projected bytes_changed and outline, for caller-side preview."
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "definition": "Successful patch_section response body.",
+          "fields": {
+            "document_id": {
+              "type": "string",
+              "definition": "Echoed target document."
+            },
+            "version": {
+              "type": "integer",
+              "definition": "Post-write version counter (document_api's existing optimistic-concurrency version field)."
+            },
+            "content_hash": {
+              "type": "string",
+              "constraints": {
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "definition": "sha256 hex of the full document body after the patch -- the new if_match value for the next call."
+            },
+            "size_bytes": {
+              "type": "integer",
+              "definition": "Full document body size after the patch."
+            },
+            "event_id": {
+              "type": "string",
+              "constraints": {
+                "format": "ULID"
+              },
+              "definition": "ID of the document.history_event row recorded for this mutation."
+            },
+            "anchor_resolved": {
+              "type": "object",
+              "definition": "The anchor as actually resolved -- echoes heading_path/level/ordinal/block_id from the matched outline entry, so a caller anchored by block_id can confirm which heading text it landed on.",
+              "fields": {
+                "heading_path": {
+                  "type": "array",
+                  "item_type": "string"
+                },
+                "level": {
+                  "type": "integer"
+                },
+                "ordinal": {
+                  "type": "integer"
+                },
+                "block_id": {
+                  "type": "string",
+                  "nullable": true
+                }
+              }
+            },
+            "bytes_changed": {
+              "type": "integer",
+              "definition": "abs(size_bytes_after - size_bytes_before), reported for audit/telemetry."
+            },
+            "outline": {
+              "type": "array",
+              "definition": "Full post-write outline (same shape as document.digest.outline), so the caller can re-anchor a follow-up patch_section call without a separate digest read."
+            }
+          }
+        }
+      },
+      "allowed_values": {
+        "op": {
+          "type": "enum",
+          "enum": [
+            "replace",
+            "append",
+            "prepend",
+            "delete"
+          ],
+          "definition": "replace: overwrite the anchor's section content. append: add body after existing section content. prepend: add body before existing section content. delete: remove the section content (and, only when include_heading=true, the heading line itself)."
+        }
+      },
+      "error_codes": {
+        "CONTENT_HASH_MISMATCH": {
+          "http_status": 412,
+          "definition": "if_match did not equal the document's current content_hash.",
+          "fields": [
+            "expected_hash",
+            "current_hash",
+            "current_version",
+            "updated_at",
+            "recommended_next_actions"
+          ]
+        },
+        "REVISION_CONFLICT": {
+          "http_status": 409,
+          "definition": "Concurrent write landed between the pre-check and the commit (mirrors api.if_match_revision_contract's REVISION_CONFLICT on the whole-document PATCH path)."
+        },
+        "PRECONDITION_REQUIRED": {
+          "http_status": 428,
+          "definition": "if_match was omitted entirely. Unlike the whole-document PATCH path, patch_section has no unconditional mode."
+        },
+        "ANCHOR_NOT_FOUND": {
+          "http_status": 404,
+          "definition": "No outline entry matched the supplied anchor.",
+          "fields": [
+            "outline"
+          ]
+        },
+        "ANCHOR_AMBIGUOUS": {
+          "http_status": 409,
+          "definition": "More than one outline entry matched (e.g. heading_path supplied without ordinal or block_id where duplicate siblings exist).",
+          "fields": [
+            "candidates"
+          ]
+        },
+        "BODY_TOO_LARGE": {
+          "http_status": 413,
+          "definition": "`body` alone exceeds the per-op size cap."
+        },
+        "DOCUMENT_TOO_LARGE": {
+          "http_status": 413,
+          "definition": "Applying the patch would push the full document body over MAX_CONTENT_SIZE."
+        },
+        "OP_BODY_FORBIDDEN": {
+          "http_status": 400,
+          "definition": "`body` was supplied for op=delete."
+        },
+        "OP_BODY_REQUIRED": {
+          "http_status": 400,
+          "definition": "`body` was omitted for op in {replace, append, prepend}."
+        },
+        "IDEMPOTENT_REPLAY": {
+          "http_status": 200,
+          "definition": "idempotency_key matched a previously-applied mutation; the original response was replayed without re-applying the op."
+        },
+        "SCI_REQUIRED": {
+          "http_status": 403,
+          "definition": "Caller lacked a valid session/SCI context for a governed write (mirrors the standard MCP governed-write SCI requirement)."
+        },
+        "GOVERNANCE_STALE": {
+          "http_status": 409,
+          "definition": "Supplied governance_hash did not match the current governance hash."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P69",
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD",
+        "note": "Contract only in this change; endpoint implementation tracked as a follow-on task against backend/lambda/document_api."
+      }
+    },
+    "document.digest": {
+      "description": "Content-free projection returned by GET /documents/{id}?digest_only=true and GET /documents/{id}/manifest (ENC-TSK-P69, FR-B1-1..8). MCP search actions documents.get with digest_only and documents.manifest resolve to the same document_api handler -- MCP-side registration ships separately in ENC-TSK-P73/P74 (see mcp_server.documents_patch_section). Lets a caller read a document's structural metadata and section outline without paying the S3 fetch + response-size cost of the full body. Served from the persisted `outline` item attribute when present; computed on the fly (and NEVER written back) for pre-existing items written before ENC-TSK-P69.",
+      "fields": {
+        "document_id": {
+          "type": "string",
+          "definition": "DOC-XXXXXXXXXXXX."
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "document_subtype": {
+          "type": "string",
+          "definition": "See document.doc / document.handoff / document.coe / document.wave / document.idea / document.context-node / document.skill."
+        },
+        "subtypepattern": {
+          "type": "string",
+          "nullable": true,
+          "definition": "Echoes document.doc.subtypepattern when set; null otherwise."
+        },
+        "version": {
+          "type": "integer"
+        },
+        "content_hash": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "definition": "Lowercase hex sha256 of the exact stored UTF-8 body bytes, no normalization (asserted by test_digest_manifest_p69.py against a body with CRLF line endings and trailing whitespace). Also carried as the response ETag header, double-quoted."
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          }
+        },
+        "history_count": {
+          "type": "integer",
+          "definition": "Count of document.history_event rows for this document. Defaults to 0 (no writer increments it yet -- that ships with document.patch_section); the digest field and default are live now so callers can rely on the shape immediately."
+        },
+        "outline": {
+          "type": "array",
+          "item_type": "object",
+          "definition": "Ordered outline entries from the shared parser (backend/lambda/document_api/outline.py).",
+          "item_fields": {
+            "heading_path": {
+              "type": "array",
+              "item_type": "string",
+              "definition": "Ancestor-inclusive heading text, H1 title line excluded (neither as ancestor nor as itself)."
+            },
+            "level": {
+              "type": "integer",
+              "definition": "1-6. ATX (#..######) or setext (underline = -> H1, underline - -> H2)."
+            },
+            "ordinal": {
+              "type": "integer",
+              "definition": "1-based position among same-text siblings under the same parent -- disambiguates duplicate sibling headings, not a general sibling index."
+            },
+            "block_id": {
+              "type": "string",
+              "nullable": true,
+              "definition": "ULID from a <!-- enc:block:ULID --> comment on the line immediately following the heading; null otherwise."
+            },
+            "line_start": {
+              "type": "integer",
+              "definition": "1-based first line of the section body (after the heading and its block-id comment, if any)."
+            },
+            "line_end": {
+              "type": "integer",
+              "definition": "1-based last line of the section body -- the line before the next heading at level <= this heading's level, or EOF. A heading with no body (immediately followed by a terminating heading or EOF) reports line_end = line_start - 1."
+            },
+            "section_bytes": {
+              "type": "integer",
+              "definition": "UTF-8 byte length of the exact section text (line_start..line_end inclusive), original line endings preserved (no CRLF normalization). A parent heading's section includes its nested subsections' text."
+            }
+          }
+        }
+      },
+      "http_contract": {
+        "etag": "Response header ETag = '\"' + content_hash + '\"' (double-quoted).",
+        "if_none_match": "A request with If-None-Match equal to the current content_hash (quotes optional) returns HTTP 304 with an empty body and the same ETag header."
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P69"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD",
+        "source": "backend/lambda/document_api/lambda_function.py::_get_document_digest, backend/lambda/document_api/outline.py::compute_outline"
+      }
+    },
+    "document.history_event": {
+      "description": "Per-mutation audit row appended to a document's history sidecar (see document.body_versioning) on every write. Governance-dictionary contract carried on behalf of ENC-TSK-P82; the writer path ships incrementally starting with the document.patch_section family. document.digest.history_count is the live count of these rows for a document once the writer exists.",
+      "fields": {
+        "event_id": {
+          "type": "string",
+          "constraints": {
+            "format": "ULID"
+          },
+          "definition": "Unique event identifier, also returned as document.patch_section.response.event_id for the mutation that produced it."
+        },
+        "ts": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "UTC timestamp the event was recorded."
+        },
+        "actor": {
+          "type": "string",
+          "definition": "Identity that performed the write -- claims.sub / claims.email from _authenticate, or the internal-key identity for service-to-service writes. See elr.identity_posture for the ELR-specific identity contract."
+        },
+        "surface": {
+          "type": "enum",
+          "enum": [
+            "mcp",
+            "elr",
+            "pwa",
+            "lambda",
+            "unknown"
+          ],
+          "definition": "Which caller surface originated the write."
+        },
+        "op": {
+          "type": "enum",
+          "enum": [
+            "put",
+            "patch",
+            "append_content",
+            "replace",
+            "append",
+            "prepend",
+            "delete",
+            "metadata",
+            "legacy",
+            "<op>-rejected"
+          ],
+          "definition": "put/patch/append_content are the existing whole-document write paths; replace/append/prepend/delete are document.patch_section ops; metadata covers a write that touched only non-body fields; legacy backfills history for documents written before this event log existed; '<op>-rejected' is a literal suffix pattern (e.g. 'replace-rejected') recording a failed attempt for audit -- see rejection_code."
+        },
+        "rejection_code": {
+          "type": "string",
+          "nullable": true,
+          "definition": "One of document.patch_section.error_codes when op ends in '-rejected'; null for a successful op."
+        },
+        "anchor": {
+          "type": "object",
+          "nullable": true,
+          "definition": "The resolved anchor (document.patch_section.response.anchor_resolved shape) for a section-scoped op; null for whole-document put/patch/append_content."
+        },
+        "before_hash": {
+          "type": "string",
+          "definition": "content_hash immediately before this event."
+        },
+        "after_hash": {
+          "type": "string",
+          "definition": "content_hash immediately after this event (matches document.digest.content_hash once this is the latest event)."
+        },
+        "before_version": {
+          "type": "integer"
+        },
+        "after_version": {
+          "type": "integer"
+        },
+        "patch_bytes": {
+          "type": "integer",
+          "nullable": true,
+          "definition": "Size of the delta applied (body length for a section op); null for whole-document put/patch."
+        },
+        "document_bytes": {
+          "type": "integer",
+          "definition": "Full document size_bytes after this event."
+        },
+        "fields_changed": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Non-body metadata fields touched by this event, if any (e.g. ['title', 'keywords'])."
+        },
+        "caused_by": {
+          "type": "string",
+          "nullable": true,
+          "definition": "Echoes the request's caused_by, if supplied."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "nullable": true,
+          "definition": "Echoes the request's idempotency_key, if supplied -- lets a replay (IDEMPOTENT_REPLAY) be traced back to its originating event."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "document.body_versioning": {
+      "description": "S3 key layout for a document's current body, historical versions, and the append-only history sidecar. Governance-dictionary contract carried on behalf of ENC-TSK-P82; the versions/ snapshot and history sidecar writers ship incrementally starting with document.patch_section. current_key is the existing, already-live document_api._s3_key convention.",
+      "fields": {
+        "current_key": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^agent-documents/[^/]+/[^/]+\\.md$"
+          },
+          "definition": "agent-documents/{project_id}/{document_id}.md -- the live document body, overwritten on every write. Matches document_api._s3_key (S3_PREFIX default 'agent-documents')."
+        },
+        "version_key_pattern": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^agent-documents/[^/]+/versions/[^/]+/[^/]+\\.md$"
+          },
+          "definition": "agent-documents/{project_id}/versions/{document_id}/{version}.md -- a snapshot of the body as of that version counter value, written alongside current_key once versioned writes ship."
+        },
+        "retention": {
+          "type": "enum",
+          "enum": [
+            "indefinite"
+          ],
+          "definition": "Version snapshots are retained indefinitely -- no lifecycle expiry policy. Revisit if S3 storage cost or the document_maturity_state archival flow motivates a retention window."
+        },
+        "history_sidecar": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^agent-documents/[^/]+/[^/]+\\.history\\.jsonl$"
+          },
+          "definition": "agent-documents/{project_id}/{document_id}.history.jsonl -- newline-delimited JSON, one document.history_event object per line, appended (never rewritten) on every write."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "mcp_server.documents_patch_section": {
+      "description": "MCP-side registration of documents.patch_section, and of the digest_only / documents.manifest forwarding for document.digest, mirroring mcp_server.documents_passthrough's open-passthrough pattern. Ships in ENC-TSK-P73/P74 -- a separate lane from the document_api Lambda changes in ENC-TSK-P69 (backend/lambda/document_api/lambda_function.py, outline.py) which this entity's tasks are NOT part of. This entity documents the contract those tasks implement against, carried on behalf of ENC-TSK-P82.",
+      "fields": {
+        "documents_patch_section_tool": {
+          "type": "object",
+          "definition": "New execute() step type forwarding to PATCH /documents/{document_id}/sections. Body/response shapes: see document.patch_section.",
+          "fields": {
+            "arguments": {
+              "type": "object",
+              "definition": "Mirrors document.patch_section.request minus governance_hash (handled by the HTTP auth layer per the mcp_server.documents_passthrough denylist convention) and minus document_id (forwarded as the URL path parameter)."
+            }
+          }
+        },
+        "documents_get_digest_only_forwarding": {
+          "type": "behavior",
+          "definition": "search(action='documents.get', arguments={..., digest_only: true}) forwards digest_only=true as a query string parameter to GET /documents/{id}, resolving to the same document_api handler as documents.manifest (document.digest)."
+        },
+        "documents_manifest_tool": {
+          "type": "object",
+          "definition": "New search() action documents.manifest({document_id, project_id}) forwarding to GET /documents/{document_id}/manifest. Response: document.digest."
+        },
+        "reference_pattern": {
+          "type": "string",
+          "definition": "Mirrors mcp_server.documents_passthrough's open-passthrough loop at tools/enceladus-mcp-server/server.py -- new patch_section fields should forward automatically rather than requiring an explicit per-field whitelist entry."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P73",
+          "ENC-TSK-P74",
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "elr.identity_posture": {
+      "description": "How an ELR (Enceladus Lifecycle Runner, tools/elr on origin/main) invocation identifies itself when it acts as document.history_event.surface='elr' or performs a governed write. Distinguishes a real per-session credential from ELR's internal-key fallback, since the two carry different audit and revocation guarantees. Governance-dictionary contract carried on behalf of ENC-TSK-P82.",
+      "fields": {
+        "identity_posture": {
+          "type": "enum",
+          "enum": [
+            "credential-bound",
+            "internal-key",
+            "unknown"
+          ],
+          "definition": "credential-bound: the invocation carries a specific session/user credential (Cognito id_token or an SCI-scoped token) and is attributable to that identity in document.history_event.actor. internal-key: the invocation authenticated via a shared X-Coordination-Internal-Key (service-to-service) with no per-caller identity -- actor is recorded as the internal-key's configured identity, not a specific human/agent. unknown: identity could not be determined (e.g. a pre-ENC-TSK-P69 legacy write being backfilled) -- actor is recorded as 'unknown' and should not be treated as attributable for audit purposes."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD",
+        "note": "See the ELR wrapper trap in session memory: invoke ELR via ~/.enceladus/elr/elr <sub>; the doc id argument is positional."
+      }
+    },
+    "elr.tls_resolution": {
+      "description": "How ELR resolves the CA bundle it trusts for outbound HTTPS calls to Enceladus Lambda HTTP APIs (jreese.net / mcp.jreese.net), since tools/elr is stdlib-only (no boto3, no requests) and cannot rely on a packaged CA bundle the way boto3-based Lambdas do. Governance-dictionary contract carried on behalf of ENC-TSK-P82.",
+      "fields": {
+        "ca_bundle_source": {
+          "type": "object",
+          "definition": "Resolution order and provenance for the CA bundle ELR's urllib/ssl context ultimately trusts.",
+          "fields": {
+            "source": {
+              "type": "enum",
+              "enum": [
+                "SSL_CERT_FILE",
+                "certifi",
+                "system",
+                "missing"
+              ],
+              "definition": "SSL_CERT_FILE: the SSL_CERT_FILE environment variable was set and pointed at a readable bundle -- highest precedence, lets an operator override explicitly. certifi: no usable SSL_CERT_FILE; the certifi package was importable and its bundle was used. system: neither of the above; fell back to the platform default trust store via ssl.create_default_context(). missing: no usable CA bundle was found by any of the above -- ELR should fail closed (refuse the HTTPS call) rather than silently disabling verification, and surface this as a startup diagnostic."
+            }
+          }
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P82"
+        ],
+        "reference_doc": "DOC-8F6CF7700EAD"
+      }
     }
   },
   "change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
   "change_log": [
+    {
+      "version": "2026-09-16.1",
+      "date": "2026-09-16",
+      "summary": "ENC-TSK-P69 / ENC-TSK-P82: registered document.patch_section, document.digest, document.history_event, document.body_versioning, mcp_server.documents_patch_section, mcp_server.projects_prefix_map, elr.identity_posture, and elr.tls_resolution; amended document.doc to note 'research' and 'brd' as observed emergent subtypepattern values (ENC-FTR-078 graduation_pathway) without promoting them to the enum. See DOC-8F6CF7700EAD.",
+      "task_id": "ENC-TSK-P69"
+    },
+    {
+      "version": "2026-09-15.1",
+      "date": "2026-09-15",
+      "record": "ENC-TSK-P74",
+      "summary": "ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary)."
+    },
     {
       "version": "2026-08-23.3",
       "date": "2026-08-23",

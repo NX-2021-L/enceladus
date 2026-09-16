@@ -1,0 +1,44 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 14,
+    "section_bytes": 185
+  },
+  {
+    "heading_path": [
+      "Seción de Café ☕"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 6,
+    "section_bytes": 32
+  },
+  {
+    "heading_path": [
+      "日本語の見出し"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 8,
+    "line_end": 10,
+    "section_bytes": 32
+  },
+  {
+    "heading_path": [
+      "Заголовок раздела"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 12,
+    "line_end": 14,
+    "section_bytes": 32
+  }
+]

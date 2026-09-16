@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 8,
+    "section_bytes": 105
+  },
+  {
+    "heading_path": [
+      "Before Unclosed Fence"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 8,
+    "section_bytes": 79
+  }
+]
