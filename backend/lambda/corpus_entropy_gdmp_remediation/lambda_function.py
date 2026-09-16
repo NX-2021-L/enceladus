@@ -3,15 +3,18 @@
 ENC-TSK-K42 / B66 Phase-5 (ENC-PLN-064, parent ENC-TSK-B66), per
 DOC-A3D0CDF91CE9. Consumes K41's Compliance/Semantic detector output
 (corpus_entropy_core.detect_compliance_semantic_entropy) and deterministically
-resolves a whitelist of `compliance_warnings` classes via `documents.patch`,
-advancing raw documents to compliant `document_maturity_state` with no agent
-session involvement.
+resolves a whitelist of `compliance_warnings` classes, advancing raw documents
+to compliant `document_maturity_state` with no agent session involvement.
+ENC-TSK-P85: fence-language findings write via `documents.patch_section`
+(ENC-TSK-P71), one section-scoped PATCH per finding with a fresh
+`documents.manifest` (ENC-TSK-P69) if_match read immediately before each
+patch; the document_maturity_state advance stays a plain `documents.patch`.
 
 Read/write boundary: this Lambda calls the SAME governed HTTP surface the MCP
 server wraps (tracker API for the compliance/semantic scan reuse + document
-API for GET/PATCH), authenticated with the internal API key — never raw
-DynamoDB/S3 writes. Mirrors corpus_entropy_engine/lambda_function.py (K41)
-for reads and adds governed PATCH calls for remediation.
+API for GET/PATCH/manifest/sections), authenticated with the internal API
+key — never raw DynamoDB/S3 writes. Mirrors corpus_entropy_engine/lambda_function.py
+(K41) for reads and adds governed PATCH / patch_section calls for remediation.
 
 DATA-SAFETY:
   * GDMP_DRY_RUN=1 (default) — no document mutations, candidate report only.
@@ -66,6 +69,12 @@ GDMP_STATE_BUCKET = os.environ.get("GDMP_STATE_BUCKET", "")
 GDMP_STATE_PREFIX = os.environ.get("GDMP_STATE_PREFIX", "gdmp-remediation-state")
 _HTTP_TIMEOUT_S = 30
 _MAX_DOCS_PER_RUN = int(os.environ.get("GDMP_MAX_DOCS_PER_RUN", "200"))
+# ENC-TSK-P85: documents.patch_section validates governance_hash for PRESENCE
+# only (document_api has no freshness check on this path today -- see AC-1 /
+# ENC-TSK-P71 handler comment), so a fixed, clearly-labeled sentinel is safe
+# here. This Lambda has no live governance-dictionary-hash source (it never
+# calls the MCP server); override via env if that ever changes.
+GDMP_GOVERNANCE_HASH = os.environ.get("GDMP_GOVERNANCE_HASH", "gdmp-remediation-lambda")
 
 _s3_client = None
 
@@ -131,6 +140,76 @@ def _patch_document(document_id: str, body: Dict[str, Any]) -> Optional[Dict[str
         return None
 
 
+def _fetch_manifest(document_id: str) -> Optional[Dict[str, Any]]:
+    """GET .../documents/{id}/manifest (ENC-TSK-P69): digest projection with
+    content_hash + outline, no content. Called fresh immediately before every
+    documents.patch_section call so if_match is never stale-by-construction
+    (ENC-TSK-P85 AC-1)."""
+    url = (
+        f"{DOCUMENT_API_BASE}/{urllib.parse.quote(document_id, safe='')}/manifest"
+        f"?project_id={urllib.parse.quote(PROJECT_ID)}"
+    )
+    try:
+        return _http_request(url, method="GET")
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        logger.error("[ERROR] document manifest GET failed id=%s: %s", document_id, exc)
+        return None
+
+
+def _patch_section(document_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """POST .../documents/{id}/sections (ENC-TSK-P71). Returns
+    {"ok": True, **response} on 200. On failure returns {"ok": False,
+    "conflict": <bool>, "status": <http status or None>} -- conflict=True
+    means 412 CONTENT_HASH_MISMATCH, the ENC-TSK-L91 guard's diagnostic case
+    (ENC-TSK-P85 AC-2): record it and move on, never retried from here.
+    """
+    url = f"{DOCUMENT_API_BASE}/{urllib.parse.quote(document_id, safe='')}/sections"
+    try:
+        resp = _http_request(url, method="POST", body=body)
+        return {"ok": True, **resp}
+    except urllib.error.HTTPError as exc:
+        conflict = exc.code == 412
+        logger.error(
+            "[ERROR] section PATCH failed id=%s status=%s conflict=%s: %s",
+            document_id, exc.code, conflict, exc,
+        )
+        return {"ok": False, "conflict": conflict, "status": exc.code}
+    except urllib.error.URLError as exc:
+        logger.error("[ERROR] section PATCH failed id=%s: %s", document_id, exc)
+        return {"ok": False, "conflict": False, "status": None}
+
+
+def _resolve_section_anchor(
+    outline: List[Dict[str, Any]], line: int
+) -> Optional[Dict[str, Any]]:
+    """Return the most specific (deepest / narrowest-range) outline entry
+    whose [line_start, line_end] contains `line`, or None when `line` falls
+    before the first heading -- ENC-TSK-P85's no_section case (never a
+    full-body-patch fallback). Nested sections' ranges sit strictly inside
+    their ancestors' ranges, so the containing entry with the greatest
+    line_start is the innermost match.
+    """
+    best: Optional[Dict[str, Any]] = None
+    for entry in outline or []:
+        line_start = entry.get("line_start")
+        line_end = entry.get("line_end")
+        if line_start is None or line_end is None:
+            continue
+        if line_start <= line <= line_end:
+            if best is None or line_start > best.get("line_start", -1):
+                best = entry
+    return best
+
+
+def _anchor_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer {block_id} when the outline entry has one, else
+    {heading_path, ordinal} (ENC-TSK-P85 implementation note)."""
+    block_id = entry.get("block_id")
+    if block_id:
+        return {"block_id": block_id}
+    return {"heading_path": entry.get("heading_path"), "ordinal": entry.get("ordinal")}
+
+
 # ---------------------------------------------------------------------------
 # io-approval ramp state (S3 run counter) -- verbatim pattern from
 # unlearning/lambda_function.py (_load_run_counter / _save_run_counter).
@@ -170,11 +249,24 @@ def _build_run_breakdown(
     mutation_hard_disabled: bool,
     applied: List[Dict[str, Any]],
     skipped_idempotent: List[str],
+    conflicts_skipped: int = 0,
+    sections_patched: int = 0,
 ) -> Dict[str, Any]:
     """ENC-TSK-L91: reviewable per-run audit record. Partitions the run's
     candidates into safe-deterministic (auto-fixable whitelist) vs needs-human
     (ambiguous warnings requiring agent/human review) and lists every candidate
     doc, so io can audit the GDMP_IO_APPROVAL_RUNS ramp from persisted reports.
+
+    ENC-TSK-P85: `conflicts_skipped` / `sections_patched` are run-level totals
+    for the documents.patch_section write path (AC-2 / AC-3) -- a 412
+    CONTENT_HASH_MISMATCH is diagnostic-only here, never retried. Each
+    candidate also carries `fence_finding_lines`, a would-be section-anchor
+    hint (the line numbers a fence_missing_language finding would resolve
+    against the outline) sourced entirely from the local scan -- no extra
+    live manifest/content fetch -- so report-only (dry-run / disarmed) runs
+    keep showing candidate section locations without spending extra reads.
+    Real anchors + bytes_changed for an armed run's actual attempts are on
+    each `applied[].sections[]` entry instead.
     """
     candidates: List[Dict[str, Any]] = []
     safe_count = 0
@@ -198,6 +290,9 @@ def _build_run_breakdown(
             "deterministic_count": len(det),
             "ambiguous_warnings": amb,
             "ambiguous_count": len(amb),
+            "fence_finding_lines": sorted(
+                {f["line"] for f in det if f.get("class") == "fence_missing_language" and f.get("line") is not None}
+            ),
         })
     return {
         "schema": "gdmp.run_breakdown.v1",
@@ -213,6 +308,8 @@ def _build_run_breakdown(
             "needs_human": needs_human_count,
             "remediated": len(applied),
             "skipped_idempotent": len(skipped_idempotent),
+            "conflicts_skipped": conflicts_skipped,
+            "sections_patched": sections_patched,
         },
         "candidates": candidates,
         "applied": applied,
@@ -308,6 +405,8 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
 
         applied: List[Dict[str, Any]] = []
         skipped_idempotent: List[str] = []
+        conflicts_skipped = 0
+        sections_patched = 0
 
         if allow_mutate:
             for plan in plans:
@@ -331,15 +430,17 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
                 if not content:
                     continue
 
-                # ENC-TSK-L91 optimistic-concurrency guard. The queued `plan` was
-                # computed from the run-start scan (_fetch_documents, up to
-                # GDMP_MAX_DOCS_PER_RUN docs earlier -- a minutes-to-hours stale
-                # read). Re-derive the remediation plan from THIS fresh GET's
-                # compliance_warnings so the deterministic fixes are consistent
-                # with the exact content we are about to PATCH. If a concurrent
-                # human/agent edit already resolved or changed the warnings, the
-                # fresh plan collapses to a no-op skip instead of clobbering that
-                # edit with stale findings (the silent lost-update this task fixes).
+                # ENC-TSK-L91 optimistic-concurrency guard (retained -- ENC-TSK-P85
+                # AC-2 only demotes the *patch_section 412* case to diagnostic, not
+                # this re-derivation). The queued `plan` was computed from the
+                # run-start scan (_fetch_documents, up to GDMP_MAX_DOCS_PER_RUN docs
+                # earlier -- a minutes-to-hours stale read). Re-derive the
+                # remediation plan from THIS fresh GET's compliance_warnings so the
+                # deterministic fixes are consistent with the exact content we are
+                # about to patch. If a concurrent human/agent edit already resolved
+                # or changed the warnings, the fresh plan collapses to a no-op skip
+                # instead of clobbering that edit with stale findings (the silent
+                # lost-update this task fixes).
                 fresh_plan = plan_remediation({
                     "record_id": document_id,
                     "compliance_warnings": doc.get("compliance_warnings") or [],
@@ -352,25 +453,133 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
                     continue
 
                 before_score = doc.get("compliance_score")
-                remediated_content = remediate_content(content, fresh_findings)
-                if remediated_content == content:
-                    # No actual text change produced (e.g. fixer found nothing
-                    # left to do) -- idempotent no-op, do not PATCH.
+
+                # ENC-TSK-P85 AC-1: fence-language findings are remediated via
+                # documents.patch_section, one PATCH per finding, scoped to the
+                # enclosing section only (never a full-body PATCH). Each finding
+                # gets its OWN fresh documents.manifest read (content_hash +
+                # outline) immediately before its own patch, so a section patched
+                # earlier in this same document's loop never sends a stale
+                # if_match against its own prior write. A finding with no `line`
+                # (metadata_field_missing -- always near the top of the document,
+                # never inside a section) or whose line falls before the first
+                # heading resolves to no_section and is skipped, recorded in the
+                # breakdown -- never a full-body-patch fallback (implementation
+                # note).
+                doc_sections: List[Dict[str, Any]] = []
+                doc_patched = False
+                doc_blocked = False
+                for finding in fresh_findings:
+                    finding_class = finding.get("class")
+                    line = finding.get("line")
+                    if line is None:
+                        doc_sections.append({"class": finding_class, "status": "no_section", "reason": "no_line"})
+                        doc_blocked = True
+                        continue
+
+                    manifest = _fetch_manifest(document_id)
+                    if not manifest or not manifest.get("content_hash"):
+                        doc_sections.append({
+                            "class": finding_class, "line": line,
+                            "status": "error", "reason": "manifest_unavailable",
+                        })
+                        doc_blocked = True
+                        continue
+
+                    entry = _resolve_section_anchor(manifest.get("outline") or [], line)
+                    if entry is None:
+                        doc_sections.append({"class": finding_class, "line": line, "status": "no_section"})
+                        doc_blocked = True
+                        continue
+
+                    latest_doc = _fetch_document_with_content(document_id)
+                    latest_content = (latest_doc or {}).get("content")
+                    if not latest_content:
+                        doc_sections.append({
+                            "class": finding_class, "line": line,
+                            "status": "error", "reason": "content_unavailable",
+                        })
+                        doc_blocked = True
+                        continue
+
+                    content_lines = latest_content.splitlines()
+                    line_start = entry.get("line_start")
+                    line_end = entry.get("line_end")
+                    slice_text = "\n".join(content_lines[line_start - 1:line_end])
+                    fixed_slice = remediate_content(slice_text, [finding])
+                    if fixed_slice == slice_text:
+                        # No actual text change within this section (e.g. the
+                        # fixer found nothing left to do) -- idempotent no-op.
+                        doc_sections.append({"class": finding_class, "line": line, "status": "noop"})
+                        continue
+
+                    anchor = _anchor_payload(entry)
+                    finding_id = f"gdmp-remediation:{document_id}:{finding_class}:line-{line}"
+                    section_resp = _patch_section(document_id, {
+                        "project_id": PROJECT_ID,
+                        "anchor": anchor,
+                        "op": "replace",
+                        "body": fixed_slice,
+                        "if_match": manifest["content_hash"],
+                        "governance_hash": GDMP_GOVERNANCE_HASH,
+                        "caused_by": finding_id,
+                        "rebase_headings": False,
+                        "include_heading": False,
+                    })
+
+                    if section_resp.get("ok"):
+                        sections_patched += 1
+                        doc_patched = True
+                        doc_sections.append({
+                            "class": finding_class, "line": line, "status": "patched",
+                            "heading_path": entry.get("heading_path"),
+                            "bytes_changed": section_resp.get("bytes_changed"),
+                            "caused_by": finding_id,
+                        })
+                        logger.info(
+                            "[REMEDIATED] %s section patched class=%s line=%s heading_path=%s bytes_changed=%s",
+                            document_id, finding_class, line, entry.get("heading_path"), section_resp.get("bytes_changed"),
+                        )
+                    elif section_resp.get("conflict"):
+                        # ENC-TSK-L91 demoted to diagnostic (ENC-TSK-P85 AC-2): a
+                        # 412 CONTENT_HASH_MISMATCH is recorded and the document is
+                        # skipped for THIS run -- never retried from here.
+                        conflicts_skipped += 1
+                        doc_blocked = True
+                        doc_sections.append({"class": finding_class, "line": line, "status": "conflict_skipped"})
+                        logger.info(
+                            "[CONFLICT] %s section patch 412 CONTENT_HASH_MISMATCH class=%s line=%s -- "
+                            "skipped for this run, not retried",
+                            document_id, finding_class, line,
+                        )
+                    else:
+                        doc_blocked = True
+                        doc_sections.append({
+                            "class": finding_class, "line": line, "status": "error",
+                            "http_status": section_resp.get("status"),
+                        })
+                        logger.error(
+                            "[ERROR] section PATCH failed for %s class=%s line=%s status=%s",
+                            document_id, finding_class, line, section_resp.get("status"),
+                        )
+
+                if not doc_patched:
+                    # Nothing was actually written for this document this run
+                    # (all findings were no_section / conflict / error / noop).
                     skipped_idempotent.append(document_id)
                     continue
 
-                patch_resp = _patch_document(document_id, {"content": remediated_content})
-                if not patch_resp or patch_resp.get("success") is False:
-                    logger.error("[ERROR] content PATCH failed for %s", document_id)
-                    continue
-
-                after_score = (patch_resp.get("document") or patch_resp).get("compliance_score")
-                after_warnings = (patch_resp.get("document") or patch_resp).get(
-                    "compliance_warnings", []
-                )
+                after_doc = _fetch_document_with_content(document_id) or {}
+                after_score = after_doc.get("compliance_score")
+                after_warnings = after_doc.get("compliance_warnings") or []
 
                 maturity_patch_resp = None
-                if after_score is not None and after_score >= COMPLIANCE_SCORE_THRESHOLD and not after_warnings:
+                if (
+                    not doc_blocked
+                    and after_score is not None
+                    and after_score >= COMPLIANCE_SCORE_THRESHOLD
+                    and not after_warnings
+                ):
                     maturity_patch_resp = _patch_document(
                         document_id, {"document_maturity_state": COMPLIANT_MATURITY_STATE}
                     )
@@ -383,6 +592,8 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
                     "advanced_to_compliant": bool(
                         maturity_patch_resp and maturity_patch_resp.get("success", True)
                     ),
+                    "sections": doc_sections,
+                    "sections_patched": sum(1 for r in doc_sections if r["status"] == "patched"),
                     "deterministic_classes_applied": sorted(
                         {f["class"] for f in fresh_findings}
                     ),
@@ -408,6 +619,8 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
             mutation_hard_disabled=gdmp_mutation_hard_disabled,
             applied=applied,
             skipped_idempotent=skipped_idempotent,
+            conflicts_skipped=conflicts_skipped,
+            sections_patched=sections_patched,
         )
         breakdown_ref = _persist_run_breakdown(breakdown)
 
