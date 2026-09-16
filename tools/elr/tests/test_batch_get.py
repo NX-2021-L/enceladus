@@ -159,7 +159,7 @@ class NoListRouteTests(unittest.TestCase):
             _document_ok({"version": 1, "title": "D"}),
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
-            elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "internal", 5)
+            elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5)
 
         self.assertEqual(mock_urlopen.call_count, 2)
         for call in mock_urlopen.call_args_list:
@@ -170,7 +170,7 @@ class NoListRouteTests(unittest.TestCase):
 
     def test_unclassified_id_never_triggers_a_network_call(self):
         with patch("elr_lib.transport.urllib.request.urlopen") as mock_urlopen:
-            digest = elr_batch_get.run_batch_get(["TOTALLY-BOGUS"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["TOTALLY-BOGUS"], "prod", 5)
         mock_urlopen.assert_not_called()
         self.assertEqual(digest["counts"]["unclassified"], 1)
 
@@ -189,7 +189,7 @@ class FailurePartitioningTests(unittest.TestCase):
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
             digest = elr_batch_get.run_batch_get(
-                ["ENC-TSK-1", "ENC-TSK-MISSING", "DOC-ABCDEF"], "internal", 5
+                ["ENC-TSK-1", "ENC-TSK-MISSING", "DOC-ABCDEF"], "prod", 5
             )
 
         rows = {r["id"]: r for r in digest["rows"]}
@@ -210,28 +210,28 @@ class FailurePartitioningTests(unittest.TestCase):
             _tracker_ok({"status": "closed", "title": "B"}),
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5)
         self.assertTrue(digest["ok"])
         self.assertEqual(digest["status"], 200)
 
     def test_all_fail_gives_502_and_not_ok(self):
         responses = [_http_error(500, b""), _http_error(404, b"")]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5)
         self.assertFalse(digest["ok"])
         self.assertEqual(digest["status"], 502)
 
     def test_mixed_classified_and_unclassified_partitions_correctly(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "GARBAGE-ID"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "GARBAGE-ID"], "prod", 5)
         self.assertEqual(digest["counts"]["fetched"], 1)
         self.assertEqual(digest["counts"]["unclassified"], 1)
         self.assertEqual(digest["counts"]["failed"], 0)
         self.assertFalse(digest["ok"])
 
     def test_empty_id_list_does_not_crash_and_is_not_ok(self):
-        digest = elr_batch_get.run_batch_get([], "internal", 5)
+        digest = elr_batch_get.run_batch_get([], "prod", 5)
         self.assertFalse(digest["ok"])
         self.assertEqual(digest["counts"]["requested"], 0)
         self.assertIn("no_ids_supplied", digest["anomalies"])
@@ -246,17 +246,17 @@ class LowerBoundLabelingTests(unittest.TestCase):
     def test_lower_bound_true_on_success(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         self.assertIs(digest["counts"]["lower_bound"], True)
 
     def test_lower_bound_true_on_partial_failure(self):
         responses = [_http_error(404, b"")]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         self.assertIs(digest["counts"]["lower_bound"], True)
 
     def test_lower_bound_true_on_empty_request(self):
-        digest = elr_batch_get.run_batch_get([], "internal", 5)
+        digest = elr_batch_get.run_batch_get([], "prod", 5)
         self.assertIs(digest["counts"]["lower_bound"], True)
 
 
@@ -269,7 +269,7 @@ class DigestShapeTests(unittest.TestCase):
     def test_top_level_keys(self):
         responses = [_tracker_ok({"status": "open", "title": "A"}), _document_ok({"version": 1, "title": "B"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5)
         for key in ("operation", "ok", "status", "identity_posture", "anomalies", "counts", "rows"):
             self.assertIn(key, digest)
         self.assertEqual(digest["operation"], "elr_batch_get.batch")
@@ -277,7 +277,7 @@ class DigestShapeTests(unittest.TestCase):
     def test_row_shape(self):
         responses = [_tracker_ok({"status": "open", "title": "A task"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         row = digest["rows"][0]
         self.assertEqual(set(row.keys()), {"id", "kind", "ok", "status_or_version", "title"})
         self.assertEqual(row["id"], "ENC-TSK-1")
@@ -289,7 +289,7 @@ class DigestShapeTests(unittest.TestCase):
     def test_document_row_uses_version_for_status_or_version(self):
         responses = [_document_ok({"version": 7, "title": "A doc"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["DOC-ABCDEF"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["DOC-ABCDEF"], "prod", 5)
         row = digest["rows"][0]
         self.assertEqual(row["status_or_version"], 7)
 
@@ -300,7 +300,7 @@ class DigestShapeTests(unittest.TestCase):
         big_body = {"status": "open", "title": "A", "history": ["huge"] * 500, "secret_field": "leak-me"}
         responses = [_tracker_ok(big_body)]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         serialized = json.dumps(digest)
         self.assertNotIn("secret_field", serialized)
         self.assertNotIn("leak-me", serialized)
@@ -308,7 +308,7 @@ class DigestShapeTests(unittest.TestCase):
     def test_digest_is_json_serializable_and_stable_across_calls(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         serialized = json.dumps(digest, sort_keys=True)
         self.assertEqual(json.loads(serialized), digest)
 
@@ -316,7 +316,7 @@ class DigestShapeTests(unittest.TestCase):
         long_title = "X" * 200
         responses = [_tracker_ok({"status": "open", "title": long_title})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "internal", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
         row_title = digest["rows"][0]["title"]
         self.assertEqual(len(row_title), 60)
         self.assertTrue(row_title.endswith("..."))
@@ -361,7 +361,8 @@ class AllowAbbrevTests(unittest.TestCase):
         args = parser.parse_args([])
         self.assertIsNone(args.ids)
         self.assertIsNone(args.ids_file)
-        self.assertEqual(args.profile, "internal")
+        # ENC-TSK-P77: --profile is now the ENVIRONMENT profile, default "prod".
+        self.assertEqual(args.profile, "prod")
         self.assertEqual(args.timeout, 15)
         self.assertFalse(args.json)
 

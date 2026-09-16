@@ -18,10 +18,23 @@ session's fate on exit.
 
 Usage:
     python3 tools/elr/elr_smoke.py
-    python3 tools/elr/elr_smoke.py --profile internal --timeout 10
+    python3 tools/elr/elr_smoke.py --profile v4-gamma --timeout 10
     python3 tools/elr/elr_smoke.py --keep-session
+    python3 tools/elr/elr_smoke.py --all-profiles
 
-Exit code is 0 when the health check succeeded (2xx), 1 otherwise.
+`--profile` (ENC-TSK-P77, default "prod", or ENCELADUS_PROFILE) selects
+the ELR ENVIRONMENT profile (elr_lib.profiles: "prod" / "v4-gamma") --
+NOT elr_lib.config's separate TRANSPORT profile concept ("internal" /
+"mcp-http"), which this script still always uses "internal" for (the
+only transport that supports the health smoke read; see elr_lib/config.py
+and elr_lib/profiles.py module docstrings for the two-axis distinction).
+`--all-profiles` runs the health check under EVERY environment profile
+and prints one digest per profile (still one JSON object per line).
+
+Exit code (single-profile run): 0 when the health check succeeded (2xx),
+4 when the CA bundle could not be resolved (ENC-TSK-P76 AC-2), 1
+otherwise. With --all-profiles: 0 only if every profile's digest was ok,
+else the worst of (4 if any profile hit TLS-unresolved, else 1).
 """
 
 from __future__ import annotations
@@ -30,13 +43,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Allow running this file directly (python3 tools/elr/elr_smoke.py) without
 # requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elr_lib import identity as elr_identity  # noqa: E402
+from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib import tls as elr_tls  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
@@ -53,9 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile",
-        default="internal",
-        choices=["internal"],
-        help="ELR profile to use (only 'internal' supports the health smoke read).",
+        default=elr_profiles.PROFILE_PROD,
+        choices=list(elr_profiles.VALID_ENVIRONMENT_PROFILES),
+        help=(
+            "ELR ENVIRONMENT profile to use -- which deployed Enceladus "
+            "environment to smoke-test (default: prod; ENCELADUS_PROFILE "
+            "env var also selects this). Ignored when --all-profiles is set."
+        ),
+    )
+    parser.add_argument(
+        "--all-profiles",
+        action="store_true",
+        default=False,
+        help="Run the health check under EVERY environment profile and emit one digest per profile (ENC-TSK-P77 AC-2).",
     )
     parser.add_argument(
         "--timeout",
@@ -76,15 +100,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = False) -> Dict[str, Any]:
-    config = get_profile(profile_name)
+def run_health_smoke(
+    environment_profile_name: str, timeout: int, *, keep_session: bool = False, transport_profile_name: str = "internal"
+) -> Dict[str, Any]:
+    config = get_profile(transport_profile_name, environment_profile_name=environment_profile_name)
     client = InternalClient(config, timeout=timeout)
+    resolved_profile_name = config.environment_profile.name
 
     # AC-1: resolve identity BEFORE the read. This is best-effort/never
     # raises -- resolve_identity() itself falls back through the posture
     # chain on any failure, it never propagates a network error here.
     identity_ctx = elr_identity.resolve_identity(
-        profile_name=profile_name, timeout=timeout, keep_session=keep_session, client=client
+        profile_name=transport_profile_name, timeout=timeout, keep_session=keep_session, client=client
     )
 
     try:
@@ -105,6 +132,11 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
                 status,
                 identity_posture=identity_ctx.posture,
                 anomalies=list(identity_ctx.anomalies) + ["tls_ca_bundle_missing"],
+                # ENC-TSK-P77: elr.smoke_digest schema fields -- present
+                # even on the TLS-unresolved short-circuit path.
+                profile=resolved_profile_name,
+                prefix_map_source="none",
+                unclassified=[],
                 **extra,
             )
 
@@ -120,10 +152,12 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
         ok = 200 <= status < 300
 
         counts: Optional[Dict[str, Any]] = None
+        governance_hash: Optional[str] = None
         if isinstance(body, dict):
             summarized = {k: body[k] for k in ("dynamodb", "s3") if k in body}
             if summarized:
                 counts = summarized
+            governance_hash = body.get("governance_hash") or None
             if "error" in body:
                 anomalies = list(anomalies) + [f"health_body_error: {body['error']}"]
 
@@ -144,6 +178,11 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
             identity_posture=identity_ctx.posture,
             anomalies=anomalies,
             counts=counts,
+            # ENC-TSK-P77 / BRD elr.smoke_digest schema:
+            profile=resolved_profile_name,
+            governance_hash=governance_hash,
+            prefix_map_source="none",  # until ENC-TSK-P74's ELR half lands
+            unclassified=[],
             **extra,
         )
     finally:
@@ -151,21 +190,39 @@ def run_health_smoke(profile_name: str, timeout: int, *, keep_session: bool = Fa
         # a non-credential-bound posture. Runs even if the health call
         # above raised, so a resolved session is never leaked.
         elr_identity.finalize_identity(
-            identity_ctx, client, keep_session=keep_session, profile_name=profile_name, timeout=timeout
+            identity_ctx, client, keep_session=keep_session, profile_name=transport_profile_name, timeout=timeout
         )
+
+
+def _digest_exit_code(digest: Dict[str, Any]) -> int:
+    if digest.get("status") == elr_tls.TLS_UNRESOLVED_STATUS:
+        return elr_tls.EXIT_CODE_TLS_UNRESOLVED
+    return 0 if digest.get("ok") else 1
 
 
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.all_profiles:
+        # ENC-TSK-P77 AC-2: one digest per environment profile, still one
+        # JSON object per stdout line. A single-profile run (below) is
+        # otherwise byte-for-byte unchanged apart from the new fields.
+        digests: List[Dict[str, Any]] = []
+        for profile_name in elr_profiles.VALID_ENVIRONMENT_PROFILES:
+            digest = run_health_smoke(profile_name, args.timeout, keep_session=args.keep_session)
+            print(json.dumps(digest, sort_keys=True))
+            digests.append(digest)
+        exit_codes = [_digest_exit_code(d) for d in digests]
+        if all(code == 0 for code in exit_codes):
+            return 0
+        return elr_tls.EXIT_CODE_TLS_UNRESOLVED if elr_tls.EXIT_CODE_TLS_UNRESOLVED in exit_codes else 1
+
     digest = run_health_smoke(args.profile, args.timeout, keep_session=args.keep_session)
     print(json.dumps(digest, sort_keys=True))
     # AC-2 (ENC-TSK-P76): TLS-unresolvable is always exit code 4, distinct
     # from a plain network/auth failure (1).
-    if digest.get("status") == elr_tls.TLS_UNRESOLVED_STATUS:
-        return elr_tls.EXIT_CODE_TLS_UNRESOLVED
-    return 0 if digest.get("ok") else 1
+    return _digest_exit_code(digest)
 
 
 if __name__ == "__main__":

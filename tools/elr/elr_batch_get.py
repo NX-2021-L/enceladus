@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # without requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -332,8 +333,12 @@ def _aggregate_posture(outcomes: List[FetchOutcome]) -> Tuple[str, List[str]]:
     return "unknown", [f"mixed_identity_posture:{','.join(distinct or ['unknown'])}"]
 
 
-def run_batch_get(ids: List[str], profile_name: str, timeout: int) -> Dict[str, Any]:
-    config = get_profile(profile_name)
+def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -> Dict[str, Any]:
+    # ENC-TSK-P77: `environment_profile_name` is the "prod"/"v4-gamma"
+    # ENVIRONMENT profile (elr_lib.profiles) coming from --profile; the
+    # TRANSPORT profile is always "internal" here (the only one batch
+    # reads support), so it's passed through as the literal string.
+    config = get_profile("internal", environment_profile_name=environment_profile_name)
     client = InternalClient(config, timeout=timeout)
 
     rows: List[Dict[str, Any]] = []
@@ -434,9 +439,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile",
-        default="internal",
-        choices=["internal"],
-        help="ELR profile to use (only 'internal' supports batch reads).",
+        default=elr_profiles.PROFILE_PROD,
+        choices=list(elr_profiles.VALID_ENVIRONMENT_PROFILES),
+        help=(
+            "ELR ENVIRONMENT profile (ENC-TSK-P77) -- which deployed "
+            "Enceladus environment to read from (default: prod; "
+            "ENCELADUS_PROFILE env var also selects this). Batch reads "
+            "always use the 'internal' transport."
+        ),
     )
     parser.add_argument(
         "--timeout",
