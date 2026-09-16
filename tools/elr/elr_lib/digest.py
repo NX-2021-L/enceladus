@@ -70,6 +70,24 @@ seconds before its Session Claim ID (sci) expires. The sci VALUE itself
 is never a digest field -- only its remaining-lifetime is, so a digest
 can prove a live SCI is held without becoming a bearer credential in its
 own right.
+
+``digest_path``, ``anchor_resolved``, ``bytes_changed``, ``event_id``,
+``current_hash``, ``current_version``, ``recommended_next_actions``, and
+``candidates`` (added for ENC-TSK-P78 / elr_doc_digest.py, elr_doc_get.py,
+elr_doc_patch.py) carry the section-patch delta-only write path's small,
+stable summaries: digest_path is the ~/.enceladus/docs/{id}.digest.json
+side-file path a run wrote or refreshed (elr_lib.manifest); anchor_resolved
+is the small {heading_path, ordinal, block_id} view of the section a patch
+targeted; bytes_changed is the abs(after-before) byte delta a successful
+patch reports; event_id is the server's event id for an applied patch;
+current_hash/current_version/recommended_next_actions are the small
+remediation fields echoed by a 412 CONTENT_HASH_MISMATCH envelope; candidates
+is the small list of {heading_path, ordinal, block_id} views echoed by a 409
+ANCHOR_AMBIGUOUS envelope. ``request_bytes`` is the measured wire size
+(headers + JSON body) of the one POST a real (non-dry-run) patch sends --
+proof the delta-only contract holds regardless of how large the target
+document is. Same digest-first discipline as every other field -- small
+and stable, never a raw document body.
 """
 
 from __future__ import annotations
@@ -112,6 +130,15 @@ _OPTIONAL_FIELDS = (
     "governance_hash",
     "prefix_map_source",
     "unclassified",
+    "digest_path",
+    "anchor_resolved",
+    "bytes_changed",
+    "event_id",
+    "current_hash",
+    "current_version",
+    "recommended_next_actions",
+    "candidates",
+    "request_bytes",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

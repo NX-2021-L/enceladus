@@ -1,0 +1,70 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 20,
+    "section_bytes": 159
+  },
+  {
+    "heading_path": [
+      "Parent"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 20,
+    "section_bytes": 148
+  },
+  {
+    "heading_path": [
+      "Parent",
+      "Repeated"
+    ],
+    "level": 3,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 6,
+    "line_end": 8,
+    "section_bytes": 24
+  },
+  {
+    "heading_path": [
+      "Parent",
+      "Other"
+    ],
+    "level": 3,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 10,
+    "line_end": 12,
+    "section_bytes": 22
+  },
+  {
+    "heading_path": [
+      "Parent",
+      "Repeated"
+    ],
+    "level": 3,
+    "ordinal": 2,
+    "block_id": null,
+    "line_start": 14,
+    "line_end": 16,
+    "section_bytes": 25
+  },
+  {
+    "heading_path": [
+      "Parent",
+      "Repeated"
+    ],
+    "level": 3,
+    "ordinal": 3,
+    "block_id": null,
+    "line_start": 18,
+    "line_end": 20,
+    "section_bytes": 24
+  }
+]

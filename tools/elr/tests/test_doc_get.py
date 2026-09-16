@@ -151,7 +151,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
 
         expected_keys = {
             "operation",
@@ -167,6 +167,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
             "compliance_score",
             "outline",
             "local_path",
+            "digest_path",
         }
         self.assertEqual(set(digest.keys()), expected_keys)
         self.assertTrue(digest["ok"])
@@ -189,7 +190,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         serialized = json.dumps(digest, sort_keys=True)
         self.assertEqual(json.loads(serialized), digest)
 
@@ -203,7 +204,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         self.assertTrue(digest["ok"])
         self.assertEqual(digest["local_sha256"], digest["content_hash"])
         self.assertNotIn("content-hash-mismatch", digest["anomalies"])
@@ -218,7 +219,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         self.assertFalse(digest["ok"])
         self.assertIn("content-hash-mismatch", digest["anomalies"])
         self.assertNotEqual(digest["local_sha256"], digest["content_hash"])
@@ -233,7 +234,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         self.assertTrue(digest["ok"])
         self.assertIn("server-content-hash-missing", digest["anomalies"])
 
@@ -242,7 +243,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         self.assertFalse(digest["ok"])
         self.assertIn("missing-document-body", digest["anomalies"])
         # local_path is an optional digest field, omitted (not None) when
@@ -263,7 +264,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", side_effect=http_error):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
         self.assertFalse(digest["ok"])
         self.assertEqual(digest["status"], 404)
         self.assertNotIn("local_path", digest)
@@ -278,7 +279,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         fake_resp = _FakeHttpResponse(200, json.dumps(_server_body(doc)).encode("utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, tmpdir, docs_dir=tmpdir)
             saved = Path(digest["local_path"]).read_text(encoding="utf-8")
             self.assertEqual(saved, self.CONTENT)
 
@@ -293,7 +294,7 @@ class FetchDocumentDigestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             nested = str(Path(tmpdir) / "does" / "not" / "exist" / "yet")
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-                digest = elr_doc_get.fetch_document(self.DOC_ID, nested)
+                digest = elr_doc_get.fetch_document(self.DOC_ID, nested, docs_dir=nested)
             self.assertTrue(Path(digest["local_path"]).is_file())
 
 
@@ -320,7 +321,7 @@ class NoBodyOnStdoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
                 with contextlib.redirect_stdout(stdout):
-                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir])
+                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir, "--docs-dir", tmpdir])
             captured = stdout.getvalue()
             self.assertEqual(exit_code, 0)
             self.assertNotIn(self.SECRET_MARKER, captured)
@@ -345,7 +346,7 @@ class NoBodyOnStdoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
                 with contextlib.redirect_stdout(stdout):
-                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir])
+                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir, "--docs-dir", tmpdir])
         captured = stdout.getvalue()
         self.assertNotEqual(exit_code, 0)
         self.assertNotIn(self.SECRET_MARKER, captured)
@@ -363,7 +364,7 @@ class NoBodyOnStdoutTests(unittest.TestCase):
                 side_effect=urllib.error.URLError("connection refused"),
             ):
                 with contextlib.redirect_stdout(stdout):
-                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir])
+                    exit_code = elr_doc_get.main([self.DOC_ID, "--out-dir", tmpdir, "--docs-dir", tmpdir])
         self.assertNotEqual(exit_code, 0)
         parsed = json.loads(stdout.getvalue().strip())
         self.assertFalse(parsed["ok"])
