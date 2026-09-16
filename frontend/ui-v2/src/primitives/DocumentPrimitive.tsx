@@ -1,6 +1,6 @@
 import { FileText } from 'lucide-react'
 import type { Document } from '../types/records'
-import { MarkdownContent } from '../components/MarkdownContent'
+import { DocumentSectionsView } from '../components/DocumentSectionsView'
 import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub } from '../components/RecordDetailHub'
 import { downloadTextFile } from '../utils/downloadTextFile'
@@ -36,6 +36,11 @@ export function DocumentPrimitive({ record }: { record: Document }) {
   const createdLabel = formatTimestamp(record.created_at)
   const updatedLabel = formatTimestamp(record.updated_at)
   const fileName = record.file_name || `${record.document_id}.md`
+  // ENC-TSK-P92 (AC-1): a URL hash on load means the user followed a deep
+  // link to a section -- open straight to the Content tab so that section
+  // (rendered inside DocumentSectionsView) is in the DOM to scroll to,
+  // instead of landing on Overview with the anchor unreachable.
+  const hasSectionDeepLink = typeof window !== 'undefined' && window.location.hash.length > 1
 
   return (
     <RecordDetailHub
@@ -43,6 +48,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
       kindLabel="Document"
       title={record.title}
       status={record.status}
+      initialTabId={hasSectionDeepLink ? 'content' : undefined}
       vitals={vitals}
       actions={[
         {
@@ -93,7 +99,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
           ) : null}
         </>
       }
-      content={<MarkdownContent content={record.content} projectId={record.project_id} />}
+      content={<DocumentSectionsView record={record} />}
       neighbors={
         <NeighborsTab projectId={record.project_id} groups={[{ label: 'Related items', ids: record.related_items }]} />
       }
