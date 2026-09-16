@@ -23,6 +23,9 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
     search_actions: Dict[str, Dict[str, Any]] = {
         "projects.list": {"tool": "projects_list"},
         "projects.get": {"tool": "projects_get"},
+        # ENC-TSK-P74 / FR-B4-2: prefix -> project_id map (server half of ELR v2
+        # prefix resolution; ELR-side consumer is a separate PR).
+        "projects.prefix_map": {"tool": "projects_prefix_map"},
         "tracker.get": {"tool": "tracker_get"},
         "tracker.list": {"tool": "tracker_list"},
         "tracker.pending_updates": {"tool": "tracker_pending_updates"},
