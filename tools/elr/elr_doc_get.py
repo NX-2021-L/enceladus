@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 # requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -85,9 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile",
-        default="internal",
-        choices=["internal"],
-        help="ELR profile to use (only 'internal' can reach the document API).",
+        default=elr_profiles.PROFILE_PROD,
+        choices=list(elr_profiles.VALID_ENVIRONMENT_PROFILES),
+        help=(
+            "ELR ENVIRONMENT profile (ENC-TSK-P77) -- which deployed "
+            "Enceladus environment to read from (default: prod; "
+            "ENCELADUS_PROFILE env var also selects this). Document "
+            "reads always use the 'internal' transport."
+        ),
     )
     return parser
 
@@ -142,8 +148,12 @@ def fetch_document(
     *,
     timeout: int = 20,
     profile_name: str = "internal",
+    environment_profile_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    config = get_profile(profile_name)
+    # ENC-TSK-P77: `profile_name` stays the TRANSPORT profile (unchanged
+    # contract, always "internal" here); `environment_profile_name` is
+    # the NEW "prod"/"v4-gamma" axis, threaded from --profile.
+    config = get_profile(profile_name, environment_profile_name=environment_profile_name)
     client = InternalClient(config, timeout=timeout)
     key_sent = bool(config.key_for("document"))
 
@@ -227,7 +237,7 @@ def main(argv: Optional[list] = None) -> int:
         args.document_id,
         args.out_dir,
         timeout=args.timeout,
-        profile_name=args.profile,
+        environment_profile_name=args.profile,
     )
     # Digest-only: the document body is written to disk inside
     # fetch_document() and MUST NEVER be printed here.

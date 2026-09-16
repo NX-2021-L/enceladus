@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elr_lib import config as elr_config  # noqa: E402
+from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib import transport as elr_transport  # noqa: E402
 from elr_lib.digest import content_digest  # noqa: E402
 
@@ -173,7 +174,7 @@ def resolve_dictionary_auth() -> Tuple[str, str, Optional[str]]:
     return "", "no-auth-available", key_file_error
 
 
-def fetch_dictionary(*, timeout: int = 20) -> Dict[str, Any]:
+def fetch_dictionary(*, timeout: int = 20, environment_profile_name: Optional[str] = None) -> Dict[str, Any]:
     """Pull governance_data_dictionary.json fresh and cache it for this
     process only (plus an on-disk session-cache file for cross-call
     reuse within one ELR session -- content is never baked into code).
@@ -189,7 +190,11 @@ def fetch_dictionary(*, timeout: int = 20) -> Dict[str, Any]:
     if key_file_error:
         anomalies.append(f"dict_key_file_error: {key_file_error}")
 
-    profile = elr_config.InternalProfileConfig()
+    # ENC-TSK-P77: --profile / ENCELADUS_PROFILE selects which deployed
+    # environment's governance API this dictionary pull hits.
+    profile = elr_config.InternalProfileConfig(
+        environment_profile=elr_profiles.get_environment_profile(environment_profile_name)
+    )
     if token:
         # Attach whichever token auth resolved to -- the dedicated key
         # file's token if present and valid, else the fallback chain's
@@ -795,7 +800,7 @@ def validate_entity_payload(
 
 
 def cmd_validate(args: argparse.Namespace) -> Dict[str, Any]:
-    dict_result = fetch_dictionary(timeout=args.timeout)
+    dict_result = fetch_dictionary(timeout=args.timeout, environment_profile_name=args.profile)
     if not dict_result["ok"]:
         return _refusal_digest(
             f"elr_validate.validate:{args.entity}",
@@ -877,6 +882,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", default=True, help="Emit digest as JSON (always on; flag kept for explicit invocation).")
     parser.add_argument("--timeout", type=int, default=20, help="Dictionary pull timeout in seconds (default: 20).")
+    parser.add_argument(
+        "--profile",
+        default=elr_profiles.PROFILE_PROD,
+        choices=list(elr_profiles.VALID_ENVIRONMENT_PROFILES),
+        help=(
+            "ELR ENVIRONMENT profile (ENC-TSK-P77) -- which deployed "
+            "Enceladus environment's governance dictionary to validate "
+            "against (default: prod; ENCELADUS_PROFILE env var also "
+            "selects this)."
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

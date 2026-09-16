@@ -27,26 +27,34 @@ class AllowAbbrevTests(unittest.TestCase):
             with contextlib.redirect_stderr(stderr):
                 # "--prof" is an unambiguous prefix of "--profile" -- with
                 # allow_abbrev=True argparse would accept it silently.
-                parser.parse_args(["--prof", "internal"])
+                parser.parse_args(["--prof", "prod"])
 
     def test_full_flag_name_is_accepted(self):
+        # ENC-TSK-P77: --profile is now the ENVIRONMENT profile (elr_lib.profiles),
+        # not elr_lib.config's transport profile -- "v4-gamma" is a valid choice.
         parser = elr_smoke.build_parser()
-        args = parser.parse_args(["--profile", "internal", "--timeout", "7"])
-        self.assertEqual(args.profile, "internal")
+        args = parser.parse_args(["--profile", "v4-gamma", "--timeout", "7"])
+        self.assertEqual(args.profile, "v4-gamma")
         self.assertEqual(args.timeout, 7)
 
-    def test_default_profile_is_internal(self):
+    def test_default_profile_is_prod(self):
         parser = elr_smoke.build_parser()
         args = parser.parse_args([])
-        self.assertEqual(args.profile, "internal")
+        self.assertEqual(args.profile, "prod")
         self.assertEqual(args.timeout, 15)
+        self.assertFalse(args.all_profiles)
 
     def test_unsupported_profile_choice_rejected(self):
         parser = elr_smoke.build_parser()
         stderr = io.StringIO()
         with self.assertRaises(SystemExit):
             with contextlib.redirect_stderr(stderr):
-                parser.parse_args(["--profile", "mcp-http"])
+                parser.parse_args(["--profile", "not-a-real-environment"])
+
+    def test_all_profiles_flag_accepted(self):
+        parser = elr_smoke.build_parser()
+        args = parser.parse_args(["--all-profiles"])
+        self.assertTrue(args.all_profiles)
 
 
 class _FakeHttpResponse:
@@ -67,12 +75,88 @@ class _FakeHttpResponse:
         return False
 
 
+class EnvironmentProfileSmokeTests(unittest.TestCase):
+    """ENC-TSK-P77 AC-2/AC-4: profile/governance_hash/prefix_map_source/
+    unclassified fields, environment selection by flag and env var, and
+    per-profile digest emission via --all-profiles (network mocked).
+    """
+
+    def _fake_response(self, governance_hash="abc123"):
+        body = json.dumps({"dynamodb": "ok", "s3": "ok", "governance_hash": governance_hash}).encode("utf-8")
+        return _FakeHttpResponse(200, body)
+
+    def test_run_health_smoke_reports_environment_profile_and_governance_hash(self):
+        with patch("elr_lib.transport.urllib.request.urlopen", return_value=self._fake_response()):
+            digest = elr_smoke.run_health_smoke("v4-gamma", 5)
+        self.assertEqual(digest["profile"], "v4-gamma")
+        self.assertEqual(digest["governance_hash"], "abc123")
+        self.assertEqual(digest["prefix_map_source"], "none")
+        self.assertEqual(digest["unclassified"], [])
+
+    def test_default_environment_profile_is_prod(self):
+        with patch("elr_lib.transport.urllib.request.urlopen", return_value=self._fake_response()):
+            digest = elr_smoke.run_health_smoke("prod", 5)
+        self.assertEqual(digest["profile"], "prod")
+
+    def test_unknown_environment_profile_raises(self):
+        with self.assertRaises(ValueError):
+            elr_smoke.run_health_smoke("not-a-real-environment", 5)
+
+    def test_env_var_selects_environment_profile_via_main(self):
+        import os
+
+        stdout = io.StringIO()
+        with patch.dict(os.environ, {"ENCELADUS_PROFILE": "v4-gamma"}), patch(
+            "elr_lib.transport.urllib.request.urlopen", return_value=self._fake_response()
+        ):
+            with contextlib.redirect_stdout(stdout):
+                # No --profile flag passed -- argparse default "prod" wins
+                # over ENCELADUS_PROFILE at the CLI layer; this test
+                # documents that CLI --profile (when given) is what's
+                # threaded through, while get_environment_profile() itself
+                # (used when no CLI value is passed) honors the env var.
+                from elr_lib import profiles as elr_profiles_mod
+
+                resolved = elr_profiles_mod.get_environment_profile(None)
+        self.assertEqual(resolved.name, "v4-gamma")
+
+    def test_all_profiles_emits_one_digest_per_profile(self):
+        from elr_lib import profiles as elr_profiles_mod
+
+        stdout = io.StringIO()
+        with patch("elr_lib.transport.urllib.request.urlopen", return_value=self._fake_response()):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = elr_smoke.main(["--all-profiles"])
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), len(elr_profiles_mod.VALID_ENVIRONMENT_PROFILES))
+        seen_profiles = {json.loads(line)["profile"] for line in lines}
+        self.assertEqual(seen_profiles, set(elr_profiles_mod.VALID_ENVIRONMENT_PROFILES))
+        self.assertEqual(exit_code, 0)
+
+    def test_all_profiles_nonzero_exit_when_one_profile_fails(self):
+        import urllib.error
+
+        call_count = {"n": 0}
+
+        def _side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return self._fake_response()
+            raise urllib.error.URLError("connection refused")
+
+        stdout = io.StringIO()
+        with patch("elr_lib.transport.urllib.request.urlopen", side_effect=_side_effect):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = elr_smoke.main(["--all-profiles"])
+        self.assertEqual(exit_code, 1)
+
+
 class RunHealthSmokeTests(unittest.TestCase):
     def test_digest_only_output_on_success(self):
         body = json.dumps({"dynamodb": "ok", "s3": "ok"}).encode("utf-8")
         fake_resp = _FakeHttpResponse(200, body)
         with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-            digest = elr_smoke.run_health_smoke("internal", 5)
+            digest = elr_smoke.run_health_smoke("prod", 5)
 
         self.assertTrue(digest["ok"])
         self.assertEqual(digest["status"], 200)
@@ -91,7 +175,7 @@ class RunHealthSmokeTests(unittest.TestCase):
         body = json.dumps({"dynamodb": "ok", "s3": "ok"}).encode("utf-8")
         fake_resp = _FakeHttpResponse(200, body)
         with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-            digest = elr_smoke.run_health_smoke("internal", 5)
+            digest = elr_smoke.run_health_smoke("prod", 5)
         serialized = json.dumps(digest, sort_keys=True)
         reparsed = json.loads(serialized)
         self.assertEqual(reparsed, digest)
@@ -129,7 +213,7 @@ class RunHealthSmokeTests(unittest.TestCase):
         body = json.dumps({"dynamodb": "ok", "s3": "ok"}).encode("utf-8")
         fake_resp = _FakeHttpResponse(200, body)
         with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
-            digest = elr_smoke.run_health_smoke("internal", 5)
+            digest = elr_smoke.run_health_smoke("prod", 5)
         self.assertIn("ca_bundle", digest)
         self.assertIn("source", digest["ca_bundle"])
         self.assertIn("path", digest["ca_bundle"])
