@@ -210,13 +210,17 @@ class TestSuccessfulWrite(unittest.TestCase):
         copy_kwargs = fake_s3.copy_object.call_args.kwargs
         self.assertEqual(copy_kwargs["Key"], "agent-documents/enceladus/DOC-P71TEST0001.md")
 
-        # Single conditional UpdateItem, content_hash = :expected_hash.
-        fake_ddb.update_item.assert_called_once()
-        update_kwargs = fake_ddb.update_item.call_args.kwargs
+        # ENC-TSK-P72: update_item is also called once (unconditionally) to
+        # allocate the AC-7 version_seq counter, before the single conditional
+        # UpdateItem (content_hash = :expected_hash) that actually writes the
+        # document — the guarded write is always the LAST call.
+        self.assertEqual(fake_ddb.update_item.call_count, 2)
+        update_kwargs = fake_ddb.update_item.call_args_list[-1].kwargs
         self.assertEqual(update_kwargs["ConditionExpression"], "content_hash = :expected_hash")
         self.assertEqual(update_kwargs["ExpressionAttributeValues"][":expected_hash"], {"S": HASH_A})
         self.assertIn("list_append", update_kwargs["UpdateExpression"])
         self.assertIn("#ver = #ver + :one", update_kwargs["UpdateExpression"])
+        self.assertIn("version_seq = :p72_vseq", update_kwargs["UpdateExpression"])
 
     @patch.object(document_api, "_get_content")
     @patch.object(document_api, "_get_s3")
@@ -229,7 +233,14 @@ class TestSuccessfulWrite(unittest.TestCase):
             {"Item": _doc_item(version=4, content_hash="2" * 64)},
         ]
         fake_ddb.exceptions.ConditionalCheckFailedException = _CCFE
-        fake_ddb.update_item.side_effect = _CCFE("conditional check failed")
+
+        def _side_effect(*args, **kwargs):
+            if kwargs.get("Key", {}).get("document_id", {}).get("S") == DOC_ID \
+                    and "ConditionExpression" in kwargs:
+                raise _CCFE("conditional check failed")
+            return {"Attributes": {"next_num": {"N": "1"}}}
+
+        fake_ddb.update_item.side_effect = _side_effect
         fake_s3 = MagicMock()
         mock_s3.return_value = fake_s3
         mock_content.return_value = CONTENT_A

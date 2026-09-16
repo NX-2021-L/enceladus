@@ -146,7 +146,12 @@ class TestContentHashMismatch(unittest.TestCase):
             "re-read digest via documents.manifest and retry",
             details.get("recommended_next_actions", []),
         )
-        fake_ddb.update_item.assert_not_called()
+        # ENC-TSK-P72 AC-2: a rejected mutation now appends a bookkeeping
+        # history event (+ version_seq counter allocation) via a SEPARATE
+        # unconditional UpdateItem — but must never attempt the guarded
+        # (ConditionExpression-bearing) content/version write itself.
+        for call in fake_ddb.update_item.call_args_list:
+            self.assertNotIn("ConditionExpression", call.kwargs)
 
     @patch.object(document_api, "_get_ddb")
     def test_matching_hash_succeeds_and_omits_precondition_absent(self, mock_ddb):
@@ -222,7 +227,18 @@ class TestGuardedContentWriteStagingAndConditionExpression(unittest.TestCase):
             pass
 
         fake_ddb.exceptions.ConditionalCheckFailedException = _CCFE
-        fake_ddb.update_item.side_effect = _CCFE("conditional check failed")
+
+        # ENC-TSK-P72: update_item is now also called for the version_seq
+        # counter (unconditional, different Key) and the AC-2 rejected-event
+        # bookkeeping write — only the guarded write against the document's
+        # own Key with a ConditionExpression should raise ConditionalCheckFailedException.
+        def _side_effect(*args, **kwargs):
+            if kwargs.get("Key", {}).get("document_id", {}).get("S") == "DOC-P70TEST0001" \
+                    and "ConditionExpression" in kwargs:
+                raise _CCFE("conditional check failed")
+            return {"Attributes": {"next_num": {"N": "1"}}}
+
+        fake_ddb.update_item.side_effect = _side_effect
         fake_s3 = MagicMock()
         mock_s3.return_value = fake_s3
 
@@ -255,7 +271,14 @@ class TestGuardedContentWriteStagingAndConditionExpression(unittest.TestCase):
             pass
 
         fake_ddb.exceptions.ConditionalCheckFailedException = _CCFE
-        fake_ddb.update_item.side_effect = _CCFE("conditional check failed")
+
+        def _side_effect(*args, **kwargs):
+            if kwargs.get("Key", {}).get("document_id", {}).get("S") == "DOC-P70TEST0001" \
+                    and "ConditionExpression" in kwargs:
+                raise _CCFE("conditional check failed")
+            return {"Attributes": {"next_num": {"N": "1"}}}
+
+        fake_ddb.update_item.side_effect = _side_effect
         fake_s3 = MagicMock()
         fake_s3.delete_object.side_effect = RuntimeError("s3 unavailable")
         mock_s3.return_value = fake_s3

@@ -1116,8 +1116,22 @@ def _is_allowed_file_name(file_name: str) -> bool:
     return any(lower_name.endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS)
 
 
-def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[str, str, int]:
-    """Upload .md content to S3. Returns (s3_key, content_hash, size_bytes)."""
+def _upload_content(
+    project_id: str, document_id: str, content: str, version: Optional[int] = None,
+) -> Tuple[str, str, int]:
+    """Upload .md content to S3. Returns (s3_key, content_hash, size_bytes).
+
+    ENC-TSK-P72 AC-4: when `version` is given (every real call site passes
+    it — put's create version=1, and _handle_patch's unguarded content/
+    append_content branches pass current_version + 1), also writes the
+    immutable versions/{document_id}/{version}.md snapshot. Kept optional
+    (not folded silently) so the many existing tests across this file that
+    `@patch.object(document_api, "_upload_content", ...)` at the module
+    level — replacing this whole function, version write included — keep
+    working unchanged; the ENC-TSK-P70 staged-write sibling
+    (_upload_content_staged) already always writes its version key the same
+    way for the guarded path.
+    """
     s3 = _get_s3()
     key = _s3_key(project_id, document_id)
     content_bytes = content.encode("utf-8")
@@ -1131,6 +1145,8 @@ def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[st
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
+    if version is not None:
+        _put_version_object_immutable(s3, _staging_s3_key(project_id, document_id, version), content_bytes)
     return key, content_hash, size_bytes
 
 
@@ -1152,17 +1168,48 @@ def _staging_s3_key(project_id: str, document_id: str, next_version: int) -> str
     return f"{S3_PREFIX}/{project_id}/versions/{document_id}/{next_version}.md"
 
 
-def _upload_content_staged(
-    project_id: str, document_id: str, content: str, next_version: int,
-) -> Tuple[str, str, int]:
-    """Upload .md content to the version-suffixed staging key. Returns
-    (staging_s3_key, content_hash, size_bytes). Caller promotes or deletes it."""
-    s3 = _get_s3()
-    key = _staging_s3_key(project_id, document_id, next_version)
-    content_bytes = content.encode("utf-8")
-    content_hash = hashlib.sha256(content_bytes).hexdigest()
-    size_bytes = len(content_bytes)
+def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> None:
+    """ENC-TSK-P72 AC-4: version snapshot objects are never overwritten. Tries
+    PutObject with IfNoneMatch='*' (S3 conditional write — fails with
+    PreconditionFailed/412 if the key already exists); older botocore/moto
+    reject the IfNoneMatch kwarg outright (TypeError / ParamValidationError),
+    so that path falls back to a HeadObject existence check before an
+    unconditional put. Either way, an existing object under this key is never
+    overwritten — a collision is logged and swallowed (the DynamoDB
+    conditional write is what actually arbitrates who gets a given version
+    number; this is defense in depth, not the primary guard).
+    """
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=content_bytes,
+            ContentType="text/markdown; charset=utf-8",
+            CacheControl="max-age=0, s-maxage=300, must-revalidate",
+            IfNoneMatch="*",
+        )
+        return
+    except TypeError:
+        pass  # IfNoneMatch not supported by this botocore/mock — fall through.
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("PreconditionFailed", "412"):
+            logger.warning("[ENC-TSK-P72] version object already exists, not overwritten: key=%s", key)
+            return
+        if code not in ("InvalidRequest", "NotImplemented", "UnknownParameter"):
+            raise
+        # Parameter unsupported by this endpoint — fall through to the
+        # HeadObject-then-put fallback below.
 
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=key)
+        logger.warning("[ENC-TSK-P72] version object already exists, not overwritten: key=%s", key)
+        return
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+            raise
+    except Exception:  # noqa: BLE001
+        pass
     s3.put_object(
         Bucket=S3_BUCKET,
         Key=key,
@@ -1170,6 +1217,22 @@ def _upload_content_staged(
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
+
+
+def _upload_content_staged(
+    project_id: str, document_id: str, content: str, next_version: int,
+) -> Tuple[str, str, int]:
+    """Upload .md content to the version-suffixed staging key (AC-4: this key
+    IS the permanent version snapshot once promoted — see _promote_staged_content).
+    Returns (staging_s3_key, content_hash, size_bytes). Caller promotes or
+    deletes it."""
+    s3 = _get_s3()
+    key = _staging_s3_key(project_id, document_id, next_version)
+    content_bytes = content.encode("utf-8")
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    size_bytes = len(content_bytes)
+
+    _put_version_object_immutable(s3, key, content_bytes)
     return key, content_hash, size_bytes
 
 
@@ -2245,9 +2308,10 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     now = _now_z()
     created_by = claims.get("email") or claims.get("sub", "unknown")
 
-    # Upload to S3
+    # Upload to S3 — ENC-TSK-P72 AC-4: version=1 also stores the
+    # versions/{document_id}/1.md snapshot for this create.
     try:
-        s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+        s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content, version=1)
     except Exception as exc:
         logger.error("S3 upload failed: %s", exc)
         return _error(500, "Failed to store document content.")
@@ -2287,6 +2351,29 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         # project Document nodes to Neo4j.
         "record_type": {"S": "document"},
     }
+
+    # ENC-TSK-P72 AC-1: 'put' is the first history_event for a document — part
+    # of this SAME put_item call, not a follow-up write, so an event can never
+    # exist without its body (there is no prior body for a create: before_hash
+    # / before_version are null/0).
+    _p72_event_id = sections_mod.generate_ulid()
+    _p72_history_event = _section_history_event(
+        event_id=_p72_event_id, ts=now, actor=created_by,
+        surface=_derive_write_surface(event, claims), op="put", anchor=None,
+        before_hash=None, after_hash=content_hash,
+        before_version=0, after_version=1,
+        patch_bytes=None, document_bytes=size_bytes,
+        caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+    )
+    item["history"] = {"L": [_ddb_value_from_python(_p72_history_event)]}
+    # AC-7: stamp version_seq/feed_scope on the same item write (create has no
+    # separate UpdateItem to piggyback on — these just land in the put_item).
+    try:
+        _p72_seq = _allocate_document_version_seq()
+        item["version_seq"] = {"N": str(_p72_seq)}
+        item["feed_scope"] = {"S": FEED_SCOPE}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P72] version_seq allocation failed on create (non-fatal): %s", exc)
 
     # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065: provenance fields used by the
     # Handoff Consolidation Engine and GDMP. All optional and additive:
@@ -2377,11 +2464,19 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
 
 def _handle_get(
     event: Dict, claims: Dict, document_id: Optional[str], is_manifest: bool = False,
+    is_history: bool = False, is_diff: bool = False,
 ) -> Dict:
     """Retrieve a single document or list documents."""
     qs = event.get("queryStringParameters") or {}
 
     if document_id and document_id != "search":
+        # ENC-TSK-P72 AC-5 / ENC-TSK-P91 route: GET /documents/{id}/history
+        # and GET /documents/{id}/diff — checked before digest/manifest so
+        # neither path segment is mistaken for a document read.
+        if is_history:
+            return _handle_document_history(document_id, qs)
+        if is_diff:
+            return _handle_document_diff(document_id, qs)
         # ENC-TSK-P69 / AC-1: GET /documents/{id}?digest_only=true and
         # GET /documents/{id}/manifest are two routes into one handler.
         digest_only = is_manifest or str(qs.get("digest_only", "")).strip().lower() in (
@@ -2416,6 +2511,13 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
         return _error(404, f"Document not found: {document_id}")
 
     doc = _deserialize_item(item)
+
+    # ENC-TSK-P72 AC-6: documents.get?at_version=&at_event= reconstruction.
+    at_version_raw = qs.get("at_version")
+    at_event_raw = qs.get("at_event")
+    if at_version_raw is not None or at_event_raw is not None:
+        return _get_document_at_version(document_id, doc, item, at_version_raw, at_event_raw)
+
     include_content = qs.get("include_content", "true").lower() == "true"
 
     if include_content:
@@ -2679,6 +2781,14 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     except (ValueError, TypeError):
         return _error(400, "Invalid JSON body.")
 
+    # ENC-TSK-P72 AC-1: which write path this PATCH is, purely from body-key
+    # presence (content/append_content are already validated as mutually
+    # exclusive below) — used to label the history_event `op` at every
+    # accepted/rejected return site in this handler. Dictionary enum:
+    # document.history_event.op includes "patch" (content field), "append_content",
+    # and "metadata" (neither — a metadata-only patch).
+    _p72_patch_op = "patch" if "content" in body else ("append_content" if "append_content" in body else "metadata")
+
     # Fetch current record
     ddb = _get_ddb()
     try:
@@ -2724,6 +2834,16 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 received=precondition_raw,
             )
         if precondition_kind == "version" and precondition_raw != str(current_version):
+            _append_rejected_event(
+                document_id=document_id, project_id=project_id,
+                existing_history_attr=existing.get("history", {}).get("L", []),
+                event_id=sections_mod.generate_ulid(), ts=now,
+                actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+                op=_p72_patch_op, rejection_code="REVISION_CONFLICT", anchor=None,
+                before_hash=current_content_hash, before_version=current_version,
+                document_bytes=int(existing.get("size_bytes", {}).get("N", "0")),
+                caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+            )
             return _error(
                 409,
                 f"If-Match revision mismatch: client expected revision '{precondition_raw}', "
@@ -2735,6 +2855,16 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 current=_deserialize_item(existing),
             )
         if precondition_kind == "hash" and precondition_raw != current_content_hash:
+            _append_rejected_event(
+                document_id=document_id, project_id=project_id,
+                existing_history_attr=existing.get("history", {}).get("L", []),
+                event_id=sections_mod.generate_ulid(), ts=now,
+                actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+                op=_p72_patch_op, rejection_code="CONTENT_HASH_MISMATCH", anchor=None,
+                before_hash=current_content_hash, before_version=current_version,
+                document_bytes=int(existing.get("size_bytes", {}).get("N", "0")),
+                caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+            )
             return _error(
                 412,
                 (
@@ -3282,7 +3412,12 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 _p70_staging_key = s3_key
                 s3_key = _s3_key(project_id, document_id)
             else:
-                s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+                # ENC-TSK-P72 AC-4: unguarded writes skip the stage-then-promote
+                # dance but _upload_content(version=...) still leaves a version
+                # snapshot behind.
+                s3_key, content_hash, size_bytes = _upload_content(
+                    project_id, document_id, content, version=current_version + 1,
+                )
             # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
             outline_entries = outline_mod.compute_outline(content)
             expr_parts.append("content_hash = :hash")
@@ -3374,7 +3509,12 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 _p70_staging_key = s3_key
                 s3_key = _s3_key(project_id, document_id)
             else:
-                s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+                # ENC-TSK-P72 AC-4: unguarded writes skip the stage-then-promote
+                # dance but _upload_content(version=...) still leaves a version
+                # snapshot behind.
+                s3_key, content_hash, size_bytes = _upload_content(
+                    project_id, document_id, new_content, version=current_version + 1,
+                )
             # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
             outline_entries = outline_mod.compute_outline(new_content)
             expr_parts.append("content_hash = :hash")
@@ -3394,6 +3534,46 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         except Exception as exc:
             logger.error("S3 append content failed: %s", exc)
             return _error(500, "Failed to append document content.")
+
+    # ENC-TSK-P72 AC-1 / AC-3 / AC-7: build this write's history_event and fold
+    # its append (with sidecar-rollover handling) plus the version_seq/feed_scope
+    # stamp into the SAME expr_parts/attr_values this handler's single UpdateItem
+    # already accumulates — so the event can never exist without its body change
+    # (AC-1) and every write path stamps version_seq (AC-7).
+    if _p72_patch_op == "append_content":
+        # dictionary contract: patch_bytes is the size of the delta applied;
+        # null for whole-document put/patch (a full replace, not a delta).
+        _p72_patch_bytes: Optional[int] = len(str(body.get("append_content") or "").encode("utf-8"))
+    else:
+        _p72_patch_bytes = None
+    if _p72_patch_op in ("patch", "append_content"):
+        _p72_after_hash = content_hash
+        _p72_document_bytes = size_bytes
+        _p72_fields_changed: List[str] = []
+    else:
+        _p72_after_hash = current_content_hash
+        _p72_document_bytes = int(existing.get("size_bytes", {}).get("N", "0"))
+        _p72_fields_changed = sorted(
+            k for k in body.keys() if k not in ("content", "append_content", "if_match", "caused_by", "idempotency_key")
+        )
+    _p72_history_event = _section_history_event(
+        event_id=sections_mod.generate_ulid(), ts=now,
+        actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+        op=_p72_patch_op, anchor=None,
+        before_hash=current_content_hash, after_hash=_p72_after_hash,
+        before_version=current_version, after_version=current_version + 1,
+        patch_bytes=_p72_patch_bytes, document_bytes=_p72_document_bytes,
+        caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+        fields_changed=_p72_fields_changed,
+    )
+    _p72_hist_set_clauses, _p72_hist_values = _history_append_parts(
+        existing.get("history", {}).get("L", []), _p72_history_event, project_id, document_id,
+    )
+    _p72_vseq_set_clauses, _p72_vseq_values = _document_version_seq_update_parts()
+    expr_parts.extend(_p72_hist_set_clauses)
+    expr_parts.extend(_p72_vseq_set_clauses)
+    attr_values.update(_p72_hist_values)
+    attr_values.update(_p72_vseq_values)
 
     update_expr = "SET " + ", ".join(expr_parts)
 
@@ -3426,9 +3606,26 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                 Key={"document_id": {"S": document_id}},
                 ConsistentRead=True,
             )
-            _refreshed = _deserialize_item(_refreshed_resp.get("Item") or existing)
+            _refreshed_item_typed = _refreshed_resp.get("Item") or existing
+            _refreshed = _deserialize_item(_refreshed_item_typed)
         except Exception:  # noqa: BLE001
+            _refreshed_item_typed = existing
             _refreshed = _deserialize_item(existing)
+        # ENC-TSK-P72 AC-2: the race lost, but it's still a rejected mutation
+        # (412/409) — record it, keyed off the freshly-read current state.
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=_refreshed_item_typed.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=_p72_patch_op,
+            rejection_code="CONTENT_HASH_MISMATCH" if precondition_kind == "hash" else "REVISION_CONFLICT",
+            anchor=None,
+            before_hash=str(_refreshed.get("content_hash") or ""),
+            before_version=int(_refreshed.get("version") or 0),
+            document_bytes=int(_refreshed.get("size_bytes") or 0),
+            caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+        )
         if precondition_kind == "hash":
             return _error(
                 412,
@@ -3551,8 +3748,16 @@ def _section_history_event(
     caused_by: Optional[str],
     idempotency_key: Optional[str],
     rejection_code: Optional[str] = None,
+    fields_changed: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """document.history_event shape (ENC-TSK-P82 dictionary contract)."""
+    """document.history_event shape (ENC-TSK-P82 dictionary contract).
+
+    ENC-TSK-P72: added `fields_changed` (AC-1, non-body metadata-only patches)
+    as an optional kwarg so this stays the single generic event-builder used
+    by every write path (put, patch, append_content, patch_section,
+    metadata-only patch) — existing ENC-TSK-P71 callers that don't pass it
+    keep getting [] exactly as before.
+    """
     return {
         "event_id": event_id,
         "ts": ts,
@@ -3567,7 +3772,7 @@ def _section_history_event(
         "after_version": after_version,
         "patch_bytes": patch_bytes,
         "document_bytes": document_bytes,
-        "fields_changed": [],
+        "fields_changed": list(fields_changed) if fields_changed else [],
         "caused_by": caused_by,
         "idempotency_key": idempotency_key,
     }
@@ -3588,6 +3793,523 @@ def _ddb_value_from_python(value: Any) -> Dict[str, Any]:
     if isinstance(value, (list, tuple)):
         return {"L": [_ddb_value_from_python(v) for v in value]}
     return {"S": str(value)}
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P72 (FR-B2-1..10): operation log / rejected-event recording / history
+# sidecar / S3 body versioning / documents.history & documents.diff reads.
+# Generalizes the ENC-TSK-P71 in-UpdateItem history-append pattern (above) to
+# every write path (put, patch, append_content, patch_section, metadata-only
+# patch) and adds the AC-2 rejected-event, AC-3 sidecar rollover, AC-6
+# at_version/at_event reconstruction, and AC-7 version_seq/feed_scope
+# stamping. See document.history_event / document.body_versioning in
+# governance_data_dictionary.json for the field contract.
+# ---------------------------------------------------------------------------
+
+HISTORY_INLINE_CAP = 200
+HISTORY_ROLLOVER_BATCH = 100
+FEED_SCOPE = "global"
+DIFF_MAX_BYTES = 200_000
+_VERSION_SEQ_COUNTER_DOCUMENT_ID = "__COUNTER__VERSION_SEQ__"
+
+
+def _history_sidecar_key(project_id: str, document_id: str) -> str:
+    """document.body_versioning.history_sidecar: agent-documents/{project_id}/{document_id}.history.jsonl"""
+    return f"{S3_PREFIX}/{project_id}/{document_id}.history.jsonl"
+
+
+def _ddb_to_python(value: Any) -> Any:
+    """Inverse of _ddb_value_from_python — deserializes a DynamoDB typed
+    attribute value back to a plain Python value. Only needs to cover the
+    M/L/S/N/BOOL/NULL shapes _ddb_value_from_python emits."""
+    if not isinstance(value, dict):
+        return value
+    if "NULL" in value:
+        return None
+    if "BOOL" in value:
+        return bool(value["BOOL"])
+    if "N" in value:
+        raw = value["N"]
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return float(raw)
+    if "S" in value:
+        return value["S"]
+    if "M" in value:
+        return {k: _ddb_to_python(v) for k, v in value["M"].items()}
+    if "L" in value:
+        return [_ddb_to_python(v) for v in value["L"]]
+    return None
+
+
+def _allocate_document_version_seq() -> int:
+    """ENC-TSK-M79 / ENC-TSK-M92 discipline, adapted for DOCUMENTS_TABLE.
+
+    enceladus_shared.version_seq's counter row is keyed on {project_id,
+    record_id} — the tracker table's composite key. DOCUMENTS_TABLE's key
+    schema is document_id-only (infrastructure/cloudformation/01-data.yaml
+    DocumentsTable: KeySchema = [document_id HASH], no record_id attribute),
+    so that shape cannot be reused as-is against this table. This vendors an
+    equivalent monotonic counter scoped to DOCUMENTS_TABLE, keyed on the
+    document_id sentinel below — same atomic if_not_exists+1 pattern, same
+    feed_scope constant, so a future feed_query extension that adds a
+    matching version-seq GSI on DOCUMENTS_TABLE can read it unchanged.
+    """
+    ddb = _get_ddb()
+    resp = ddb.update_item(
+        TableName=DOCUMENTS_TABLE,
+        Key={"document_id": {"S": _VERSION_SEQ_COUNTER_DOCUMENT_ID}},
+        UpdateExpression=(
+            "SET next_num = if_not_exists(next_num, :zero) + :one, "
+            "feed_scope = :scope, record_type = :rtype"
+        ),
+        ExpressionAttributeValues={
+            ":zero": {"N": "0"},
+            ":one": {"N": "1"},
+            ":scope": {"S": FEED_SCOPE},
+            ":rtype": {"S": "counter"},
+        },
+        ReturnValues="UPDATED_NEW",
+    )
+    attrs = resp.get("Attributes") or {}
+    return int(attrs.get("next_num", {"N": "0"})["N"])
+
+
+def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
+    """AC-7: returns (extra_set_clauses, extra_attr_values) stamping
+    version_seq + feed_scope in the SAME UpdateItem as the caller's write."""
+    seq = _allocate_document_version_seq()
+    return (
+        ["version_seq = :p72_vseq", "feed_scope = :p72_fscope"],
+        {":p72_vseq": {"N": str(seq)}, ":p72_fscope": {"S": FEED_SCOPE}},
+    )
+
+
+def _append_history_sidecar(project_id: str, document_id: str, events: List[Dict[str, Any]]) -> None:
+    """AC-3: append `events` (plain-python history_event dicts, oldest first)
+    as newline-delimited JSON to the S3 sidecar, read-modify-append. Only
+    ever called from the rollover path below — the sidecar is append-only,
+    per AC-3's "the sidecar is only ever appended by this handler"."""
+    s3 = _get_s3()
+    key = _history_sidecar_key(project_id, document_id)
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        existing_body = resp["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
+        existing_body = ""
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "NoSuchKey":
+            raise
+        existing_body = ""
+    new_lines = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events)
+    s3.put_object(
+        Bucket=S3_BUCKET, Key=key, Body=(existing_body + new_lines).encode("utf-8"),
+        ContentType="application/x-ndjson",
+    )
+
+
+def _history_append_parts(
+    existing_history_attr: List[Dict[str, Any]],
+    history_event: Dict[str, Any],
+    project_id: str,
+    document_id: str,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """AC-1 / AC-3: returns (extra_set_clauses, extra_attr_values) that append
+    `history_event` to the item's inline `history` list within the SAME
+    UpdateItem as the caller's body/metadata write, performing the AC-3
+    sidecar rollover when the append would exceed HISTORY_INLINE_CAP.
+
+    Deviation from the brief's literal `REMOVE history[0], history[1], ...
+    history[99]` mechanism: DynamoDB evaluates a multi-index REMOVE against
+    the list sequentially as it shrinks, so an ascending-index REMOVE in one
+    UpdateExpression drops the wrong elements once the first removal shifts
+    everything after it — a documented DynamoDB gotcha (the fix is descending
+    order, which is itself easy to get wrong and awkward to unit-test against
+    a mock ddb client that doesn't emulate the shift). This computes the
+    resulting list in Python and SETs it wholesale in one atomic clause
+    instead — identical net effect (oldest N dropped from the inline list,
+    same UpdateItem as the write, oldest flushed to the sidecar first), and
+    is straightforward to unit-test exactly.
+    """
+    new_event_ddb = _ddb_value_from_python(history_event)
+    current_len = len(existing_history_attr)
+    if current_len + 1 > HISTORY_INLINE_CAP:
+        overflow_n = min(HISTORY_ROLLOVER_BATCH, current_len)
+        oldest = [_ddb_to_python({"M": e.get("M", {})}) for e in existing_history_attr[:overflow_n]]
+        _append_history_sidecar(project_id, document_id, oldest)
+        remainder = existing_history_attr[overflow_n:]
+        new_list = remainder + [new_event_ddb]
+        return (
+            [
+                "history = :p72_new_history",
+                "history_overflow_count = if_not_exists(history_overflow_count, :p72_hoc_zero) + :p72_hoc_inc",
+                "history_sidecar_key = :p72_hsk",
+            ],
+            {
+                ":p72_new_history": {"L": new_list},
+                ":p72_hoc_zero": {"N": "0"},
+                ":p72_hoc_inc": {"N": str(overflow_n)},
+                ":p72_hsk": {"S": _history_sidecar_key(project_id, document_id)},
+            },
+        )
+    return (
+        ["history = list_append(if_not_exists(history, :p72_empty_history), :p72_new_event)"],
+        {":p72_empty_history": {"L": []}, ":p72_new_event": {"L": [new_event_ddb]}},
+    )
+
+
+def _append_rejected_event(
+    *,
+    document_id: str,
+    project_id: str,
+    existing_history_attr: List[Dict[str, Any]],
+    event_id: str,
+    ts: str,
+    actor: str,
+    surface: str,
+    op: str,
+    rejection_code: str,
+    anchor: Optional[Dict[str, Any]],
+    before_hash: str,
+    before_version: int,
+    document_bytes: int,
+    caused_by: Optional[str],
+    idempotency_key: Optional[str],
+) -> None:
+    """AC-2: rejected mutations append a `<op>-rejected` event WITHOUT
+    advancing version, via a SEPARATE unconditional UpdateItem that touches
+    only history (+ AC-3 rollover fields, + AC-7 version_seq/feed_scope) —
+    never version/content_hash. Best-effort: a failure here must never turn a
+    legitimate 412/409/404 rejection response into a 500, so exceptions are
+    logged and swallowed (same discipline as _mirror_related_items_to_tracker
+    / _emit_legacy_write_unguarded_metric elsewhere in this file).
+    """
+    try:
+        rejected_event = _section_history_event(
+            event_id=event_id, ts=ts, actor=actor, surface=surface,
+            op=f"{op}-rejected", anchor=anchor,
+            before_hash=before_hash, after_hash=before_hash,
+            before_version=before_version, after_version=before_version,
+            patch_bytes=None, document_bytes=document_bytes,
+            caused_by=caused_by, idempotency_key=idempotency_key,
+            rejection_code=rejection_code,
+        )
+        set_clauses, values = _history_append_parts(
+            existing_history_attr, rejected_event, project_id, document_id,
+        )
+        vseq_clauses, vseq_values = _document_version_seq_update_parts()
+        set_clauses = set_clauses + vseq_clauses
+        values = {**values, **vseq_values}
+        _get_ddb().update_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            UpdateExpression="SET " + ", ".join(set_clauses),
+            ExpressionAttributeValues=values,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[ENC-TSK-P72] rejected-event append failed (non-fatal): document_id=%s op=%s err=%s",
+            document_id, op, exc,
+        )
+
+
+def _load_document_history_events(
+    document_id: str, project_id: str, inline_history_attr: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """AC-5: merge sidecar (older) then inline (recent) into one list of
+    plain-python history_event dicts, ascending ts (caller may re-sort)."""
+    events: List[Dict[str, Any]] = []
+    try:
+        s3 = _get_s3()
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=_history_sidecar_key(project_id, document_id))
+        raw = resp["Body"].read().decode("utf-8")
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+    except Exception:  # noqa: BLE001 — NoSuchKey (no sidecar yet) or any read failure: no sidecar events.
+        pass
+    for e in inline_history_attr:
+        events.append(_ddb_to_python({"M": e.get("M", {})}))
+    return events
+
+
+def _synthesize_legacy_event(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """AC-7: "pre-existing history entries are surfaced by documents.history
+    as op=legacy without hashes, earliest first" — a document written before
+    ENC-TSK-P72 (or before ENC-TSK-P71 for that matter) has no `history`
+    attribute at all. documents.history must not return an empty list for
+    such a document, so synthesize one op=legacy placeholder from the item's
+    own create/update stamps."""
+    return {
+        "event_id": f"legacy-{doc.get('document_id')}",
+        "ts": str(doc.get("created_at") or doc.get("updated_at") or ""),
+        "actor": str(doc.get("created_by") or "unknown"),
+        "surface": "unknown",
+        "op": "legacy",
+        "rejection_code": None,
+        "anchor": None,
+        "before_hash": None,
+        "after_hash": None,
+        "before_version": None,
+        "after_version": doc.get("version"),
+        "patch_bytes": None,
+        "document_bytes": doc.get("size_bytes"),
+        "fields_changed": [],
+        "caused_by": None,
+        "idempotency_key": None,
+    }
+
+
+def _version_object_exists(
+    project_id: str, document_id: str, version: Optional[int], cache: Dict[int, bool],
+) -> bool:
+    """AC-5 diff_available: HeadObject on a versions/ snapshot key, memoized
+    per-request via `cache` (the brief's "cache per request" note)."""
+    if version is None:
+        return False
+    if version in cache:
+        return cache[version]
+    try:
+        _get_s3().head_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, version))
+        cache[version] = True
+    except Exception:  # noqa: BLE001
+        cache[version] = False
+    return cache[version]
+
+
+def _handle_document_history(document_id: str, qs: Dict[str, Any]) -> Dict:
+    """GET /documents/{document_id}/history (AC-5, ENC-TSK-P91 route)."""
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+
+    doc = _deserialize_item(item)
+    project_id = str(doc.get("project_id") or "")
+    inline_history = item.get("history", {}).get("L", [])
+    events = _load_document_history_events(document_id, project_id, inline_history)
+    if not events:
+        events = [_synthesize_legacy_event(doc)]
+
+    since = qs.get("since")
+    until = qs.get("until")
+    actor_filter = qs.get("actor")
+    op_filter = qs.get("op")
+    block_id_filter = qs.get("anchor.block_id") or qs.get("anchor_block_id")
+
+    def _keep(e: Dict[str, Any]) -> bool:
+        ts = str(e.get("ts") or "")
+        if since and ts < str(since):
+            return False
+        if until and ts > str(until):
+            return False
+        if actor_filter and e.get("actor") != actor_filter:
+            return False
+        if op_filter and e.get("op") != op_filter:
+            return False
+        if block_id_filter:
+            anchor = e.get("anchor") or {}
+            if not isinstance(anchor, dict) or anchor.get("block_id") != block_id_filter:
+                return False
+        return True
+
+    filtered = [e for e in events if _keep(e)]
+    filtered.sort(key=lambda e: str(e.get("ts") or ""))
+
+    try:
+        page_size = int(qs.get("page_size") or 50)
+    except (TypeError, ValueError):
+        page_size = 50
+    page_size = max(1, min(page_size, HISTORY_INLINE_CAP))
+
+    offset = 0
+    cursor = qs.get("cursor")
+    if cursor:
+        try:
+            offset = max(0, int(json.loads(base64.b64decode(cursor).decode("utf-8")).get("offset", 0)))
+        except Exception:  # noqa: BLE001
+            offset = 0
+
+    page = filtered[offset: offset + page_size]
+    next_offset = offset + page_size
+    next_cursor = None
+    if next_offset < len(filtered):
+        next_cursor = base64.b64encode(json.dumps({"offset": next_offset}).encode("utf-8")).decode("ascii")
+
+    exists_cache: Dict[int, bool] = {}
+    out_events = []
+    for e in page:
+        e = dict(e)
+        e["diff_available"] = bool(
+            _version_object_exists(project_id, document_id, e.get("before_version"), exists_cache)
+            and _version_object_exists(project_id, document_id, e.get("after_version"), exists_cache)
+        )
+        out_events.append(e)
+
+    return _response(200, {
+        "success": True,
+        "document_id": document_id,
+        "events": out_events,
+        "total_matched": len(filtered),
+        "next_cursor": next_cursor,
+    })
+
+
+def _handle_document_diff(document_id: str, qs: Dict[str, Any]) -> Dict:
+    """GET /documents/{document_id}/diff?from=&to= (AC-5, ENC-TSK-P91 route)."""
+    try:
+        from_version = int(qs.get("from"))
+        to_version = int(qs.get("to"))
+    except (TypeError, ValueError):
+        return _error(400, "Query parameters 'from' and 'to' must be integers.", code="INVALID_INPUT")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+    project_id = item.get("project_id", {}).get("S", "")
+
+    s3 = _get_s3()
+
+    def _load_version(v: int) -> Optional[str]:
+        try:
+            r = s3.get_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, v))
+            return r["Body"].read().decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+
+    from_content = _load_version(from_version)
+    to_content = _load_version(to_version)
+    missing = [v for v, c in ((from_version, from_content), (to_version, to_content)) if c is None]
+    if missing:
+        return _error(
+            404, f"Version object(s) not found: {missing}", code="VERSION_NOT_FOUND",
+            document_id=document_id, missing_versions=missing,
+        )
+
+    from_hash = hashlib.sha256(from_content.encode("utf-8")).hexdigest()
+    to_hash = hashlib.sha256(to_content.encode("utf-8")).hexdigest()
+    diff_text = sections_mod.unified_diff_for_patch(from_content, to_content)
+    truncated = False
+    if len(diff_text.encode("utf-8")) > DIFF_MAX_BYTES:
+        diff_text = diff_text.encode("utf-8")[:DIFF_MAX_BYTES].decode("utf-8", errors="ignore")
+        truncated = True
+
+    return _response(200, {
+        "success": True,
+        "document_id": document_id,
+        "from_version": from_version,
+        "to_version": to_version,
+        "from_hash": from_hash,
+        "to_hash": to_hash,
+        "diff": diff_text,
+        "truncated": truncated,
+    })
+
+
+def _get_document_at_version(
+    document_id: str,
+    doc: Dict[str, Any],
+    item_typed: Dict[str, Any],
+    at_version_raw: Optional[str],
+    at_event_raw: Optional[str],
+) -> Dict:
+    """AC-6: documents.get?at_version=&at_event= — reconstruct the body from
+    the S3 version object, verifying content_hash against the recording
+    event's after_hash. Mismatch => 500 INTEGRITY_VIOLATION + CloudWatch
+    metric (AC-4 says version objects are never overwritten, so this should
+    be unreachable in practice; the check exists to catch that invariant
+    breaking rather than silently serving corrupt content)."""
+    project_id = str(doc.get("project_id") or "")
+    inline_history = item_typed.get("history", {}).get("L", [])
+    events = _load_document_history_events(document_id, project_id, inline_history)
+
+    target_event: Optional[Dict[str, Any]] = None
+    target_version: Optional[int] = None
+    if at_event_raw:
+        for e in events:
+            if e.get("event_id") == at_event_raw:
+                target_event = e
+                break
+        if target_event is None:
+            return _error(
+                404, f"No history event '{at_event_raw}' for document {document_id}.",
+                code="EVENT_NOT_FOUND", document_id=document_id,
+            )
+        target_version = target_event.get("after_version")
+    else:
+        try:
+            target_version = int(at_version_raw)
+        except (TypeError, ValueError):
+            return _error(400, "'at_version' must be an integer.", code="INVALID_INPUT")
+        for e in events:
+            if e.get("after_version") == target_version:
+                target_event = e
+                break
+
+    if target_version is None:
+        return _error(
+            400, "Could not resolve a version from the given at_version/at_event.",
+            code="INVALID_INPUT", document_id=document_id,
+        )
+
+    key = _staging_s3_key(project_id, document_id, target_version)
+    try:
+        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)
+        content = resp["Body"].read().decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P72] version object read failed: key=%s err=%s", key, exc)
+        return _error(
+            404, f"Version {target_version} not found for document {document_id}.",
+            code="VERSION_NOT_FOUND", document_id=document_id, version=target_version,
+        )
+
+    actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    expected_hash = target_event.get("after_hash") if target_event else None
+    if expected_hash and actual_hash != expected_hash:
+        try:
+            _get_cloudwatch().put_metric_data(
+                Namespace="Enceladus/Docstore",
+                MetricData=[{
+                    "MetricName": "IntegrityViolation",
+                    "Dimensions": [{"Name": "DocumentId", "Value": document_id}],
+                    "Value": 1,
+                    "Unit": "Count",
+                }],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-P72] IntegrityViolation metric emit failed (non-fatal): %s", exc)
+        return _error(
+            500,
+            f"Integrity check failed for document {document_id} at version {target_version}.",
+            code="INTEGRITY_VIOLATION",
+            document_id=document_id, version=target_version,
+            expected_hash=expected_hash, actual_hash=actual_hash,
+        )
+
+    doc_out = dict(doc)
+    doc_out["content"] = content
+    doc_out["version"] = target_version
+    doc_out["content_hash"] = actual_hash
+    doc_out["reconstructed"] = True
+    payload = {"success": True, "document": doc_out, **doc_out}
+    return _response(200, payload)
 
 
 def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
@@ -3713,6 +4435,16 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
                 return _response(200, replay_payload)
 
     if precondition_raw != current_content_hash:
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=existing.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=op, rejection_code="CONTENT_HASH_MISMATCH", anchor=anchor,
+            before_hash=current_content_hash, before_version=current_version,
+            document_bytes=int(existing_plain.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
         return _error(
             412,
             (
@@ -3756,6 +4488,18 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
                 {k: v for k, v in e.items() if k not in ("header_start_ln", "header_end_ln")}
                 for e in details["outline"]
             ]
+        # ENC-TSK-P72 AC-2: ANCHOR_NOT_FOUND (404) / ANCHOR_AMBIGUOUS (409) are
+        # both rejected mutations per the AC-2 code list.
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=existing.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=op, rejection_code=exc.code, anchor=anchor,
+            before_hash=current_content_hash, before_version=current_version,
+            document_bytes=int(existing_plain.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
         return _error(exc.status, exc.message, code=exc.code, document_id=document_id, **details)
 
     # --- AC-3/AC-4/AC-5: apply the op in memory ----------------------------
@@ -3838,7 +4582,6 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
         "s3_key = :s3k",
         "outline = :outline",
         "#ver = #ver + :one",
-        "history = list_append(if_not_exists(history, :empty_list), :new_event)",
     ]
     attr_names: Dict[str, str] = {"#ver": "version"}
     attr_values: Dict[str, Any] = {
@@ -3848,9 +4591,18 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
         ":s3k": {"S": canonical_key},
         ":outline": {"S": json.dumps(new_outline_entries)},
         ":one": {"N": "1"},
-        ":empty_list": {"L": []},
-        ":new_event": {"L": [_ddb_value_from_python(history_event)]},
     }
+    # ENC-TSK-P72 AC-1 / AC-3 / AC-7: same history-append (+ sidecar rollover)
+    # + version_seq/feed_scope stamp as _handle_patch, folded into this
+    # handler's single conditional UpdateItem.
+    _p72_hist_set_clauses, _p72_hist_values = _history_append_parts(
+        existing.get("history", {}).get("L", []), history_event, project_id, document_id,
+    )
+    _p72_vseq_set_clauses, _p72_vseq_values = _document_version_seq_update_parts()
+    set_clauses.extend(_p72_hist_set_clauses)
+    set_clauses.extend(_p72_vseq_set_clauses)
+    attr_values.update(_p72_hist_values)
+    attr_values.update(_p72_vseq_values)
 
     if idempotency_key:
         # AC-6: whole-map rewrite (never a nested `section_idempotency.#key`
@@ -3896,9 +4648,22 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
             _refreshed_resp = ddb.get_item(
                 TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
             )
-            _refreshed = _deserialize_item(_refreshed_resp.get("Item") or existing)
+            _refreshed_item_typed = _refreshed_resp.get("Item") or existing
+            _refreshed = _deserialize_item(_refreshed_item_typed)
         except Exception:  # noqa: BLE001
+            _refreshed_item_typed = existing
             _refreshed = existing_plain
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=_refreshed_item_typed.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=actor, surface=surface, op=op, rejection_code="CONTENT_HASH_MISMATCH",
+            anchor=anchor_resolved,
+            before_hash=str(_refreshed.get("content_hash") or ""),
+            before_version=int(_refreshed.get("version") or 0),
+            document_bytes=int(_refreshed.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
         return _error(
             412,
             "Content-hash precondition mismatch: document was modified concurrently.",
@@ -4071,9 +4836,9 @@ def _handle_governance_sync_push(event: Dict) -> Dict:
 # Path parsing
 # ---------------------------------------------------------------------------
 
-def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool]:
-    """Parse method, document_id, query params, and manifest/sections route
-    flags from event.
+def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool, bool, bool]:
+    """Parse method, document_id, query params, and manifest/sections/history/
+    diff route flags from event.
 
     ENC-TSK-P69: the 4th element (`is_manifest`) is True for
     GET /documents/{documentId}/manifest — checked before the bare-ID
@@ -4083,6 +4848,11 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool]:
     ENC-TSK-P71: the 5th element (`is_sections`) is True for
     POST /documents/{documentId}/sections, same reasoning — the "sections"
     path segment must never be mistaken for part of the document_id.
+
+    ENC-TSK-P72: the 6th/7th elements (`is_history` / `is_diff`) are True for
+    GET /documents/{documentId}/history and GET /documents/{documentId}/diff
+    (ENC-TSK-P91 routes that reach this Lambda but, before this task, fell
+    through to the bare document GET handler and 400'd) — same reasoning.
     """
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
@@ -4098,6 +4868,8 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool]:
     )
     is_manifest = False
     is_sections = False
+    is_history = False
+    is_diff = False
 
     if not document_id:
         # Handle arbitrary API mappings/stage prefixes by matching the tail.
@@ -4107,12 +4879,24 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool]:
         sections_match = re.search(
             r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/sections/?$", raw_path,
         )
+        history_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/history/?$", raw_path,
+        )
+        diff_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/diff/?$", raw_path,
+        )
         if manifest_match:
             document_id = manifest_match.group("documentId")
             is_manifest = True
         elif sections_match:
             document_id = sections_match.group("documentId")
             is_sections = True
+        elif history_match:
+            document_id = history_match.group("documentId")
+            is_history = True
+        elif diff_match:
+            document_id = diff_match.group("documentId")
+            is_diff = True
         else:
             match = re.search(r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/?$", raw_path)
             if match:
@@ -4122,13 +4906,17 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool]:
     else:
         is_manifest = bool(re.search(r"/manifest/?$", raw_path))
         is_sections = bool(re.search(r"/sections/?$", raw_path))
+        is_history = bool(re.search(r"/history/?$", raw_path))
+        is_diff = bool(re.search(r"/diff/?$", raw_path))
 
     qs = event.get("queryStringParameters") or {}
     logger.info(
-        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s is_manifest=%s is_sections=%s",
+        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s is_manifest=%s "
+        "is_sections=%s is_history=%s is_diff=%s",
         method, raw_path, document_id, sorted(qs.keys()), is_manifest, is_sections,
+        is_history, is_diff,
     )
-    return method, document_id, qs, is_manifest, is_sections
+    return method, document_id, qs, is_manifest, is_sections, is_history, is_diff
 
 
 # ---------------------------------------------------------------------------
@@ -4142,7 +4930,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if event.get("_governance_sync_push"):
         return _handle_governance_sync_push(event)
 
-    method, document_id, qs, is_manifest, is_sections = _parse_request(event)
+    method, document_id, qs, is_manifest, is_sections, is_history, is_diff = _parse_request(event)
 
     # CORS preflight
     if method == "OPTIONS":
@@ -4166,7 +4954,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             return _handle_patch_section(event, claims, document_id)
         return _handle_put(event, claims)
     elif method == "GET":
-        return _handle_get(event, claims, document_id, is_manifest=is_manifest)
+        return _handle_get(
+            event, claims, document_id,
+            is_manifest=is_manifest, is_history=is_history, is_diff=is_diff,
+        )
     elif method == "PATCH":
         if not document_id:
             return _error(400, "PATCH requires a document ID in the path.")
