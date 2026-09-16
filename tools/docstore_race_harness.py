@@ -90,7 +90,7 @@ def create_scratch_document(base_url: str, api_key: str, project_id: str) -> Tup
     returns (document_id, content_hash) read from the create response."""
     title = f"{SCRATCH_TITLE_PREFIX} {int(time.time() * 1000)}"
     status, body = _request(
-        "POST",
+        "PUT",
         base_url,
         api_key,
         body={

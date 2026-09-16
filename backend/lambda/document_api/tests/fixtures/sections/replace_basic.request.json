@@ -1,0 +1,10 @@
+{
+  "anchor": {
+    "heading_path": [
+      "Alpha"
+    ]
+  },
+  "op": "replace",
+  "body": "New alpha content.",
+  "rebase_headings": true
+}
