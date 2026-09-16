@@ -5002,6 +5002,18 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                 Resource: !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+              # ENC-TSK-P94 / ENC-ISS-766: document_api emits the Enceladus/Docstore
+              # metrics (ENC-TSK-P70 LegacyWriteUnguarded, ENC-TSK-P84 patch_section
+              # outcomes) fire-and-forget; without this grant every datapoint was
+              # dropped with a non-fatal AccessDenied. Namespace-scoped by condition.
+              - Sid: DocstoreMetricsPutMetricData
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Enceladus/Docstore
               # ENC-TSK-M59 / ENC-ISS-526: gamma's documents table carries rows cloned
               # from prod whose s3_key names the UNPREFIXED prod path; the bodies were
               # never provisioned into ${S3EnvPrefix}agent-documents/. Read-only access
