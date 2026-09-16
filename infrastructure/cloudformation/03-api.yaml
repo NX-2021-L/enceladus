@@ -684,6 +684,35 @@ Resources:
       RouteKey: PATCH /api/v1/documents/{documentId}
       Target: !Sub integrations/${DocumentApiIntegration}
 
+  # ENC-TSK-P91 / ENC-PLN-091: section-anchored docstore sub-resources
+  RouteDocumentsManifest:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/{documentId}/manifest
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsSections:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/documents/{documentId}/sections
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/{documentId}/history
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsDiff:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/{documentId}/diff
+      Target: !Sub integrations/${DocumentApiIntegration}
+
   # ---------------------------------------------------------------------------
   # Routes — Project Service
   # ---------------------------------------------------------------------------
@@ -1742,6 +1771,42 @@ Resources:
       RouteKey: OPTIONS /api/v1/documents/{documentId}
       Target: !Sub integrations/${DocumentApiIntegration}
 
+  RouteOptDocumentsByDocumentIdManifest:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}/manifest
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptDocumentsByDocumentIdSections:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}/sections
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptDocumentsByDocumentIdHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}/history
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptDocumentsByDocumentIdDiff:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}/diff
+      Target: !Sub integrations/${DocumentApiIntegration}
+
   RouteOptFeed:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsProduction
@@ -2465,6 +2530,42 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "OPTIONS /api/v1/documents/{documentId}"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptGammaDocumentsManifest:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}/manifest"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptGammaDocumentsSections:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}/sections"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptGammaDocumentsHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}/history"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptGammaDocumentsDiff:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}/diff"
       Target: !Sub integrations/${DocumentApiIntegration}
 
   ImportedGammaRouteB0406:
