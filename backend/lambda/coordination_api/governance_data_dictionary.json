@@ -1,7 +1,7 @@
 {
-  "version": "2026-08-27.4",
-  "updated_at": "2026-08-27T05:45:00Z",
-  "last_change_summary": "ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
+  "version": "2026-09-15.1",
+  "updated_at": "2026-09-15T00:00:00Z",
+  "last_change_summary": "ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary). PREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8356,10 +8356,36 @@
           "usage_guidance": "Do not emit this metric from any other code path or component. Its entire value is that its ABSENCE is trustworthy; a second emitter would make a missing datapoint ambiguous and silently disarm the alarm. ENC-TSK-O81 AC-1 requires the alarm be OBSERVED firing against a deliberately DISABLED schedule -- an alarm never seen red is not evidence that it works."
         }
       }
+    },
+    "mcp_server.projects_prefix_map": {
+      "description": "ENC-TSK-P74 / FR-B4-2: MCP raw tool projects_prefix_map (code-mode action projects.prefix_map). Read-only search action returning the union of each project's canonical (MINT) prefix and alias_prefixes entries mapped to project_id, by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim -- no additional table scan beyond what the resolver itself performs on cache miss. Response is cacheable and carries no record bodies. Consumed by ELR v2 prefix resolution (tools/elr/elr_lib/prefix.py, separate PR).",
+      "fields": {
+        "prefixes": {
+          "type": "object",
+          "definition": "Map of prefix (e.g. 'ENC', 'HFY') to project_id, per _get_prefix_map()'s mint-wins-over-alias collision resolution."
+        },
+        "source": {
+          "type": "string",
+          "definition": "Fixed provenance string: 'project_service.prefix union alias_prefixes'."
+        },
+        "generated_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601"
+          },
+          "definition": "UTC timestamp the response was generated, via _now_z()."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
   "change_log": [
+    {
+      "version": "2026-09-15.1",
+      "date": "2026-09-15",
+      "record": "ENC-TSK-P74",
+      "summary": "ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary)."
+    },
     {
       "version": "2026-08-23.3",
       "date": "2026-08-23",
