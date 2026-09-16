@@ -5,6 +5,9 @@ Stubs urllib.request.urlopen so no real network call happens. Covers:
   - dry-run never POSTs
   - --apply POSTs to the idempotent apply endpoint for each remaining id
   - missing API key env var exits 2 and never makes a request
+  - the list call carries no status filter (client-side filtering instead)
+  - status=failed + applied_at unset is a candidate; applied/denied/requested
+    are excluded
 """
 import importlib.util
 import json
@@ -45,8 +48,8 @@ def _list_payload(items, next_cursor=None):
     return payload
 
 
-def _esc(esc_id, applied_at=None, target="ENC-TSK-J10"):
-    item = {"item_id": esc_id, "status": "approved", "target_record_id": target,
+def _esc(esc_id, applied_at=None, target="ENC-TSK-J10", status="approved"):
+    item = {"item_id": esc_id, "status": status, "target_record_id": target,
             "mutation_type": "direct_state_override", "decided_at": "2026-09-16T00:00:00Z"}
     if applied_at:
         item["applied_at"] = applied_at
@@ -108,6 +111,67 @@ def test_apply_posts_for_each_unapplied_id(monkeypatch, capsys):
     for req in apply_requests:
         assert req.get_method() == "POST"
         assert req.full_url.endswith("/apply")
+    out = capsys.readouterr().out
+    assert "HTTP 200" in out
+
+
+def test_list_call_has_no_status_filter(monkeypatch):
+    # ENC-TSK-P89: filtering moved client-side so both approved and failed
+    # candidates are caught in one pass.
+    monkeypatch.setenv(sweep.ENV_KEY_NAME, "test-key-value")
+    with mock.patch("urllib.request.urlopen",
+                    return_value=_FakeResponse(_list_payload([]))) as urlopen:
+        sys.argv = ["escalation_redrive_sweep.py", "--base-url", "https://x/api/v1/tracker"]
+        sweep.main()
+    requested_url = urlopen.call_args_list[0].args[0].full_url
+    assert "status=" not in requested_url
+    assert "page_size=200" in requested_url
+
+
+def test_dry_run_shows_failed_unapplied_and_excludes_applied_denied_requested(monkeypatch, capsys):
+    monkeypatch.setenv(sweep.ENV_KEY_NAME, "test-key-value")
+    items = [
+        _esc("ENC-ESC-105", status="failed"),
+        _esc("ENC-ESC-106", status="applied", applied_at="2026-09-01T00:00:00Z"),
+        _esc("ENC-ESC-108", status="denied"),
+        _esc("ENC-ESC-109", status="requested"),
+    ]
+
+    with mock.patch("urllib.request.urlopen", return_value=_FakeResponse(_list_payload(items))) as urlopen:
+        sys.argv = ["escalation_redrive_sweep.py", "--base-url", "https://enceladus-gamma.jreese.net/api/v1/tracker"]
+        code = sweep.main()
+
+    assert code == 0
+    assert urlopen.call_count == 1  # only the list call, no apply POSTs
+    out = capsys.readouterr().out
+    assert "ENC-ESC-105" in out
+    assert "status=failed" in out
+    for excluded in ("ENC-ESC-106", "ENC-ESC-108", "ENC-ESC-109"):
+        assert excluded not in out
+    assert "Dry-run only" in out
+
+
+def test_apply_posts_for_failed_unapplied_id(monkeypatch, capsys):
+    monkeypatch.setenv(sweep.ENV_KEY_NAME, "test-key-value")
+    items = [_esc("ENC-ESC-105", status="failed")]
+    responses = [
+        _FakeResponse(_list_payload(items)),
+        _FakeResponse({"success": True, "status": "applied", "result": {"after": {"status": "closed"}}}),
+    ]
+
+    with mock.patch("urllib.request.urlopen", side_effect=responses) as urlopen:
+        sys.argv = [
+            "escalation_redrive_sweep.py",
+            "--base-url", "https://enceladus-gamma.jreese.net/api/v1/tracker",
+            "--apply",
+        ]
+        code = sweep.main()
+
+    assert code == 0
+    assert urlopen.call_count == 2  # 1 list + 1 apply POST
+    apply_req = urlopen.call_args_list[1].args[0]
+    assert apply_req.get_method() == "POST"
+    assert apply_req.full_url.endswith("/ENC-ESC-105/apply")
     out = capsys.readouterr().out
     assert "HTTP 200" in out
 

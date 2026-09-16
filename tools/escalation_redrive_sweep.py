@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""ENC-TSK-P89 / AC-3: sweep for approved-but-unapplied escalations and
-re-drive them through the idempotent apply endpoint.
+"""ENC-TSK-P89 / AC-3: sweep for approved-or-failed-but-unapplied escalations
+and re-drive them through the idempotent apply endpoint.
 
-Finds every escalation with status=approved AND applied_at unset (the
-ENC-ISS-759 stuck-approval symptom -- DynamoDB rejected the UpdateItem, so
-the approval landed but the target record never changed) and, with --apply,
+Finds every escalation with status in {approved, failed} AND applied_at unset
+-- the ENC-ISS-759/ENC-ESC-105 stuck symptom: DynamoDB rejected the target
+UpdateItem (either at approval time, leaving status=approved, or the applier
+itself parked it at status=failed after the ValidationException), so the
+decision landed but the target record never changed -- and, with --apply,
 re-POSTs each one to the idempotent
-POST /{project}/escalation/{id}/apply endpoint.
+POST /{project}/escalation/{id}/apply endpoint (which now accepts a retry
+from status=failed as well as status=approved, per the failed->applying FSM
+edge added in this same task).
 
 Dry-run (default) only lists candidates; nothing is mutated until --apply
 is passed. stdlib-only, no third-party deps.
@@ -63,14 +67,20 @@ def _request(url: str, api_key: str, method: str = "GET", body: bytes = None) ->
     return status, parsed, raw
 
 
+_REDRIVE_STATUSES = {"approved", "failed"}
+
+
 def _candidates(base_url: str, project: str, api_key: str) -> list:
-    """GET .../{project}/escalation/list?status=approved, walking next_cursor
-    (bounded), keeping only items whose applied_at is empty/missing."""
+    """GET .../{project}/escalation/list?page_size=200 WITHOUT a status filter,
+    walking next_cursor (bounded), then filter client-side to status in
+    {approved, failed} AND applied_at empty/missing. Fetching unfiltered (one
+    call) rather than one call per status keeps this a single pass over the
+    list; either approach is fine, this just avoids paginating twice."""
     out = []
     cursor = None
     max_pages = 50
     for _ in range(max_pages):
-        query = "status=approved&page_size=200"
+        query = "page_size=200"
         if cursor:
             query += f"&next_cursor={urllib.parse.quote(cursor)}"
         url = f"{base_url}/{project}/escalation/list?{query}"
@@ -79,7 +89,7 @@ def _candidates(base_url: str, project: str, api_key: str) -> list:
             print(f"error: list call failed (status={status}): {raw[:300]}", file=sys.stderr)
             sys.exit(1)
         for item in parsed.get("escalations", []):
-            if not item.get("applied_at"):
+            if item.get("status") in _REDRIVE_STATUSES and not item.get("applied_at"):
                 out.append(item)
         cursor = parsed.get("next_cursor")
         if not cursor:
@@ -101,16 +111,18 @@ def main() -> int:
 
     candidates = _candidates(base_url, args.project, api_key)
     if not candidates:
-        print("No approved escalations with unset applied_at found.")
+        print("No approved-or-failed escalations with unset applied_at found.")
         return 0
 
-    print(f"Found {len(candidates)} approved escalation(s) with applied_at unset:")
+    print(f"Found {len(candidates)} approved-or-failed escalation(s) with applied_at unset:")
     for item in candidates:
         esc_id = item.get("item_id", "?")
         target = item.get("target_record_id", "?")
         mutation_type = item.get("mutation_type", "?")
+        esc_status = item.get("status", "?")
         decided_at = item.get("decided_at") or item.get("updated_at", "?")
-        print(f"  {esc_id}  target={target}  mutation_type={mutation_type}  decided_at={decided_at}")
+        print(f"  {esc_id}  status={esc_status}  target={target}  "
+              f"mutation_type={mutation_type}  decided_at={decided_at}")
 
         if args.apply:
             url = f"{base_url}/{args.project}/escalation/{esc_id}/apply"

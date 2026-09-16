@@ -523,8 +523,12 @@ ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
     default=True,
 )
 
-# §5.2 escalation status lifecycle. `failed` is terminal: a corrective
-# request is a NEW escalation (exactly-once semantics stay trivial).
+# §5.2 escalation status lifecycle. `failed` is retryable in place
+# (ENC-TSK-P89): a failed apply (e.g. a DynamoDB ValidationException on the
+# target write) can be re-driven via failed->applying without minting a new
+# escalation, so long as applied_at is still unset. The conditional write on
+# the current status value (approved OR failed) keeps exactly-once semantics
+# even when two re-drives race.
 _ESCALATION_FSM = {
     "requested": {"approved", "denied", "denied_with_guidance"},
     "approved": {"applying"},
@@ -532,7 +536,7 @@ _ESCALATION_FSM = {
     "denied": set(),
     "denied_with_guidance": set(),
     "applied": set(),
-    "failed": set(),
+    "failed": {"applying"},
 }
 _ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
 _ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
@@ -8110,8 +8114,15 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
                                extra_names: Optional[Dict] = None,
                                extra_values: Optional[Dict] = None,
                                extra_sets: Optional[list] = None,
-                               require_not_applied: bool = False) -> bool:
+                               require_not_applied: bool = False,
+                               extra_events: Optional[list] = None) -> bool:
     """Conditionally walk the escalation FSM one edge, appending the §11.2 event.
+
+    `extra_events` (ENC-TSK-P89): additional pre-built event dicts (ddb attribute
+    shape, e.g. from `_escalation_event`) appended to the same `events` list in
+    the same atomic write — used by the failed->applying retry path to record a
+    "retry" history entry alongside the ordinary to_status event, without a
+    second write and without disturbing the prior failure's audit trail.
 
     Returns False (without raising) when the ConditionExpression loses — the
     concurrent-applier no-op path of the §5.5 idempotency contract.
@@ -8126,12 +8137,13 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
     ] + (extra_sets or [])
     names = {"#st": "status", "#ev": "events"}
     names.update(extra_names or {})
+    event_list = [_escalation_event(to_status, actor, detail=detail)] + list(extra_events or [])
     values = {
         ":to_status": _ser_s(to_status),
         ":from_status": _ser_s(from_status),
         ":now": _ser_s(now),
         ":empty": {"L": []},
-        ":event": {"L": [_escalation_event(to_status, actor, detail=detail)]},
+        ":event": {"L": event_list},
     }
     values.update(extra_values or {})
     condition = "#st = :from_status"
@@ -8185,14 +8197,21 @@ def _emit_escalation_applied_event(project_id: str, escalation: Dict,
 def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) -> Dict:
     """POST /{project}/escalation/{id}/apply — applyEscalatedMutation (§5.5).
 
-    Sequence: (1) approved + applied_at-null guard; (2) conditional
-    approved→applying transition (the concurrency gate — a losing racer
-    no-ops); (3) fresh target read; (4) expected_version drift was surfaced
-    at approval time, proceed on io's informed approval; (5) registry handler
-    apply — one atomic UpdateItem on the target; (6) provenance is stamped
-    inside that same write; (7) applying→applied with applied_at + result.
-    On handler exception: applying→failed with the error in result and no
-    partial target write.
+    Sequence: (1) approved-or-failed + applied_at-null guard; (2) conditional
+    approved→applying OR failed→applying transition (the concurrency gate — a
+    losing racer no-ops); (3) fresh target read; (4) expected_version drift was
+    surfaced at approval time, proceed on io's informed approval; (5) registry
+    handler apply — one atomic UpdateItem on the target; (6) provenance is
+    stamped inside that same write; (7) applying→applied with applied_at +
+    result. On handler exception: applying→failed with the error in result and
+    no partial target write.
+
+    ENC-TSK-P89: a prior failed apply is retryable — status='failed' with
+    applied_at still unset re-drives through the same approved-path gate
+    (failed→applying is now a legal FSM edge), incrementing retry_count and
+    appending a 'retry' history event, without erasing the first failure's
+    audit trail (its event + result are appended-to, never overwritten, until
+    a new terminal transition lands).
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
@@ -8222,9 +8241,11 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "status": "applied",
             "reason": "applied_at already set — exactly-once guard (§5.5 step 1)",
         })
-    if status != "approved":
+    is_retry = status == "failed"
+    if status != "approved" and not is_retry:
         return _error(409, (
-            f"Escalation {escalation_id} is '{status}', not 'approved'. "
+            f"Escalation {escalation_id} is '{status}'. Apply "
+            "applies only while status=approved or failed (applied_at unset). "
             "Only the Cognito-human approval flow can authorize application."
         ))
 
@@ -8232,11 +8253,25 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
 
-    # Concurrency gate: exactly one applier wins approved→applying.
+    # Concurrency gate: exactly one applier wins approved→applying (or, for a
+    # re-drive, failed→applying). The conditional write on the CURRENT status
+    # value keeps this exactly-once even when two racing re-drives both fire.
+    transition_kwargs: Dict[str, Any] = {
+        "detail": {"target_record_id": escalation.get("target_record_id")},
+        "require_not_applied": True,
+    }
+    if is_retry:
+        transition_kwargs["extra_sets"] = [
+            "retry_count = if_not_exists(retry_count, :zero) + :one",
+        ]
+        transition_kwargs["extra_values"] = {":zero": {"N": "0"}, ":one": {"N": "1"}}
+        transition_kwargs["extra_events"] = [_escalation_event(
+            "retry", actor,
+            detail={"description": "re-drive after failed apply (ENC-TSK-P89)"},
+        )]
     if not _escalation_fsm_transition(
-        project_id, escalation_id, "approved", "applying", actor,
-        detail={"target_record_id": escalation.get("target_record_id")},
-        require_not_applied=True,
+        project_id, escalation_id, status, "applying", actor,
+        **transition_kwargs,
     ):
         return _response(200, {
             "success": True, "no_op": True, "escalation_id": escalation_id,
