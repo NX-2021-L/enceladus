@@ -14,11 +14,18 @@ scoring_service/test_lambda_function.py conventions in this repo:
 Runs under pytest (test_* discovery).
 """
 
+import hashlib
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ENC-TSK-P83: outline.py is vendored into this Lambda's build root via
+# .build_extras (see that file); for local test runs it's appended (not
+# inserted at 0) from its canonical home so it never shadows anything here.
+sys.path.append(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "document_api")
+)
 
 import corpus_entropy_core as core  # noqa: E402
 import lambda_function as mod  # noqa: E402
@@ -248,6 +255,140 @@ def test_doc_missing_compliance_score_skipped():
 
 
 # ---------------------------------------------------------------------------
+# (f) Docstore Integrity Entropy -- I-D1, I-D3, I-D4, I-D6 (ENC-TSK-P83)
+# ---------------------------------------------------------------------------
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+_CLEAN_BODY = "# Title\n\nSome content.\n"
+_CLEAN_OUTLINE = [{"heading_path": ["Title"], "level": 1, "ordinal": 1, "block_id": None,
+                    "line_start": 1, "line_end": 3, "section_bytes": len("Some content.\n".encode())}]
+
+
+def _clean_bundle(document_id="DOC-1", **overrides):
+    bundle = {
+        "document_id": document_id,
+        "content_hash": _sha256(_CLEAN_BODY),
+        "body_sha256": _sha256(_CLEAN_BODY),
+        "manifest_outline": _CLEAN_OUTLINE,
+        "computed_outline": _CLEAN_OUTLINE,
+        "accepted_events": [
+            {"before_hash": "h0", "after_hash": "h1", "after_version": 1},
+            {"before_hash": "h1", "after_hash": "h2", "after_version": 2},
+        ],
+        "version_hashes": {1: "h1", 2: "h2"},
+    }
+    bundle.update(overrides)
+    return bundle
+
+
+def test_docstore_clean_document_yields_zero_findings():
+    assert core.detect_docstore_integrity([_clean_bundle()]) == []
+
+
+def test_docstore_drifted_body_flags_i_d1_with_expected_and_observed():
+    bundle = _clean_bundle(body_sha256="deadbeef" * 8)
+    findings = core.detect_docstore_integrity([bundle])
+    assert len(findings) == 1
+    assert findings[0]["invariant"] == "I-D1"
+    assert findings[0]["expected"] == bundle["content_hash"]
+    assert findings[0]["observed"] == "deadbeef" * 8
+
+
+def test_docstore_missing_version_object_flags_i_d3():
+    bundle = _clean_bundle(version_hashes={1: "h1", 2: None})
+    findings = core.detect_docstore_integrity([bundle])
+    assert len(findings) == 1
+    assert findings[0]["invariant"] == "I-D3"
+    assert findings[0]["expected"] == "h2"
+    assert findings[0]["observed"] == "missing"
+
+
+def test_docstore_version_hash_mismatch_flags_i_d3():
+    bundle = _clean_bundle(version_hashes={1: "h1", 2: "wrong-hash"})
+    findings = core.detect_docstore_integrity([bundle])
+    assert len(findings) == 1
+    assert findings[0]["invariant"] == "I-D3"
+    assert findings[0]["expected"] == "h2"
+    assert findings[0]["observed"] == "wrong-hash"
+
+
+def test_docstore_duplicate_before_hash_flags_i_d4():
+    bundle = _clean_bundle(accepted_events=[
+        {"before_hash": "hdup", "after_hash": "h1", "after_version": 1},
+        {"before_hash": "hdup", "after_hash": "h2", "after_version": 2},
+    ])
+    findings = core.detect_docstore_integrity([bundle])
+    assert len(findings) == 1
+    assert findings[0]["invariant"] == "I-D4"
+    assert findings[0]["observed"] == "hdup"
+
+
+def test_docstore_stale_outline_flags_i_d6():
+    stale_manifest_outline = [{"heading_path": ["Old Title"], "level": 1, "ordinal": 1,
+                                "block_id": None, "line_start": 1, "line_end": 1, "section_bytes": 0}]
+    bundle = _clean_bundle(manifest_outline=stale_manifest_outline)
+    findings = core.detect_docstore_integrity([bundle])
+    assert len(findings) == 1
+    assert findings[0]["invariant"] == "I-D6"
+    assert findings[0]["expected"] == stale_manifest_outline
+    assert findings[0]["observed"] == _CLEAN_OUTLINE
+
+
+def test_docstore_missing_body_skips_i_d1_and_i_d6_not_falsely_flagged():
+    bundle = _clean_bundle(body_sha256=None, computed_outline=None)
+    assert core.detect_docstore_integrity([bundle]) == []
+
+
+def test_docstore_multiple_invariants_same_document_all_reported():
+    bundle = _clean_bundle(body_sha256="deadbeef" * 8, version_hashes={1: "h1", 2: None})
+    findings = core.detect_docstore_integrity([bundle])
+    assert {f["invariant"] for f in findings} == {"I-D1", "I-D3"}
+
+
+def test_sample_document_ids_deterministic_rotation_by_day_offset():
+    ids = [f"DOC-{i}" for i in range(10)]
+    sample_a = core.sample_document_ids(ids, n=3, day_offset=0)
+    sample_b = core.sample_document_ids(ids, n=3, day_offset=3)
+    assert sample_a == sorted(ids)[:3]
+    assert sample_b == sorted(ids)[3:6]
+    # Same day_offset is fully deterministic (idempotent across calls).
+    assert core.sample_document_ids(ids, n=3, day_offset=0) == sample_a
+
+
+def test_sample_document_ids_returns_all_when_corpus_smaller_than_n():
+    ids = ["DOC-2", "DOC-1"]
+    assert core.sample_document_ids(ids, n=50, day_offset=100) == ["DOC-1", "DOC-2"]
+
+
+def test_sample_document_ids_empty_inputs():
+    assert core.sample_document_ids([], n=50, day_offset=0) == []
+    assert core.sample_document_ids(["DOC-1"], n=0, day_offset=0) == []
+
+
+def test_build_docstore_invariant_metric_data_shape():
+    findings = [
+        {"document_id": "DOC-1", "invariant": "I-D1", "expected": "a", "observed": "b"},
+        {"document_id": "DOC-2", "invariant": "I-D1", "expected": "c", "observed": "d"},
+        {"document_id": "DOC-3", "invariant": "I-D4", "expected": "e", "observed": "f"},
+    ]
+    metric_data = core.build_docstore_invariant_metric_data(findings, function_name="cee-fn", timestamp="T")
+    by_invariant = {m["Dimensions"][1]["Value"]: m for m in metric_data}
+    assert set(by_invariant.keys()) == {"I-D1", "I-D4"}
+    assert by_invariant["I-D1"]["Value"] == 2.0
+    assert by_invariant["I-D4"]["Value"] == 1.0
+    for m in metric_data:
+        assert m["MetricName"] == "DocstoreIntegrityViolation"
+        assert {d["Name"] for d in m["Dimensions"]} == {"FunctionName", "Invariant"}
+
+
+def test_build_docstore_invariant_metric_data_empty_findings_yields_no_datapoints():
+    assert core.build_docstore_invariant_metric_data([], function_name="cee-fn", timestamp="T") == []
+
+
+# ---------------------------------------------------------------------------
 # Kill switch (ISS-465 cost-preflight companion)
 # ---------------------------------------------------------------------------
 
@@ -307,12 +448,17 @@ class _FakeCW:
         self.calls.append(kwargs)
 
 
-def test_handler_publishes_all_five_category_counts(monkeypatch):
+def test_handler_publishes_all_six_category_counts(monkeypatch):
     _patch_fetches(
         monkeypatch,
         tasks=[{"record_id": "task#T1", "record_type": "task", "status": "open",
                 "created_at": "2020-01-01T00:00:00Z", "history": []}],
         lessons=[{"record_id": "lesson#L1", "stability": 0.1}],
+        # No "document_id" key on this fixture -- ENC-TSK-P83's docstore_integrity
+        # sampling only considers documents carrying document_id, so this document
+        # (used to exercise the pre-existing compliance_semantic detector) is
+        # correctly excluded from the docstore sample and stays a zero-finding,
+        # zero-extra-HTTP-call category here (covered separately below).
         documents=[{"record_id": "DOC-1", "compliance_score": 5, "document_maturity_state": "raw"}],
     )
     fake_cw = _FakeCW()
@@ -327,16 +473,107 @@ def test_handler_publishes_all_five_category_counts(monkeypatch):
     counts = body["counts"]
     assert set(counts.keys()) == {
         "lineage_unanchored", "stagnation", "relational", "retention", "compliance_semantic",
+        "docstore_integrity",
     }
     assert counts["lineage_unanchored"] >= 1  # unanchored task has no parent/related
     assert counts["stagnation"] == 1
     assert counts["retention"] == 1
     assert counts["compliance_semantic"] == 1
+    assert counts["docstore_integrity"] == 0
+    assert body["corpus_scanned"]["docstore_documents_sampled"] == 0
     assert len(fake_cw.calls) == 1
-    assert len(fake_cw.calls[0]["MetricData"]) == 6
+    # 6 categories + ScanDurationMs; no DocstoreIntegrityViolation datapoints
+    # since the sample was empty (no findings -> no per-invariant metric).
+    assert len(fake_cw.calls[0]["MetricData"]) == 7
     metric_names = {m["MetricName"] for m in fake_cw.calls[0]["MetricData"]}
     assert metric_names == {"EntropyFindingCount", "ScanDurationMs"}
     assert fake_cw.calls[0]["Namespace"] == "Enceladus/CEE"
+
+
+def test_handler_docstore_integrity_wired_into_counts_and_invariant_metric(monkeypatch):
+    """End-to-end handler wiring: a sampled document whose bundle carries an
+    I-D1 drift must show up in counts["docstore_integrity"] AND publish a
+    DocstoreIntegrityViolation datapoint dimensioned Invariant=I-D1."""
+    _patch_fetches(monkeypatch, documents=[{"record_id": "DOC-1", "document_id": "DOC-1"}])
+    drifted_bundle = {
+        "document_id": "DOC-1",
+        "content_hash": "expected-hash",
+        "body_sha256": "observed-hash",
+        "manifest_outline": [],
+        "computed_outline": [],
+        "accepted_events": [],
+        "version_hashes": {},
+    }
+    monkeypatch.setattr(mod, "_fetch_docstore_bundle", lambda document_id, project_id: drifted_bundle)
+    fake_cw = _FakeCW()
+    monkeypatch.setattr(mod, "_get_cw", lambda: fake_cw)
+    monkeypatch.delenv("CEE_HARD_DISABLED", raising=False)
+
+    result = mod.lambda_handler({}, None)
+
+    assert result["statusCode"] == 200
+    body = json.loads(result["body"])
+    assert body["counts"]["docstore_integrity"] == 1
+    assert body["corpus_scanned"]["docstore_documents_sampled"] == 1
+    metric_data = fake_cw.calls[0]["MetricData"]
+    violation_metrics = [m for m in metric_data if m["MetricName"] == "DocstoreIntegrityViolation"]
+    assert len(violation_metrics) == 1
+    assert violation_metrics[0]["Value"] == 1.0
+    assert {d["Name"]: d["Value"] for d in violation_metrics[0]["Dimensions"]}["Invariant"] == "I-D1"
+
+
+def test_fetch_docstore_bundle_assembles_manifest_body_and_versions(monkeypatch):
+    """_fetch_docstore_bundle mocked at the HTTP + S3 boundary (per brief_p83's
+    'mocked HTTP + mocked S3' requirement) -- verifies manifest/body/history/
+    version-object wiring produces the bundle shape detect_docstore_integrity
+    expects."""
+    body_text = "# Doc\n\nBody text.\n"
+    body_hash = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+
+    def _fake_http_get(url):
+        if "/manifest" in url:
+            return {"content_hash": body_hash, "version": 2, "outline": [{"heading_path": ["Doc"]}]}
+        if "/history" in url:
+            return {"events": [
+                {"before_hash": "h0", "after_hash": "h1", "after_version": 1},
+                {"before_hash": "h1", "after_hash": "h2", "after_version": 2, "rejection_code": "STALE_HASH"},
+            ]}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(mod, "_http_get", _fake_http_get)
+
+    class _FakeS3Exceptions:
+        NoSuchKey = KeyError
+
+    class _FakeS3:
+        exceptions = _FakeS3Exceptions()
+
+        def get_object(self, Bucket, Key):
+            if Key.endswith("versions/DOC-1/1.md"):
+                return {"Body": _Body(body_text)}
+            if Key.endswith("DOC-1.md"):
+                return {"Body": _Body(body_text)}
+            raise self.exceptions.NoSuchKey("missing")
+
+    monkeypatch.setattr(mod, "_get_s3", lambda: _FakeS3())
+
+    bundle = mod._fetch_docstore_bundle("DOC-1", "enceladus")
+
+    assert bundle["document_id"] == "DOC-1"
+    assert bundle["content_hash"] == body_hash
+    assert bundle["body_sha256"] == body_hash
+    assert bundle["computed_outline"] == mod.compute_outline(body_text)
+    # Rejected event filtered out -- only the accepted before_hash/after_hash pair remains.
+    assert bundle["accepted_events"] == [{"before_hash": "h0", "after_hash": "h1", "after_version": 1}]
+    assert bundle["version_hashes"] == {1: body_hash}
+
+
+class _Body:
+    def __init__(self, text):
+        self._text = text
+
+    def read(self):
+        return self._text.encode("utf-8")
 
 
 def test_handler_respects_kill_switch(monkeypatch):

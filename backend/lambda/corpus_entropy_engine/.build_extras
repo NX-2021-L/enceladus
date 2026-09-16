@@ -1,0 +1,8 @@
+# ENC-TSK-P83: cross-Lambda module sharing manifest (honored by _build.yml).
+# The docstore_integrity detector's I-D6 invariant reuses document_api's
+# shared Markdown outline parser unmodified (outline.compute_outline), so the
+# outline this Lambda recomputes from the current S3 body matches document_
+# api's own manifest.outline byte-for-byte. Declared here so `from outline
+# import compute_outline` resolves at runtime; keep in lockstep with the
+# canonical owner (backend/lambda/document_api/outline.py).
+backend/lambda/document_api/outline.py
