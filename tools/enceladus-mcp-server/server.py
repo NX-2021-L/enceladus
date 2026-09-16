@@ -708,8 +708,16 @@ def _ser_value(val: Any) -> Dict:
     return _ser_s(str(val))
 
 
-# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic).
+# ESC/GEN mirror backend/lambda/tracker_mutation/lambda_function.py
+# _ID_SEGMENT_TO_TYPE (ENC-ISS-699) so tracker.get / get_compact_context
+# (mode="record") resolve an ENC-ESC-NNN or ENC-GEN-NNN id instead of
+# raising "Unknown type segment". Escalations stay OUT of any generic
+# record-type allow-list on the write side (see that file's ENC-FTR-121
+# comment) -- this addition only affects ID parsing / key-building on the
+# read path.
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson",
+                       "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
 _DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
 _RELATION_ID_FIELDS = {
@@ -6092,12 +6100,27 @@ async def _tracker_list(args: dict) -> list[TextContent]:
 
     def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
         params: Dict[str, Any] = {"page_size": page_size}
-        if record_type:
-            params["type"] = record_type
         if status_filter:
             params["status"] = status_filter
         if page_cursor:
             params["next_cursor"] = page_cursor
+        if record_type == "escalation":
+            # ENC-ISS-699: escalations are deliberately NOT a member of the
+            # backend's _RECORD_TYPES (generic CRUD surface never touches
+            # them, see backend/lambda/tracker_mutation/lambda_function.py),
+            # so the generic GET /{project}?type=escalation path can't see
+            # them at all. Route to the dedicated, now-paginated escalation
+            # list endpoint instead and normalize its `escalations` key to
+            # `records` so the rest of this function (summary, cursoring,
+            # total accounting) is unchanged for every record type.
+            resp = _tracker_api_request(
+                "GET", f"/{project_id}/escalation/list", query=params)
+            if isinstance(resp, dict) and not resp.get("error") and "escalations" in resp:
+                resp = dict(resp)
+                resp["records"] = resp.pop("escalations")
+            return resp
+        if record_type:
+            params["type"] = record_type
         return _tracker_api_request("GET", f"/{project_id}", query=params)
 
     # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --

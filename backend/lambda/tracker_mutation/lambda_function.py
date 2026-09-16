@@ -718,6 +718,46 @@ def _apply_deploy_arc_change(project_id: str, escalation: Dict, target: Dict) ->
     return {"before": before, "after": after, "waived_fields": []}
 
 
+# ENC-ISS-759: bookkeeping paths this applier owns outright. A field_values
+# entry that names one of these is dropped rather than rendered as a second
+# SET clause on the same top-level document path -- e.g. ENC-ESC-105/106
+# store field_values={"status": <target_status>} restating payload.target_status
+# verbatim, which under the old code made #st and #fv{i} both resolve to the
+# top-level `status` path; DynamoDB rejects the whole UpdateItem with
+# ValidationException "Two document paths overlap" and NOTHING gets written
+# (no-partial-write -- the approval stays durable so this is safely retried
+# once fixed). The authoritative value for a reserved path always wins.
+_RESERVED_OVERRIDE_PATHS = {
+    "status", "updated_at", "last_update_note", "sync_version",
+    "history", "escalation_provenance", "escalated_closure", "closed_count",
+}
+
+
+def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
+    """Render a SET (+ optional ADD) UpdateExpression from an ordered list of
+    (top_level_path, expression_snippet) pairs, one snippet per DISTINCT
+    top-level attribute path.
+
+    Raises ValueError if the same top_level_path is supplied twice. DynamoDB
+    itself rejects an UpdateExpression that names one document path more than
+    once ("Two document paths overlap"); this raises the same defect in-process
+    so a future regression fails a unit test instead of a live UpdateItem call
+    (ENC-ISS-759).
+    """
+    seen = set()
+    set_clauses = []
+    for path, expr in ordered_assignments:
+        if path in seen:
+            raise ValueError(
+                f"duplicate top-level path in UpdateExpression: {path!r}")
+        seen.add(path)
+        set_clauses.append(expr)
+    expression = "SET " + ", ".join(set_clauses)
+    if add_clauses:
+        expression += " ADD " + ", ".join(add_clauses)
+    return expression
+
+
 def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict) -> Dict:
     """§5.3 handler 2 apply: land the record in target_status regardless of
     path legality, with supplied field_values verbatim and §5.6 waiver
@@ -725,6 +765,12 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalated_closure=true (ENC-FTR-118 metric filter) and, for tasks,
     increment closed_count for organic-gate parity. Single atomic UpdateItem —
     a handler exception leaves the target untouched (no-partial-write).
+
+    field_values keys that name a reserved bookkeeping path (see
+    _RESERVED_OVERRIDE_PATHS, ENC-ISS-759) are dropped rather than written —
+    the applier's own value for that path is authoritative — and recorded in
+    the returned `after["dropped_field_values"]` plus the provenance note so
+    the audit trail shows what was dropped and why.
     """
     payload = escalation.get("payload") or {}
     target_status = str(payload.get("target_status") or "").strip()
@@ -740,24 +786,33 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalation_id = str(escalation.get("item_id") or "")
     now = _now_z()
     before = {"status": target.get("status")}
+
+    dropped_field_values = {
+        field: value for field, value in field_values.items()
+        if field in _RESERVED_OVERRIDE_PATHS
+    }
+    clean_field_values = {
+        field: value for field, value in field_values.items()
+        if field not in _RESERVED_OVERRIDE_PATHS
+    }
+
     waivable = _escalation_waivable_fields(target, target_status)
     waived = [
         field for field in waivable
-        if field not in field_values and not target.get(field)
+        if field not in _RESERVED_OVERRIDE_PATHS
+        and field not in clean_field_values
+        and not target.get(field)
     ]
     is_closure = target_status == _CLOSED_STATUS.get(record_type, "closed")
-    after = {"status": target_status, "field_values": sorted(field_values.keys()),
+    after = {"status": target_status, "field_values": sorted(clean_field_values.keys()),
              "escalated_closure": is_closure}
+    if dropped_field_values:
+        after["dropped_field_values"] = sorted(dropped_field_values.keys())
     note = _escalation_provenance_note(escalation, before, after, waived)
+    if dropped_field_values:
+        note += (" dropped_field_values="
+                 f"{json.dumps(sorted(dropped_field_values.keys()))}")
 
-    update_parts = [
-        "#st = :target_status",
-        "updated_at = :now",
-        "last_update_note = :note",
-        "sync_version = if_not_exists(sync_version, :zero) + :one",
-        "history = list_append(if_not_exists(history, :empty), :hentry)",
-        "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)",
-    ]
     names = {"#st": "status"}
     values = {
         ":target_status": _ser_s(target_status),
@@ -773,26 +828,40 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         }}]},
         ":esc": {"L": [_ser_s(escalation_id)]},
     }
-    for index, (field, value) in enumerate(sorted(field_values.items())):
+
+    assignments = [
+        ("status", "#st = :target_status"),
+        ("updated_at", "updated_at = :now"),
+        ("last_update_note", "last_update_note = :note"),
+        ("sync_version", "sync_version = if_not_exists(sync_version, :zero) + :one"),
+        ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
+        ("escalation_provenance",
+         "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
+    ]
+
+    for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
         value_key = f":fv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = str(field)
         values[value_key] = _ser_value(value)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
     for index, field in enumerate(waived):
         name_key = f"#wv{index}"
         value_key = f":wv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = field
         values[value_key] = _escalation_waiver_sentinel(escalation_id, now)
-    update_expression = "SET " + ", ".join(update_parts)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
+    add_clauses = []
     if is_closure:
-        update_parts.append("escalated_closure = :esc_closure")
+        assignments.append(("escalated_closure", "escalated_closure = :esc_closure"))
         values[":esc_closure"] = {"BOOL": True}
-        update_expression = "SET " + ", ".join(update_parts)
         if record_type == "task":
-            update_expression += " ADD closed_count :one_count"
+            add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
+
+    update_expression = _render_update_expression(assignments, add_clauses)
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -7866,8 +7935,22 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
     return _response(200, {"success": True, "escalation": _escalation_public(item)})
 
 
+_ESCALATION_LIST_MAX_PAGES = 50  # ENC-ISS-699: bounded exhaustion guard,
+# mirrors the tools/enceladus-mcp-server/server.py _TRACKER_LIST_MAX_EXHAUST_PAGES
+# pattern (never walk LastEvaluatedKey unbounded).
+
+
 def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
-    """GET /{project}/escalation — list with status/target/session filters (§5.4)."""
+    """GET /{project}/escalation — list with status/target/session filters (§5.4).
+
+    ENC-ISS-699: the prior version queried once, kept at most `page_size`
+    items, and returned no cursor at all -- a caller could never see past
+    whatever fit in that single page (observed: total capped at 50 even
+    though prod carries ~105 escalations). This walks LastEvaluatedKey the
+    same base64-json cursor shape as _handle_list_records, bounded by
+    _ESCALATION_LIST_MAX_PAGES, and returns `next_cursor` whenever more data
+    remains so a caller can page all the way through.
+    """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
 
@@ -7884,6 +7967,7 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
         page_size = 50
+    cursor = str(query_params.get("next_cursor") or "").strip()
 
     ddb = _get_ddb()
     key_values = {
@@ -7903,7 +7987,7 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         filter_clauses.append("requested_by.session_id = :session_filter")
         key_values[":session_filter"] = _ser_s(session_filter)
 
-    kwargs = {
+    kwargs: Dict[str, Any] = {
         "TableName": DYNAMODB_TABLE,
         "KeyConditionExpression": (
             "project_id = :pid AND begins_with(record_id, :esc_prefix)"
@@ -7914,16 +7998,40 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["FilterExpression"] = " AND ".join(filter_clauses)
     if expression_names:
         kwargs["ExpressionAttributeNames"] = expression_names
+    if cursor:
+        try:
+            import base64
+            kwargs["ExclusiveStartKey"] = json.loads(
+                base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+            )
+        except Exception:
+            return _error(400, "Invalid next_cursor")
 
     escalations = []
+    next_cursor = ""
+    pages_fetched = 0
     try:
         while True:
             resp = ddb.query(**kwargs)
             escalations.extend(
                 _escalation_public(raw) for raw in resp.get("Items", [])
             )
+            pages_fetched += 1
             last_key = resp.get("LastEvaluatedKey")
-            if not last_key or len(escalations) >= page_size:
+            if len(escalations) >= page_size:
+                if last_key:
+                    import base64
+                    next_cursor = base64.urlsafe_b64encode(
+                        json.dumps(last_key).encode("utf-8")
+                    ).decode("ascii")
+                break
+            if not last_key:
+                break
+            if pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
+                import base64
+                next_cursor = base64.urlsafe_b64encode(
+                    json.dumps(last_key).encode("utf-8")
+                ).decode("ascii")
                 break
             kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
@@ -7932,11 +8040,14 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
 
     escalations.sort(key=lambda esc: esc.get("created_at", ""), reverse=True)
     escalations = escalations[:page_size]
-    return _response(200, {
+    payload: Dict[str, Any] = {
         "success": True,
         "escalations": escalations,
         "count": len(escalations),
-    })
+    }
+    if next_cursor:
+        payload["next_cursor"] = next_cursor
+    return _response(200, payload)
 
 
 # ---------------------------------------------------------------------------
