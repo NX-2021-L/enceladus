@@ -122,3 +122,61 @@ def test_tracker_list_escalation_single_page_reports_lower_bound(monkeypatch):
     result = json.loads(result_text[0].text)
     assert result["total_is_lower_bound"] is True
     assert result["next_cursor"] == "cur1"
+
+
+def _esc_backend_get_response():
+    """The real _handle_escalation_get shape: {"success": True, "escalation": {...}}
+    -- fields live one level deeper than every other record type's {"record": {...}}."""
+    return {
+        "success": True,
+        "escalation": {
+            "item_id": "ENC-ESC-042",
+            "record_type": "escalation",
+            "status": "requested",
+            "title": "Escalation title",
+            "priority": "P1",
+            "category": "escalation",
+            "intent": "direct_state_override",
+            "payload": {"target_status": "closed"},
+        },
+    }
+
+
+def test_tracker_get_unwraps_escalation_envelope(monkeypatch):
+    """ENC-TSK-P89: _tracker_get must read the escalation body out of
+    resp["escalation"], not fall through to the whole wrapper because there
+    is no "record" key."""
+    monkeypatch.setattr(
+        server, "_tracker_api_request",
+        lambda method, path, **kwargs: _esc_backend_get_response(),
+    )
+    result_text = _run(server._tracker_get({"record_id": "ENC-ESC-042"}))
+    record = json.loads(result_text[0].text)
+    assert record["status"] == "requested"
+    assert record["title"] == "Escalation title"
+    assert record["priority"] == "P1"
+    assert record.get("success") is not True  # not the raw wrapper
+    assert "escalation" not in record  # unwrapped, not nested
+
+
+def test_get_issue_context_unwraps_escalation_envelope(monkeypatch):
+    """ENC-TSK-P89: get_issue_context (get_compact_context mode=record) hit the
+    identical bug -- record_core ended up with title/status/priority/category/
+    intent all empty for a real escalation."""
+    monkeypatch.setattr(
+        server, "_tracker_api_request",
+        lambda method, path, **kwargs: _esc_backend_get_response(),
+    )
+    result_text = _run(server._get_issue_context({
+        "record_id": "ENC-ESC-042",
+        "include_components": False,
+        "include_architecture": False,
+        "include_recent_history": False,
+    }))
+    result = json.loads(result_text[0].text)
+    record_core = result["record"]
+    assert record_core["status"] == "requested"
+    assert record_core["title"] == "Escalation title"
+    assert record_core["priority"] == "P1"
+    assert record_core["category"] == "escalation"
+    assert record_core["intent"] == "direct_state_override"

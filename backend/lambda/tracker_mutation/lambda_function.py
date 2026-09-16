@@ -7946,10 +7946,31 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     ENC-ISS-699: the prior version queried once, kept at most `page_size`
     items, and returned no cursor at all -- a caller could never see past
     whatever fit in that single page (observed: total capped at 50 even
-    though prod carries ~105 escalations). This walks LastEvaluatedKey the
-    same base64-json cursor shape as _handle_list_records, bounded by
-    _ESCALATION_LIST_MAX_PAGES, and returns `next_cursor` whenever more data
-    remains so a caller can page all the way through.
+    though prod carries ~105 escalations).
+
+    The cursor is a value-based (created_at, item_id) boundary, not a raw
+    DynamoDB LastEvaluatedKey. Two bugs came from tying the cursor to the raw
+    scan position instead of the returned/sorted page boundary:
+
+      1. Whenever a single query() response already held more than
+         `page_size` matching items *and* was DynamoDB's last page (no
+         LastEvaluatedKey), the old code emitted no cursor at all -- the
+         accumulate-then-truncate-to-page_size step silently dropped every
+         item past the threshold with no way to ever reach it.
+      2. Because results are re-sorted by created_at (globally, across
+         accumulated raw pages) before truncation, a cursor built from the
+         raw LastEvaluatedKey resumed the *unsorted* DynamoDB scan strictly
+         after that key -- which can skip items that were already fetched
+         in this call but sorted below the page_size cutoff, and are not
+         positioned after the raw key in DynamoDB's own key order.
+
+    A cursor built from the boundary values of the last item actually
+    returned sidesteps both: the next call re-filters (`created_at`,
+    `item_id`) strictly "after" that boundary in the same sort order used
+    for truncation, so it can never skip an item regardless of how many raw
+    DynamoDB pages or query() calls sit behind it. The raw-scan walk below is
+    still bounded by _ESCALATION_LIST_MAX_PAGES per call purely to cap
+    per-invocation DynamoDB cost; it is orthogonal to cursor correctness.
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
@@ -7969,6 +7990,19 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         page_size = 50
     cursor = str(query_params.get("next_cursor") or "").strip()
 
+    after_created_at = None
+    after_id = None
+    if cursor:
+        try:
+            import base64
+            cursor_obj = json.loads(
+                base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+            )
+            after_created_at = str(cursor_obj["after_created_at"])
+            after_id = str(cursor_obj["after_id"])
+        except Exception:
+            return _error(400, "Invalid next_cursor")
+
     ddb = _get_ddb()
     key_values = {
         ":pid": _ser_s(project_id),
@@ -7986,6 +8020,15 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     if session_filter:
         filter_clauses.append("requested_by.session_id = :session_filter")
         key_values[":session_filter"] = _ser_s(session_filter)
+    if after_created_at is not None:
+        # Sort order is (created_at, item_id) descending -- "after" the
+        # boundary means strictly lower in that order.
+        filter_clauses.append(
+            "(created_at < :after_created_at OR "
+            "(created_at = :after_created_at AND item_id < :after_id))"
+        )
+        key_values[":after_created_at"] = _ser_s(after_created_at)
+        key_values[":after_id"] = _ser_s(after_id)
 
     kwargs: Dict[str, Any] = {
         "TableName": DYNAMODB_TABLE,
@@ -7998,18 +8041,10 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["FilterExpression"] = " AND ".join(filter_clauses)
     if expression_names:
         kwargs["ExpressionAttributeNames"] = expression_names
-    if cursor:
-        try:
-            import base64
-            kwargs["ExclusiveStartKey"] = json.loads(
-                base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-            )
-        except Exception:
-            return _error(400, "Invalid next_cursor")
 
     escalations = []
-    next_cursor = ""
     pages_fetched = 0
+    last_key = None
     try:
         while True:
             resp = ddb.query(**kwargs)
@@ -8018,32 +8053,36 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
             )
             pages_fetched += 1
             last_key = resp.get("LastEvaluatedKey")
-            if len(escalations) >= page_size:
-                if last_key:
-                    import base64
-                    next_cursor = base64.urlsafe_b64encode(
-                        json.dumps(last_key).encode("utf-8")
-                    ).decode("ascii")
-                break
             if not last_key:
                 break
-            if pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
-                import base64
-                next_cursor = base64.urlsafe_b64encode(
-                    json.dumps(last_key).encode("utf-8")
-                ).decode("ascii")
+            if len(escalations) >= page_size or pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
                 break
             kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
         logger.error("escalation list query failed: %s", exc)
         return _error(500, "Database query failed.")
 
-    escalations.sort(key=lambda esc: esc.get("created_at", ""), reverse=True)
-    escalations = escalations[:page_size]
+    escalations.sort(key=lambda esc: (esc.get("created_at", ""), esc.get("item_id", "")), reverse=True)
+    truncated = len(escalations) > page_size
+    visible = escalations[:page_size]
+
+    next_cursor = ""
+    if truncated or last_key:
+        boundary = visible[-1] if visible else None
+        if boundary is not None:
+            import base64
+            cursor_payload = {
+                "after_created_at": boundary.get("created_at", ""),
+                "after_id": boundary.get("item_id", ""),
+            }
+            next_cursor = base64.urlsafe_b64encode(
+                json.dumps(cursor_payload).encode("utf-8")
+            ).decode("ascii")
+
     payload: Dict[str, Any] = {
         "success": True,
-        "escalations": escalations,
-        "count": len(escalations),
+        "escalations": visible,
+        "count": len(visible),
     }
     if next_cursor:
         payload["next_cursor"] = next_cursor
