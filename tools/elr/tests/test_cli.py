@@ -124,6 +124,35 @@ class RunHealthSmokeTests(unittest.TestCase):
         self.assertFalse(parsed["ok"])
         self.assertEqual(parsed["status"], 0)
 
+    def test_digest_carries_ca_bundle_on_success(self):
+        # ENC-TSK-P76 AC-1: ca_bundle:{source,path} on every digest.
+        body = json.dumps({"dynamodb": "ok", "s3": "ok"}).encode("utf-8")
+        fake_resp = _FakeHttpResponse(200, body)
+        with patch("elr_lib.transport.urllib.request.urlopen", return_value=fake_resp):
+            digest = elr_smoke.run_health_smoke("internal", 5)
+        self.assertIn("ca_bundle", digest)
+        self.assertIn("source", digest["ca_bundle"])
+        self.assertIn("path", digest["ca_bundle"])
+        self.assertNotIn("remediation", digest)
+
+    def test_tls_unresolved_fails_fast_with_exit_code_4(self):
+        # ENC-TSK-P76 AC-2: a "missing" CA bundle never attempts urlopen,
+        # surfaces REMEDIATION_MESSAGE as the error, and exits 4.
+        import elr_lib.tls as elr_tls_mod
+
+        stdout = io.StringIO()
+        with patch.object(
+            elr_tls_mod, "resolve_ca_bundle", return_value=elr_tls_mod.CaBundleResolution("missing", None)
+        ), patch("elr_lib.transport.urllib.request.urlopen") as mock_urlopen:
+            with contextlib.redirect_stdout(stdout):
+                exit_code = elr_smoke.main([])
+        mock_urlopen.assert_not_called()
+        self.assertEqual(exit_code, 4)
+        parsed = json.loads(stdout.getvalue().strip())
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["remediation"], elr_tls_mod.REMEDIATION_MESSAGE)
+        self.assertEqual(parsed["ca_bundle"], {"source": "missing", "path": None})
+
 
 if __name__ == "__main__":
     unittest.main()

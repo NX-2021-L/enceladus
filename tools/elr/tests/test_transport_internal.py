@@ -137,5 +137,59 @@ class InternalClientHeaderTests(unittest.TestCase):
                         os.environ[k] = v
 
 
+class TlsUnresolvedFailFastTests(unittest.TestCase):
+    """ENC-TSK-P76 AC-1/AC-2: the CA bundle source/path is recorded on the
+    client, and a "missing" resolution fails fast (no urlopen attempt,
+    no raw CERTIFICATE_VERIFY_FAILED traceback) with the exact
+    remediation string as the error.
+    """
+
+    def setUp(self):
+        from elr_lib import tls as elr_tls
+
+        self.elr_tls = elr_tls
+        self.cfg = elr_config.InternalProfileConfig()
+        self.client = elr_transport.InternalClient(self.cfg, timeout=5)
+
+    def test_ca_bundle_recorded_on_client_from_real_resolution(self):
+        # No mocking -- resolve_ca_bundle() runs for real at construction
+        # time and is snapshotted onto the client.
+        self.assertIn("source", self.client.ca_bundle)
+        self.assertIn("path", self.client.ca_bundle)
+        self.assertIn(
+            self.client.ca_bundle["source"],
+            (self.elr_tls.SOURCE_SSL_CERT_FILE, self.elr_tls.SOURCE_CERTIFI, self.elr_tls.SOURCE_DEFAULT, self.elr_tls.SOURCE_MISSING),
+        )
+
+    def test_missing_ca_bundle_fails_fast_without_urlopen(self):
+        self.client._ca_bundle = self.elr_tls.CaBundleResolution(self.elr_tls.SOURCE_MISSING, None)
+        self.client.ca_bundle = self.client._ca_bundle.as_digest_field()
+        with patch("elr_lib.transport.urllib.request.urlopen") as mock_urlopen:
+            status, body = self.client.request("GET", "tracker", "/x")
+        mock_urlopen.assert_not_called()
+        self.assertEqual(status, self.elr_tls.TLS_UNRESOLVED_STATUS)
+        self.assertEqual(body, {"error": self.elr_tls.REMEDIATION_MESSAGE})
+
+    def test_ca_bundle_digest_fields_includes_remediation_only_when_missing(self):
+        self.client._ca_bundle = self.elr_tls.CaBundleResolution(self.elr_tls.SOURCE_DEFAULT, "/etc/ssl/cert.pem")
+        self.client.ca_bundle = self.client._ca_bundle.as_digest_field()
+        fields = self.client.ca_bundle_digest_fields()
+        self.assertEqual(fields["ca_bundle"], {"source": "default", "path": "/etc/ssl/cert.pem"})
+        self.assertNotIn("remediation", fields)
+
+        self.client._ca_bundle = self.elr_tls.CaBundleResolution(self.elr_tls.SOURCE_MISSING, None)
+        self.client.ca_bundle = self.client._ca_bundle.as_digest_field()
+        fields = self.client.ca_bundle_digest_fields()
+        self.assertEqual(fields["remediation"], self.elr_tls.REMEDIATION_MESSAGE)
+
+    def test_ssl_context_still_verifies_even_when_missing(self):
+        import ssl
+
+        self.client._ca_bundle = self.elr_tls.CaBundleResolution(self.elr_tls.SOURCE_MISSING, None)
+        ctx = self.elr_tls.build_ssl_context(self.client._ca_bundle)
+        self.assertTrue(ctx.check_hostname)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+
+
 if __name__ == "__main__":
     unittest.main()
