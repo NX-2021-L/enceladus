@@ -77,7 +77,10 @@ class RunHealthSmokeTests(unittest.TestCase):
         self.assertTrue(digest["ok"])
         self.assertEqual(digest["status"], 200)
         self.assertEqual(digest["operation"], "elr_smoke.health_check")
-        self.assertIn(digest["identity_posture"], ("internal-key", "server-held-keys", "unknown"))
+        # ENC-TSK-P75 AC-4: identity_posture is now elr_lib.identity's
+        # resolved posture (credential-bound/internal-key/unknown), never
+        # the transport-layer "server-held-keys" classification.
+        self.assertIn(digest["identity_posture"], ("credential-bound", "internal-key", "unknown"))
         self.assertEqual(digest["counts"], {"dynamodb": "ok", "s3": "ok"})
         # digest-first: the raw body dict must never leak verbatim as a
         # top-level key other than the summarized "counts".

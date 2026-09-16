@@ -23,6 +23,36 @@ import elr_publish
 import elr_validate as ev
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-P75: every test in this module exercises the documents.put /
+# documents.patch write path. As of AC-1, a write is refused LOCALLY
+# (before any network call) whenever elr_lib.identity resolves ELR's
+# posture as "unknown" -- and this module's tests set no
+# ENCELADUS_AGENT_CREDENTIAL / credential file / internal-key env var, so
+# without this fixture every one of them would hit that local refusal
+# instead of exercising the mocked-network mechanics they're actually
+# testing (dual-proof, concurrency guard, plane-safety, ambiguous-echo
+# recovery, ...). Identity/SCI-carriage/re-claim mechanics themselves are
+# covered by tests/test_identity.py, not here -- this is a fixture-only
+# key, never a real secret, scoped for the whole module via
+# setUpModule/tearDownModule so no individual test needs to know about it.
+# ---------------------------------------------------------------------------
+
+_env_patcher = None
+
+
+def setUpModule():
+    global _env_patcher
+    _env_patcher = patch.dict(
+        "os.environ", {"ENCELADUS_INTERNAL_API_KEY": "test-fixture-key-not-a-real-secret"}, clear=False
+    )
+    _env_patcher.start()
+
+
+def tearDownModule():
+    _env_patcher.stop()
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
