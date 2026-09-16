@@ -632,6 +632,67 @@ def _emit_legacy_write_unguarded_metric(project_id: str, surface: str) -> None:
         logger.warning("[ENC-TSK-P70] LegacyWriteUnguarded metric emit failed (non-fatal): %s", exc)
 
 
+def _emit_patch_section_outcome_metric(
+    project_id: str,
+    surface: str,
+    outcome: str,
+    *,
+    patch_bytes: Optional[int] = None,
+    document_bytes: Optional[int] = None,
+) -> None:
+    """ENC-TSK-P84 AC-1: fire-and-forget CloudWatch metrics for patch_section
+    outcomes (Enceladus/Docstore, dims ProjectId + Surface). `outcome` is one
+    of PatchSectionAccepted / PatchSectionRejected412 / PatchSectionRejected409
+    / AnchorNotFound; `surface` MUST come from _derive_write_surface (the same
+    normalizer ENC-TSK-P72 uses for the history-event `surface` field, so the
+    metric dimension and the event field always agree). For the accepted
+    outcome only, also emits EditCostRatio (as a statistic set over
+    patch_bytes/document_bytes) plus plain PatchBytes/DocumentBytes values.
+    All datapoints for one call are batched into a single put_metric_data
+    call; failures are logged at WARNING and never raise — same fire-and-
+    forget contract as _emit_legacy_write_unguarded_metric."""
+    dims = [
+        {"Name": "ProjectId", "Value": str(project_id or "unknown")},
+        {"Name": "Surface", "Value": str(surface or "unknown")},
+    ]
+    metric_data = [
+        {
+            "MetricName": outcome,
+            "Dimensions": dims,
+            "Value": 1,
+            "Unit": "Count",
+        }
+    ]
+    if outcome == "PatchSectionAccepted":
+        pb = int(patch_bytes or 0)
+        db = int(document_bytes or 0)
+        ratio = (pb / db) if db else 0.0
+        metric_data.append(
+            {
+                "MetricName": "EditCostRatio",
+                "Dimensions": dims,
+                "StatisticValues": {
+                    "SampleCount": 1,
+                    "Sum": ratio,
+                    "Minimum": ratio,
+                    "Maximum": ratio,
+                },
+                "Unit": "None",
+            }
+        )
+        metric_data.append(
+            {"MetricName": "PatchBytes", "Dimensions": dims, "Value": pb, "Unit": "Bytes"}
+        )
+        metric_data.append(
+            {"MetricName": "DocumentBytes", "Dimensions": dims, "Value": db, "Unit": "Bytes"}
+        )
+    try:
+        cw = _get_cloudwatch()
+        cw.put_metric_data(Namespace="Enceladus/Docstore", MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P84] patch_section outcome metric emit failed (non-fatal): %s", exc)
+
+
 def _extract_token(event: Dict) -> Optional[str]:
     headers = event.get("headers") or {}
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
@@ -4445,6 +4506,9 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
             document_bytes=int(existing_plain.get("size_bytes") or 0),
             caused_by=caused_by, idempotency_key=idempotency_key,
         )
+        _emit_patch_section_outcome_metric(
+            project_id, _derive_write_surface(event, claims), "PatchSectionRejected412",
+        )
         return _error(
             412,
             (
@@ -4499,6 +4563,11 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
             before_hash=current_content_hash, before_version=current_version,
             document_bytes=int(existing_plain.get("size_bytes") or 0),
             caused_by=caused_by, idempotency_key=idempotency_key,
+        )
+        _emit_patch_section_outcome_metric(
+            project_id,
+            _derive_write_surface(event, claims),
+            "AnchorNotFound" if exc.status == 404 else "PatchSectionRejected409",
         )
         return _error(exc.status, exc.message, code=exc.code, document_id=document_id, **details)
 
@@ -4693,6 +4762,11 @@ def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
     logger.info(
         "document section patched: %s op=%s anchor=%s event_id=%s",
         document_id, op, anchor_resolved, event_id,
+    )
+    _emit_patch_section_outcome_metric(
+        project_id, surface, "PatchSectionAccepted",
+        patch_bytes=(len(section_body.encode("utf-8")) if section_body else 0),
+        document_bytes=new_size,
     )
     return _response(200, response_payload)
 
