@@ -27,8 +27,8 @@
     },
     {
       "path": "tools/elr/elr_doc_patch.py",
-      "sha256": "31dfaf73488a79df6c2dcc46d10485afa187584f8a711ab3cf150a66a5be9f9e",
-      "size_bytes": 24942
+      "sha256": "af0ec3f440ffa919403e6c2af6d32134bc3c9ec3f83e25648a00512d538cca95",
+      "size_bytes": 25092
     },
     {
       "path": "tools/elr/elr_lib/__init__.py",
@@ -57,8 +57,8 @@
     },
     {
       "path": "tools/elr/elr_lib/plane_safety.py",
-      "sha256": "4da7190909731eea31dfe603630e4e12e9faf8a45b1179704941ea62c4205c2d",
-      "size_bytes": 15133
+      "sha256": "eb595a25e4181deed6770e0687690df7254948a6b6c977c82dcc0b896f3c8f75",
+      "size_bytes": 15585
     },
     {
       "path": "tools/elr/elr_lib/prefix.py",
@@ -67,8 +67,8 @@
     },
     {
       "path": "tools/elr/elr_lib/profiles.py",
-      "sha256": "970da8aa8f309e48443d57467abea36ad2784e50e6ec4f81bccf135adfe4b4c0",
-      "size_bytes": 5274
+      "sha256": "5badda061f8dcc08380a0acda5ccca3a36f1997f14901247d00b1852d4dd9470",
+      "size_bytes": 5603
     },
     {
       "path": "tools/elr/elr_lib/sections.py",
@@ -121,7 +121,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-16T04:36:20-07:00",
+  "generated_at": "2026-09-16T04:47:29-07:00",
   "manifest_version": 1,
-  "source_ref": "168dd18746c5dbfe1f21ead592d15af097525b7d"
+  "source_ref": "ec0f8157d42d625bdb96325374cc90659f92caf8"
 }

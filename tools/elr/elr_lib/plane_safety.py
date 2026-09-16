@@ -94,16 +94,24 @@ def _extract_document(body: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _sentinel_probe(client: "elr_transport.InternalClient") -> Dict[str, Any]:
-    """GET DOC-87EC08ECF51A metadata (include_content=false) through the
+def _sentinel_probe(
+    client: "elr_transport.InternalClient", sentinel_document_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """GET the plane sentinel metadata (include_content=false) through the
     exact InternalClient/document-API surface about to be written.
+
+    ENC-TSK-P79: the sentinel id comes from the active environment profile
+    (prod DOC-87EC08ECF51A, v4-gamma DOC-EF02AE82AD3A); when no profile is
+    supplied the historical prod constant is used, byte-for-byte unchanged.
     """
-    encoded = urllib.parse.quote(SENTINEL_DOCUMENT_ID, safe="")
+    sentinel_id = sentinel_document_id or SENTINEL_DOCUMENT_ID
+    encoded = urllib.parse.quote(sentinel_id, safe="")
     status, body = client.request("GET", "document", f"/{encoded}", query={"include_content": "false"})
     doc = _extract_document(body)
     echoed_id = doc.get("document_id")
-    identity_ok = status == 200 and echoed_id == SENTINEL_DOCUMENT_ID
+    identity_ok = status == 200 and echoed_id == sentinel_id
     return {
+        "sentinel_document_id": sentinel_id,
         "status": status,
         "ok": identity_ok,
         "document_id_echoed": echoed_id,
@@ -232,7 +240,11 @@ def plane_b_probe(*, timeout: int = 20) -> Dict[str, Any]:
 
 
 def run_pre_write(
-    client: "elr_transport.InternalClient", project_id: str, *, timeout: int = 20
+    client: "elr_transport.InternalClient",
+    project_id: str,
+    *,
+    timeout: int = 20,
+    sentinel_document_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Steps 1 + 2. Returns a dict the caller threads through to
     run_post_write() and build_report() unchanged:
@@ -243,7 +255,7 @@ def run_pre_write(
              hard gate; the caller MUST NOT proceed to the write.
       abort_reason: "plane-safety-sentinel-mismatch" or None
     """
-    sentinel = _sentinel_probe(client)
+    sentinel = _sentinel_probe(client, sentinel_document_id)
     count_probe = _target_count_probe(client, project_id)
     plane_b_pre = plane_b_probe(timeout=timeout)
 
