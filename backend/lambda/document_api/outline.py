@@ -198,11 +198,17 @@ def _classify_lines(lines: List[str]) -> List[Dict[str, Any]]:
     return candidates
 
 
-def compute_outline(content: str) -> List[Dict[str, Any]]:
-    """Compute the ordered outline for a Markdown document body.
-
-    Pure function: no I/O, no mutation of the input. See module docstring
-    for the full field contract.
+def compute_outline_with_spans(content: str) -> List[Dict[str, Any]]:
+    """Same entries as compute_outline(), PLUS two ENC-TSK-P71 additive
+    fields per entry: `header_start_ln` / `header_end_ln` — the physical
+    1-based line span of the heading construct itself (1 line for ATX, 2 for
+    setext: text line + underline). This is a SEPARATE function (rather than
+    adding the fields to compute_outline()'s own return) so the P69
+    byte-for-byte conformance corpus (tests/fixtures/outline,
+    test_outline_fixtures.py) stays byte-identical — that corpus is also the
+    contract ELR vendors compute_outline() against. sections.py (ENC-TSK-P71)
+    uses this variant to locate heading lines for block-id stamping and
+    include_heading operations without a second, potentially-divergent scan.
     """
     if content is None:
         content = ""
@@ -258,6 +264,13 @@ def compute_outline(content: str) -> List[Dict[str, Any]]:
             "line_start": line_start,
             "line_end": line_end,
             "section_bytes": section_bytes,
+            # ENC-TSK-P71: kept internally (Phase 3 threads it through) but
+            # NOT part of compute_outline()'s public per-entry shape — see
+            # compute_outline_with_spans() below. Public compute_outline()
+            # strips this key so the P69 byte-for-byte conformance corpus
+            # (tests/fixtures/outline) is untouched by this addition.
+            "header_start_ln": cand["start_ln"],
+            "header_end_ln": header_end_ln,
         })
 
     # Phase 3: nesting (heading_path, ordinal) via a level-based stack. The
@@ -289,8 +302,27 @@ def compute_outline(content: str) -> List[Dict[str, Any]]:
             "line_start": item["line_start"],
             "line_end": item["line_end"],
             "section_bytes": item["section_bytes"],
+            "header_start_ln": item["header_start_ln"],
+            "header_end_ln": item["header_end_ln"],
         })
 
         stack.append({"level": level, "text": text, "seen": {}})
 
     return entries
+
+
+def compute_outline(content: str) -> List[Dict[str, Any]]:
+    """Compute the ordered outline for a Markdown document body.
+
+    Pure function: no I/O, no mutation of the input. See module docstring
+    for the full field contract. Thin wrapper over
+    compute_outline_with_spans() (ENC-TSK-P71) that strips the two additive
+    header_start_ln/header_end_ln fields, so this function's return shape —
+    and the tests/fixtures/outline byte-for-byte conformance corpus it must
+    match — is completely unchanged by that addition.
+    """
+    detailed = compute_outline_with_spans(content)
+    return [
+        {k: v for k, v in entry.items() if k not in ("header_start_ln", "header_end_ln")}
+        for entry in detailed
+    ]

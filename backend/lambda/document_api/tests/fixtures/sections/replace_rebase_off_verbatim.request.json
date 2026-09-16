@@ -1,0 +1,10 @@
+{
+  "anchor": {
+    "heading_path": [
+      "Beta"
+    ]
+  },
+  "op": "replace",
+  "body": "# Verbatim Heading\n\nNot rebased.",
+  "rebase_headings": false
+}

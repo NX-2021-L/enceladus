@@ -1,0 +1,25 @@
+{
+  "name": "replace_include_heading_rename",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Alpha"
+      ]
+    },
+    "op": "replace",
+    "body": "### Renamed Alpha\n\nNew body under renamed heading.",
+    "include_heading": true,
+    "rebase_headings": false
+  },
+  "ok": true,
+  "bytes_changed": 29,
+  "stamped": false,
+  "block_id_was_none_before": true,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

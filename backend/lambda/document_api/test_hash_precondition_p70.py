@@ -357,3 +357,44 @@ class TestClassifyPrecondition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIss763ExpressionAttributeValuesMatchConditionExpression(unittest.TestCase):
+    """ENC-ISS-763 (P0, filed from a gamma 500 on every CORRECT hash-form
+    guarded write): DynamoDB's UpdateItem rejects any ExpressionAttributeValues
+    placeholder that neither UpdateExpression nor ConditionExpression actually
+    reference ("ValidationException: ... unused in expressions"). attr_values
+    must carry :expected_hash ONLY when the hash-form ConditionExpression
+    ("content_hash = :expected_hash") is used, and :expected ONLY when the
+    version-form ConditionExpression ("#ver = :expected") is used — never
+    both, regardless of which precondition form the caller supplied."""
+
+    @patch.object(document_api, "_get_ddb")
+    def test_hash_form_carries_only_expected_hash(self, mock_ddb):
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {"Item": _doc_item(version=3, content_hash=HASH_A)}
+        resp = document_api._handle_patch(
+            _event({"title": "New title"}, if_match=HASH_A), CLAIMS, "DOC-P70TEST0001",
+        )
+        self.assertEqual(resp["statusCode"], 200)
+        update_kwargs = fake_ddb.update_item.call_args.kwargs
+        self.assertEqual(update_kwargs["ConditionExpression"], "content_hash = :expected_hash")
+        values = update_kwargs["ExpressionAttributeValues"]
+        self.assertIn(":expected_hash", values)
+        self.assertNotIn(":expected", values)
+
+    @patch.object(document_api, "_get_ddb")
+    def test_version_form_carries_only_expected(self, mock_ddb):
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {"Item": _doc_item(version=3, content_hash=HASH_A)}
+        resp = document_api._handle_patch(
+            _event({"title": "New title"}, if_match="3"), CLAIMS, "DOC-P70TEST0001",
+        )
+        self.assertEqual(resp["statusCode"], 200)
+        update_kwargs = fake_ddb.update_item.call_args.kwargs
+        self.assertEqual(update_kwargs["ConditionExpression"], "#ver = :expected")
+        values = update_kwargs["ExpressionAttributeValues"]
+        self.assertIn(":expected", values)
+        self.assertNotIn(":expected_hash", values)
