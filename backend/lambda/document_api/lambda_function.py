@@ -535,6 +535,98 @@ def _extract_if_none_match(event: Optional[Dict]) -> Optional[str]:
     return raw or None
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-P70: content-hash / version precondition (FR-B1-9..12)
+# ---------------------------------------------------------------------------
+
+_PRECONDITION_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_PRECONDITION_VERSION_RE = re.compile(r"^[0-9]+$")
+
+
+def _extract_precondition(event: Optional[Dict], body: Optional[Dict] = None) -> Optional[str]:
+    """ENC-TSK-P70 AC-1: unified If-Match precondition extraction.
+
+    Prefers the HTTP If-Match header (via `_extract_if_match`, which also strips
+    ETag-style quoting); falls back to the body field `if_match` when the header
+    is absent. Returns None when neither is present.
+    """
+    header_val = _extract_if_match(event)
+    if header_val is not None:
+        return header_val
+    if body and isinstance(body, dict):
+        body_val = body.get("if_match")
+        if body_val is not None:
+            body_val = str(body_val).strip()
+            return body_val or None
+    return None
+
+
+def _classify_precondition(raw: str) -> Optional[str]:
+    """ENC-TSK-P70 AC-1: classify a raw precondition token.
+
+    Returns 'hash' for a 64-hex sha256 (^[0-9a-f]{64}$), 'version' for the
+    ENC-TSK-L47 counter form (^[0-9]+$), or None when the shape matches neither
+    (caller should reject 400 PRECONDITION_MALFORMED).
+    """
+    if _PRECONDITION_HASH_RE.match(raw):
+        return "hash"
+    if _PRECONDITION_VERSION_RE.match(raw):
+        return "version"
+    return None
+
+
+def _derive_write_surface(event: Optional[Dict], claims: Optional[Dict]) -> str:
+    """ENC-TSK-P70 AC-4: derive the caller surface for the LegacyWriteUnguarded metric.
+
+    'lambda' for system/managed-token identities, 'mcp' for internal-key callers
+    whose User-Agent or X-Write-Source header says mcp, 'pwa' for Cognito-session
+    callers, else 'unknown'. Kept as a single small helper per AC-4.
+    """
+    claims = claims or {}
+    auth_mode = str(claims.get("auth_mode") or "").strip().lower()
+    if auth_mode == "managed-token":
+        return "lambda"
+    if auth_mode == "internal-key":
+        headers = (event or {}).get("headers") or {}
+        ua = str(headers.get("user-agent") or headers.get("User-Agent") or "").lower()
+        write_source = str(
+            headers.get("x-write-source") or headers.get("X-Write-Source") or ""
+        ).lower()
+        if "mcp" in ua or "mcp" in write_source:
+            return "mcp"
+        return "unknown"
+    if _is_cognito_session(claims):
+        return "pwa"
+    return "unknown"
+
+
+def _emit_legacy_write_unguarded_metric(project_id: str, surface: str) -> None:
+    """ENC-TSK-P70 AC-4: fire-and-forget CloudWatch metric for unguarded writes.
+
+    Emits Enceladus/Docstore LegacyWriteUnguarded (dims ProjectId, Surface) whenever
+    a put/patch/append proceeds without a client-supplied precondition. Never raises —
+    failures are logged at WARNING and swallowed so the request is never impacted.
+    """
+    try:
+        cw = _get_cloudwatch()
+        cw.put_metric_data(
+            Namespace="Enceladus/Docstore",
+            MetricData=[
+                {
+                    "MetricName": "LegacyWriteUnguarded",
+                    "Dimensions": [
+                        {"Name": "ProjectId", "Value": str(project_id or "unknown")},
+                        {"Name": "Surface", "Value": str(surface or "unknown")},
+                    ],
+                    "Value": 1,
+                    "Unit": "Count",
+                }
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P70] LegacyWriteUnguarded metric emit failed (non-fatal): %s", exc)
+
+
 def _extract_token(event: Dict) -> Optional[str]:
     headers = event.get("headers") or {}
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
@@ -637,6 +729,7 @@ def _validate_project_exists(project_id: str) -> Optional[str]:
 
 _ddb = None
 _s3 = None
+_cloudwatch = None
 
 
 def _get_ddb():
@@ -654,6 +747,18 @@ def _get_s3():
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
+
+
+def _get_cloudwatch():
+    """ENC-TSK-P70 AC-4: lazy singleton with a short fast-fail timeout — the
+    LegacyWriteUnguarded metric is fire-and-forget and must never slow a request."""
+    global _cloudwatch
+    if _cloudwatch is None:
+        _cloudwatch = boto3.client(
+            "cloudwatch", region_name=DYNAMODB_REGION,
+            config=Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+        )
+    return _cloudwatch
 
 
 def _now_z() -> str:
@@ -1022,6 +1127,70 @@ def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[st
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
     return key, content_hash, size_bytes
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P70 AC-3: staged content write for guarded (precondition-bearing)
+# writes. Ordering: caller writes the body to the staging key BEFORE the
+# guarded DynamoDB conditional UpdateItem runs, then either promotes the
+# staging key to the canonical key (condition succeeded) or deletes the
+# staging key best-effort (ConditionalCheckFailedException). This avoids the
+# canonical-key clobber a losing racer would otherwise cause by writing
+# directly to the shared canonical key ahead of an uncertain conditional
+# write. Unguarded (no precondition) writes are unaffected — they keep using
+# `_upload_content` straight to the canonical key per AC-4.
+# ---------------------------------------------------------------------------
+
+
+def _staging_s3_key(project_id: str, document_id: str, next_version: int) -> str:
+    """BRD FR-B2-6 staging key: {S3_PREFIX}/{project_id}/versions/{document_id}/{next_version}.md"""
+    return f"{S3_PREFIX}/{project_id}/versions/{document_id}/{next_version}.md"
+
+
+def _upload_content_staged(
+    project_id: str, document_id: str, content: str, next_version: int,
+) -> Tuple[str, str, int]:
+    """Upload .md content to the version-suffixed staging key. Returns
+    (staging_s3_key, content_hash, size_bytes). Caller promotes or deletes it."""
+    s3 = _get_s3()
+    key = _staging_s3_key(project_id, document_id, next_version)
+    content_bytes = content.encode("utf-8")
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    size_bytes = len(content_bytes)
+
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=content_bytes,
+        ContentType="text/markdown; charset=utf-8",
+        CacheControl="max-age=0, s-maxage=300, must-revalidate",
+    )
+    return key, content_hash, size_bytes
+
+
+def _promote_staged_content(staging_key: str, project_id: str, document_id: str) -> str:
+    """Copy the staging object onto the canonical key after a guarded conditional
+    write succeeds. Returns the canonical s3_key."""
+    s3 = _get_s3()
+    canonical_key = _s3_key(project_id, document_id)
+    s3.copy_object(
+        Bucket=S3_BUCKET,
+        CopySource={"Bucket": S3_BUCKET, "Key": staging_key},
+        Key=canonical_key,
+        ContentType="text/markdown; charset=utf-8",
+        CacheControl="max-age=0, s-maxage=300, must-revalidate",
+        MetadataDirective="REPLACE",
+    )
+    return canonical_key
+
+
+def _delete_s3_object_best_effort(key: str) -> None:
+    """Delete an orphaned staging object after a lost conditional-write race.
+    Never raises — logs the orphan key at WARNING if deletion fails."""
+    try:
+        _get_s3().delete_object(Bucket=S3_BUCKET, Key=key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P70] orphaned staging object left behind (delete failed): key=%s err=%s", key, exc)
 
 
 def _get_content(
@@ -2525,21 +2694,58 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     project_id = existing.get("project_id", {}).get("S", "")
     now = _now_z()
 
-    # ENC-TSK-L47: If-Match / HTTP 409 per-record revision contract. Own lightweight
-    # counter (version), decoupled from ENC-TSK-L27's version_seq. Absent header
-    # preserves today's unconditional-PATCH behavior (backward compatible).
-    if_match = _extract_if_match(event)
-    if if_match is not None and if_match != str(current_version):
-        return _error(
-            409,
-            f"If-Match revision mismatch: client expected revision '{if_match}', "
-            f"server is at revision {current_version}.",
-            code="REVISION_CONFLICT",
-            document_id=document_id,
-            expected_revision=if_match,
-            current_revision=current_version,
-            current=_deserialize_item(existing),
-        )
+    # ENC-TSK-L47 / ENC-TSK-P70: If-Match / HTTP 409|412 per-record precondition
+    # contract. Own lightweight counter (version), decoupled from ENC-TSK-L27's
+    # version_seq. Absent precondition preserves today's unconditional-PATCH
+    # behavior (backward compatible) — AC-4. ENC-TSK-P70 (FR-B1-9..12) extends the
+    # L47 header-only version form with a content-hash form (64-hex sha256) taken
+    # from either the If-Match header or the body field `if_match` (AC-1).
+    precondition_raw = _extract_precondition(event, body)
+    precondition_kind: Optional[str] = None  # 'hash' | 'version' | None (absent)
+    precondition_absent = precondition_raw is None
+    current_content_hash = str(existing.get("content_hash", {}).get("S", ""))
+    if precondition_raw is not None:
+        precondition_kind = _classify_precondition(precondition_raw)
+        if precondition_kind is None:
+            return _error(
+                400,
+                (
+                    f"Malformed precondition '{precondition_raw}': must be a 64-hex "
+                    "sha256 content hash (^[0-9a-f]{64}$) or a decimal version "
+                    "counter (^[0-9]+$)."
+                ),
+                code="PRECONDITION_MALFORMED",
+                document_id=document_id,
+                received=precondition_raw,
+            )
+        if precondition_kind == "version" and precondition_raw != str(current_version):
+            return _error(
+                409,
+                f"If-Match revision mismatch: client expected revision '{precondition_raw}', "
+                f"server is at revision {current_version}.",
+                code="REVISION_CONFLICT",
+                document_id=document_id,
+                expected_revision=precondition_raw,
+                current_revision=current_version,
+                current=_deserialize_item(existing),
+            )
+        if precondition_kind == "hash" and precondition_raw != current_content_hash:
+            return _error(
+                412,
+                (
+                    f"Content-hash precondition mismatch: client expected hash "
+                    f"'{precondition_raw}', server is at '{current_content_hash}'."
+                ),
+                code="CONTENT_HASH_MISMATCH",
+                document_id=document_id,
+                expected_hash=precondition_raw,
+                current_hash=current_content_hash,
+                current_version=current_version,
+                updated_at=str(existing.get("updated_at", {}).get("S", "")),
+                recommended_next_actions=[
+                    "re-read digest via documents.manifest and retry",
+                ],
+            )
 
     # ENC-FTR-078 AC-3 / AC-19: determine final_subtype for subsequent validations.
     # existing_subtype is the pre-patch value (may be a legacy read-only value for
@@ -2566,6 +2772,16 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         ":rtype": {"S": "document"},
     }
     compliance: Optional[Dict[str, Any]] = None
+    # ENC-TSK-P70 AC-3: guarded (precondition-bearing) content writes go through a
+    # version-suffixed staging key first; this tracks the staging key so the final
+    # UpdateItem block below knows whether to promote it (success) or delete it
+    # best-effort (ConditionalCheckFailedException). Unguarded writes leave this None
+    # and use the pre-existing direct-to-canonical-key path (AC-4).
+    _p70_staging_key: Optional[str] = None
+    if precondition_kind == "hash":
+        # AC-3: single UpdateItem ConditionExpression content_hash = :expected for
+        # the hash form (replaces the version-counter condition for this write).
+        attr_values[":expected_hash"] = {"S": current_content_hash}
 
     # ENC-FTR-078 AC-3: document_subtype patch validation (strict allow-list).
     # AC-19 backward compat: legacy values are readable but cannot be re-written.
@@ -3039,7 +3255,18 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                     compliance_score=compliance["compliance_score"],
                     compliance_warnings=compliance["compliance_warnings"],
                 )
-            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+            # ENC-TSK-P70 AC-3: guarded writes stage to a version-suffixed key first
+            # and only promote to canonical after the conditional UpdateItem below
+            # succeeds; unguarded writes keep the pre-existing direct-to-canonical
+            # path (AC-4).
+            if precondition_kind is not None:
+                s3_key, content_hash, size_bytes = _upload_content_staged(
+                    project_id, document_id, content, current_version + 1,
+                )
+                _p70_staging_key = s3_key
+                s3_key = _s3_key(project_id, document_id)
+            else:
+                s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
             # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
             outline_entries = outline_mod.compute_outline(content)
             expr_parts.append("content_hash = :hash")
@@ -3121,7 +3348,17 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             if len(new_content.encode("utf-8")) > MAX_CONTENT_SIZE:
                 return _error(400, f"Appended content exceeds maximum size of {MAX_CONTENT_SIZE} bytes.")
             compliance = _evaluate_markdown_compliance(new_content)
-            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+            # ENC-TSK-P70 AC-3: same stage-then-promote pattern as the content-field
+            # path above (mutually exclusive with it — content/append_content are
+            # already validated as mutually exclusive earlier in this handler).
+            if precondition_kind is not None:
+                s3_key, content_hash, size_bytes = _upload_content_staged(
+                    project_id, document_id, new_content, current_version + 1,
+                )
+                _p70_staging_key = s3_key
+                s3_key = _s3_key(project_id, document_id)
+            else:
+                s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
             # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
             outline_entries = outline_mod.compute_outline(new_content)
             expr_parts.append("content_hash = :hash")
@@ -3144,16 +3381,29 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
 
     update_expr = "SET " + ", ".join(expr_parts)
 
+    # ENC-TSK-P70 AC-3: the comparison and the metadata write are a single
+    # UpdateItem — content_hash = :expected_hash for the hash-form precondition,
+    # else the pre-existing version = :expected (L47 counter form / internal
+    # race-safety net for the unguarded case).
+    _p70_condition_expression = (
+        "content_hash = :expected_hash" if precondition_kind == "hash" else "#ver = :expected"
+    )
+
     try:
         ddb.update_item(
             TableName=DOCUMENTS_TABLE,
             Key={"document_id": {"S": document_id}},
             UpdateExpression=update_expr,
-            ConditionExpression="#ver = :expected",
+            ConditionExpression=_p70_condition_expression,
             ExpressionAttributeNames=attr_names,
             ExpressionAttributeValues=attr_values,
         )
     except ddb.exceptions.ConditionalCheckFailedException:
+        # ENC-TSK-P70 AC-3: a losing guarded writer must not leave its staged S3
+        # object behind — delete it best-effort (WARNING-logged orphan on failure)
+        # rather than ever letting it reach the canonical key.
+        if _p70_staging_key is not None:
+            _delete_s3_object_best_effort(_p70_staging_key)
         try:
             _refreshed_resp = ddb.get_item(
                 TableName=DOCUMENTS_TABLE,
@@ -3163,6 +3413,23 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             _refreshed = _deserialize_item(_refreshed_resp.get("Item") or existing)
         except Exception:  # noqa: BLE001
             _refreshed = _deserialize_item(existing)
+        if precondition_kind == "hash":
+            return _error(
+                412,
+                (
+                    "Content-hash precondition mismatch: document was modified "
+                    "concurrently. Please re-read the digest and retry."
+                ),
+                code="CONTENT_HASH_MISMATCH",
+                document_id=document_id,
+                expected_hash=precondition_raw,
+                current_hash=str(_refreshed.get("content_hash") or ""),
+                current_version=_refreshed.get("version"),
+                updated_at=str(_refreshed.get("updated_at") or ""),
+                recommended_next_actions=[
+                    "re-read digest via documents.manifest and retry",
+                ],
+            )
         return _error(
             409,
             "Document was modified concurrently. Please refresh and try again.",
@@ -3174,7 +3441,23 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         )
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
+        if _p70_staging_key is not None:
+            _delete_s3_object_best_effort(_p70_staging_key)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-P70 AC-3: conditional write succeeded — promote the staged content
+    # to the canonical key now (never before the condition passed).
+    if _p70_staging_key is not None:
+        try:
+            _promote_staged_content(_p70_staging_key, project_id, document_id)
+        except Exception as exc:  # noqa: BLE001
+            # Metadata already committed pointing at the canonical key; log loudly
+            # but don't fail the (already-successful) request over a copy hiccup.
+            logger.error(
+                "[ENC-TSK-P70] staged content promote failed after successful "
+                "conditional update: staging_key=%s document_id=%s err=%s",
+                _p70_staging_key, document_id, exc,
+            )
 
     # ENC-TSK-L07 (B65 AC-5/AC-7): mirror any newly-added related_items onto each
     # target's related_document_ids.
@@ -3199,6 +3482,11 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     if compliance is not None:
         payload["compliance_score"] = compliance["compliance_score"]
         payload["compliance_warnings"] = compliance["compliance_warnings"]
+    # ENC-TSK-P70 AC-4: absence of any precondition preserves the pre-existing
+    # unconditional write, flagged in the response, with a fire-and-forget metric.
+    if precondition_absent:
+        payload["precondition_absent"] = True
+        _emit_legacy_write_unguarded_metric(project_id, _derive_write_surface(event, claims))
     return _response(200, payload)
 
 
