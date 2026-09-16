@@ -558,7 +558,9 @@ Resources:
         {mcp, elr, pwa, lambda}, over the trailing 14 days. Gates T-E3
         (hard enforcement of the precondition requirement) — must be clear
         before that cutover proceeds.
-      EvaluationPeriods: 14
+# ENC-TSK-P94: CloudWatch caps EvaluationPeriods * Period at 604800s (one week) for
+# period >= 3600; the 14-day T-E3 gate is two consecutive clean weeks (ENC-PLN-092).
+      EvaluationPeriods: 7
       DatapointsToAlarm: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
