@@ -1,9 +1,17 @@
+import { lazy, Suspense } from 'react'
 import { FileText } from 'lucide-react'
 import type { Document } from '../types/records'
 import { DocumentSectionsView } from '../components/DocumentSectionsView'
 import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub } from '../components/RecordDetailHub'
 import { downloadTextFile } from '../utils/downloadTextFile'
+
+/** ENC-TSK-P81 — code-split: the History tab (list + rewind + diff) only
+ *  ships to the client once the tab is opened, as its own chunk separate
+ *  from this already-large `document` primitive chunk. */
+const DocumentHistoryPanel = lazy(() =>
+  import('../components/DocumentHistoryPanel').then((m) => ({ default: m.DocumentHistoryPanel })),
+)
 
 /** "8.6 KB" / "116.9 KB" style — matches Docs.dc.html row + metadata format. */
 function formatSize(bytes: number | undefined): string | null {
@@ -100,6 +108,11 @@ export function DocumentPrimitive({ record }: { record: Document }) {
         </>
       }
       content={<DocumentSectionsView record={record} />}
+      history={
+        <Suspense fallback={<p className="ev2-history__status">Loading history&hellip;</p>}>
+          <DocumentHistoryPanel documentId={record.document_id} projectId={record.project_id} />
+        </Suspense>
+      }
       neighbors={
         <NeighborsTab projectId={record.project_id} groups={[{ label: 'Related items', ids: record.related_items }]} />
       }
