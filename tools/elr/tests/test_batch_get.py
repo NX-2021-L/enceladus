@@ -12,6 +12,17 @@ import urllib.error
 from unittest.mock import patch
 
 import elr_batch_get
+from elr_lib.prefix import PrefixResolver
+
+
+def _static_resolver(mapping=None, source="none"):
+    """A PrefixResolver pre-seeded with a fixed map (default: the old
+    ENC-only static literal this suite exercised pre-ENC-TSK-P90) -- never
+    touches the network or filesystem, so these tests stay offline and
+    deterministic while still exercising the live-resolver code path in
+    elr_batch_get.classify_id/run_batch_get.
+    """
+    return PrefixResolver.from_mapping(mapping or {"ENC": "enceladus"}, source=source)
 
 
 class _FakeHttpResponse:
@@ -57,65 +68,83 @@ def _document_ok(record):
 
 class ClassifyIdTests(unittest.TestCase):
     def test_tsk_id_classified_as_tracker_task(self):
-        c = elr_batch_get.classify_id("ENC-TSK-O52")
+        c = elr_batch_get.classify_id("ENC-TSK-O52", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.project_id, "enceladus")
         self.assertEqual(c.record_type, "task")
         self.assertEqual(c.normalized, "ENC-TSK-O52")
 
     def test_iss_id_classified_as_tracker_issue(self):
-        c = elr_batch_get.classify_id("ENC-ISS-1")
+        c = elr_batch_get.classify_id("ENC-ISS-1", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.record_type, "issue")
 
     def test_ftr_id_classified_as_tracker_feature(self):
-        c = elr_batch_get.classify_id("ENC-FTR-134")
+        c = elr_batch_get.classify_id("ENC-FTR-134", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.record_type, "feature")
 
     def test_pln_id_classified_as_tracker_plan(self):
-        c = elr_batch_get.classify_id("ENC-PLN-085")
+        c = elr_batch_get.classify_id("ENC-PLN-085", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.record_type, "plan")
 
     def test_lsn_id_classified_as_tracker_lesson(self):
-        c = elr_batch_get.classify_id("ENC-LSN-53")
+        c = elr_batch_get.classify_id("ENC-LSN-53", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.record_type, "lesson")
 
     def test_lowercase_input_is_normalized(self):
-        c = elr_batch_get.classify_id("enc-tsk-o52")
+        c = elr_batch_get.classify_id("enc-tsk-o52", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
         self.assertEqual(c.normalized, "ENC-TSK-O52")
 
     def test_whitespace_is_stripped(self):
-        c = elr_batch_get.classify_id("  ENC-TSK-1  ")
+        c = elr_batch_get.classify_id("  ENC-TSK-1  ", _static_resolver())
         self.assertEqual(c.normalized, "ENC-TSK-1")
 
     def test_doc_id_classified_as_document(self):
-        c = elr_batch_get.classify_id("DOC-87EC08ECF51A")
+        c = elr_batch_get.classify_id("DOC-87EC08ECF51A", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_DOCUMENT)
         self.assertIsNone(c.project_id)
         self.assertIsNone(c.record_type)
 
-    def test_unknown_project_prefix_is_unclassified_not_guessed(self):
-        # DVP is a real prefix elsewhere in the org, but this tool has no
-        # static mapping for it (see _PREFIX_TO_PROJECT_ID) and must never
-        # guess or fall back to a list call to resolve it.
-        c = elr_batch_get.classify_id("DVP-TSK-100")
+    def test_unmapped_prefix_is_unclassified_not_guessed(self):
+        # ZZZ is well-formed (PREFIX-TSK-suffix) but absent from whatever
+        # map the resolver ended up using this run (here: the static
+        # ENC-only seed) -- classify_id must never guess or fall back to
+        # a list call to resolve it.
+        c = elr_batch_get.classify_id("ZZZ-TSK-100", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_UNCLASSIFIED)
         self.assertIsNone(c.project_id)
 
+    def test_prefix_present_in_resolved_map_is_classified(self):
+        # ENC-TSK-P90 / AC-2: DVP (and any other prefix present in the
+        # live/cached map) now routes to its project_id, unlike the old
+        # ENC-only static literal.
+        resolver = _static_resolver({"ENC": "enceladus", "DVP": "devops"})
+        c = elr_batch_get.classify_id("DVP-TSK-100", resolver)
+        self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
+        self.assertEqual(c.project_id, "devops")
+
+    def test_int_prefix_present_in_resolved_map_is_classified(self):
+        # AC-2 explicitly names INT-* alongside ENC-*/DVP-*.
+        resolver = _static_resolver({"ENC": "enceladus", "INT": "internal-tools"})
+        c = elr_batch_get.classify_id("INT-ISS-42", resolver)
+        self.assertEqual(c.kind, elr_batch_get.KIND_TRACKER)
+        self.assertEqual(c.project_id, "internal-tools")
+        self.assertEqual(c.record_type, "issue")
+
     def test_unknown_type_segment_is_unclassified(self):
-        c = elr_batch_get.classify_id("ENC-XYZ-1")
+        c = elr_batch_get.classify_id("ENC-XYZ-1", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_UNCLASSIFIED)
 
     def test_garbage_input_is_unclassified(self):
-        c = elr_batch_get.classify_id("not-an-id-at-all")
+        c = elr_batch_get.classify_id("not-an-id-at-all", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_UNCLASSIFIED)
 
     def test_empty_string_is_unclassified(self):
-        c = elr_batch_get.classify_id("")
+        c = elr_batch_get.classify_id("", _static_resolver())
         self.assertEqual(c.kind, elr_batch_get.KIND_UNCLASSIFIED)
 
 
@@ -159,7 +188,7 @@ class NoListRouteTests(unittest.TestCase):
             _document_ok({"version": 1, "title": "D"}),
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
-            elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5)
+            elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5, resolver=_static_resolver())
 
         self.assertEqual(mock_urlopen.call_count, 2)
         for call in mock_urlopen.call_args_list:
@@ -189,7 +218,7 @@ class FailurePartitioningTests(unittest.TestCase):
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
             digest = elr_batch_get.run_batch_get(
-                ["ENC-TSK-1", "ENC-TSK-MISSING", "DOC-ABCDEF"], "prod", 5
+                ["ENC-TSK-1", "ENC-TSK-MISSING", "DOC-ABCDEF"], "prod", 5, resolver=_static_resolver()
             )
 
         rows = {r["id"]: r for r in digest["rows"]}
@@ -210,21 +239,21 @@ class FailurePartitioningTests(unittest.TestCase):
             _tracker_ok({"status": "closed", "title": "B"}),
         ]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5, resolver=_static_resolver())
         self.assertTrue(digest["ok"])
         self.assertEqual(digest["status"], 200)
 
     def test_all_fail_gives_502_and_not_ok(self):
         responses = [_http_error(500, b""), _http_error(404, b"")]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "ENC-TSK-2"], "prod", 5, resolver=_static_resolver())
         self.assertFalse(digest["ok"])
         self.assertEqual(digest["status"], 502)
 
     def test_mixed_classified_and_unclassified_partitions_correctly(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "GARBAGE-ID"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "GARBAGE-ID"], "prod", 5, resolver=_static_resolver())
         self.assertEqual(digest["counts"]["fetched"], 1)
         self.assertEqual(digest["counts"]["unclassified"], 1)
         self.assertEqual(digest["counts"]["failed"], 0)
@@ -246,13 +275,13 @@ class LowerBoundLabelingTests(unittest.TestCase):
     def test_lower_bound_true_on_success(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         self.assertIs(digest["counts"]["lower_bound"], True)
 
     def test_lower_bound_true_on_partial_failure(self):
         responses = [_http_error(404, b"")]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         self.assertIs(digest["counts"]["lower_bound"], True)
 
     def test_lower_bound_true_on_empty_request(self):
@@ -269,15 +298,46 @@ class DigestShapeTests(unittest.TestCase):
     def test_top_level_keys(self):
         responses = [_tracker_ok({"status": "open", "title": "A"}), _document_ok({"version": 1, "title": "B"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5)
-        for key in ("operation", "ok", "status", "identity_posture", "anomalies", "counts", "rows"):
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1", "DOC-ABCDEF"], "prod", 5, resolver=_static_resolver())
+        for key in (
+            "operation",
+            "ok",
+            "status",
+            "identity_posture",
+            "anomalies",
+            "counts",
+            "rows",
+            "prefix_map_source",
+            "unclassified",
+        ):
             self.assertIn(key, digest)
         self.assertEqual(digest["operation"], "elr_batch_get.batch")
+
+    def test_prefix_map_source_and_unclassified_list_reflect_resolver(self):
+        # ENC-TSK-P90 / AC-1: every digest reports prefix_map_source (the
+        # resolver's actual provenance) and the list of ids that fell
+        # through as unclassified -- never just a count.
+        responses = [_tracker_ok({"status": "open", "title": "A"})]
+        with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
+            digest = elr_batch_get.run_batch_get(
+                ["ENC-TSK-1", "ZZZ-TSK-9"], "prod", 5, resolver=_static_resolver(source="cache")
+            )
+        self.assertEqual(digest["prefix_map_source"], "cache")
+        self.assertEqual(digest["unclassified"], ["ZZZ-TSK-9"])
+        self.assertEqual(digest["counts"]["unclassified"], 1)
+
+    def test_prefix_map_source_is_none_when_no_id_needs_resolution(self):
+        # A batch of DOC-* ids only never touches the resolver at all.
+        responses = [_document_ok({"version": 1, "title": "D"})]
+        with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
+            digest = elr_batch_get.run_batch_get(["DOC-ABCDEF"], "prod", 5, resolver=_static_resolver())
+        self.assertEqual(digest["prefix_map_source"], "none")
+        self.assertEqual(digest["unclassified"], [])
 
     def test_row_shape(self):
         responses = [_tracker_ok({"status": "open", "title": "A task"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         row = digest["rows"][0]
         self.assertEqual(set(row.keys()), {"id", "kind", "ok", "status_or_version", "title"})
         self.assertEqual(row["id"], "ENC-TSK-1")
@@ -300,7 +360,7 @@ class DigestShapeTests(unittest.TestCase):
         big_body = {"status": "open", "title": "A", "history": ["huge"] * 500, "secret_field": "leak-me"}
         responses = [_tracker_ok(big_body)]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         serialized = json.dumps(digest)
         self.assertNotIn("secret_field", serialized)
         self.assertNotIn("leak-me", serialized)
@@ -308,7 +368,7 @@ class DigestShapeTests(unittest.TestCase):
     def test_digest_is_json_serializable_and_stable_across_calls(self):
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         serialized = json.dumps(digest, sort_keys=True)
         self.assertEqual(json.loads(serialized), digest)
 
@@ -316,7 +376,7 @@ class DigestShapeTests(unittest.TestCase):
         long_title = "X" * 200
         responses = [_tracker_ok({"status": "open", "title": long_title})]
         with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5)
+            digest = elr_batch_get.run_batch_get(["ENC-TSK-1"], "prod", 5, resolver=_static_resolver())
         row_title = digest["rows"][0]["title"]
         self.assertEqual(len(row_title), 60)
         self.assertTrue(row_title.endswith("..."))
@@ -404,11 +464,16 @@ class CollectIdsTests(unittest.TestCase):
 
 class MainOutputTests(unittest.TestCase):
     def test_main_json_flag_prints_single_line(self):
+        # main() builds a live PrefixResolver by default (no --ids-scoped
+        # resolver injection point at the CLI) -- patch the class so this
+        # stays offline and the single mocked urlopen response is
+        # consumed by the tracker GET, not a prefix-map fetch.
         responses = [_tracker_ok({"status": "open", "title": "A"})]
         stdout = io.StringIO()
-        with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            with contextlib.redirect_stdout(stdout):
-                exit_code = elr_batch_get.main(["--ids", "ENC-TSK-1", "--json"])
+        with patch("elr_batch_get.PrefixResolver", return_value=_static_resolver()):
+            with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = elr_batch_get.main(["--ids", "ENC-TSK-1", "--json"])
         self.assertEqual(exit_code, 0)
         lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
         self.assertEqual(len(lines), 1)
@@ -418,9 +483,10 @@ class MainOutputTests(unittest.TestCase):
     def test_main_default_output_is_still_valid_json(self):
         responses = [_http_error(404, b"")]
         stdout = io.StringIO()
-        with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
-            with contextlib.redirect_stdout(stdout):
-                exit_code = elr_batch_get.main(["--ids", "ENC-TSK-1"])
+        with patch("elr_batch_get.PrefixResolver", return_value=_static_resolver()):
+            with patch("elr_lib.transport.urllib.request.urlopen", side_effect=responses):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = elr_batch_get.main(["--ids", "ENC-TSK-1"])
         self.assertEqual(exit_code, 1)
         parsed = json.loads(stdout.getvalue())
         self.assertFalse(parsed["ok"])
