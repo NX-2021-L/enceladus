@@ -1,7 +1,7 @@
 {
-  "version": "2026-09-16.1",
+  "version": "2026-09-16.2",
   "updated_at": "2026-09-16T00:00:00Z",
-  "last_change_summary": "ENC-TSK-P69 / ENC-TSK-P82: registered document.patch_section, document.digest, document.history_event, document.body_versioning, mcp_server.documents_patch_section, mcp_server.projects_prefix_map, elr.identity_posture, and elr.tls_resolution; amended document.doc to note 'research' and 'brd' as observed emergent subtypepattern values (ENC-FTR-078 graduation_pathway) without promoting them to the enum. See DOC-8F6CF7700EAD.\n\nPREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged. PREVIOUS: ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary). PREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
+  "last_change_summary": "ENC-TSK-P70 (FR-B1-9..12, ENC-ISS-503): added document_api.precondition -- content-hash (64-hex sha256) precondition on document_api's put (update case), PATCH (whole-document), and PATCH append_content paths, read from If-Match or body field if_match, alongside the existing ENC-TSK-L47 version-counter form; malformed values reject 400 PRECONDITION_MALFORMED before any write. Comparison and metadata write are a single atomic DynamoDB UpdateItem (content_hash = :expected for the hash form); guarded content writes stage to a version-suffixed S3 key before the conditional update and promote to the canonical key only on success, deleting the staging object best-effort on ConditionalCheckFailedException. Absent precondition preserves the pre-existing unconditional write, now flagged precondition_absent:true and observed via the Enceladus/Docstore LegacyWriteUnguarded CloudWatch metric (dims ProjectId, Surface). Also added PRECONDITION_MALFORMED to document.patch_section.error_codes (ENC-TSK-P82 contract, hash-only if_match).\n\nPREVIOUS: ENC-TSK-P69 / ENC-TSK-P82: registered document.patch_section, document.digest, document.history_event, document.body_versioning, mcp_server.documents_patch_section, mcp_server.projects_prefix_map, elr.identity_posture, and elr.tls_resolution; amended document.doc to note 'research' and 'brd' as observed emergent subtypepattern values (ENC-FTR-078 graduation_pathway) without promoting them to the enum. See DOC-8F6CF7700EAD.\n\nPREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged. PREVIOUS: ENC-TSK-P74 (FR-B4-2): added the projects.prefix_map read-only search action to tools/enceladus-mcp-server/server.py -- returns {prefixes, source, generated_at} by calling the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim, no additional table scan; cacheable, no record bodies. ELR-side v2 prefix resolution consumer lands in a separate PR (ENC-TSK-P69 concurrently adds a fuller entity set to this dictionary). PREVIOUS: ENC-TSK-P66 (ENC-ISS-730): graph_query_api neighbors Cypher orders per-neighbor rows by min(size(r)) (shortest path length) before LIMIT, so the MAX_RESULTS cap fills nearest-first and distance-1 membership edges (e.g. a plan's PLAN_CONTAINS ring) can never be starved by distance-2 context rows. Query shape/response contract otherwise unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -812,6 +812,70 @@
           "type": "string",
           "definition": "Only present for fields with pattern constraints. Plain-English rule describing what the value must contain. Example: 'plan_anchor_id must contain \\'-PLN-\\' substring' for wave docs."
         }
+      }
+    },
+    "document_api.precondition": {
+      "description": "ENC-TSK-P70 (FR-B1-9..12): unified content-hash / version precondition on document_api's put (update case -- today's PUT/POST path is create-only, so this case is currently latent and activates once an update case exists), PATCH (whole-document), and PATCH append_content paths. Extends api.if_match_revision_contract's L47 version-counter form with a second, preferred form keyed on content_hash, taken from the same If-Match header (falls back to the body field if_match when the header is absent). The comparison and the metadata write are a single atomic DynamoDB UpdateItem (ConditionExpression content_hash = :expected for the hash form; version = :expected for the counter form, unchanged from L47). Absence of any precondition preserves the pre-existing unconditional write and is now observable via precondition_absent in the response plus the Enceladus/Docstore LegacyWriteUnguarded CloudWatch metric.",
+      "fields": {
+        "if_match": {
+          "type": "string",
+          "definition": "Precondition token, read from the If-Match header (preferred; ETag-style quotes stripped) or the body field if_match when the header is absent. A value matching ^[0-9a-f]{64}$ is the content_hash form; a value matching ^[0-9]+$ is the ENC-TSK-L47 version-counter form; any other shape is rejected 400 PRECONDITION_MALFORMED before any write is attempted.",
+          "usage_guidance": "Prefer the content_hash form -- read it from documents.manifest / documents.get's content_hash (or a prior write's response) and echo it back. On CONTENT_HASH_MISMATCH (412), re-read the digest via documents.manifest and retry rather than blind-retrying with the same value."
+        },
+        "precondition_absent": {
+          "type": "boolean",
+          "definition": "Present (true) on a successful put/patch/append response only when neither If-Match nor body if_match was supplied -- flags that the write proceeded unconditionally (pre-existing behavior, unchanged) and that the LegacyWriteUnguarded metric was emitted for this write. Absent from the response body whenever a precondition of either form was supplied and matched.",
+          "usage_guidance": "A caller migrating call sites off unconditional writes can alert on this field or on the CloudWatch metric without instrumenting every call site individually."
+        }
+      },
+      "error_codes": {
+        "PRECONDITION_MALFORMED": {
+          "http_status": 400,
+          "definition": "The supplied If-Match / body if_match value matched neither the 64-hex content_hash shape nor the decimal version-counter shape. No write is attempted.",
+          "fields": [
+            "received"
+          ]
+        },
+        "CONTENT_HASH_MISMATCH": {
+          "http_status": 412,
+          "definition": "The content_hash-form precondition did not equal the document's current content_hash, either at the pre-write check or at the DynamoDB ConditionExpression guarding the commit itself if a write lands in the interim. Same response shape as document.patch_section's CONTENT_HASH_MISMATCH.",
+          "fields": [
+            "expected_hash",
+            "current_hash",
+            "current_version",
+            "updated_at",
+            "recommended_next_actions"
+          ]
+        }
+      },
+      "s3_write_ordering": {
+        "type": "behavior",
+        "definition": "AC-3: a precondition-bearing (guarded) content/append_content write stages the new body at a version-suffixed key (agent-documents/{project_id}/versions/{document_id}/{next_version}.md per BRD FR-B2-6) before the conditional DynamoDB UpdateItem, and only copies it onto the canonical key (agent-documents/{project_id}/{document_id}.md) after that UpdateItem succeeds. On ConditionalCheckFailedException the staging object is deleted best-effort (orphan logged at WARNING on delete failure) and the canonical key is never touched by the losing writer. Unguarded writes (no precondition) are unaffected -- they keep writing straight to the canonical key (pre-existing behavior, AC-4)."
+      },
+      "metric": {
+        "type": "cloudwatch_metric",
+        "namespace": "Enceladus/Docstore",
+        "metric_name": "LegacyWriteUnguarded",
+        "dimensions": [
+          "ProjectId",
+          "Surface"
+        ],
+        "definition": "Fire-and-forget (never fails the request) counter emitted on every put/patch/append that proceeds without a caller-supplied precondition. Surface is derived from caller identity: 'mcp' for internal-key callers whose User-Agent/write_source indicates mcp, 'pwa' for Cognito-session callers, 'lambda' for system/managed-token identities, else 'unknown'."
+      },
+      "related_entities": {
+        "extends": "api.if_match_revision_contract",
+        "sibling_contract": "document.patch_section",
+        "governing_issue": "ENC-ISS-503"
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-P70"
+        ],
+        "predecessor_tasks": [
+          "ENC-TSK-L47",
+          "ENC-TSK-P69"
+        ],
+        "note": "put's update case is currently latent -- today's PUT/POST document_api path is create-only; the precondition contract applies there once an update case exists. PATCH (whole-document) and PATCH append_content are live today."
       }
     },
     "document.create": {
@@ -8562,6 +8626,13 @@
             "recommended_next_actions"
           ]
         },
+        "PRECONDITION_MALFORMED": {
+          "http_status": 400,
+          "definition": "ENC-TSK-P70: the supplied if_match value did not match the required 64-hex content_hash shape (patch_section's if_match is hash-only -- the ENC-TSK-L47 version-counter form is not accepted here). No write is attempted.",
+          "fields": [
+            "received"
+          ]
+        },
         "REVISION_CONFLICT": {
           "http_status": 409,
           "definition": "Concurrent write landed between the pre-check and the commit (mirrors api.if_match_revision_contract's REVISION_CONFLICT on the whole-document PATCH path)."
@@ -8946,6 +9017,12 @@
   },
   "change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
   "change_log": [
+    {
+      "version": "2026-09-16.2",
+      "date": "2026-09-16",
+      "task_id": "ENC-TSK-P70",
+      "summary": "ENC-TSK-P70 (FR-B1-9..12, ENC-ISS-503): added document_api.precondition -- content-hash (64-hex sha256) precondition on document_api's put (update case), PATCH (whole-document), and PATCH append_content paths, read from If-Match or body field if_match, alongside the existing ENC-TSK-L47 version-counter form; malformed values reject 400 PRECONDITION_MALFORMED before any write. Comparison and metadata write are a single atomic DynamoDB UpdateItem (content_hash = :expected for the hash form); guarded content writes stage to a version-suffixed S3 key before the conditional update and promote to the canonical key only on success, deleting the staging object best-effort on ConditionalCheckFailedException. Absent precondition preserves the pre-existing unconditional write, now flagged precondition_absent:true and observed via the Enceladus/Docstore LegacyWriteUnguarded CloudWatch metric (dims ProjectId, Surface). Also added PRECONDITION_MALFORMED to document.patch_section.error_codes (ENC-TSK-P82 contract, hash-only if_match)."
+    },
     {
       "version": "2026-09-16.1",
       "date": "2026-09-16",
