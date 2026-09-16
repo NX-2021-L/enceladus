@@ -536,6 +536,97 @@ Resources:
         - !Ref "AWS::NoValue"
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-P84 AC-3 — T-E3 readiness gate. Fires when Enceladus/Docstore
+  # LegacyWriteUnguarded (ENC-TSK-P70 AC-4, emitted by document_api on every
+  # put/patch/append that proceeds without a client-supplied precondition) is
+  # non-zero, summed across the four governed write surfaces, over a rolling
+  # 14-day window (Period 86400 x EvaluationPeriods 14, DatapointsToAlarm 1 —
+  # a single non-zero day anywhere in the trailing 14 days keeps this in
+  # ALARM). "unknown" is deliberately excluded from the sum: it is the
+  # surface-classification-failed bucket (see _derive_write_surface), not
+  # itself a write surface T-E3 needs cleared. TreatMissingData notBreaching:
+  # no LegacyWriteUnguarded datapoints at all (the good outcome, once T-E3
+  # ships) must not itself alarm.
+  # ---------------------------------------------------------------------------
+  DocstoreLegacyUnguardedWritesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-docstore-legacy-unguarded-writes${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-P84 AC-3: Enceladus/Docstore LegacyWriteUnguarded is non-zero
+        for ProjectId=enceladus, summed across Surface in
+        {mcp, elr, pwa, lambda}, over the trailing 14 days. Gates T-E3
+        (hard enforcement of the precondition requirement) — must be clear
+        before that cutover proceeds.
+      EvaluationPeriods: 14
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: mcpUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: mcp
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: elrUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: elr
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: pwaUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: pwa
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: lambdaUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: lambda
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: totalUnguarded
+          Expression: "mcpUnguarded + elrUnguarded + pwaUnguarded + lambdaUnguarded"
+          Label: "LegacyWriteUnguarded (mcp+elr+pwa+lambda)"
+          Period: 86400
+          ReturnData: true
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-K46 (B66 Ph5 AC-2/AC-6/AC-7) — v4 architecture CloudWatch dashboard.
   # Binds live panels for every metric source Wave A (K41/K43/K44/K45) and the
   # already-shipped H86 arc-walk telemetry Lambda publish to. No new metric
@@ -753,6 +844,60 @@ Resources:
                   [ "Enceladus/ArcWalk", "ConvergenceGatesShort", "ProjectId", "enceladus", { "stat": "Maximum", "label": "Total Gates Short" } ]
                 ],
                 "period": 3600
+              }
+            },
+            {
+              "type": "text",
+              "x": 0, "y": 26, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "## Docstore Patch/Metrics (Enceladus/Docstore, ENC-TSK-P84 AC-1/AC-2, T-D3 / FR-B6-1..2)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "Patch Outcomes — Accepted vs Rejected",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionAccepted\"', 'Sum', 300)", "label": "PatchSectionAccepted", "id": "e3" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionRejected412\"', 'Sum', 300)", "label": "PatchSectionRejected412 (CONTENT_HASH_MISMATCH)", "id": "e4" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionRejected409\"', 'Sum', 300)", "label": "PatchSectionRejected409 (ANCHOR_AMBIGUOUS)", "id": "e5" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"AnchorNotFound\"', 'Sum', 300)", "label": "AnchorNotFound (404)", "id": "e6" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "EditCostRatio p50/p90/p99 (patch_bytes / document_bytes)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p50', 300)", "label": "EditCostRatio p50", "id": "e7" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p90', 300)", "label": "EditCostRatio p90", "id": "e8" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p99', 300)", "label": "EditCostRatio p99", "id": "e9" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "LegacyWriteUnguarded over time (T-E3 gate, ENC-TSK-P70/P84 AC-3)",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"LegacyWriteUnguarded\"', 'Sum', 300)", "label": "LegacyWriteUnguarded by Surface", "id": "e10" } ]
+                ],
+                "period": 300
               }
             }
           ]
