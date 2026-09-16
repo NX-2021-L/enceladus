@@ -43,6 +43,15 @@ mirrors the {reason, missing_fields, violations} shape every other ELR
 CLI's local refusal helper already uses, folded into build_digest so
 elr_sync can reuse ONE digest builder for both its success and its
 refuse-activation paths.
+
+``session_id``, ``agent_type_id``, and ``sci_ttl_remaining_s`` (added for
+ENC-TSK-P75 / elr_lib.identity) carry the credential-bound identity
+posture's small, stable summary: the live ENC-SES session_id and
+ENC-AGT agent_type_id this run resolved (or reused), and the remaining
+seconds before its Session Claim ID (sci) expires. The sci VALUE itself
+is never a digest field -- only its remaining-lifetime is, so a digest
+can prove a live SCI is held without becoming a bearer credential in its
+own right.
 """
 
 from __future__ import annotations
@@ -50,7 +59,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, Iterable, List, Optional
 
-VALID_IDENTITY_POSTURES = ("internal-key", "bearer", "server-held-keys", "unknown")
+VALID_IDENTITY_POSTURES = ("credential-bound", "internal-key", "bearer", "server-held-keys", "unknown")
 
 _OPTIONAL_FIELDS = (
     "content_hash",
@@ -76,6 +85,9 @@ _OPTIONAL_FIELDS = (
     "files_failed",
     "mismatched",
     "refusal",
+    "session_id",
+    "agent_type_id",
+    "sci_ttl_remaining_s",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

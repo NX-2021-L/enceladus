@@ -70,11 +70,19 @@ _DEDICATED_KEY_ENV: Dict[str, Optional[str]] = {
 
 # Common internal-key fallback chain, in priority order (matches
 # server.py's ``_first_nonempty_env`` call building COMMON_INTERNAL_API_KEY).
+#
+# ENC-TSK-P75 / FR-B4-4..7: ``ENCELADUS_INTERNAL_API_KEY`` is appended LAST
+# (lowest priority) -- it is the name elr_lib.identity's posture chain
+# (AC-1) uses for its "internal-key" posture, but every EXISTING name here
+# still wins when both are set, so this is purely additive: nothing that
+# already resolved a key via one of the names above changes which value it
+# gets.
 COMMON_INTERNAL_KEY_ENV_CHAIN = (
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
     "COORDINATION_INTERNAL_API_KEY",
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "ENCELADUS_INTERNAL_API_KEY",
 )
 
 # Auth header name, verbatim from server.py.

@@ -4,6 +4,19 @@
 Spec: DOC-F2CF625B7556 A.9, ENC-FTR-134 AC-5/AC-8 (ENC-TSK-O54). WRITES
 to the production docstore -- the highest-care ELR operation to date.
 
+ENC-TSK-P75 (T-B2, FR-B4-4..7): this is ELR's "only governed write path
+today" (elr_lib.identity's module docstring), so it is also the one this
+task threads elr_lib.identity through. Both the documents.put and
+documents.patch calls below now go through elr_lib.identity.governed_call
+instead of InternalClient.request() directly -- when credential-bound
+that carries sci + write_source.provider on the wire and performs one
+re-claim-and-retry on a 403 SCI_REQUIRED/{expired_sci,revoked_sci}; when
+the identity posture is "unknown" it refuses the write LOCALLY (no
+network call) with elr_lib.identity.WRITE_REMEDIATION. The resolved
+identity's session is retired (or cached, with --keep-session) on every
+exit path via elr_lib.identity.finalize_identity() in this function's
+``finally`` block.
+
 Flow:
 
   0. PRE-FLIGHT: validate the intended documents.put payload through
@@ -90,6 +103,7 @@ from typing import Any, Dict, List, Optional
 # without requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from elr_lib import identity as elr_identity  # noqa: E402
 from elr_lib import plane_safety  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
@@ -285,6 +299,7 @@ def publish_document(
     timeout: int = 20,
     profile_name: str = "internal",
     preserve_dir: str = DEFAULT_PRESERVE_DIR,
+    keep_session: bool = False,
 ) -> Dict[str, Any]:
     operation = "elr_publish.publish"
 
@@ -313,214 +328,256 @@ def publish_document(
     client = InternalClient(config, timeout=timeout)
     key_sent = bool(config.key_for("document"))
 
-    # --- 1. PLANE-SAFETY steps 1+2 (pre-write, hard gate) --------------------
-    pre_state = plane_safety.run_pre_write(client, project, timeout=timeout)
-    if pre_state["abort"]:
-        return _refusal(
-            operation,
-            pre_state["abort_reason"],
-            violations=[
-                {
-                    "path": "plane_safety.sentinel",
-                    "reason": (
-                        f"sentinel {plane_safety.SENTINEL_DOCUMENT_ID} did not echo through the "
-                        "surface about to be written -- refusing to write to a plane that may not "
-                        "be the intended one"
-                    ),
-                }
-            ],
-            plane_safety=plane_safety.build_report(pre_state, None, write_ok=None),
-            source_sha256=source_sha256,
-        )
-
-    # --- 2. documents.put (the write; PROOF 1 source) ------------------------
-    put_payload: Dict[str, Any] = {
-        "project_id": project,
-        "title": title,
-        "content": source_text,
-        "document_subtype": subtype,
-    }
-    if subtype == "doc":
-        # Defensive no-op: only takes effect if the semantic
-        # handoff-detection guard fires on title/content; otherwise
-        # ignored and not stored (per the live dictionary's
-        # document.doc.confirm_subtype definition).
-        put_payload["confirm_subtype"] = True
-    if keywords:
-        put_payload["keywords"] = list(keywords)
-    if related:
-        put_payload["related_items"] = list(related)
-
-    put_status, put_body = client.request("PUT", "document", "", payload=put_payload)
-    posture, posture_anomalies = classify_internal_posture(key_sent=key_sent, status_code=put_status)
-    anomalies: List[str] = list(preflight_anomalies) + list(posture_anomalies)
-
-    put_ok = 200 <= put_status < 300
-    put_doc = _extract_document(put_body)
-    minted_document_id = put_doc.get("document_id") or (
-        put_body.get("document_id") if isinstance(put_body, dict) else None
+    # ENC-TSK-P75 AC-1/AC-2: resolve ELR's identity BEFORE the write path
+    # -- credential-bound (sci/write_source carriage on every write below,
+    # via elr_identity.governed_call), internal-key, or unknown (every
+    # write below is refused locally, before any network call). Reads
+    # (plane-safety probes, the concurrency guard, the verify-reread) are
+    # unaffected -- the SCI gate only ever guards mutations.
+    identity_ctx = elr_identity.resolve_identity(
+        profile_name=profile_name, timeout=timeout, keep_session=keep_session, client=client
     )
-    put_content_hash = put_doc.get("content_hash")
-    put_size_bytes = put_doc.get("size_bytes")
-    put_compliance_score = put_doc.get("compliance_score") if "compliance_score" in put_doc else None
-
-    if not put_ok or not minted_document_id:
-        anomalies.append(f"put_failed_http_{put_status}" if not put_ok else "put-response-missing-document-id")
-        return _refusal(
-            operation,
-            "put_failed",
-            violations=[{"path": "documents.put", "reason": f"status={put_status}"}],
-            status=put_status,
-            identity_posture=posture,
-            anomalies=anomalies,
-            plane_safety=plane_safety.build_report(pre_state, None, write_ok=False),
-            source_sha256=source_sha256,
-        )
-
-    hash_echo_pass = bool(put_content_hash) and str(put_content_hash).strip().lower() == source_sha256
-    if not hash_echo_pass:
-        anomalies.append("put-content-hash-mismatch" if put_content_hash else "put-content-hash-missing")
-
-    encoded_id = urllib.parse.quote(minted_document_id, safe="")
-    has_placeholder = placeholder in source_text
-
-    patch_performed = False
-    proof2_status = "skip"
-    reverse_sha256: Optional[str] = None
-    final_content_hash = put_content_hash
-    final_size_bytes = put_size_bytes
-    final_version = put_doc.get("version")
-    final_compliance_score = put_compliance_score
-    final_status = put_status
-
-    if has_placeholder:
-        # --- 3. CONCURRENCY GUARD (metadata-only re-read) --------------------
-        conflict_reason, guard_status, guard_hash = check_concurrency(
-            client, encoded_id, str(put_content_hash or "").strip().lower()
-        )
-        expected_hash = str(put_content_hash or "").strip().lower()
-
-        if conflict_reason:
-            patched_content = source_text.replace(placeholder, minted_document_id)
-            preserved_path = _preserve_body(preserve_dir, minted_document_id, patched_content)
-            anomalies.append(conflict_reason)
-            # The create still landed -- corroborate its effect even
-            # though the patch never happens (steps 4+5 still apply).
-            post_state = plane_safety.run_post_write(client, project, minted_document_id, pre_state, timeout=timeout)
+    try:
+        # --- 1. PLANE-SAFETY steps 1+2 (pre-write, hard gate) --------------------
+        pre_state = plane_safety.run_pre_write(client, project, timeout=timeout)
+        if pre_state["abort"]:
             return _refusal(
                 operation,
-                conflict_reason,
+                pre_state["abort_reason"],
                 violations=[
                     {
-                        "path": "content_hash",
+                        "path": "plane_safety.sentinel",
                         "reason": (
-                            f"pre-patch reread hash {guard_hash!r} != put-echo hash "
-                            f"{expected_hash!r} (reread status={guard_status})"
+                            f"sentinel {plane_safety.SENTINEL_DOCUMENT_ID} did not echo through the "
+                            "surface about to be written -- refusing to write to a plane that may not "
+                            "be the intended one"
                         ),
                     }
                 ],
-                status=guard_status,
-                identity_posture=posture,
-                anomalies=anomalies,
-                document_id=minted_document_id,
-                preserved_path=preserved_path,
-                proofs={"hash_echo": "pass" if hash_echo_pass else "fail", "reverse_substitution": "not-attempted"},
-                plane_safety=plane_safety.build_report(pre_state, post_state, write_ok=True),
+                plane_safety=plane_safety.build_report(pre_state, None, write_ok=None),
                 source_sha256=source_sha256,
             )
 
-        # --- 4. documents.patch (called AT MOST ONCE) -------------------------
-        patched_content = source_text.replace(placeholder, minted_document_id)
-        patch_status, patch_body = client.request(
-            "PATCH", "document", f"/{encoded_id}", payload={"content": patched_content}
+        # --- 2. documents.put (the write; PROOF 1 source) ------------------------
+        put_payload: Dict[str, Any] = {
+            "project_id": project,
+            "title": title,
+            "content": source_text,
+            "document_subtype": subtype,
+        }
+        if subtype == "doc":
+            # Defensive no-op: only takes effect if the semantic
+            # handoff-detection guard fires on title/content; otherwise
+            # ignored and not stored (per the live dictionary's
+            # document.doc.confirm_subtype definition).
+            put_payload["confirm_subtype"] = True
+        if keywords:
+            put_payload["keywords"] = list(keywords)
+        if related:
+            put_payload["related_items"] = list(related)
+
+        put_status, put_body, put_meta = elr_identity.governed_call(
+            identity_ctx, client, "PUT", "document", "", payload=put_payload
         )
-        patch_performed = True
-        final_status = patch_status
+        if put_meta.get("refused"):
+            # AC-1: posture unknown -- refused locally, no network call made.
+            return _refusal(
+                operation,
+                "write_refused_unknown_identity",
+                violations=[{"path": "identity_posture", "reason": put_meta["refusal_reason"]}],
+                identity_posture=identity_ctx.posture,
+                anomalies=list(preflight_anomalies) + ["write-refused-local-unknown-posture"],
+                plane_safety=plane_safety.build_report(pre_state, None, write_ok=None),
+                source_sha256=source_sha256,
+            )
+        posture, posture_anomalies = classify_internal_posture(key_sent=key_sent, status_code=put_status)
+        anomalies: List[str] = list(preflight_anomalies) + list(posture_anomalies)
+        if put_meta.get("retried"):
+            # AC-3: exactly one agent.claim re-claim + retry happened.
+            anomalies.append("sci-reclaimed-and-retried")
 
-        ambiguous = patch_status == 0 or patch_status >= 500
-        if ambiguous:
-            anomalies.append("ambiguous-patch-echo")
-        elif not (200 <= patch_status < 300):
-            anomalies.append(f"patch_failed_http_{patch_status}")
-
-        if 200 <= patch_status < 300 and isinstance(patch_body, dict):
-            final_version = patch_body.get("version", final_version)
-            final_compliance_score = patch_body.get("compliance_score", final_compliance_score)
-
-        # --- 5. VERIFY-BY-REREAD (unconditional; never re-send) ---------------
-        reread_status, reread_body = client.request(
-            "GET", "document", f"/{encoded_id}", query={"include_content": "true"}
+        put_ok = 200 <= put_status < 300
+        put_doc = _extract_document(put_body)
+        minted_document_id = put_doc.get("document_id") or (
+            put_body.get("document_id") if isinstance(put_body, dict) else None
         )
-        reread_doc = _extract_document(reread_body)
-        stored_content = reread_doc.get("content")
+        put_content_hash = put_doc.get("content_hash")
+        put_size_bytes = put_doc.get("size_bytes")
+        put_compliance_score = put_doc.get("compliance_score") if "compliance_score" in put_doc else None
 
-        if reread_status != 200 or not isinstance(stored_content, str):
-            proof2_status = "fail"
-            anomalies.append("verify-reread-failed")
-        elif minted_document_id not in stored_content:
-            # The reverse-substitution hash check alone cannot tell
-            # "the patch applied cleanly and there was never a
-            # placeholder collision" apart from "the patch never
-            # actually applied" -- when nothing was substituted,
-            # reverse-substituting is a no-op and would trivially
-            # reproduce the source hash either way. Require positive
-            # evidence the substitution really happened: the minted id
-            # must actually be present in what got read back.
-            proof2_status = "fail"
-            anomalies.append("patch-did-not-apply-minted-id-absent")
-        else:
-            reconstructed = stored_content.replace(minted_document_id, placeholder)
-            reverse_sha256 = hashlib.sha256(reconstructed.encode("utf-8")).hexdigest()
-            proof2_status = "pass" if reverse_sha256 == source_sha256 else "fail"
-            if proof2_status == "fail":
-                anomalies.append("reverse-substitution-hash-mismatch")
-            final_content_hash = reread_doc.get("content_hash", final_content_hash)
-            final_size_bytes = reread_doc.get("size_bytes", final_size_bytes)
-            final_version = reread_doc.get("version", final_version)
-            if "compliance_score" in reread_doc:
-                final_compliance_score = reread_doc.get("compliance_score")
-            if ambiguous and proof2_status == "pass":
-                anomalies.append("ambiguous-patch-echo-recovered-via-reread")
+        if not put_ok or not minted_document_id:
+            anomalies.append(f"put_failed_http_{put_status}" if not put_ok else "put-response-missing-document-id")
+            return _refusal(
+                operation,
+                "put_failed",
+                violations=[{"path": "documents.put", "reason": f"status={put_status}"}],
+                status=put_status,
+                identity_posture=posture,
+                anomalies=anomalies,
+                plane_safety=plane_safety.build_report(pre_state, None, write_ok=False),
+                source_sha256=source_sha256,
+            )
 
-    # --- PLANE-SAFETY steps 4+5 (post-write corroboration) --------------------
-    post_state = plane_safety.run_post_write(client, project, minted_document_id, pre_state, timeout=timeout)
-    plane_report = plane_safety.build_report(pre_state, post_state, write_ok=True)
-    for anomaly in plane_report.get("anomalies") or []:
-        if anomaly not in anomalies:
-            anomalies.append(anomaly)
+        hash_echo_pass = bool(put_content_hash) and str(put_content_hash).strip().lower() == source_sha256
+        if not hash_echo_pass:
+            anomalies.append("put-content-hash-mismatch" if put_content_hash else "put-content-hash-missing")
 
-    if not has_placeholder:
-        # No self-reference to patch -- harvest version/content_hash/
-        # compliance_score from the post-write presence probe already
-        # fetched for plane-safety step 4, instead of an extra call.
-        target_probe = ((post_state.get("step4_post_probe") or {}).get("target")) or {}
-        final_version = target_probe.get("version", final_version)
-        final_content_hash = target_probe.get("content_hash", final_content_hash) or final_content_hash
-        final_size_bytes = target_probe.get("size_bytes", final_size_bytes) or final_size_bytes
-        if target_probe.get("compliance_score") is not None:
-            final_compliance_score = target_probe.get("compliance_score")
-        anomalies.append("no-placeholder-in-source-patch-skipped")
+        encoded_id = urllib.parse.quote(minted_document_id, safe="")
+        has_placeholder = placeholder in source_text
 
-    proofs = {"hash_echo": "pass" if hash_echo_pass else "fail", "reverse_substitution": proof2_status}
-    write_ok = hash_echo_pass and proof2_status in ("pass", "skip")
+        patch_performed = False
+        proof2_status = "skip"
+        reverse_sha256: Optional[str] = None
+        final_content_hash = put_content_hash
+        final_size_bytes = put_size_bytes
+        final_version = put_doc.get("version")
+        final_compliance_score = put_compliance_score
+        final_status = put_status
 
-    return build_digest(
-        operation,
-        write_ok,
-        final_status,
-        identity_posture=posture,
-        anomalies=anomalies,
-        document_id=minted_document_id,
-        version=final_version,
-        content_hash=final_content_hash,
-        size_bytes=final_size_bytes,
-        compliance_score=final_compliance_score,
-        source_sha256=source_sha256,
-        reverse_substituted_sha256=reverse_sha256,
-        proofs=proofs,
-        plane_safety=plane_report,
-        patch_performed=patch_performed,
-    )
+        if has_placeholder:
+            # --- 3. CONCURRENCY GUARD (metadata-only re-read) --------------------
+            conflict_reason, guard_status, guard_hash = check_concurrency(
+                client, encoded_id, str(put_content_hash or "").strip().lower()
+            )
+            expected_hash = str(put_content_hash or "").strip().lower()
+
+            if conflict_reason:
+                patched_content = source_text.replace(placeholder, minted_document_id)
+                preserved_path = _preserve_body(preserve_dir, minted_document_id, patched_content)
+                anomalies.append(conflict_reason)
+                # The create still landed -- corroborate its effect even
+                # though the patch never happens (steps 4+5 still apply).
+                post_state = plane_safety.run_post_write(
+                    client, project, minted_document_id, pre_state, timeout=timeout
+                )
+                return _refusal(
+                    operation,
+                    conflict_reason,
+                    violations=[
+                        {
+                            "path": "content_hash",
+                            "reason": (
+                                f"pre-patch reread hash {guard_hash!r} != put-echo hash "
+                                f"{expected_hash!r} (reread status={guard_status})"
+                            ),
+                        }
+                    ],
+                    status=guard_status,
+                    identity_posture=posture,
+                    anomalies=anomalies,
+                    document_id=minted_document_id,
+                    preserved_path=preserved_path,
+                    proofs={
+                        "hash_echo": "pass" if hash_echo_pass else "fail",
+                        "reverse_substitution": "not-attempted",
+                    },
+                    plane_safety=plane_safety.build_report(pre_state, post_state, write_ok=True),
+                    source_sha256=source_sha256,
+                )
+
+            # --- 4. documents.patch (called AT MOST ONCE) -------------------------
+            patched_content = source_text.replace(placeholder, minted_document_id)
+            patch_status, patch_body, patch_meta = elr_identity.governed_call(
+                identity_ctx, client, "PATCH", "document", f"/{encoded_id}", payload={"content": patched_content}
+            )
+            patch_performed = True
+            final_status = patch_status
+            if patch_meta.get("retried") and "sci-reclaimed-and-retried" not in anomalies:
+                # AC-3: exactly one agent.claim re-claim + retry happened.
+                anomalies.append("sci-reclaimed-and-retried")
+
+            ambiguous = patch_status == 0 or patch_status >= 500
+            if ambiguous:
+                anomalies.append("ambiguous-patch-echo")
+            elif not (200 <= patch_status < 300):
+                anomalies.append(f"patch_failed_http_{patch_status}")
+
+            if 200 <= patch_status < 300 and isinstance(patch_body, dict):
+                final_version = patch_body.get("version", final_version)
+                final_compliance_score = patch_body.get("compliance_score", final_compliance_score)
+
+            # --- 5. VERIFY-BY-REREAD (unconditional; never re-send) ---------------
+            reread_status, reread_body = client.request(
+                "GET", "document", f"/{encoded_id}", query={"include_content": "true"}
+            )
+            reread_doc = _extract_document(reread_body)
+            stored_content = reread_doc.get("content")
+
+            if reread_status != 200 or not isinstance(stored_content, str):
+                proof2_status = "fail"
+                anomalies.append("verify-reread-failed")
+            elif minted_document_id not in stored_content:
+                # The reverse-substitution hash check alone cannot tell
+                # "the patch applied cleanly and there was never a
+                # placeholder collision" apart from "the patch never
+                # actually applied" -- when nothing was substituted,
+                # reverse-substituting is a no-op and would trivially
+                # reproduce the source hash either way. Require positive
+                # evidence the substitution really happened: the minted id
+                # must actually be present in what got read back.
+                proof2_status = "fail"
+                anomalies.append("patch-did-not-apply-minted-id-absent")
+            else:
+                reconstructed = stored_content.replace(minted_document_id, placeholder)
+                reverse_sha256 = hashlib.sha256(reconstructed.encode("utf-8")).hexdigest()
+                proof2_status = "pass" if reverse_sha256 == source_sha256 else "fail"
+                if proof2_status == "fail":
+                    anomalies.append("reverse-substitution-hash-mismatch")
+                final_content_hash = reread_doc.get("content_hash", final_content_hash)
+                final_size_bytes = reread_doc.get("size_bytes", final_size_bytes)
+                final_version = reread_doc.get("version", final_version)
+                if "compliance_score" in reread_doc:
+                    final_compliance_score = reread_doc.get("compliance_score")
+                if ambiguous and proof2_status == "pass":
+                    anomalies.append("ambiguous-patch-echo-recovered-via-reread")
+
+        # --- PLANE-SAFETY steps 4+5 (post-write corroboration) --------------------
+        post_state = plane_safety.run_post_write(client, project, minted_document_id, pre_state, timeout=timeout)
+        plane_report = plane_safety.build_report(pre_state, post_state, write_ok=True)
+        for anomaly in plane_report.get("anomalies") or []:
+            if anomaly not in anomalies:
+                anomalies.append(anomaly)
+
+        if not has_placeholder:
+            # No self-reference to patch -- harvest version/content_hash/
+            # compliance_score from the post-write presence probe already
+            # fetched for plane-safety step 4, instead of an extra call.
+            target_probe = ((post_state.get("step4_post_probe") or {}).get("target")) or {}
+            final_version = target_probe.get("version", final_version)
+            final_content_hash = target_probe.get("content_hash", final_content_hash) or final_content_hash
+            final_size_bytes = target_probe.get("size_bytes", final_size_bytes) or final_size_bytes
+            if target_probe.get("compliance_score") is not None:
+                final_compliance_score = target_probe.get("compliance_score")
+            anomalies.append("no-placeholder-in-source-patch-skipped")
+
+        proofs = {"hash_echo": "pass" if hash_echo_pass else "fail", "reverse_substitution": proof2_status}
+        write_ok = hash_echo_pass and proof2_status in ("pass", "skip")
+
+        return build_digest(
+            operation,
+            write_ok,
+            final_status,
+            identity_posture=posture,
+            anomalies=anomalies,
+            document_id=minted_document_id,
+            version=final_version,
+            content_hash=final_content_hash,
+            size_bytes=final_size_bytes,
+            compliance_score=final_compliance_score,
+            source_sha256=source_sha256,
+            reverse_substituted_sha256=reverse_sha256,
+            proofs=proofs,
+            plane_safety=plane_report,
+            patch_performed=patch_performed,
+        )
+    finally:
+        # AC-3: retire-on-exit (or cache, with --keep-session). No-op for
+        # a non-credential-bound posture. This is the SAME
+        # finalize_identity() every ELR entry point calls -- see its
+        # docstring for why this must never grow a checkout.* call.
+        elr_identity.finalize_identity(
+            identity_ctx, client, keep_session=keep_session, profile_name=profile_name, timeout=timeout
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +622,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PRESERVE_DIR,
         help=f"Directory for HALT-preserved composed bodies (default: {DEFAULT_PRESERVE_DIR}).",
     )
+    parser.add_argument(
+        "--keep-session",
+        action="store_true",
+        default=False,
+        help=(
+            "When credential-bound, cache the resolved session in "
+            "~/.enceladus/session.json (0600) for reuse instead of retiring "
+            "it on exit (ENC-TSK-P75 AC-3)."
+        ),
+    )
     return parser
 
 
@@ -583,6 +650,7 @@ def main(argv: Optional[list] = None) -> int:
         timeout=args.timeout,
         profile_name=args.profile,
         preserve_dir=args.preserve_dir,
+        keep_session=args.keep_session,
     )
     # Digest-only: bodies (source, composed, stored, preserved) are
     # NEVER printed here, on any path.
