@@ -34,6 +34,11 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         "documents.search": {"tool": "documents_search"},
         "documents.get": {"tool": "documents_get"},
         "documents.list": {"tool": "documents_list"},
+        # ENC-TSK-P73 / FR-B3-2..4: read-only document manifest/history/diff
+        # forwarding actions (backend: ENC-TSK-P69 manifest, ENC-TSK-P72 history/diff).
+        "documents.manifest": {"tool": "documents_manifest"},
+        "documents.history": {"tool": "documents_history"},
+        "documents.diff": {"tool": "documents_diff"},
         "reference.search": {"tool": "reference_search"},
         "deploy.state_get": {"tool": "deploy_state_get"},
         "deploy.history": {"tool": "deploy_history"},
@@ -100,6 +105,10 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         "documents.check_policy": {"tool": "check_document_policy"},
         "documents.put": {"tool": "documents_put", "requires_governance_hash": True},
         "documents.patch": {"tool": "documents_patch", "requires_governance_hash": True},
+        # ENC-TSK-P73 / FR-B3-1: governed section-level patch (ENC-TSK-P71 backend handler).
+        "documents.patch_section": {
+            "tool": "documents_patch_section", "requires_governance_hash": True,
+        },
         "deploy.submit": {"tool": "deploy_submit", "requires_governance_hash": True},
         "deploy.state_set": {"tool": "deploy_state_set", "requires_governance_hash": True},
         "deploy.trigger": {"tool": "deploy_trigger"},

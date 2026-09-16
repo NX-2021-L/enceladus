@@ -2108,6 +2108,7 @@ def _document_api_request(
     path: str = "",
     payload: Optional[Dict[str, Any]] = None,
     query: Optional[Dict[str, Any]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     base = DOCUMENT_API_BASE.rstrip("/")
     route = path if path.startswith("/") else (f"/{path}" if path else "")
@@ -2123,6 +2124,12 @@ def _document_api_request(
     }
     if DOCUMENT_API_INTERNAL_API_KEY:
         headers["X-Coordination-Internal-Key"] = DOCUMENT_API_INTERNAL_API_KEY
+    # ENC-TSK-P73: allows callers (e.g. documents_patch_section) to set the
+    # If-Match precondition header from a body-supplied if_match value.
+    if extra_headers:
+        for key, value in extra_headers.items():
+            if value:
+                headers[key] = str(value)
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
@@ -3527,7 +3534,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
                                     "type": "string",
                                     "description": (
                                         "Action identifier such as tracker.create, documents.patch, "
-                                        "deploy.submit, checkout.advance, or github.create_issue."
+                                        "documents.patch_section, deploy.submit, checkout.advance, "
+                                        "or github.create_issue."
                                     ),
                                 },
                                 "arguments": {
@@ -6527,7 +6535,16 @@ async def _documents_search(args: dict) -> list[TextContent]:
 async def _documents_get(args: dict) -> list[TextContent]:
     doc_id = args["document_id"]
     include_content = args.get("include_content", True)
-    query = {"include_content": "true" if include_content else "false"}
+    query: Dict[str, Any] = {"include_content": "true" if include_content else "false"}
+    # ENC-TSK-P73 / FR-B3-1..2: digest_only resolves to the same document_api
+    # handler as documents.manifest (document.digest); at_version/at_event
+    # are time-travel read passthrough for the ENC-TSK-P72 history surface.
+    if args.get("digest_only") is not None:
+        query["digest_only"] = "true" if args["digest_only"] else "false"
+    for key in ("at_version", "at_event"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
     resp = _document_api_request("GET", f"/{urllib.parse.quote(str(doc_id), safe='')}", query=query)
     return _result_text(resp)
 
@@ -6672,6 +6689,122 @@ async def _documents_patch(args: dict) -> list[TextContent]:
             document_id,
         )
     result = _enrich_document_compliance_response(result)
+    return _result_text(result)
+
+
+# ENC-TSK-P73 / FR-B3-1: same denylist-driven passthrough convention as
+# _DOCUMENTS_PATCH_BODY_DENYLIST (ENC-ISS-158) -- new patch_section fields
+# (anchor, op, body, if_match, include_heading, rebase_headings,
+# idempotency_key, caused_by, dry_run) forward automatically with no
+# whitelist edit required here.
+_DOCUMENTS_PATCH_SECTION_BODY_DENYLIST = frozenset({"governance_hash", "document_id"})
+
+
+async def _documents_patch_section(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-1: execute action forwarding to
+    POST /documents/{document_id}/sections (ENC-TSK-P71 patch_section handler).
+
+    if_match is forwarded in the body (denylist passthrough) AND copied onto
+    the If-Match HTTP header, since document_api's guarded-write precondition
+    (ENC-TSK-P70 convention) is read from the header.
+    """
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+    policy_error = _enforce_document_storage_policy(
+        operation="documents_patch_section",
+        storage_target="docstore_api",
+        args=args,
+    )
+    if policy_error:
+        return _result_text(policy_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+
+    body: Dict[str, Any] = {}
+    for key in args:
+        if key in _DOCUMENTS_PATCH_SECTION_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
+
+    extra_headers: Dict[str, str] = {}
+    if_match = body.get("if_match")
+    if if_match:
+        extra_headers["If-Match"] = str(if_match)
+
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request(
+        "POST",
+        path=f"/{encoded_id}/sections",
+        payload=body,
+        extra_headers=extra_headers or None,
+    )
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] documents_patch_section: document API auth failed for document %s — "
+            "check ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
+            document_id,
+        )
+    result = _enrich_document_compliance_response(result)
+    return _result_text(result)
+
+
+async def _documents_manifest(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-2: search action forwarding to
+    GET /documents/{document_id}/manifest (ENC-TSK-P69 document.digest)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    if args.get("digest_only") is not None:
+        query["digest_only"] = "true" if args["digest_only"] else "false"
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/manifest", query=query or None)
+    return _result_text(result)
+
+
+async def _documents_history(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-3: search action forwarding to
+    GET /documents/{document_id}/history (backend lands with ENC-TSK-P72)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    for key in ("since", "until", "actor", "op", "block_id", "cursor", "page_size"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/history", query=query or None)
+    return _result_text(result)
+
+
+async def _documents_diff(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-4: search action forwarding to
+    GET /documents/{document_id}/diff (backend lands with ENC-TSK-P72)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    for key in ("from", "to"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/diff", query=query or None)
     return _result_text(result)
 
 
@@ -8807,6 +8940,15 @@ async def _connection_health(args: dict) -> list[TextContent]:
         "tracker_api_internal_api_key_configured": bool(TRACKER_API_INTERNAL_API_KEY),
     }
     resp["graph_index"] = _graph_health_check()
+    # ENC-TSK-P73 / AC-3: computed from the live action registry (not
+    # hardcoded) so agents feature-detect docstore surface support instead
+    # of probing with a throwaway call.
+    resp["docstore_capabilities"] = {
+        "patch_section": "documents.patch_section" in _EXECUTE_ACTIONS,
+        "manifest": "documents.manifest" in _SEARCH_ACTIONS,
+        "history": "documents.history" in _SEARCH_ACTIONS,
+        "prefix_map": "projects.prefix_map" in _SEARCH_ACTIONS,
+    }
     return _result_text(resp)
 
 
@@ -9967,6 +10109,11 @@ _TOOL_HANDLERS = {
     "documents_list": _documents_list,
     "documents_put": _documents_put,
     "documents_patch": _documents_patch,
+    # ENC-TSK-P73 / FR-B3-1..4: patch_section + manifest/history/diff read forwarding
+    "documents_patch_section": _documents_patch_section,
+    "documents_manifest": _documents_manifest,
+    "documents_history": _documents_history,
+    "documents_diff": _documents_diff,
     "check_document_policy": _check_document_policy,
     "reference_search": _reference_search,
     "get_code_map": _get_code_map,
