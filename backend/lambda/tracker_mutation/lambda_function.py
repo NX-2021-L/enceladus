@@ -523,8 +523,12 @@ ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
     default=True,
 )
 
-# §5.2 escalation status lifecycle. `failed` is terminal: a corrective
-# request is a NEW escalation (exactly-once semantics stay trivial).
+# §5.2 escalation status lifecycle. `failed` is retryable in place
+# (ENC-TSK-P89): a failed apply (e.g. a DynamoDB ValidationException on the
+# target write) can be re-driven via failed->applying without minting a new
+# escalation, so long as applied_at is still unset. The conditional write on
+# the current status value (approved OR failed) keeps exactly-once semantics
+# even when two re-drives race.
 _ESCALATION_FSM = {
     "requested": {"approved", "denied", "denied_with_guidance"},
     "approved": {"applying"},
@@ -532,7 +536,7 @@ _ESCALATION_FSM = {
     "denied": set(),
     "denied_with_guidance": set(),
     "applied": set(),
-    "failed": set(),
+    "failed": {"applying"},
 }
 _ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
 _ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
@@ -718,6 +722,46 @@ def _apply_deploy_arc_change(project_id: str, escalation: Dict, target: Dict) ->
     return {"before": before, "after": after, "waived_fields": []}
 
 
+# ENC-ISS-759: bookkeeping paths this applier owns outright. A field_values
+# entry that names one of these is dropped rather than rendered as a second
+# SET clause on the same top-level document path -- e.g. ENC-ESC-105/106
+# store field_values={"status": <target_status>} restating payload.target_status
+# verbatim, which under the old code made #st and #fv{i} both resolve to the
+# top-level `status` path; DynamoDB rejects the whole UpdateItem with
+# ValidationException "Two document paths overlap" and NOTHING gets written
+# (no-partial-write -- the approval stays durable so this is safely retried
+# once fixed). The authoritative value for a reserved path always wins.
+_RESERVED_OVERRIDE_PATHS = {
+    "status", "updated_at", "last_update_note", "sync_version",
+    "history", "escalation_provenance", "escalated_closure", "closed_count",
+}
+
+
+def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
+    """Render a SET (+ optional ADD) UpdateExpression from an ordered list of
+    (top_level_path, expression_snippet) pairs, one snippet per DISTINCT
+    top-level attribute path.
+
+    Raises ValueError if the same top_level_path is supplied twice. DynamoDB
+    itself rejects an UpdateExpression that names one document path more than
+    once ("Two document paths overlap"); this raises the same defect in-process
+    so a future regression fails a unit test instead of a live UpdateItem call
+    (ENC-ISS-759).
+    """
+    seen = set()
+    set_clauses = []
+    for path, expr in ordered_assignments:
+        if path in seen:
+            raise ValueError(
+                f"duplicate top-level path in UpdateExpression: {path!r}")
+        seen.add(path)
+        set_clauses.append(expr)
+    expression = "SET " + ", ".join(set_clauses)
+    if add_clauses:
+        expression += " ADD " + ", ".join(add_clauses)
+    return expression
+
+
 def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict) -> Dict:
     """§5.3 handler 2 apply: land the record in target_status regardless of
     path legality, with supplied field_values verbatim and §5.6 waiver
@@ -725,6 +769,12 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalated_closure=true (ENC-FTR-118 metric filter) and, for tasks,
     increment closed_count for organic-gate parity. Single atomic UpdateItem —
     a handler exception leaves the target untouched (no-partial-write).
+
+    field_values keys that name a reserved bookkeeping path (see
+    _RESERVED_OVERRIDE_PATHS, ENC-ISS-759) are dropped rather than written —
+    the applier's own value for that path is authoritative — and recorded in
+    the returned `after["dropped_field_values"]` plus the provenance note so
+    the audit trail shows what was dropped and why.
     """
     payload = escalation.get("payload") or {}
     target_status = str(payload.get("target_status") or "").strip()
@@ -740,24 +790,33 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalation_id = str(escalation.get("item_id") or "")
     now = _now_z()
     before = {"status": target.get("status")}
+
+    dropped_field_values = {
+        field: value for field, value in field_values.items()
+        if field in _RESERVED_OVERRIDE_PATHS
+    }
+    clean_field_values = {
+        field: value for field, value in field_values.items()
+        if field not in _RESERVED_OVERRIDE_PATHS
+    }
+
     waivable = _escalation_waivable_fields(target, target_status)
     waived = [
         field for field in waivable
-        if field not in field_values and not target.get(field)
+        if field not in _RESERVED_OVERRIDE_PATHS
+        and field not in clean_field_values
+        and not target.get(field)
     ]
     is_closure = target_status == _CLOSED_STATUS.get(record_type, "closed")
-    after = {"status": target_status, "field_values": sorted(field_values.keys()),
+    after = {"status": target_status, "field_values": sorted(clean_field_values.keys()),
              "escalated_closure": is_closure}
+    if dropped_field_values:
+        after["dropped_field_values"] = sorted(dropped_field_values.keys())
     note = _escalation_provenance_note(escalation, before, after, waived)
+    if dropped_field_values:
+        note += (" dropped_field_values="
+                 f"{json.dumps(sorted(dropped_field_values.keys()))}")
 
-    update_parts = [
-        "#st = :target_status",
-        "updated_at = :now",
-        "last_update_note = :note",
-        "sync_version = if_not_exists(sync_version, :zero) + :one",
-        "history = list_append(if_not_exists(history, :empty), :hentry)",
-        "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)",
-    ]
     names = {"#st": "status"}
     values = {
         ":target_status": _ser_s(target_status),
@@ -773,26 +832,40 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         }}]},
         ":esc": {"L": [_ser_s(escalation_id)]},
     }
-    for index, (field, value) in enumerate(sorted(field_values.items())):
+
+    assignments = [
+        ("status", "#st = :target_status"),
+        ("updated_at", "updated_at = :now"),
+        ("last_update_note", "last_update_note = :note"),
+        ("sync_version", "sync_version = if_not_exists(sync_version, :zero) + :one"),
+        ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
+        ("escalation_provenance",
+         "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
+    ]
+
+    for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
         value_key = f":fv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = str(field)
         values[value_key] = _ser_value(value)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
     for index, field in enumerate(waived):
         name_key = f"#wv{index}"
         value_key = f":wv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = field
         values[value_key] = _escalation_waiver_sentinel(escalation_id, now)
-    update_expression = "SET " + ", ".join(update_parts)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
+    add_clauses = []
     if is_closure:
-        update_parts.append("escalated_closure = :esc_closure")
+        assignments.append(("escalated_closure", "escalated_closure = :esc_closure"))
         values[":esc_closure"] = {"BOOL": True}
-        update_expression = "SET " + ", ".join(update_parts)
         if record_type == "task":
-            update_expression += " ADD closed_count :one_count"
+            add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
+
+    update_expression = _render_update_expression(assignments, add_clauses)
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -7866,8 +7939,43 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
     return _response(200, {"success": True, "escalation": _escalation_public(item)})
 
 
+_ESCALATION_LIST_MAX_PAGES = 50  # ENC-ISS-699: bounded exhaustion guard,
+# mirrors the tools/enceladus-mcp-server/server.py _TRACKER_LIST_MAX_EXHAUST_PAGES
+# pattern (never walk LastEvaluatedKey unbounded).
+
+
 def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
-    """GET /{project}/escalation — list with status/target/session filters (§5.4)."""
+    """GET /{project}/escalation — list with status/target/session filters (§5.4).
+
+    ENC-ISS-699: the prior version queried once, kept at most `page_size`
+    items, and returned no cursor at all -- a caller could never see past
+    whatever fit in that single page (observed: total capped at 50 even
+    though prod carries ~105 escalations).
+
+    The cursor is a value-based (created_at, item_id) boundary, not a raw
+    DynamoDB LastEvaluatedKey. Two bugs came from tying the cursor to the raw
+    scan position instead of the returned/sorted page boundary:
+
+      1. Whenever a single query() response already held more than
+         `page_size` matching items *and* was DynamoDB's last page (no
+         LastEvaluatedKey), the old code emitted no cursor at all -- the
+         accumulate-then-truncate-to-page_size step silently dropped every
+         item past the threshold with no way to ever reach it.
+      2. Because results are re-sorted by created_at (globally, across
+         accumulated raw pages) before truncation, a cursor built from the
+         raw LastEvaluatedKey resumed the *unsorted* DynamoDB scan strictly
+         after that key -- which can skip items that were already fetched
+         in this call but sorted below the page_size cutoff, and are not
+         positioned after the raw key in DynamoDB's own key order.
+
+    A cursor built from the boundary values of the last item actually
+    returned sidesteps both: the next call re-filters (`created_at`,
+    `item_id`) strictly "after" that boundary in the same sort order used
+    for truncation, so it can never skip an item regardless of how many raw
+    DynamoDB pages or query() calls sit behind it. The raw-scan walk below is
+    still bounded by _ESCALATION_LIST_MAX_PAGES per call purely to cap
+    per-invocation DynamoDB cost; it is orthogonal to cursor correctness.
+    """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
 
@@ -7884,6 +7992,20 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
         page_size = 50
+    cursor = str(query_params.get("next_cursor") or "").strip()
+
+    after_created_at = None
+    after_id = None
+    if cursor:
+        try:
+            import base64
+            cursor_obj = json.loads(
+                base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+            )
+            after_created_at = str(cursor_obj["after_created_at"])
+            after_id = str(cursor_obj["after_id"])
+        except Exception:
+            return _error(400, "Invalid next_cursor")
 
     ddb = _get_ddb()
     key_values = {
@@ -7902,8 +8024,17 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     if session_filter:
         filter_clauses.append("requested_by.session_id = :session_filter")
         key_values[":session_filter"] = _ser_s(session_filter)
+    if after_created_at is not None:
+        # Sort order is (created_at, item_id) descending -- "after" the
+        # boundary means strictly lower in that order.
+        filter_clauses.append(
+            "(created_at < :after_created_at OR "
+            "(created_at = :after_created_at AND item_id < :after_id))"
+        )
+        key_values[":after_created_at"] = _ser_s(after_created_at)
+        key_values[":after_id"] = _ser_s(after_id)
 
-    kwargs = {
+    kwargs: Dict[str, Any] = {
         "TableName": DYNAMODB_TABLE,
         "KeyConditionExpression": (
             "project_id = :pid AND begins_with(record_id, :esc_prefix)"
@@ -7916,27 +8047,50 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["ExpressionAttributeNames"] = expression_names
 
     escalations = []
+    pages_fetched = 0
+    last_key = None
     try:
         while True:
             resp = ddb.query(**kwargs)
             escalations.extend(
                 _escalation_public(raw) for raw in resp.get("Items", [])
             )
+            pages_fetched += 1
             last_key = resp.get("LastEvaluatedKey")
-            if not last_key or len(escalations) >= page_size:
+            if not last_key:
+                break
+            if len(escalations) >= page_size or pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
                 break
             kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
         logger.error("escalation list query failed: %s", exc)
         return _error(500, "Database query failed.")
 
-    escalations.sort(key=lambda esc: esc.get("created_at", ""), reverse=True)
-    escalations = escalations[:page_size]
-    return _response(200, {
+    escalations.sort(key=lambda esc: (esc.get("created_at", ""), esc.get("item_id", "")), reverse=True)
+    truncated = len(escalations) > page_size
+    visible = escalations[:page_size]
+
+    next_cursor = ""
+    if truncated or last_key:
+        boundary = visible[-1] if visible else None
+        if boundary is not None:
+            import base64
+            cursor_payload = {
+                "after_created_at": boundary.get("created_at", ""),
+                "after_id": boundary.get("item_id", ""),
+            }
+            next_cursor = base64.urlsafe_b64encode(
+                json.dumps(cursor_payload).encode("utf-8")
+            ).decode("ascii")
+
+    payload: Dict[str, Any] = {
         "success": True,
-        "escalations": escalations,
-        "count": len(escalations),
-    })
+        "escalations": visible,
+        "count": len(visible),
+    }
+    if next_cursor:
+        payload["next_cursor"] = next_cursor
+    return _response(200, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -7960,8 +8114,15 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
                                extra_names: Optional[Dict] = None,
                                extra_values: Optional[Dict] = None,
                                extra_sets: Optional[list] = None,
-                               require_not_applied: bool = False) -> bool:
+                               require_not_applied: bool = False,
+                               extra_events: Optional[list] = None) -> bool:
     """Conditionally walk the escalation FSM one edge, appending the §11.2 event.
+
+    `extra_events` (ENC-TSK-P89): additional pre-built event dicts (ddb attribute
+    shape, e.g. from `_escalation_event`) appended to the same `events` list in
+    the same atomic write — used by the failed->applying retry path to record a
+    "retry" history entry alongside the ordinary to_status event, without a
+    second write and without disturbing the prior failure's audit trail.
 
     Returns False (without raising) when the ConditionExpression loses — the
     concurrent-applier no-op path of the §5.5 idempotency contract.
@@ -7976,12 +8137,13 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
     ] + (extra_sets or [])
     names = {"#st": "status", "#ev": "events"}
     names.update(extra_names or {})
+    event_list = [_escalation_event(to_status, actor, detail=detail)] + list(extra_events or [])
     values = {
         ":to_status": _ser_s(to_status),
         ":from_status": _ser_s(from_status),
         ":now": _ser_s(now),
         ":empty": {"L": []},
-        ":event": {"L": [_escalation_event(to_status, actor, detail=detail)]},
+        ":event": {"L": event_list},
     }
     values.update(extra_values or {})
     condition = "#st = :from_status"
@@ -8035,14 +8197,21 @@ def _emit_escalation_applied_event(project_id: str, escalation: Dict,
 def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) -> Dict:
     """POST /{project}/escalation/{id}/apply — applyEscalatedMutation (§5.5).
 
-    Sequence: (1) approved + applied_at-null guard; (2) conditional
-    approved→applying transition (the concurrency gate — a losing racer
-    no-ops); (3) fresh target read; (4) expected_version drift was surfaced
-    at approval time, proceed on io's informed approval; (5) registry handler
-    apply — one atomic UpdateItem on the target; (6) provenance is stamped
-    inside that same write; (7) applying→applied with applied_at + result.
-    On handler exception: applying→failed with the error in result and no
-    partial target write.
+    Sequence: (1) approved-or-failed + applied_at-null guard; (2) conditional
+    approved→applying OR failed→applying transition (the concurrency gate — a
+    losing racer no-ops); (3) fresh target read; (4) expected_version drift was
+    surfaced at approval time, proceed on io's informed approval; (5) registry
+    handler apply — one atomic UpdateItem on the target; (6) provenance is
+    stamped inside that same write; (7) applying→applied with applied_at +
+    result. On handler exception: applying→failed with the error in result and
+    no partial target write.
+
+    ENC-TSK-P89: a prior failed apply is retryable — status='failed' with
+    applied_at still unset re-drives through the same approved-path gate
+    (failed→applying is now a legal FSM edge), incrementing retry_count and
+    appending a 'retry' history event, without erasing the first failure's
+    audit trail (its event + result are appended-to, never overwritten, until
+    a new terminal transition lands).
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
@@ -8072,9 +8241,11 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "status": "applied",
             "reason": "applied_at already set — exactly-once guard (§5.5 step 1)",
         })
-    if status != "approved":
+    is_retry = status == "failed"
+    if status != "approved" and not is_retry:
         return _error(409, (
-            f"Escalation {escalation_id} is '{status}', not 'approved'. "
+            f"Escalation {escalation_id} is '{status}'. Apply "
+            "applies only while status=approved or failed (applied_at unset). "
             "Only the Cognito-human approval flow can authorize application."
         ))
 
@@ -8082,11 +8253,25 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
 
-    # Concurrency gate: exactly one applier wins approved→applying.
+    # Concurrency gate: exactly one applier wins approved→applying (or, for a
+    # re-drive, failed→applying). The conditional write on the CURRENT status
+    # value keeps this exactly-once even when two racing re-drives both fire.
+    transition_kwargs: Dict[str, Any] = {
+        "detail": {"target_record_id": escalation.get("target_record_id")},
+        "require_not_applied": True,
+    }
+    if is_retry:
+        transition_kwargs["extra_sets"] = [
+            "retry_count = if_not_exists(retry_count, :zero) + :one",
+        ]
+        transition_kwargs["extra_values"] = {":zero": {"N": "0"}, ":one": {"N": "1"}}
+        transition_kwargs["extra_events"] = [_escalation_event(
+            "retry", actor,
+            detail={"description": "re-drive after failed apply (ENC-TSK-P89)"},
+        )]
     if not _escalation_fsm_transition(
-        project_id, escalation_id, "approved", "applying", actor,
-        detail={"target_record_id": escalation.get("target_record_id")},
-        require_not_applied=True,
+        project_id, escalation_id, status, "applying", actor,
+        **transition_kwargs,
     ):
         return _response(200, {
             "success": True, "no_op": True, "escalation_id": escalation_id,

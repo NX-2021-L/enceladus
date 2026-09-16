@@ -708,8 +708,16 @@ def _ser_value(val: Any) -> Dict:
     return _ser_s(str(val))
 
 
-# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic).
+# ESC/GEN mirror backend/lambda/tracker_mutation/lambda_function.py
+# _ID_SEGMENT_TO_TYPE (ENC-ISS-699) so tracker.get / get_compact_context
+# (mode="record") resolve an ENC-ESC-NNN or ENC-GEN-NNN id instead of
+# raising "Unknown type segment". Escalations stay OUT of any generic
+# record-type allow-list on the write side (see that file's ENC-FTR-121
+# comment) -- this addition only affects ID parsing / key-building on the
+# read path.
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson",
+                       "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
 _DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
 _RELATION_ID_FIELDS = {
@@ -826,6 +834,22 @@ def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
     if not record_type:
         raise ValueError(f"Unknown type segment {type_seg!r} in {record_id!r}")
     return project_id, record_type, record_id
+
+
+def _unwrap_tracker_envelope(resp: Dict[str, Any], record_type: str) -> Dict[str, Any]:
+    """Unwrap the tracker-mutation backend's per-record-type response envelope.
+
+    Every record type's GET response nests the record under a top-level
+    "record" key -- except escalation: _handle_escalation_get (backend
+    tracker_mutation lambda) nests it under "escalation" instead. Plain
+    ``resp.get("record", resp)`` found no "record" key for an escalation
+    response and fell through to the whole ``{"success": ..., "escalation":
+    {...}}`` wrapper, leaving every field (status/title/priority/...) empty.
+    See ENC-ISS-699 / ENC-TSK-P89.
+    """
+    if record_type == "escalation":
+        return resp.get("escalation", resp)
+    return resp.get("record", resp)
 
 
 def _tracker_key(record_id: str) -> Dict[str, Dict]:
@@ -5697,7 +5721,7 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return _result_text(resp)
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
     # Add completeness score (ENC-FTR-013 ontology)
     record["ontology"] = _compute_completeness_score(record)
     # Summary mode: strip verbose fields unless include_history=true
@@ -5743,7 +5767,7 @@ def _manifest_fetch_record(record_id: str) -> Tuple[Optional[Dict[str, Any]], Op
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return None, {"error_payload": resp, "record_id": record_id}
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
     return record, None
 
 
@@ -5939,7 +5963,7 @@ async def _tracker_validation_rules(args: dict) -> list[TextContent]:
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return _result_text(resp)
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
 
     current_status = _normalized_status(record.get("status"))
     valid_forward = sorted(TRACKER_VALID_TRANSITIONS.get(record_type, {}).get(current_status, set()))
@@ -6092,12 +6116,27 @@ async def _tracker_list(args: dict) -> list[TextContent]:
 
     def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
         params: Dict[str, Any] = {"page_size": page_size}
-        if record_type:
-            params["type"] = record_type
         if status_filter:
             params["status"] = status_filter
         if page_cursor:
             params["next_cursor"] = page_cursor
+        if record_type == "escalation":
+            # ENC-ISS-699: escalations are deliberately NOT a member of the
+            # backend's _RECORD_TYPES (generic CRUD surface never touches
+            # them, see backend/lambda/tracker_mutation/lambda_function.py),
+            # so the generic GET /{project}?type=escalation path can't see
+            # them at all. Route to the dedicated, now-paginated escalation
+            # list endpoint instead and normalize its `escalations` key to
+            # `records` so the rest of this function (summary, cursoring,
+            # total accounting) is unchanged for every record type.
+            resp = _tracker_api_request(
+                "GET", f"/{project_id}/escalation/list", query=params)
+            if isinstance(resp, dict) and not resp.get("error") and "escalations" in resp:
+                resp = dict(resp)
+                resp["records"] = resp.pop("escalations")
+            return resp
+        if record_type:
+            params["type"] = record_type
         return _tracker_api_request("GET", f"/{project_id}", query=params)
 
     # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
@@ -6273,7 +6312,7 @@ async def _tracker_relate(args: dict) -> list[TextContent]:
     get_resp = _tracker_api_request("GET", f"/{project_id}/{source_type}/{source_rid}")
     if get_resp.get("error"):
         return _result_text(get_resp)
-    record = get_resp.get("record", get_resp)
+    record = _unwrap_tracker_envelope(get_resp, source_type)
     current_ids = [str(x).strip().upper() for x in (record.get(field) or [])]
     if target_id.upper() in current_ids:
         return _result_text({
@@ -7892,8 +7931,10 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     record_resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if not isinstance(record_resp, dict) or record_resp.get("error"):
         return _result_text(record_resp or {"error": "Failed to fetch record"})
-    # Unwrap record envelope — API returns {"record": {...}} (ENC-ISS-110)
-    record_resp = record_resp.get("record", record_resp)
+    # Unwrap record envelope — API returns {"record": {...}} for every type
+    # except escalation, which nests under {"escalation": {...}} instead
+    # (ENC-ISS-110; escalation case fixed under ENC-TSK-P89 / ENC-ISS-699).
+    record_resp = _unwrap_tracker_envelope(record_resp, record_type)
 
     # Build compact record core
     budget_used = 0
