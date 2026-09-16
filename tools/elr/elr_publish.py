@@ -105,6 +105,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elr_lib import identity as elr_identity  # noqa: E402
 from elr_lib import plane_safety  # noqa: E402
+from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -300,6 +301,7 @@ def publish_document(
     profile_name: str = "internal",
     preserve_dir: str = DEFAULT_PRESERVE_DIR,
     keep_session: bool = False,
+    environment_profile_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     operation = "elr_publish.publish"
 
@@ -324,7 +326,10 @@ def publish_document(
         refusal["source_sha256"] = source_sha256
         return refusal
 
-    config = get_profile(profile_name)
+    # ENC-TSK-P77: `profile_name` stays the TRANSPORT profile (unchanged
+    # contract); `environment_profile_name` is the NEW "prod"/"v4-gamma"
+    # axis, threaded from --profile.
+    config = get_profile(profile_name, environment_profile_name=environment_profile_name)
     client = InternalClient(config, timeout=timeout)
     key_sent = bool(config.key_for("document"))
 
@@ -613,9 +618,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=20, help="Request timeout in seconds (default: 20).")
     parser.add_argument(
         "--profile",
-        default="internal",
-        choices=["internal"],
-        help="ELR profile to use (only 'internal' can reach the document API).",
+        default=elr_profiles.PROFILE_PROD,
+        choices=list(elr_profiles.VALID_ENVIRONMENT_PROFILES),
+        help=(
+            "ELR ENVIRONMENT profile (ENC-TSK-P77) -- which deployed "
+            "Enceladus environment to publish to (default: prod; "
+            "ENCELADUS_PROFILE env var also selects this). Publish "
+            "always uses the 'internal' transport."
+        ),
     )
     parser.add_argument(
         "--preserve-dir",
@@ -648,7 +658,7 @@ def main(argv: Optional[list] = None) -> int:
         related=_split_csv(args.related),
         placeholder=args.placeholder,
         timeout=args.timeout,
-        profile_name=args.profile,
+        environment_profile_name=args.profile,
         preserve_dir=args.preserve_dir,
         keep_session=args.keep_session,
     )

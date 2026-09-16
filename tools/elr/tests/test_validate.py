@@ -349,7 +349,7 @@ class CmdValidateFailClosedTests(unittest.TestCase):
     def _args(self, **overrides):
         import argparse
 
-        base = dict(entity="tracker.feature", payload="-", op="tracker.create", overlay=None, timeout=5)
+        base = dict(entity="tracker.feature", payload="-", op="tracker.create", overlay=None, timeout=5, profile="prod")
         base.update(overrides)
         return argparse.Namespace(**base)
 

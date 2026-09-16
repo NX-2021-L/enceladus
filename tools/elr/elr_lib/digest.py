@@ -44,6 +44,14 @@ CLI's local refusal helper already uses, folded into build_digest so
 elr_sync can reuse ONE digest builder for both its success and its
 refuse-activation paths.
 
+``profile``, ``governance_hash``, ``prefix_map_source``, and
+``unclassified`` (added for ENC-TSK-P77 / elr_smoke.py's elr.smoke_digest
+schema) carry: the ENVIRONMENT profile name ("prod"/"v4-gamma") the run
+used; the live governance_hash echoed by the health endpoint body;
+"none" for prefix_map_source until ENC-TSK-P74's ELR half lands; and an
+always-present (possibly empty) list of unclassified items reserved for
+that same follow-up.
+
 ``ca_bundle`` and ``remediation`` (added for ENC-TSK-P76 / elr_lib.tls)
 carry the TLS CA-bundle resolution report: ca_bundle is the small
 {source, path} dict every transport client resolves at construction time
@@ -97,6 +105,10 @@ _OPTIONAL_FIELDS = (
     "sci_ttl_remaining_s",
     "ca_bundle",
     "remediation",
+    "profile",
+    "governance_hash",
+    "prefix_map_source",
+    "unclassified",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

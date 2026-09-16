@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 from typing import Dict, Optional, Tuple
 
+from . import profiles as elr_profiles
+
 PROFILE_INTERNAL = "internal"
 PROFILE_MCP_HTTP = "mcp-http"
 VALID_PROFILES = (PROFILE_INTERNAL, PROFILE_MCP_HTTP)
@@ -117,11 +119,21 @@ class InternalProfileConfig:
     run even if the environment mutates.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, environment_profile: Optional["elr_profiles.EnvironmentProfile"] = None) -> None:
         self.profile = PROFILE_INTERNAL
+        # ENC-TSK-P77: WHICH deployed environment (prod/v4-gamma), a
+        # separate axis from `self.profile` above (the transport shape).
+        # Resolution order per-api below: explicit ENCELADUS_<API>_API_BASE
+        # env var (unchanged, always wins) -> this environment profile's
+        # api_base_overrides -> the static _API_BASE_DEFAULTS default.
+        self.environment_profile = environment_profile or elr_profiles.get_environment_profile()
         self.user_agent = os.environ.get(DEFAULT_USER_AGENT_ENV, DEFAULT_USER_AGENT)
         self._bases: Dict[str, str] = {
-            api: os.environ.get(env_name, default).strip() or default
+            api: (
+                os.environ.get(env_name, "").strip()
+                or self.environment_profile.api_base_overrides.get(api)
+                or default
+            )
             for api, (env_name, default) in _API_BASE_DEFAULTS.items()
         }
         self._keys: Dict[str, str] = {api: self._resolve_key(api) for api in _API_BASE_DEFAULTS}
@@ -170,9 +182,16 @@ class InternalProfileConfig:
 class McpHttpProfileConfig:
     """Resolved config for the "mcp-http" profile."""
 
-    def __init__(self) -> None:
+    def __init__(self, environment_profile: Optional["elr_profiles.EnvironmentProfile"] = None) -> None:
         self.profile = PROFILE_MCP_HTTP
-        self.gateway_url = os.environ.get(MCP_GATEWAY_URL_ENV, MCP_GATEWAY_URL_DEFAULT).strip() or MCP_GATEWAY_URL_DEFAULT
+        self.environment_profile = environment_profile or elr_profiles.get_environment_profile()
+        # ENC-TSK-P77: an explicit ENCELADUS_MCP_GATEWAY_URL always wins;
+        # otherwise the gateway URL is derived from this environment
+        # profile's coordination_base_url (mirrors server.py's own
+        # <coordination base>/mcp routing), replacing the old
+        # hardcoded-to-prod MCP_GATEWAY_URL_DEFAULT.
+        env_gateway_url = os.environ.get(MCP_GATEWAY_URL_ENV, "").strip()
+        self.gateway_url = env_gateway_url or f"{self.environment_profile.coordination_base_url}/mcp"
         self.user_agent = os.environ.get(DEFAULT_USER_AGENT_ENV, DEFAULT_USER_AGENT)
         self._bearer = ""
         for env_name in MCP_BEARER_ENV_CHAIN:
@@ -195,14 +214,23 @@ class McpHttpProfileConfig:
         )
 
 
-def get_profile(name: str = PROFILE_INTERNAL):
-    """Resolve a profile config object by name.
+def get_profile(name: str = PROFILE_INTERNAL, environment_profile_name: Optional[str] = None):
+    """Resolve a TRANSPORT profile config object (`name`: "internal" /
+    "mcp-http") -- unchanged contract, raises ValueError for anything
+    else.
 
-    Raises ValueError for anything other than "internal" / "mcp-http".
+    `environment_profile_name` (ENC-TSK-P77) is the SEPARATE, ENVIRONMENT
+    axis (e.g. a script's --profile / ENCELADUS_PROFILE value: "prod" /
+    "v4-gamma"). It resolves via elr_lib.profiles.get_environment_profile
+    (which itself fails fast, listing valid names, for an unknown value)
+    and is threaded into whichever transport config is built so its
+    per-API base-URL defaults (and, for mcp-http, its gateway URL) point
+    at that environment.
     """
     normalized = (name or PROFILE_INTERNAL).strip().lower()
+    environment_profile = elr_profiles.get_environment_profile(environment_profile_name)
     if normalized == PROFILE_INTERNAL:
-        return InternalProfileConfig()
+        return InternalProfileConfig(environment_profile=environment_profile)
     if normalized == PROFILE_MCP_HTTP:
-        return McpHttpProfileConfig()
+        return McpHttpProfileConfig(environment_profile=environment_profile)
     raise ValueError(f"unknown ELR profile {name!r}; expected one of {VALID_PROFILES}")
