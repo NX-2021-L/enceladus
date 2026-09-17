@@ -251,12 +251,15 @@ jobs:
             fi
           fi
 
-          # ENC-ISS-494: build-mcp-code always builds x86_64-py3.11 only (matches
-          # v3-prod's arch by coincidence), regardless of the target environment's
-          # own arch/py. Every other function uses KEY_PREFIX; mcp_code always uses
-          # the fixed x86_64-py3.11 prefix, or the probe 404s for every arm64 target
-          # (v4-gamma, v4-prod) even when every other artifact is present.
-          MCP_CODE_KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/x86_64-py3.11"
+          # ENC-ISS-494: mcp_code's live v3-prod Lambda runtime genuinely diverges
+          # from envs/v3-prod.yaml's environment-wide arch/py (that manifest's
+          # x86_64/python3.11 predates the ARM64 cutover and was never updated) --
+          # enceladus-mcp-code has been arm64/python3.12 since the cutover, like
+          # every other function. ENC-ISS-778 retired the BAD hardcoded pre-
+          # cutover value here (which caused the mcp.jreese.net P0 502 by
+          # shipping an x86_64 artifact to the arm64-only function) but kept the
+          # per-function override, now pointed at the correct prefix.
+          MCP_CODE_KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/arm64-py3.12"
 
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
 
@@ -418,10 +421,11 @@ jobs:
           py     = os.environ['PY_VERSION']
           sha    = os.environ['SHA']
           prefix = f"lambda-artifacts/{arch}-py{py}"
-          # ENC-ISS-494: mcp_code is always built x86_64-py3.11 only (see the
-          # matching probe-step special case) regardless of the target
-          # environment's own arch/py.
-          mcp_code_prefix = "lambda-artifacts/x86_64-py3.11"
+          # ENC-ISS-494: mcp_code's live v3-prod runtime (arm64/python3.12) genuinely
+          # diverges from this target's environment-wide arch/py above -- ENC-ISS-778
+          # retired the BAD hardcoded pre-cutover value here (the P0 502 cause) but
+          # kept the per-function override, now pointed at the correct prefix.
+          mcp_code_prefix = "lambda-artifacts/arm64-py3.12"
           region = 'us-west-2'
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
