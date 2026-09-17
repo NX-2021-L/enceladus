@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """ENC-TSK-Q04 (ENC-ISS-778) regression test: mcp_code must resolve and build
-under the same arch/py S3 key prefix as every other Lambda function, not the
-retired x86_64-py3.11 pin (ENC-ISS-494) that shipped an x86_64 artifact to
-the arm64-only enceladus-mcp-code function and caused the mcp.jreese.net
-prod 502 outage.
+under the arm64-py3.12 S3 key prefix -- matching its actual live v3-prod
+Lambda runtime -- not the retired x86_64-py3.11 pin (ENC-ISS-494) that shipped
+an x86_64 artifact to the arm64-only enceladus-mcp-code function and caused
+the mcp.jreese.net prod 502 outage.
+
+mcp_code's per-function override is intentional and expected to remain: its
+runtime genuinely diverges from the v3-prod environment-wide arch/py declared
+in envs/v3-prod.yaml (x86_64-py3.11, predating the ARM64 cutover). The ENC-
+ISS-778 defect was the hardcoded x86_64-py3.11 *value*, not the existence of
+a per-function branch.
 
 Parses .github/workflows/_deploy.yml and .github/workflows/_build.yml as YAML
 (structural validity) and asserts (via string/regex checks on the raw text,
 since the payloads of interest live inside embedded shell/python `run:`
 blocks that YAML parses as opaque scalars) that:
-  - _deploy.yml no longer contains the literal "x86_64-py3.11" pin.
-  - _deploy.yml's probe/resolve shell has no mcp_code-specific prefix branch.
+  - _deploy.yml no longer contains the literal "x86_64-py3.11" pin anywhere.
+  - _deploy.yml's resolve probe and deploy python step each still carry a
+    mcp_code-specific override, and that override resolves to arm64-py3.12.
   - _build.yml's mcp_code artifact key uses the arm64-py3.12 prefix.
 
 Hermetic: no network, AWS, git, or subprocess calls.
@@ -47,27 +54,55 @@ class TestDeployWorkflowMcpCodeKey(unittest.TestCase):
             "literal pin for mcp_code",
         )
 
-    def test_deploy_yml_resolve_step_has_no_mcp_code_prefix_branch(self):
-        # The old bug: an `if [[ "$fn" == "mcp_code" ]]` branch in the probe
-        # loop that swapped in a fixed MCP_CODE_KEY_PREFIX. Neither the shell
-        # conditional nor the dedicated variable name may remain anywhere in
-        # the file (resolve step or deploy step).
-        self.assertNotRegex(
+    def test_deploy_yml_resolve_step_mcp_code_branch_uses_arm64_py312(self):
+        # mcp_code's live v3-prod runtime (arm64/python3.12) genuinely diverges
+        # from the environment-wide arch/py, so a per-function override is
+        # expected to remain in both the probe step and the deploy python
+        # step -- it must resolve to arm64-py3.12, not the retired
+        # x86_64-py3.11 value.
+        self.assertRegex(
             self.deploy_text,
             r'\bfn\b.*==.*"mcp_code"',
-            "_deploy.yml still special-cases mcp_code by function name in a "
-            "conditional (expected: uniform KEY_PREFIX/prefix for all functions)",
+            "_deploy.yml's resolve probe is missing the expected mcp_code "
+            "per-function override branch",
         )
-        self.assertNotIn(
-            "MCP_CODE_KEY_PREFIX",
+        match = re.search(
+            r'MCP_CODE_KEY_PREFIX="\$\{\{[^}]*ARTIFACT_KEY_PREFIX[^}]*\}\}/([^"]+)"',
             self.deploy_text,
-            "_deploy.yml still defines a dedicated MCP_CODE_KEY_PREFIX variable",
         )
-        self.assertNotIn(
-            "mcp_code_prefix",
+        self.assertIsNotNone(
+            match,
+            "_deploy.yml is missing a MCP_CODE_KEY_PREFIX assignment in the "
+            "resolve probe step",
+        )
+        self.assertEqual(
+            match.group(1),
+            "arm64-py3.12",
+            "_deploy.yml's MCP_CODE_KEY_PREFIX must resolve to arm64-py3.12, "
+            "matching mcp_code's actual live v3-prod runtime (ENC-ISS-778)",
+        )
+
+        deploy_match = re.search(
+            r'mcp_code_prefix\s*=\s*"lambda-artifacts/([^"]+)"',
             self.deploy_text,
-            "_deploy.yml still defines a dedicated mcp_code_prefix variable in "
-            "the deploy python step",
+        )
+        self.assertIsNotNone(
+            deploy_match,
+            "_deploy.yml's deploy python step is missing a mcp_code_prefix "
+            "assignment",
+        )
+        self.assertEqual(
+            deploy_match.group(1),
+            "arm64-py3.12",
+            "_deploy.yml's mcp_code_prefix must resolve to arm64-py3.12, "
+            "matching mcp_code's actual live v3-prod runtime (ENC-ISS-778)",
+        )
+        self.assertIn(
+            "fn_prefix = mcp_code_prefix if fn == 'mcp_code' else prefix",
+            self.deploy_text,
+            "_deploy.yml's deploy python step must select mcp_code_prefix "
+            "only for mcp_code and fall back to the uniform prefix for "
+            "every other function",
         )
 
     def test_build_yml_mcp_code_key_uses_arm64_py312_prefix(self):
