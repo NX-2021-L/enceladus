@@ -80,6 +80,12 @@ CLOSED_EVIDENCE: Dict[str, Dict[str, str]] = {
         "evidence_type": "object",
         "label": "transition_evidence.code_on_main_evidence",
         "validator_id": "code_on_main",
+        # ENC-ISS-777: the checkout_service closed gate normalizes this field
+        # via _normalize_code_on_main_evidence() before validator_id="code_on_main"
+        # runs — an object, a bare 40-hex commit sha string, or a note string
+        # alongside a top-level transition_evidence.commit_sha are all accepted
+        # and coerced to {commit_sha: ...} here. This dict stays "object"; the
+        # widening lives in the Lambda, not the matrix.
     },
     "no_code": {
         "evidence_key": "no_code_evidence",
