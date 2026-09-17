@@ -1,5 +1,21 @@
 name: IAM CFN Deploy Role - CloudWatch Dashboard Patch (prod)
 
+# ENC-TSK-P99 / ENC-ISS-775: run 35169979296 of this workflow failed with
+# `aws iam put-role-policy` -> LimitExceeded. The role
+# enceladus-cloudformation-deploy-github-role already carries ~11 inline
+# patch policies (see the sibling iam-cfn-deploy-role-*-patch.yml files)
+# plus its stack-defined ones, and the IAM aggregate inline-policy cap per
+# role is 10,240 characters (whitespace excluded). The OIDC role this
+# workflow assumes only has iam:PutRolePolicy/GetRolePolicy/DeleteRolePolicy/
+# ListRolePolicies on this one role — no CreatePolicy/AttachRolePolicy — so a
+# brand-new inline policy is not an option; instead this workflow now MERGES
+# the prod dashboard grant into the existing gamma dashboard policy
+# (enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1) as a single statement
+# covering both dashboard ARNs, and overwrites that SAME policy name in
+# place (no new name, no delete) so the role's inline-policy count never
+# grows. tools/iam_inline_policy_budget.py computes the merged size and
+# FAILS the job before any write if it would not fit.
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +23,7 @@ on:
         description: "Why this patch is needed"
         type: string
         required: false
-        default: "Grant cloudwatch:PutDashboard (+ Get/Delete/List) on the PROD v4 architecture dashboard to the CFN deploy role (ENC-TSK-P97 / ENC-ISS-771; enceladus-monitoring UPDATE_ROLLBACK_COMPLETE on run 35166474030 due to missing permission)"
+        default: "Merge cloudwatch:PutDashboard (+ Get/Delete/List) on both the gamma and prod v4 architecture dashboards into one inline policy on the CFN deploy role, in place, to stay under the IAM aggregate inline-policy size cap (ENC-TSK-P99 / ENC-ISS-775; run 35169979296 failed with LimitExceeded)"
 
 permissions:
   contents: read
@@ -15,12 +31,15 @@ permissions:
 
 jobs:
   patch-role:
-    name: Patch CFN deploy role with prod CloudWatch Dashboard permissions
+    name: Patch CFN deploy role with merged CloudWatch Dashboard permissions
     # ENC-TSK-P97 / ENC-FTR-120: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule.
     environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -30,15 +49,15 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — prod CloudWatch Dashboard bootstrap
+      - name: Write merged CloudWatch Dashboard policy document
         run: |
           set -euo pipefail
-          cat > /tmp/prod-cloudwatch-dashboard-policy.json <<'JSON'
+          cat > /tmp/merged-cloudwatch-dashboard-policy.json <<'JSON'
           {
             "Version": "2012-10-17",
             "Statement": [
               {
-                "Sid": "ProdCloudWatchDashboardBootstrap",
+                "Sid": "CloudWatchDashboardOps",
                 "Effect": "Allow",
                 "Action": [
                   "cloudwatch:PutDashboard",
@@ -46,21 +65,42 @@ jobs:
                   "cloudwatch:DeleteDashboards",
                   "cloudwatch:ListDashboards"
                 ],
-                "Resource": "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture"
+                "Resource": [
+                  "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma",
+                  "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture"
+                ]
               }
             ]
           }
           JSON
 
+      - name: Check inline-policy budget (fails before any write if it does not fit)
+        run: |
+          python3 tools/iam_inline_policy_budget.py \
+            --role "enceladus-cloudformation-deploy-github-role" \
+            --merge-policy "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
+            --merge-document "/tmp/merged-cloudwatch-dashboard-policy.json"
+
+      - name: Apply merged inline policy — CloudWatch Dashboard (gamma + prod)
+        run: |
+          set -euo pipefail
+          # In-place overwrite of the EXISTING policy name (no new name, no
+          # delete) so the role's inline-policy count and aggregate size
+          # budget stay atomic across this change — ENC-ISS-775.
           aws iam put-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-prod-cloudwatch-dashboard-v1" \
-            --policy-document "file:///tmp/prod-cloudwatch-dashboard-policy.json"
+            --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
+            --policy-document "file:///tmp/merged-cloudwatch-dashboard-policy.json"
 
       - name: Verify inline policy attached
         run: |
           aws iam get-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-prod-cloudwatch-dashboard-v1" \
+            --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
             --query '{RoleName:RoleName,PolicyName:PolicyName,Resource:PolicyDocument.Statement[0].Resource}' \
             --output table
+
+      - name: Post-write inline-policy budget (visibility for the next patch)
+        run: |
+          python3 tools/iam_inline_policy_budget.py \
+            --role "enceladus-cloudformation-deploy-github-role"
