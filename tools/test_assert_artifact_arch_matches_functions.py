@@ -178,6 +178,85 @@ class TestResolveDeployTargets(unittest.TestCase):
         )
 
 
+class TestRunRetry(unittest.TestCase):
+    """ENC-TSK-Q05 review finding (major): a single un-retried
+    get-function-configuration call must not fail an entire v3-prod promote
+    on a transient AWS blip. _run() retries on _TRANSIENT_MARKERS with
+    backoff; anything else (including "not provisioned") returns
+    immediately."""
+
+    def _completed(self, returncode, stderr="", stdout="ok"):
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=returncode, stdout=stdout if returncode == 0 else "", stderr=stderr)
+
+    def test_transient_error_is_retried_then_succeeds(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) < 3:
+                return self._completed(1, "An error occurred (ThrottlingException) when calling ...")
+            return self._completed(0)
+
+        sleeps = []
+        with patch.object(aaf.subprocess, "run", side_effect=fake_run):
+            out, err = aaf._run(["aws", "lambda", "get-function-configuration"], sleep_fn=sleeps.append)
+
+        self.assertEqual(out, "ok")
+        self.assertIsNone(err)
+        self.assertEqual(len(calls), 3, "expected exactly two retries before success")
+        self.assertEqual(len(sleeps), 2, "expected a backoff sleep before each retry")
+
+    def test_non_transient_error_is_not_retried(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return self._completed(1, "AccessDeniedException: not authorized")
+
+        with patch.object(aaf.subprocess, "run", side_effect=fake_run):
+            out, err = aaf._run(["aws", "lambda", "get-function-configuration"], sleep_fn=lambda s: None)
+
+        self.assertIsNone(out)
+        self.assertIn("AccessDeniedException", err)
+        self.assertEqual(len(calls), 1, "a non-transient error must not be retried")
+
+    def test_transient_error_exhausting_all_attempts_still_fails(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return self._completed(1, "Rate exceeded")
+
+        with patch.object(aaf.subprocess, "run", side_effect=fake_run):
+            out, err = aaf._run(
+                ["aws", "lambda", "get-function-configuration"], attempts=3, sleep_fn=lambda s: None,
+            )
+
+        self.assertIsNone(out)
+        self.assertIn("Rate exceeded", err)
+        self.assertEqual(len(calls), 3)
+
+    def test_a_transient_blip_does_not_flip_a_real_match_into_a_failure(self):
+        # End-to-end: get_function_configuration() itself, not just _run(),
+        # must surface a real result after recovering from one throttle.
+        calls = []
+        good_json = json.dumps({"Architectures": ["arm64"], "Runtime": "python3.12"})
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return self._completed(1, "ThrottlingException: Rate exceeded")
+            return self._completed(0, stdout=good_json)
+
+        with patch.object(aaf.subprocess, "run", side_effect=fake_run):
+            config, err = aaf.get_function_configuration("enceladus-mcp-code", "us-west-2")
+
+        self.assertIsNone(err)
+        self.assertEqual(config, {"Architectures": ["arm64"], "Runtime": "python3.12"})
+        self.assertEqual(len(calls), 2)
+
+
 class TestMainCli(unittest.TestCase):
     def _fn_map(self):
         return json.dumps({"mcp_code": "enceladus-mcp-code"})

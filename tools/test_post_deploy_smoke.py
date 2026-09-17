@@ -203,6 +203,53 @@ class TestRunFunctionSmoke(unittest.TestCase):
         self.assertEqual(outcome.status, "no_previous_version")
         self.assertNotIn(outcome.status, pds._FAILING_STATUSES)
 
+    def test_gamma_env_variant_of_a_known_probed_function_is_distinct_from_no_probe(self):
+        # ENC-TSK-Q05 review finding (major): main's own _deploy.yml
+        # workflow_dispatch allows target_environment=v4-gamma, whose
+        # deployed function name is "enceladus-mcp-code-gamma" --
+        # PROBE_TABLE has no entry for that name. This must NOT report the
+        # same "no_probe" status as a function that legitimately has no
+        # health surface at all.
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code-gamma", "7",
+            probe_fn=lambda target: (_ for _ in ()).throw(AssertionError("must not be called")),
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            environment_suffix="-gamma",
+        )
+        self.assertEqual(outcome.status, "no_probe_env_variant")
+        self.assertNotEqual(outcome.status, "no_probe")
+        self.assertNotIn(outcome.status, pds._FAILING_STATUSES)
+
+    def test_unrelated_function_with_no_env_suffix_match_is_plain_no_probe(self):
+        outcome = pds.run_function_smoke(
+            "devops-tracker-mutation-api", "7",
+            probe_fn=lambda target: (_ for _ in ()).throw(AssertionError("must not be called")),
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            environment_suffix="-gamma",
+        )
+        self.assertEqual(outcome.status, "no_probe")
+
+    def test_env_variant_lookup_without_a_suffix_is_plain_no_probe(self):
+        # No environment_suffix supplied (e.g. a v3-prod run) -> a name not
+        # in PROBE_TABLE is a plain no_probe, never no_probe_env_variant.
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code-gamma", "7",
+            probe_fn=lambda target: (_ for _ in ()).throw(AssertionError("must not be called")),
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+        )
+        self.assertEqual(outcome.status, "no_probe")
+
+
+class TestBaseFunctionName(unittest.TestCase):
+    def test_strips_known_suffix(self):
+        self.assertEqual(pds._base_function_name("enceladus-mcp-code-gamma", "-gamma"), "enceladus-mcp-code")
+
+    def test_no_suffix_configured_returns_unchanged(self):
+        self.assertEqual(pds._base_function_name("enceladus-mcp-code-gamma", ""), "enceladus-mcp-code-gamma")
+
+    def test_name_not_ending_in_suffix_returns_unchanged(self):
+        self.assertEqual(pds._base_function_name("enceladus-mcp-code", "-gamma"), "enceladus-mcp-code")
+
     def test_dry_run_never_mutates_and_is_not_a_failure(self):
         rollback_calls = []
 
@@ -239,12 +286,145 @@ class TestDecideExitCode(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# get_live_alias_version / _run -- error discrimination + retry
+# (ENC-TSK-Q05 review finding, critical)
+# ---------------------------------------------------------------------------
+
+class TestGetLiveAliasVersion(unittest.TestCase):
+    def test_genuine_not_found_is_a_clean_bootstrap_case(self):
+        with patch.object(
+            pds, "_run",
+            return_value=(None, "An error occurred (ResourceNotFoundException) when calling GetAlias"),
+        ):
+            version, err = pds.get_live_alias_version("enceladus-mcp-code", "us-west-2")
+        self.assertIsNone(version)
+        self.assertIsNone(err, "a genuine 'no alias yet' bootstrap case must not be reported as an error")
+
+    def test_function_not_found_wording_is_also_a_clean_bootstrap_case(self):
+        with patch.object(pds, "_run", return_value=(None, "Function not found: enceladus-mcp-code")):
+            version, err = pds.get_live_alias_version("enceladus-mcp-code", "us-west-2")
+        self.assertIsNone(version)
+        self.assertIsNone(err)
+
+    def test_transient_or_unexpected_error_is_NOT_collapsed_into_bootstrap(self):
+        # This is the exact critical-finding scenario: a throttle/AccessDenied
+        # /timeout must be reported as an ERROR, not silently treated the
+        # same as "no alias yet".
+        with patch.object(
+            pds, "_run",
+            return_value=(None, "An error occurred (ThrottlingException) when calling GetAlias"),
+        ):
+            version, err = pds.get_live_alias_version("enceladus-mcp-code", "us-west-2")
+        self.assertIsNone(version)
+        self.assertIsNotNone(err)
+        self.assertIn("ThrottlingException", err)
+
+    def test_found_returns_version_with_no_error(self):
+        with patch.object(pds, "_run", return_value=(json.dumps({"FunctionVersion": "41"}), None)):
+            version, err = pds.get_live_alias_version("enceladus-mcp-code", "us-west-2")
+        self.assertEqual(version, "41")
+        self.assertIsNone(err)
+
+    def test_unparseable_output_is_an_error_not_a_silent_none(self):
+        with patch.object(pds, "_run", return_value=("not json", None)):
+            version, err = pds.get_live_alias_version("enceladus-mcp-code", "us-west-2")
+        self.assertIsNone(version)
+        self.assertIsNotNone(err, "unparseable get-alias output must not be treated as a clean bootstrap")
+
+
+class TestRunRetry(unittest.TestCase):
+    def _completed(self, returncode, stderr="", stdout="ok"):
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=returncode, stdout=stdout if returncode == 0 else "", stderr=stderr)
+
+    def test_transient_error_is_retried_then_succeeds(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) < 3:
+                return self._completed(1, "An error occurred (ThrottlingException) when calling GetAlias")
+            return self._completed(0)
+
+        sleeps = []
+        with patch.object(pds.subprocess, "run", side_effect=fake_run):
+            out, err = pds._run(["aws", "lambda", "get-alias"], sleep_fn=sleeps.append)
+
+        self.assertEqual(out, "ok")
+        self.assertIsNone(err)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(sleeps), 2)
+
+    def test_not_provisioned_error_is_not_retried(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return self._completed(1, "An error occurred (ResourceNotFoundException) when calling GetAlias")
+
+        with patch.object(pds.subprocess, "run", side_effect=fake_run):
+            out, err = pds._run(["aws", "lambda", "get-alias"], sleep_fn=lambda s: None)
+
+        self.assertIsNone(out)
+        self.assertIn("ResourceNotFoundException", err)
+        self.assertEqual(len(calls), 1, "a genuine not-found is not transient and must not be retried")
+
+    def test_non_transient_unexpected_error_is_not_retried(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return self._completed(1, "AccessDeniedException: not authorized")
+
+        with patch.object(pds.subprocess, "run", side_effect=fake_run):
+            out, err = pds._run(["aws", "lambda", "get-alias"], sleep_fn=lambda s: None)
+
+        self.assertIsNone(out)
+        self.assertIn("AccessDeniedException", err)
+        self.assertEqual(len(calls), 1)
+
+
+# ---------------------------------------------------------------------------
+# run_capture -- (captured, errors) fail-closed contract
+# (ENC-TSK-Q05 review finding, critical)
+# ---------------------------------------------------------------------------
+
+class TestRunCapture(unittest.TestCase):
+    def test_all_clean_bootstrap_yields_empty_captured_and_no_errors(self):
+        with patch.object(pds, "get_live_alias_version", return_value=(None, None)):
+            captured, errors = pds.run_capture(
+                {"mcp_code": "enceladus-mcp-code"}, {"mcp_code": "v1"}, "us-west-2",
+            )
+        self.assertEqual(captured, {})
+        self.assertEqual(errors, {})
+
+    def test_found_version_is_captured_with_no_errors(self):
+        with patch.object(pds, "get_live_alias_version", return_value=("41", None)):
+            captured, errors = pds.run_capture(
+                {"mcp_code": "enceladus-mcp-code"}, {"mcp_code": "v1"}, "us-west-2",
+            )
+        self.assertEqual(captured, {"enceladus-mcp-code": "41"})
+        self.assertEqual(errors, {})
+
+    def test_unexpected_error_is_reported_and_not_captured(self):
+        with patch.object(
+            pds, "get_live_alias_version",
+            return_value=(None, "An error occurred (ThrottlingException) when calling GetAlias"),
+        ):
+            captured, errors = pds.run_capture(
+                {"mcp_code": "enceladus-mcp-code"}, {"mcp_code": "v1"}, "us-west-2",
+            )
+        self.assertEqual(captured, {})
+        self.assertIn("enceladus-mcp-code", errors)
+
+
+# ---------------------------------------------------------------------------
 # CLI: capture / check
 # ---------------------------------------------------------------------------
 
 class TestCaptureCli(unittest.TestCase):
     def test_capture_prints_json_of_captured_versions(self):
-        with patch.object(pds, "get_live_alias_version", return_value="41"):
+        with patch.object(pds, "get_live_alias_version", return_value=("41", None)):
             rc = pds.main([
                 "capture",
                 "--function-name-map-json", json.dumps({"mcp_code": "enceladus-mcp-code"}),
@@ -253,7 +433,7 @@ class TestCaptureCli(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_capture_no_existing_alias_is_not_an_error(self):
-        with patch.object(pds, "get_live_alias_version", return_value=None):
+        with patch.object(pds, "get_live_alias_version", return_value=(None, None)):
             rc = pds.main([
                 "capture",
                 "--function-name-map-json", json.dumps({"mcp_code": "enceladus-mcp-code"}),
@@ -264,6 +444,38 @@ class TestCaptureCli(unittest.TestCase):
     def test_capture_bad_json_exits_two(self):
         rc = pds.main(["capture", "--function-name-map-json", "not json", "--version-ids-json", "{}"])
         self.assertEqual(rc, 2)
+
+    def test_capture_unexpected_aws_error_fails_closed_not_silent_bootstrap(self):
+        # ENC-TSK-Q05 review finding (critical): a transient/unexpected AWS
+        # error during capture must NOT be silently treated the same as a
+        # genuine "no alias yet" bootstrap case -- it must fail the capture
+        # step so the deploy never proceeds on an unverified alias state.
+        with patch.object(
+            pds, "get_live_alias_version",
+            return_value=(None, "An error occurred (ThrottlingException) when calling GetAlias"),
+        ):
+            rc = pds.main([
+                "capture",
+                "--function-name-map-json", json.dumps({"mcp_code": "enceladus-mcp-code"}),
+                "--version-ids-json", json.dumps({"mcp_code": "v1"}),
+            ])
+        self.assertEqual(rc, 1, "an unexplained capture error must fail closed, not silently pass")
+
+    def test_capture_mixed_success_and_error_still_fails_closed(self):
+        def fake_get(name, region):
+            if name == "enceladus-mcp-code":
+                return "41", None
+            return None, "AccessDeniedException: not authorized"
+
+        with patch.object(pds, "get_live_alias_version", side_effect=fake_get):
+            rc = pds.main([
+                "capture",
+                "--function-name-map-json", json.dumps({
+                    "mcp_code": "enceladus-mcp-code", "other_fn": "other-fn",
+                }),
+                "--version-ids-json", json.dumps({"mcp_code": "v1", "other_fn": "v1"}),
+            ])
+        self.assertEqual(rc, 1, "one function's capture error must fail the whole step even if others succeeded")
 
 
 class TestCheckCli(unittest.TestCase):
@@ -307,6 +519,18 @@ class TestCheckCli(unittest.TestCase):
             "--previous-alias-versions-json", "{}",
         ])
         self.assertEqual(rc, 0)
+
+    def test_gamma_env_variant_is_a_non_failing_but_distinct_outcome(self):
+        # ENC-TSK-Q05 review finding (major): main's workflow_dispatch to
+        # v4-gamma must not look identical to a fully-verified prod run.
+        rc = pds.main([
+            "check",
+            "--function-name-map-json", json.dumps({"mcp_code": "enceladus-mcp-code-gamma"}),
+            "--version-ids-json", json.dumps({"mcp_code": "v1"}),
+            "--previous-alias-versions-json", json.dumps({"enceladus-mcp-code-gamma": "7"}),
+            "--environment-suffix=-gamma",
+        ])
+        self.assertEqual(rc, 0, "no_probe_env_variant must not fail the run")
 
     def test_dry_run_never_mutates_even_when_unhealthy(self):
         with patch.object(pds, "probe_target", return_value=False), \
@@ -384,6 +608,19 @@ class TestDeployYmlWiring(unittest.TestCase):
         self.assertIsNotNone(checkout_block_match, "_deploy.yml is missing the guard-tools checkout step")
         self.assertIn("post_deploy_smoke.py", checkout_block_match.group(1))
         self.assertIn("assert_artifact_arch_matches_functions.py", checkout_block_match.group(1))
+
+    def test_check_step_is_wired_with_environment_suffix(self):
+        # ENC-TSK-Q05 review finding (major): without this, the check step
+        # can never tell a gamma-named deployed function apart from a
+        # function that legitimately has no probe entry at all.
+        job_text = self._deploy_job_text()
+        check_pos = job_text.find(".guard-tools/tools/post_deploy_smoke.py check")
+        self.assertNotEqual(check_pos, -1)
+        step_start = job_text.rfind("- name:", 0, check_pos)
+        step_end = job_text.find("- name:", check_pos)
+        step_text = job_text[step_start:step_end if step_end != -1 else len(job_text)]
+        self.assertIn("ENVIRONMENT_SUFFIX", step_text)
+        self.assertIn("--environment-suffix", step_text)
 
 
 if __name__ == "__main__":

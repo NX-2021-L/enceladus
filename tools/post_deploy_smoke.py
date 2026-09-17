@@ -17,6 +17,21 @@ AC-2 guard:
   capture  -- run BEFORE "Deploy Lambda functions". Records each deploy
               target's current 'live' alias FunctionVersion (nothing to roll
               back to if this is skipped -- see run_capture()/main()).
+              ENC-TSK-Q05 review finding (critical): get_live_alias_version()
+              MUST distinguish a genuine "no 'live' alias exists yet"
+              (ResourceNotFoundException / "Function not found" -- a real
+              bootstrap case, safe to treat as "nothing to capture") from
+              every OTHER AWS CLI failure (throttling, AccessDenied, a
+              timeout, ...). Collapsing both into the same "nothing
+              captured" result would let a capture-time hiccup silently turn
+              the post-deploy smoke test into a no-op that still exits 0 --
+              run_check() would then see no previous_version, return
+              "no_previous_version" WITHOUT ever calling the HTTP probe, and
+              the run would pass. So: a genuine bootstrap -> logged as
+              "[none] ... (bootstrap case)"; any OTHER error -> the capture
+              step FAILS CLOSED (non-zero exit), blocking the deploy job
+              before "Deploy Lambda functions" even runs, rather than
+              silently proceeding on an unverified alias state.
   check    -- run AFTER the alias update. Probes every deployed function
               that has a PROBE_TABLE entry; on failure, rolls the alias back
               to the version `capture` recorded and verifies recovery;
@@ -33,6 +48,16 @@ Fail-closed / no-op semantics (the whole point, see spawn_task-style
 requirements this backstops):
   - No PROBE_TABLE entry for a deployed function -> "no_probe": a clean
     no-op for that function, not a failure and not counted as a pass.
+  - PROBE_TABLE has no entry for the deployed name, but the name is that
+    KNOWN incident-surface function under a different environment suffix
+    (e.g. a main-lane workflow_dispatch to v4-gamma deploying
+    "enceladus-mcp-code-gamma", which PROBE_TABLE does not key) ->
+    "no_probe_env_variant": still a clean, non-failing no-op (there is no
+    known health URL for that environment to probe), but reported and
+    ::warning::-annotated distinctly from a plain "no_probe" so a
+    gamma-targeted run through this lane does not read identically to a
+    fully-verified prod run in the job summary. See PROBE_TABLE /
+    _base_function_name() below.
   - No captured previous alias version for a function that DOES have a
     probe entry -> "no_previous_version": also a clean no-op (cannot roll
     back to nothing), reported distinctly so it is never mistaken for a
@@ -86,6 +111,18 @@ PROBE_TABLE: Dict[str, ProbeTarget] = {
     # enceladus-mcp-code / mcp.jreese.net: the ENC-ISS-778 incident surface.
     # Both routes 502'd during the incident; both must resolve to their
     # normal (non-502) status for the function to count as healthy.
+    #
+    # ENC-TSK-Q05 review finding (major): this table is keyed by the
+    # PRODUCTION Lambda name only. main's own _deploy.yml workflow_dispatch
+    # input schema also allows target_environment=v4-gamma, whose deployed
+    # function name is "enceladus-mcp-code-gamma" (infrastructure/
+    # cloudformation/02-compute.yaml) -- a name this table does not key, and
+    # there is no known reachable health URL for gamma to add a real entry
+    # for. resolve_deployed_function_names() would hand run_function_smoke()
+    # that gamma name; without the _base_function_name() handling below, the
+    # lookup misses and reports a plain "no_probe" -- indistinguishable in
+    # the job summary from a function that legitimately has no health
+    # surface at all. See "no_probe_env_variant" in run_function_smoke().
     "enceladus-mcp-code": ProbeTarget(
         base_url="https://mcp.jreese.net",
         probes=(
@@ -94,6 +131,18 @@ PROBE_TABLE: Dict[str, ProbeTarget] = {
         ),
     ),
 }
+
+
+def _base_function_name(function_name: str, environment_suffix: str) -> str:
+    """Strip a non-empty, known environment suffix (e.g. "-gamma", from
+    _deploy.yml resolve job's `environment_suffix` output) from a deployed
+    Lambda name to recover the PROBE_TABLE's base key, e.g.
+    "enceladus-mcp-code-gamma" -> "enceladus-mcp-code". Returns
+    `function_name` unchanged if there is no suffix to strip or it does not
+    match."""
+    if environment_suffix and function_name.endswith(environment_suffix):
+        return function_name[: -len(environment_suffix)]
+    return function_name
 
 
 # ---------------------------------------------------------------------------
@@ -107,10 +156,10 @@ class SmokeOutcome:
     detail: str
 
 
-# Outcomes that must fail the run (exit 1). 'healthy', 'no_probe', and
-# 'no_previous_version' are all clean, non-failing outcomes -- see the
-# module docstring for why 'rolled_back' still fails even though the
-# rollback itself succeeded.
+# Outcomes that must fail the run (exit 1). 'healthy', 'no_probe',
+# 'no_probe_env_variant', and 'no_previous_version' are all clean,
+# non-failing outcomes -- see the module docstring for why 'rolled_back'
+# still fails even though the rollback itself succeeded.
 _FAILING_STATUSES = frozenset({"rollback_failed", "rollback_unverified", "rolled_back"})
 
 
@@ -147,14 +196,30 @@ def run_function_smoke(
     probe_fn: Callable[[ProbeTarget], bool],
     rollback_fn: Callable[[str, str], Tuple[bool, str]],
     dry_run: bool = False,
+    environment_suffix: str = "",
 ) -> SmokeOutcome:
     """Per-function decision pipeline. probe_fn(target) -> True/False (already
     retried with backoff by the caller's chosen implementation -- see
     probe_target() below for the production one). rollback_fn(function_name,
     previous_version) -> (success, message), wrapping the actual
-    update-alias call; never invoked when dry_run is set."""
+    update-alias call; never invoked when dry_run is set. environment_suffix
+    (e.g. "-gamma") is used only to distinguish "no_probe" (a function that
+    legitimately has no health surface) from "no_probe_env_variant" (the
+    KNOWN incident-surface function, deployed under a different
+    environment's name, that PROBE_TABLE does not key -- see
+    _base_function_name())."""
     target = PROBE_TABLE.get(function_name)
     if target is None:
+        base_name = _base_function_name(function_name, environment_suffix)
+        if base_name != function_name and base_name in PROBE_TABLE:
+            return SmokeOutcome(
+                function_name, "no_probe_env_variant",
+                f"no PROBE_TABLE entry for {function_name!r}, but its base name "
+                f"{base_name!r} IS in PROBE_TABLE -- this environment's deployed "
+                "function name is a variant PROBE_TABLE does not (yet) cover, so "
+                "this deploy shipped WITHOUT any health verification, unlike a "
+                "plain 'no_probe' function that legitimately has none to give",
+            )
         return SmokeOutcome(function_name, "no_probe", "no PROBE_TABLE entry for this function -- skipped")
     if not previous_version:
         return SmokeOutcome(
@@ -232,22 +297,72 @@ def probe_target(
     return False
 
 
-def _run(cmd: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except Exception as exc:  # noqa: BLE001
-        return None, f"exception invoking {' '.join(cmd)}: {exc}"
-    if result.returncode != 0:
-        return None, (result.stderr or "").strip() or f"exit {result.returncode}"
-    return result.stdout, None
+# Markers a genuine "no 'live' alias exists" error carries -- the same
+# shape assert_artifact_arch_matches_functions.py's _is_not_provisioned()
+# discriminates for get-function-configuration. ONLY these mean "bootstrap
+# case, nothing to capture"; every other failure must fail closed instead
+# of being silently treated the same way (ENC-TSK-Q05 review finding,
+# critical -- see module docstring).
+_NOT_PROVISIONED_MARKERS = ("ResourceNotFoundException", "Function not found")
+
+# Same transient-error marker list as _deploy.yml's own run_with_retry() /
+# assert_artifact_arch_matches_functions.py's _TRANSIENT_MARKERS, for this
+# same AWS Lambda API surface -- a throttle blip during capture must be
+# retried, not immediately escalated to a hard capture failure.
+_TRANSIENT_MARKERS = (
+    "TooManyRequestsException", "ThrottlingException", "Throttling",
+    "ResourceConflictException", "update is in progress",
+    "Rate exceeded", "RequestTimeout", "ServiceException",
+    "InternalFailure", "SlowDown",
+)
 
 
-def get_live_alias_version(function_name: str, region: str) -> Optional[str]:
-    """Returns the 'live' alias's current FunctionVersion, or None if the
-    alias/function does not exist (nothing to capture -- treated as
-    "no previous version" downstream, never an error: a function that has
-    never had a 'live' alias yet is a bootstrapping case, not a defect)."""
-    out, _err = _run([
+def _is_not_provisioned(err: Optional[str]) -> bool:
+    return bool(err) and any(marker in err for marker in _NOT_PROVISIONED_MARKERS)
+
+
+def _run(
+    cmd: List[str],
+    attempts: int = 4,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Runs an AWS CLI command with bounded retry/backoff on transient
+    errors (see _TRANSIENT_MARKERS). A non-transient error -- including a
+    genuine "not provisioned" one, which callers discriminate via
+    _is_not_provisioned() -- returns immediately without retrying."""
+    last_err: Optional[str] = None
+    for i in range(1, attempts + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            return None, f"exception invoking {' '.join(cmd)}: {exc}"
+        if result.returncode == 0:
+            return result.stdout, None
+        err = (result.stderr or "").strip() or f"exit {result.returncode}"
+        last_err = err
+        if i == attempts or not any(marker in err for marker in _TRANSIENT_MARKERS):
+            return None, err
+        sleep_fn(2 ** i)
+    return None, last_err
+
+
+def get_live_alias_version(function_name: str, region: str) -> Tuple[Optional[str], Optional[str]]:
+    """Returns (version, error).
+
+    version is the 'live' alias's current FunctionVersion, or None if
+    either genuinely absent OR an error occurred (check `error` to tell
+    which).
+
+    error is None for a CLEAN result -- either the alias was found, or it
+    is genuinely absent (ResourceNotFoundException / "Function not found":
+    a function that has never had a 'live' alias yet is a bootstrapping
+    case, not a defect). For any OTHER failure (throttling exhausted,
+    AccessDenied, a timeout, an unparseable response, ...), error carries
+    the AWS error text -- callers MUST treat that as a capture FAILURE, not
+    as "nothing to capture": collapsing the two is exactly the ENC-TSK-Q05
+    review finding this return shape fixes (a capture-time hiccup silently
+    turning the post-deploy smoke test into a no-op that still exits 0)."""
+    out, err = _run([
         "aws", "lambda", "get-alias",
         "--function-name", function_name,
         "--name", "live",
@@ -255,12 +370,14 @@ def get_live_alias_version(function_name: str, region: str) -> Optional[str]:
         "--output", "json",
     ])
     if out is None:
-        return None
+        if _is_not_provisioned(err):
+            return None, None
+        return None, err or "get-alias failed with no output and no error detail"
     try:
         version = json.loads(out).get("FunctionVersion")
-    except json.JSONDecodeError:
-        return None
-    return version or None
+    except json.JSONDecodeError as exc:
+        return None, f"could not parse get-alias JSON output: {exc}"
+    return version or None, None
 
 
 def aws_rollback_alias(function_name: str, previous_version: str, region: str) -> Tuple[bool, str]:
@@ -286,13 +403,26 @@ def _common_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--region", default="us-west-2")
 
 
-def run_capture(function_name_map: Dict[str, str], version_ids: Dict[str, str], region: str) -> Dict[str, str]:
+def run_capture(
+    function_name_map: Dict[str, str], version_ids: Dict[str, str], region: str
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Returns (captured, errors). captured maps function name -> its
+    pre-deploy 'live' alias FunctionVersion, for every function that has
+    one. errors maps function name -> AWS error text, for every function
+    whose get_live_alias_version() call failed for a reason OTHER than a
+    genuine "no alias yet" bootstrap case -- callers MUST treat a non-empty
+    `errors` as a capture failure, never silently proceed as if those
+    functions were clean bootstraps (ENC-TSK-Q05 review finding, critical)."""
     captured: Dict[str, str] = {}
+    errors: Dict[str, str] = {}
     for name in resolve_deployed_function_names(function_name_map, version_ids):
-        version = get_live_alias_version(name, region)
+        version, err = get_live_alias_version(name, region)
+        if err is not None:
+            errors[name] = err
+            continue
         if version:
             captured[name] = version
-    return captured
+    return captured, errors
 
 
 def run_check(
@@ -301,6 +431,7 @@ def run_check(
     previous_versions: Dict[str, str],
     region: str,
     dry_run: bool,
+    environment_suffix: str = "",
 ) -> List[SmokeOutcome]:
     deployed = resolve_deployed_function_names(function_name_map, version_ids)
 
@@ -308,7 +439,10 @@ def run_check(
         return aws_rollback_alias(name, version, region)
 
     outcomes = [
-        run_function_smoke(name, previous_versions.get(name), probe_target, rollback_fn, dry_run=dry_run)
+        run_function_smoke(
+            name, previous_versions.get(name), probe_target, rollback_fn,
+            dry_run=dry_run, environment_suffix=environment_suffix,
+        )
         for name in deployed
     ]
     return outcomes
@@ -325,6 +459,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _common_target_args(check_p)
     check_p.add_argument("--previous-alias-versions-json", required=True)
     check_p.add_argument("--dry-run", action="store_true", help="Probe only; never mutate an alias.")
+    check_p.add_argument(
+        "--environment-suffix", default="",
+        help="This run's resolved environment suffix (e.g. '-gamma'), from "
+        "_deploy.yml resolve job's environment_suffix output -- used only "
+        "to report 'no_probe_env_variant' distinctly from a plain 'no_probe'.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -336,14 +476,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     if args.command == "capture":
-        captured = run_capture(fn_map, version_ids, args.region)
+        captured, errors = run_capture(fn_map, version_ids, args.region)
         deployed = resolve_deployed_function_names(fn_map, version_ids)
         for name in deployed:
-            if name in captured:
+            if name in errors:
+                print(
+                    f"::error::{name}: could not capture pre-deploy 'live' alias "
+                    f"version (NOT a bootstrap case -- an unexpected AWS error): "
+                    f"{errors[name]}",
+                    file=sys.stderr,
+                )
+            elif name in captured:
                 print(f"  captured {name}: live={captured[name]}")
             else:
                 print(f"  [none] {name}: no existing 'live' alias (bootstrap case) -- nothing to capture")
         print(json.dumps(captured))
+        if errors:
+            print(
+                f"::error::Capture pre-deploy alias versions FAILED for "
+                f"{len(errors)} function(s): {', '.join(sorted(errors))} -- failing "
+                "closed rather than silently treating an unexplained AWS error the "
+                "same as a legitimate bootstrap case (ENC-ISS-778 P0 class: a "
+                "swallowed capture failure would let the post-deploy smoke probe "
+                "skip silently via 'no_previous_version'). Investigate and re-run.",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     # check
@@ -353,14 +511,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"::error::could not parse previous-alias-versions JSON: {exc}", file=sys.stderr)
         return 2
 
-    outcomes = run_check(fn_map, version_ids, previous_versions, args.region, args.dry_run)
+    outcomes = run_check(
+        fn_map, version_ids, previous_versions, args.region, args.dry_run,
+        environment_suffix=args.environment_suffix,
+    )
     if not outcomes:
         print("No deployed functions to smoke-test -- skipping.")
         return 0
 
     for o in outcomes:
-        stream = sys.stderr if o.status in _FAILING_STATUSES else sys.stdout
-        prefix = "::error::" if o.status in _FAILING_STATUSES else "  "
+        if o.status in _FAILING_STATUSES:
+            stream, prefix = sys.stderr, "::error::"
+        elif o.status == "no_probe_env_variant":
+            # Non-failing, but must not look identical to a plain "no_probe"
+            # (a function with no health surface) or a verified pass in the
+            # job summary -- see PROBE_TABLE / run_function_smoke().
+            stream, prefix = sys.stderr, "::warning::"
+        else:
+            stream, prefix = sys.stdout, "  "
         print(f"{prefix}{o.function_name} [{o.status}]: {o.detail}", file=stream)
 
     rc = decide_exit_code(outcomes)

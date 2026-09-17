@@ -48,7 +48,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -454,7 +454,7 @@ def git_show(ref: str, path: str) -> str:
     return result.stdout
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--other-ref", default="origin/v4/main",
@@ -462,7 +462,7 @@ def main() -> int:
     )
     parser.add_argument("--deploy-path", default=".github/workflows/_deploy.yml")
     parser.add_argument("--build-path", default=".github/workflows/_build.yml")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         main_deploy_text = (REPO_ROOT / args.deploy_path).read_text()

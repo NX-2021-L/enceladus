@@ -29,6 +29,13 @@ docstrings for the exact semantics of each failure mode:
     provisioned there yet -- _deploy.yml's own deploy_one() already treats
     this exact condition as a legitimate skip, not an error.
 
+Transient AWS errors (throttling, a ResourceConflict "update is in
+progress", etc. -- see _TRANSIENT_MARKERS) are retried with backoff by
+_run() before being treated as anything at all, mirroring _deploy.yml's own
+run_with_retry() for this same Lambda API surface -- so a single throttle
+blip on a ~28-function v3-prod promote does not fail the whole guard for a
+reason unrelated to any real architecture mismatch.
+
 Two testable layers:
   - Pure core: parse_key_prefix(), evaluate_match() -- no I/O.
   - Thin CLI: main() -- resolves which (short function name, deployed Lambda
@@ -55,8 +62,9 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 # Markers _deploy.yml's own deploy_one() treats as "not provisioned in this
 # environment yet" (a legitimate skip, not an error) for
@@ -64,6 +72,21 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # ResourceNotFoundException shape for a function that does not exist, so the
 # same markers apply here.
 _NOT_PROVISIONED_MARKERS = ("ResourceNotFoundException", "Function not found")
+
+# ENC-TSK-Q05 review finding (major): a single un-retried get-function-
+# configuration call on a ~28-function v3-prod promote, run immediately
+# after aws-actions/configure-aws-credentials assumes the prod deploy role,
+# can hit a transient throttle/IAM-eventual-consistency blip and fail the
+# ENTIRE promote for a reason unrelated to any real architecture mismatch.
+# Mirrors _deploy.yml's own run_with_retry() marker list for this exact AWS
+# CLI surface (Lambda) so a transient error is retried with backoff instead
+# of being reported as a mismatch.
+_TRANSIENT_MARKERS = (
+    "TooManyRequestsException", "ThrottlingException", "Throttling",
+    "ResourceConflictException", "update is in progress",
+    "Rate exceeded", "RequestTimeout", "ServiceException",
+    "InternalFailure", "SlowDown",
+)
 
 _PREFIX_RE = re.compile(r"^(?P<arch>[A-Za-z0-9_]+)-py(?P<py>\d+\.\d+)$")
 
@@ -175,14 +198,30 @@ def resolve_deploy_targets(
 # Thin CLI (AWS I/O)
 # ---------------------------------------------------------------------------
 
-def _run(cmd: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except Exception as exc:  # noqa: BLE001 -- fail closed, report the exception
-        return None, f"exception invoking {' '.join(cmd)}: {exc}"
-    if result.returncode != 0:
-        return None, (result.stderr or "").strip() or f"exit {result.returncode}"
-    return result.stdout, None
+def _run(
+    cmd: List[str],
+    attempts: int = 4,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Runs an AWS CLI command with bounded retry/backoff on transient
+    errors (see _TRANSIENT_MARKERS), mirroring _deploy.yml's own
+    run_with_retry() for this same AWS Lambda API surface. A non-transient
+    error (including "not provisioned", which the caller discriminates via
+    _is_not_provisioned()) is returned immediately without retrying."""
+    last_err: Optional[str] = None
+    for i in range(1, attempts + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as exc:  # noqa: BLE001 -- fail closed, report the exception
+            return None, f"exception invoking {' '.join(cmd)}: {exc}"
+        if result.returncode == 0:
+            return result.stdout, None
+        err = (result.stderr or "").strip() or f"exit {result.returncode}"
+        last_err = err
+        if i == attempts or not any(marker in err for marker in _TRANSIENT_MARKERS):
+            return None, err
+        sleep_fn(2 ** i)
+    return None, last_err
 
 
 def get_function_configuration(

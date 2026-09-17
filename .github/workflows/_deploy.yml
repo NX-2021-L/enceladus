@@ -919,13 +919,15 @@ jobs:
           FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
           VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
           PREVIOUS_ALIAS_VERSIONS_JSON: ${{ steps.pre_deploy_versions.outputs.previous_alias_versions_json }}
+          ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
         run: |
           set -euo pipefail
           python3 .guard-tools/tools/post_deploy_smoke.py check \
             --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
             --version-ids-json "${VERSION_IDS_JSON}" \
             --previous-alias-versions-json "${PREVIOUS_ALIAS_VERSIONS_JSON}" \
-            --region "${{ env.AWS_REGION }}"
+            --region "${{ env.AWS_REGION }}" \
+            --environment-suffix="${ENVIRONMENT_SUFFIX}"
 
       - name: Set deployment status → success
         if: success()

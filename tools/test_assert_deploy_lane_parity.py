@@ -31,11 +31,15 @@ Run: python3 -m pytest tools/test_assert_deploy_lane_parity.py -q
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
 
 import yaml
 
+from unittest.mock import patch
+
+import assert_deploy_lane_parity as alp
 from assert_deploy_lane_parity import (
     Divergence,
     compute_divergences,
@@ -44,6 +48,7 @@ from assert_deploy_lane_parity import (
     extract_matrix_skip_list,
     extract_mcp_code_packaging,
     extract_resolve_mcp_code_override,
+    main,
     normalize_prefix_expr,
     normalize_override_value,
 )
@@ -522,6 +527,100 @@ class TestRealRepoFilesCurrentlyAgree(unittest.TestCase):
         override = extract_resolve_mcp_code_override(deploy_text)
         self.assertIsNotNone(override)
         self.assertEqual(normalize_override_value(override), "arm64-py3.12")
+
+
+class TestMainCli(unittest.TestCase):
+    """ENC-TSK-Q05 review finding (major): main() -- the ACTUAL CLI entry
+    point deploy-lane-parity-guard.yml invokes -- had zero test coverage;
+    every other test in this file exercises compute_divergences()/extract_*()
+    directly. Two mutations of main() (silently returning 0 instead of 1 on
+    an unreadable git ref, and swapping the main/other args passed to
+    compute_divergences()) both went undetected by the full suite. These
+    tests invoke main() itself, patching git_show() the way the sibling
+    AC-2/AC-3 test files patch their own I/O edges, and use this worktree's
+    REAL _deploy.yml/_build.yml as "main"'s own on-disk files so a fixture
+    passing every extraction pattern doesn't have to be hand-built."""
+
+    def setUp(self):
+        self.real_deploy_path = REPO_ROOT / ".github" / "workflows" / "_deploy.yml"
+        self.real_build_path = REPO_ROOT / ".github" / "workflows" / "_build.yml"
+        self.real_deploy_text = self.real_deploy_path.read_text()
+        self.real_build_text = self.real_build_path.read_text()
+
+    def _argv(self):
+        return [
+            "--other-ref", "fake-other-ref",
+            "--deploy-path", str(self.real_deploy_path),
+            "--build-path", str(self.real_build_path),
+        ]
+
+    def test_no_divergences_exits_zero(self):
+        # "other" lane's files are mocked to be byte-identical to main's own
+        # -- every extract_*() comparison is therefore necessarily equal, so
+        # this is a real exercise of main()'s wiring, not a hand-tuned fixture.
+        with patch.object(
+            alp, "git_show",
+            side_effect=lambda ref, path: (
+                self.real_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
+            ),
+        ):
+            rc = main(self._argv())
+        self.assertEqual(rc, 0)
+
+    def test_a_real_divergence_exits_one_with_correct_main_vs_other_orientation(self):
+        # Mutate ONE named invariant (ARTIFACT_BUCKET) in the "other" lane's
+        # deploy text only -- everything else stays identical, so this is
+        # attributable to exactly this one change.
+        self.assertIn("ARTIFACT_BUCKET: jreese-net", self.real_deploy_text)
+        other_deploy_text = self.real_deploy_text.replace(
+            "ARTIFACT_BUCKET: jreese-net", "ARTIFACT_BUCKET: some-other-bucket",
+        )
+
+        with patch.object(
+            alp, "git_show",
+            side_effect=lambda ref, path: (
+                other_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
+            ),
+        ):
+            rc = main(self._argv())
+        self.assertEqual(rc, 1)
+
+        # Re-derive the divergence directly to confirm main() reports it
+        # with the correct main/other orientation -- this is exactly what
+        # an argument-swap mutation in main()'s call to compute_divergences()
+        # would get backwards (main_value and other_value would trade
+        # places, and a real divergence could even disappear if the swap
+        # happens to compare a lane against itself).
+        divs = compute_divergences(self.real_deploy_text, other_deploy_text, self.real_build_text, self.real_build_text)
+        bucket_divs = [d for d in divs if d.invariant == "deploy_env_constant:ARTIFACT_BUCKET"]
+        self.assertEqual(len(bucket_divs), 1)
+        self.assertIn("jreese-net", bucket_divs[0].main_value)
+        self.assertIn("some-other-bucket", bucket_divs[0].other_value)
+
+    def test_unreadable_other_ref_fails_closed_not_silently_skips(self):
+        # The exact regression the finding calls out: `except RuntimeError:
+        # return 0` instead of printing the error and returning 1 would pass
+        # this test's inverse (asserting 0) -- assert the FAIL-CLOSED
+        # contract explicitly.
+        with patch.object(alp, "git_show", side_effect=RuntimeError("git show fake-other-ref:... failed")):
+            rc = main(self._argv())
+        self.assertEqual(
+            rc, 1,
+            "an unreadable other-lane ref must fail closed (exit 1), never silently skip (exit 0) -- "
+            "'worse than no gate at all' per the module's own docstring",
+        )
+
+    def test_argv_parameter_is_honored_not_just_sys_argv(self):
+        # main() must accept an explicit argv (like the sibling AC-2/AC-3
+        # scripts' main()) so it is testable without mutating sys.argv.
+        with patch.object(
+            alp, "git_show",
+            side_effect=lambda ref, path: (
+                self.real_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
+            ),
+        ), patch.object(sys, "argv", ["assert_deploy_lane_parity.py"]):
+            rc = main(self._argv())
+        self.assertEqual(rc, 0, "main(argv) must parse the explicit argv, not fall back to sys.argv")
 
 
 if __name__ == "__main__":
