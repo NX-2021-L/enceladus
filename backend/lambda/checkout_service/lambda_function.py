@@ -1925,19 +1925,27 @@ _LIVE_VALIDATION_EVIDENCE_SCHEMA: Dict[str, Any] = {
 _CODE_ON_MAIN_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required_fields": {
-        "commit_sha": {
+        "transition_evidence.code_on_main_evidence.commit_sha": {
             "type": "string",
             "format": "40-char lowercase or uppercase hex SHA",
             "description": "Commit that must already be reachable from main.",
         },
     },
-    "example": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+    "accepted_shapes": [
+        "an object {commit_sha: <40-hex sha on main>}",
+        "a bare 40-hex sha string",
+        "a note string, provided alongside a top-level transition_evidence.commit_sha "
+        "that is itself a 40-hex sha",
+    ],
+    "example": {
+        "code_on_main_evidence": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+    },
 }
 
 _NO_CODE_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required_fields": {
-        "no_code_evidence": {
+        "transition_evidence.no_code_evidence": {
             "type": "string",
             "format": "non-empty string",
             "description": "Human-readable audit note describing what changed and how it was verified.",
@@ -2335,6 +2343,94 @@ def _validate_code_on_main_evidence(
     # Stamp verification flag for audit trail
     evidence["github_verified"] = True
     return True, ""
+
+
+_CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG = (
+    "transition_evidence.code_on_main_evidence must be an object "
+    "{commit_sha: <40-hex sha on main>}; a 40-hex string, or a note string "
+    "alongside transition_evidence.commit_sha, is also accepted; got "
+)
+
+
+def _normalize_code_on_main_evidence(
+    raw: Any, transition_evidence: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize the accepted input shapes for the code_only closed gate (ENC-ISS-777).
+
+    The closed gate for transition_type=code_only historically required
+    ``transition_evidence.code_on_main_evidence`` to already be a non-empty
+    dict, rejecting a bare 40-hex commit sha string even though that is the
+    only field the schema (``_CODE_ON_MAIN_EVIDENCE_SCHEMA``) actually
+    requires. This helper widens the accepted shapes without touching
+    ``_validate_code_on_main_evidence`` (the GitHub compare validator), which
+    still receives a normalized dict.
+
+    Accepted shapes for ``raw`` (the value read from
+    ``transition_evidence.code_on_main_evidence`` / ``body.code_on_main_evidence``):
+      (a) a non-empty dict — used as-is; if it lacks ``commit_sha`` and
+          ``transition_evidence.commit_sha`` is itself a 40-hex sha, that sha
+          is copied in.
+      (b) a 40-hex string (case-insensitive, surrounding whitespace stripped)
+          -> ``{"commit_sha": <lowercased sha>}``.
+      (c) any other non-empty string, when ``transition_evidence.commit_sha``
+          is a 40-hex string -> ``{"commit_sha": <that sha>, "note": <the string>}``.
+      (d) anything else (empty, wrong type, or a string without a usable sha
+          and no usable top-level commit_sha) is rejected.
+
+    Returns ``(normalized_dict, None)`` on success or ``(None, reason)`` on
+    failure, where ``reason`` names the accepted shapes per ENC-ISS-777.
+    """
+    top_level_sha_raw = transition_evidence.get("commit_sha")
+    top_level_sha_valid = (
+        isinstance(top_level_sha_raw, str)
+        and bool(re.match(r"^[0-9a-f]{40}$", top_level_sha_raw.strip().lower()))
+    )
+    top_level_sha = top_level_sha_raw.strip().lower() if top_level_sha_valid else None
+
+    if isinstance(raw, dict):
+        if not raw:
+            return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + "an empty object"
+        normalized = dict(raw)
+        if not normalized.get("commit_sha") and top_level_sha:
+            normalized["commit_sha"] = top_level_sha
+        existing_sha = normalized.get("commit_sha")
+        if existing_sha is not None:
+            if not isinstance(existing_sha, str):
+                return None, (
+                    _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG
+                    + f"an object whose commit_sha is type {type(existing_sha).__name__}, not a string"
+                )
+            stripped = existing_sha.strip()
+            if re.match(r"^[0-9a-f]{40}$", stripped.lower()):
+                # Normalize to the same canonical (stripped, lowercased) form
+                # the bare-string and note-string shapes produce, so the
+                # persisted evidence is consistent regardless of which
+                # accepted shape the caller used (ENC-ISS-777 review).
+                normalized["commit_sha"] = stripped.lower()
+        return normalized, None
+
+    if isinstance(raw, str):
+        candidate = raw.strip()
+        if re.match(r"^[0-9a-f]{40}$", candidate.lower()):
+            return {"commit_sha": candidate.lower()}, None
+        if candidate and top_level_sha:
+            return {"commit_sha": top_level_sha, "note": candidate}, None
+        if not candidate:
+            got = "an empty string"
+        elif top_level_sha_raw is not None:
+            got = (
+                f"a string without a usable sha ({candidate!r}) and "
+                "transition_evidence.commit_sha is not a valid 40-hex sha"
+            )
+        else:
+            got = (
+                f"a string without a usable sha ({candidate!r}) and no "
+                "transition_evidence.commit_sha was provided"
+            )
+        return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + got
+
+    got = "None" if raw is None else f"type {type(raw).__name__}"
+    return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + got
 
 
 def _validate_external_deploy_evidence(evidence: Any) -> Tuple[bool, str]:
@@ -3601,15 +3697,32 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
 
             if ev_type == "object":
                 # Object evidence (e.g. code_on_main_evidence)
-                evidence_obj = transition_evidence.get(ev_key) or body.get(ev_key)
-                if not evidence_obj or not isinstance(evidence_obj, dict):
-                    return _validation_error(
-                        400,
-                        f"{ev_label} is required for closed on {transition_type} tasks.",
-                        task_id=task_id, current_status=current_status, target_status=target_status,
-                        transition_type=transition_type, provider=provider or session_id,
-                        required_fields=[ev_label],
+                raw_evidence = transition_evidence.get(ev_key) or body.get(ev_key)
+                if validator_id == "code_on_main":
+                    # ENC-ISS-777: widen accepted input shapes (object, bare 40-hex
+                    # sha string, or note string + top-level commit_sha) while
+                    # keeping the GitHub compare validator's input a plain dict.
+                    evidence_obj, normalize_reason = _normalize_code_on_main_evidence(
+                        raw_evidence, transition_evidence
                     )
+                    if evidence_obj is None:
+                        return _validation_error(
+                            400,
+                            normalize_reason,
+                            task_id=task_id, current_status=current_status, target_status=target_status,
+                            transition_type=transition_type, provider=provider or session_id,
+                            required_fields=["transition_evidence.code_on_main_evidence.commit_sha"],
+                        )
+                else:
+                    evidence_obj = raw_evidence
+                    if not evidence_obj or not isinstance(evidence_obj, dict):
+                        return _validation_error(
+                            400,
+                            f"{ev_label} is required for closed on {transition_type} tasks.",
+                            task_id=task_id, current_status=current_status, target_status=target_status,
+                            transition_type=transition_type, provider=provider or session_id,
+                            required_fields=[ev_label],
+                        )
                 if validator_id == "code_on_main":
                     # code_on_main requires GitHub compare API validation
                     owner = transition_evidence.get("owner")
@@ -3640,7 +3753,8 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             400, f"{ev_key} validation failed: {reason}",
                             task_id=task_id, current_status=current_status,
                             target_status=target_status, transition_type=transition_type,
-                            provider=provider or session_id, required_fields=[ev_label],
+                            provider=provider or session_id,
+                            required_fields=["transition_evidence.code_on_main_evidence.commit_sha"],
                         )
                 transition_evidence[ev_key] = evidence_obj
             else:
