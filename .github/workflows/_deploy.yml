@@ -100,6 +100,13 @@ jobs:
       py_version:            ${{ steps.manifest.outputs.py_version }}
       canary_preference:     ${{ steps.manifest.outputs.canary_preference }}
       version_ids_json:      ${{ steps.probe.outputs.version_ids_json }}
+      # ENC-TSK-Q05 AC-2: per-function resolved S3 key prefix ("<arch>-py<pyver>",
+      # e.g. "lambda-artifacts/arm64-py3.12"), for exactly the functions this run
+      # probed (narrowed or full-scope, same set as version_ids_json). Consumed by
+      # the deploy job's architecture guard (tools/assert_artifact_arch_matches_functions.py)
+      # to compare what is about to be shipped against what the target function
+      # actually is (ENC-ISS-778 P0). Existing outputs above/below are unchanged.
+      key_prefixes_json:     ${{ steps.probe.outputs.key_prefixes_json }}
       function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
       environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
@@ -247,6 +254,10 @@ jobs:
             if [[ ${#FNS[@]} -eq 0 ]]; then
               echo "No affected functions and not full_scope -- nothing to deploy."
               echo "version_ids_json={}" >> "$GITHUB_OUTPUT"
+              # ENC-TSK-Q05 AC-2: keep in lockstep with version_ids_json on the
+              # empty-scope early exit -- an empty map here is what makes the
+              # architecture guard's "no deploy targets" no-op fire correctly.
+              echo "key_prefixes_json={}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
@@ -265,6 +276,11 @@ jobs:
 
           MISSING=()
           > /tmp/vid_map.txt
+          # ENC-TSK-Q05 AC-2: per-function resolved key prefix, written alongside
+          # the VersionId map so the deploy job's architecture guard can compare
+          # each function's artifact arch/py (encoded in this prefix) against its
+          # live get-function-configuration -- BEFORE update-function-code runs.
+          > /tmp/prefix_map.txt
           for fn in "${FNS[@]}"; do
             if [[ "$fn" == "mcp_code" ]]; then
               FN_KEY_PREFIX="$MCP_CODE_KEY_PREFIX"
@@ -280,6 +296,7 @@ jobs:
               MISSING+=("$fn")
             else
               printf '%s=%s\n' "$fn" "$VID" >> /tmp/vid_map.txt
+              printf '%s=%s\n' "$fn" "$FN_KEY_PREFIX" >> /tmp/prefix_map.txt
             fi
           done
 
@@ -303,7 +320,22 @@ jobs:
           PY
           )
 
+          # ENC-TSK-Q05 AC-2: same map-file-to-JSON shape as VID_JSON above.
+          PREFIX_JSON=$(python3 - <<'PY'
+          import json
+          d = {}
+          with open('/tmp/prefix_map.txt') as f:
+              for line in f:
+                  line = line.strip()
+                  if '=' in line:
+                      k, v = line.split('=', 1)
+                      d[k] = v
+          print(json.dumps(d))
+          PY
+          )
+
           echo "version_ids_json=$VID_JSON" >> "$GITHUB_OUTPUT"
+          echo "key_prefixes_json=$PREFIX_JSON" >> "$GITHUB_OUTPUT"
           echo "Resolved ${#FNS[@]} artifact VersionIds."
 
   # ---------------------------------------------------------------------------
@@ -385,6 +417,68 @@ jobs:
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
+
+      # ENC-TSK-Q05 (ENC-ISS-778 P0): the primary checkout above is the
+      # PROMOTED tree -- needs.resolve.outputs.commit_sha is whatever
+      # v4/main SHA a v3-prod promote points at, and that tree does not
+      # carry tools/ scripts that live only on main (this workflow's own
+      # branch). Same shape as _build.yml's build-mcp-code "Checkout guard
+      # tooling" step: fetch both AC-2/AC-3 guard scripts from the
+      # workflow's own branch into a separate path instead of relying on
+      # them being present in the (possibly foreign) promoted tree. Must
+      # NOT be made conditional on the scripts existing in the primary
+      # checkout -- that would disable both guards exactly when it matters
+      # (every promote checks out a v4/main tree that lacks them).
+      - name: Checkout guard tooling (workflow branch)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .guard-tools
+          sparse-checkout: |
+            tools/assert_artifact_arch_matches_functions.py
+            tools/post_deploy_smoke.py
+          sparse-checkout-cone-mode: false
+
+      # ENC-TSK-Q05 AC-2 (ENC-ISS-778 P0): compare what is about to be
+      # shipped against what each target function actually IS, before any
+      # update-function-code call. Fails closed on a mismatch, an
+      # unparseable prefix, or an unreadable/ambiguous function
+      # configuration; a not-yet-provisioned function (bootstrapping a new
+      # environment) is a legitimate skip, not a failure -- see the
+      # script's own docstring for the full fail-closed semantics.
+      # Unconditional / no continue-on-error / no `|| true` by design: this
+      # step existing at all is the fix, so it must not be possible to
+      # silently disable it.
+      - name: Assert deploy-time architecture guard (ENC-TSK-Q05 AC-2)
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          KEY_PREFIXES_JSON: ${{ needs.resolve.outputs.key_prefixes_json }}
+        run: |
+          set -euo pipefail
+          python3 .guard-tools/tools/assert_artifact_arch_matches_functions.py \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --key-prefixes-json "${KEY_PREFIXES_JSON}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): capture each deploy target's
+      # CURRENT 'live' alias version before it is overwritten below -- this
+      # is the only place that version is ever observable, so it must run
+      # before "Deploy Lambda functions", not after. A function with no
+      # existing 'live' alias yet (bootstrap case) is simply absent from the
+      # captured map; the post-deploy check step treats that as a clean
+      # no-op (nothing to roll back to), never a failure.
+      - name: Capture pre-deploy alias versions (ENC-TSK-Q05 AC-3)
+        id: pre_deploy_versions
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+        run: |
+          set -euo pipefail
+          VERSIONS_JSON=$(python3 .guard-tools/tools/post_deploy_smoke.py capture \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --version-ids-json "${VERSION_IDS_JSON}" \
+            --region "${{ env.AWS_REGION }}" | tail -n 1)
+          echo "previous_alias_versions_json=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Lambda functions
         id: lambda_deploy
@@ -805,6 +899,32 @@ jobs:
             --full-scope "${FULL_SCOPE}" \
             --affected-functions-json "${AFFECTED_FUNCTIONS_JSON}" \
             --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): probe each deployed function's
+      # public endpoint (data-driven PROBE_TABLE, seeded with
+      # enceladus-mcp-code / mcp.jreese.net -- the incident surface, which
+      # 502'd on both routes) with retry/backoff for cold-start tolerance.
+      # On failure, automatically restores the 'live' alias to the version
+      # captured above and fails the run -- whether or not the rollback
+      # itself succeeds, because a fired rollback means this deploy shipped
+      # something broken and must be investigated. A function with no
+      # PROBE_TABLE entry, or no captured previous version, is a clean
+      # no-op (reported distinctly, never mistaken for a verified pass).
+      # `if: success()` intentionally: a deploy that already failed upstream
+      # has nothing here worth probing.
+      - name: Post-deploy smoke test with automatic rollback (ENC-TSK-Q05 AC-3)
+        if: success()
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+          PREVIOUS_ALIAS_VERSIONS_JSON: ${{ steps.pre_deploy_versions.outputs.previous_alias_versions_json }}
+        run: |
+          set -euo pipefail
+          python3 .guard-tools/tools/post_deploy_smoke.py check \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --version-ids-json "${VERSION_IDS_JSON}" \
+            --previous-alias-versions-json "${PREVIOUS_ALIAS_VERSIONS_JSON}" \
             --region "${{ env.AWS_REGION }}"
 
       - name: Set deployment status → success

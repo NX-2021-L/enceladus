@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): post-deploy smoke test with automatic
+alias rollback.
+
+ENC-ISS-778's mcp.jreese.net P0 shipped an unservable artifact and returned
+502 on every route for hours before a human noticed -- nothing after the
+alias flip ever checked that the function actually worked. This script is
+that check: after _deploy.yml's "Deploy Lambda functions" step updates the
+'live' alias, probe each deployed function's public endpoint (data-driven --
+see PROBE_TABLE) and, if it is not healthy after a few retries (a cold start
+is not an outage), automatically restore the alias to the version captured
+immediately before the deploy and fail the run.
+
+Two subcommands, both invoked from the .guard-tools sparse checkout like the
+AC-2 guard:
+
+  capture  -- run BEFORE "Deploy Lambda functions". Records each deploy
+              target's current 'live' alias FunctionVersion (nothing to roll
+              back to if this is skipped -- see run_capture()/main()).
+  check    -- run AFTER the alias update. Probes every deployed function
+              that has a PROBE_TABLE entry; on failure, rolls the alias back
+              to the version `capture` recorded and verifies recovery;
+              always fails the run (exit 1) when a rollback happened,
+              whether or not recovery verified -- a rollback firing at all
+              means the deploy was bad and needs investigation.
+
+Both subcommands resolve "which Lambda functions did this run touch" the
+same way (resolve_deployed_function_names()), from the SAME two already-
+resolved _deploy.yml resolve-job outputs (function_name_map_json,
+version_ids_json) -- no new resolve-job output is needed for this AC.
+
+Fail-closed / no-op semantics (the whole point, see spawn_task-style
+requirements this backstops):
+  - No PROBE_TABLE entry for a deployed function -> "no_probe": a clean
+    no-op for that function, not a failure and not counted as a pass.
+  - No captured previous alias version for a function that DOES have a
+    probe entry -> "no_previous_version": also a clean no-op (cannot roll
+    back to nothing), reported distinctly so it is never mistaken for a
+    verified-healthy pass.
+  - Probe unhealthy + rollback succeeds + recovery verified -> "rolled_back":
+    still fails the run (exit 1) -- the point is "shipped a broken thing and
+    caught it automatically", not "shipped a broken thing, quietly fine now".
+  - Probe unhealthy + rollback itself fails -> "rollback_failed": fails the
+    run with the AWS error surfaced.
+  - --dry-run performs no AWS mutation (no update-alias call) and no
+    swallowing of a would-be failure into a false "pass": it always reports
+    what it *would* have done and exits 0, since a dry run is explicitly a
+    preview, never an enforcement gate.
+
+Run: post_deploy_smoke.py capture --function-name-map-json ... --version-ids-json ... --region ...
+     post_deploy_smoke.py check   --function-name-map-json ... --version-ids-json ... \\
+                                   --previous-alias-versions-json ... --region ... [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+# ---------------------------------------------------------------------------
+# Probe table -- data-driven, NOT hardcoded inline to one function.
+# function name (the deployed Lambda name, matching function_name_map's
+# values) -> ProbeTarget(base_url, probes). Extend this table as more
+# functions grow a post-deploy health surface.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    path: str
+    healthy_status: Tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ProbeTarget:
+    base_url: str
+    probes: Tuple[ProbeSpec, ...]
+
+
+PROBE_TABLE: Dict[str, ProbeTarget] = {
+    # enceladus-mcp-code / mcp.jreese.net: the ENC-ISS-778 incident surface.
+    # Both routes 502'd during the incident; both must resolve to their
+    # normal (non-502) status for the function to count as healthy.
+    "enceladus-mcp-code": ProbeTarget(
+        base_url="https://mcp.jreese.net",
+        probes=(
+            ProbeSpec(path="/.well-known/oauth-protected-resource", healthy_status=(200,)),
+            ProbeSpec(path="/", healthy_status=(401,)),
+        ),
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Pure decision core
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SmokeOutcome:
+    function_name: str
+    status: str  # see _FAILING_STATUSES below for the set that fails the run
+    detail: str
+
+
+# Outcomes that must fail the run (exit 1). 'healthy', 'no_probe', and
+# 'no_previous_version' are all clean, non-failing outcomes -- see the
+# module docstring for why 'rolled_back' still fails even though the
+# rollback itself succeeded.
+_FAILING_STATUSES = frozenset({"rollback_failed", "rollback_unverified", "rolled_back"})
+
+
+def evaluate_probe_results(results: Dict[str, Optional[int]], target: ProbeTarget) -> bool:
+    """results: probe path -> observed status code (None if the request
+    itself failed/raised). True iff EVERY probe's observed status is in its
+    own healthy_status set."""
+    return all(results.get(spec.path) in spec.healthy_status for spec in target.probes)
+
+
+def resolve_deployed_function_names(
+    function_name_map: Dict[str, str], version_ids: Dict[str, str]
+) -> List[str]:
+    """The flat, de-duplicated, order-preserving list of deployed Lambda
+    function names this run touched -- mirrors the deploy step's own
+    fn -> mapped_name(s) expansion (ENC-ISS-398 comma-list support), driven
+    by version_ids (the set this run actually resolved artifacts for), not
+    the full function_name_map (which may name functions this run never
+    touched)."""
+    names: List[str] = []
+    for fn in sorted(version_ids):
+        mapped = (function_name_map.get(fn) or "").strip()
+        if not mapped:
+            continue
+        for name in (n.strip() for n in mapped.split(",")):
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def run_function_smoke(
+    function_name: str,
+    previous_version: Optional[str],
+    probe_fn: Callable[[ProbeTarget], bool],
+    rollback_fn: Callable[[str, str], Tuple[bool, str]],
+    dry_run: bool = False,
+) -> SmokeOutcome:
+    """Per-function decision pipeline. probe_fn(target) -> True/False (already
+    retried with backoff by the caller's chosen implementation -- see
+    probe_target() below for the production one). rollback_fn(function_name,
+    previous_version) -> (success, message), wrapping the actual
+    update-alias call; never invoked when dry_run is set."""
+    target = PROBE_TABLE.get(function_name)
+    if target is None:
+        return SmokeOutcome(function_name, "no_probe", "no PROBE_TABLE entry for this function -- skipped")
+    if not previous_version:
+        return SmokeOutcome(
+            function_name, "no_previous_version",
+            "no captured pre-deploy 'live' alias version -- nothing to roll back to, skipped",
+        )
+
+    if probe_fn(target):
+        return SmokeOutcome(function_name, "healthy", "post-deploy probe(s) passed")
+
+    if dry_run:
+        return SmokeOutcome(
+            function_name, "unhealthy_dry_run",
+            f"probe(s) failed; --dry-run, so no alias mutation was performed "
+            f"(would have rolled back to live:{previous_version})",
+        )
+
+    rb_ok, rb_detail = rollback_fn(function_name, previous_version)
+    if not rb_ok:
+        return SmokeOutcome(
+            function_name, "rollback_failed",
+            f"probe(s) failed AND automatic rollback to live:{previous_version} also failed: {rb_detail}",
+        )
+
+    if probe_fn(target):
+        return SmokeOutcome(
+            function_name, "rolled_back",
+            f"probe(s) failed; automatically rolled back to live:{previous_version} "
+            "and recovery verified -- this deploy must be investigated",
+        )
+    return SmokeOutcome(
+        function_name, "rollback_unverified",
+        f"probe(s) failed; rolled back to live:{previous_version} but the "
+        "recovery probe is STILL unhealthy -- investigate immediately",
+    )
+
+
+def decide_exit_code(outcomes: Sequence[SmokeOutcome]) -> int:
+    return 1 if any(o.status in _FAILING_STATUSES for o in outcomes) else 0
+
+
+# ---------------------------------------------------------------------------
+# Impure edges: HTTP probing (with retry/backoff) and AWS alias I/O.
+# ---------------------------------------------------------------------------
+
+def _http_status(url: str, timeout: float = 10.0) -> Optional[int]:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        # A non-2xx response (e.g. the expected 401) still reaches here with
+        # a real status code -- that's a successful probe, not a failure.
+        return e.code
+    except Exception:
+        return None
+
+
+def probe_target(
+    target: ProbeTarget,
+    attempts: int = 4,
+    backoff_seconds: Sequence[float] = (2, 4, 8),
+    fetcher: Callable[[str], Optional[int]] = _http_status,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Retries the FULL probe set up to `attempts` times with backoff
+    between attempts, because a cold start is not an outage. Returns True
+    the first time every probe in `target` is healthy in the same attempt."""
+    for i in range(attempts):
+        results = {spec.path: fetcher(f"{target.base_url}{spec.path}") for spec in target.probes}
+        if evaluate_probe_results(results, target):
+            return True
+        if i < attempts - 1:
+            sleep_fn(backoff_seconds[min(i, len(backoff_seconds) - 1)])
+    return False
+
+
+def _run(cmd: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"exception invoking {' '.join(cmd)}: {exc}"
+    if result.returncode != 0:
+        return None, (result.stderr or "").strip() or f"exit {result.returncode}"
+    return result.stdout, None
+
+
+def get_live_alias_version(function_name: str, region: str) -> Optional[str]:
+    """Returns the 'live' alias's current FunctionVersion, or None if the
+    alias/function does not exist (nothing to capture -- treated as
+    "no previous version" downstream, never an error: a function that has
+    never had a 'live' alias yet is a bootstrapping case, not a defect)."""
+    out, _err = _run([
+        "aws", "lambda", "get-alias",
+        "--function-name", function_name,
+        "--name", "live",
+        "--region", region,
+        "--output", "json",
+    ])
+    if out is None:
+        return None
+    try:
+        version = json.loads(out).get("FunctionVersion")
+    except json.JSONDecodeError:
+        return None
+    return version or None
+
+
+def aws_rollback_alias(function_name: str, previous_version: str, region: str) -> Tuple[bool, str]:
+    _out, err = _run([
+        "aws", "lambda", "update-alias",
+        "--function-name", function_name,
+        "--name", "live",
+        "--function-version", previous_version,
+        "--region", region,
+    ])
+    if err is None:
+        return True, f"live alias restored to version {previous_version}"
+    return False, err
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _common_target_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--function-name-map-json", required=True)
+    parser.add_argument("--version-ids-json", required=True)
+    parser.add_argument("--region", default="us-west-2")
+
+
+def run_capture(function_name_map: Dict[str, str], version_ids: Dict[str, str], region: str) -> Dict[str, str]:
+    captured: Dict[str, str] = {}
+    for name in resolve_deployed_function_names(function_name_map, version_ids):
+        version = get_live_alias_version(name, region)
+        if version:
+            captured[name] = version
+    return captured
+
+
+def run_check(
+    function_name_map: Dict[str, str],
+    version_ids: Dict[str, str],
+    previous_versions: Dict[str, str],
+    region: str,
+    dry_run: bool,
+) -> List[SmokeOutcome]:
+    deployed = resolve_deployed_function_names(function_name_map, version_ids)
+
+    def rollback_fn(name: str, version: str) -> Tuple[bool, str]:
+        return aws_rollback_alias(name, version, region)
+
+    outcomes = [
+        run_function_smoke(name, previous_versions.get(name), probe_target, rollback_fn, dry_run=dry_run)
+        for name in deployed
+    ]
+    return outcomes
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    capture_p = sub.add_parser("capture", help="Capture each deploy target's pre-deploy 'live' alias version.")
+    _common_target_args(capture_p)
+
+    check_p = sub.add_parser("check", help="Probe each deployed function; roll back + fail on unhealthy.")
+    _common_target_args(check_p)
+    check_p.add_argument("--previous-alias-versions-json", required=True)
+    check_p.add_argument("--dry-run", action="store_true", help="Probe only; never mutate an alias.")
+
+    args = parser.parse_args(argv)
+
+    try:
+        fn_map = json.loads(args.function_name_map_json)
+        version_ids = json.loads(args.version_ids_json)
+    except json.JSONDecodeError as exc:
+        print(f"::error::could not parse function-name-map/version-ids JSON: {exc}", file=sys.stderr)
+        return 2
+
+    if args.command == "capture":
+        captured = run_capture(fn_map, version_ids, args.region)
+        deployed = resolve_deployed_function_names(fn_map, version_ids)
+        for name in deployed:
+            if name in captured:
+                print(f"  captured {name}: live={captured[name]}")
+            else:
+                print(f"  [none] {name}: no existing 'live' alias (bootstrap case) -- nothing to capture")
+        print(json.dumps(captured))
+        return 0
+
+    # check
+    try:
+        previous_versions = json.loads(args.previous_alias_versions_json)
+    except json.JSONDecodeError as exc:
+        print(f"::error::could not parse previous-alias-versions JSON: {exc}", file=sys.stderr)
+        return 2
+
+    outcomes = run_check(fn_map, version_ids, previous_versions, args.region, args.dry_run)
+    if not outcomes:
+        print("No deployed functions to smoke-test -- skipping.")
+        return 0
+
+    for o in outcomes:
+        stream = sys.stderr if o.status in _FAILING_STATUSES else sys.stdout
+        prefix = "::error::" if o.status in _FAILING_STATUSES else "  "
+        print(f"{prefix}{o.function_name} [{o.status}]: {o.detail}", file=stream)
+
+    rc = decide_exit_code(outcomes)
+    if rc != 0:
+        failing = [o.function_name for o in outcomes if o.status in _FAILING_STATUSES]
+        print(
+            f"::error::Post-deploy smoke test FAILED for: {', '.join(failing)} -- "
+            "this deploy must not be treated as successful (ENC-ISS-778 P0 class).",
+            file=sys.stderr,
+        )
+    else:
+        print("Post-deploy smoke test passed (or nothing to probe).")
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
