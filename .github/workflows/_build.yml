@@ -205,22 +205,24 @@ jobs:
   # ---------------------------------------------------------------------------
   # BUILD-MCP-CODE — packages enceladus-mcp-code from tools/enceladus-mcp-server/
   # (ENC-TSK-I39). server.py is the Lambda handler (Handler: server.lambda_handler)
-  # with deps bundled in-zip (no SharedLayer). x86_64/py311 only — matches the prod
-  # and gamma Lambda runtime. The matrix build skips mcp_code (no lambda_function.py).
+  # with deps bundled in-zip (no SharedLayer). arm64/py3.12 — matches the prod
+  # and gamma Lambda runtime since the ARM64 cutover (ENC-ISS-778 retired the
+  # prior x86_64/py3.11 pin, see _deploy.yml). The matrix build skips mcp_code
+  # (no lambda_function.py).
   # ---------------------------------------------------------------------------
   build-mcp-code:
-    name: build-mcp-code (x86_64-py3.11)
-    runs-on: ubuntu-latest
+    name: build-mcp-code (arm64-py3.12)
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repo at requested SHA
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit_sha }}
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -247,11 +249,11 @@ jobs:
           # the layer is absent. Copy the file so the fallback resolves cleanly.
           cp backend/lambda/shared_layer/python/enceladus_shared/appconfig_flags.py "$BUILD/"
 
-          # Install dependencies (x86_64 / py3.11 — must match enceladus-mcp-code runtime).
+          # Install dependencies (arm64 / py3.12 — must match enceladus-mcp-code runtime).
           python -m pip install \
-            --platform manylinux2014_x86_64 \
+            --platform manylinux2014_aarch64 \
             --implementation cp \
-            --python-version 3.11 \
+            --python-version 3.12 \
             --only-binary=:all: \
             --upgrade \
             --target "$BUILD" \
@@ -262,7 +264,7 @@ jobs:
           ZIP="/tmp/mcp_code-${SHA}.zip"
           (cd "$BUILD" && zip -qrX "$ZIP" .)
 
-          KEY="${PREFIX}/x86_64-py3.11/mcp_code-${SHA}.zip"
+          KEY="${PREFIX}/arm64-py3.12/mcp_code-${SHA}.zip"
           put_out=$(aws s3api put-object \
             --bucket "$BUCKET" \
             --key "$KEY" \
