@@ -103,6 +103,10 @@
       ],
       "notes": "ENC-TSK-J65: dispatch-only GSI addition on the prod deployment-manager table; environment: v3-prod. Caught by the guard's own first fail-closed run."
     },
+    "deploy-lane-parity-guard.yml": {
+      "class": "inert",
+      "notes": "ENC-TSK-Q05 / ENC-ISS-778: guard, no AWS mutation. Compares main's and v4/main's _deploy.yml + _build.yml on named invariants (artifact key prefixes, build producer counts, mcp_code packaging inputs) via tools/assert_deploy_lane_parity.py, so the two dispatch/gamma lanes' definitions of what gets shipped can't silently re-diverge the way the stale x86_64-py3.11 mcp_code pin did."
+    },
     "gamma-tracker-mirror.yml": {
       "class": "gamma-only",
       "gated_jobs": [
