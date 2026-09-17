@@ -209,6 +209,19 @@ jobs:
   # and gamma Lambda runtime since the ARM64 cutover (ENC-ISS-778 retired the
   # prior x86_64/py3.11 pin, see _deploy.yml). The matrix build skips mcp_code
   # (no lambda_function.py).
+  #
+  # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): kept this job rather than
+  # deleting it in favor of resolving mcp_code from the v4/main gamma-built
+  # artifact. main's matrix `build` job above only builds functions with a
+  # backend/lambda/<fn>/lambda_function.py, which mcp_code deliberately does
+  # not have -- deleting this job would leave a main-SHA v3-prod promote with
+  # no mcp_code artifact to resolve at all (resolve/probe in _deploy.yml would
+  # hard-fail, not silently fall back to a v4/main SHA it never built). Ported
+  # v4/main's glob-based module copy (instead of a hand-maintained file list)
+  # and wired the tools/assert_lambda_artifact_contents.py guard in below, so
+  # a zip missing server.py (or, once main adopts the mcp_server/ package
+  # decomposition v4/main already has, mcp_server/__init__.py) fails this
+  # build instead of 502ing at invoke time.
   # ---------------------------------------------------------------------------
   build-mcp-code:
     name: build-mcp-code (arm64-py3.12)
@@ -240,10 +253,30 @@ jobs:
           set -euo pipefail
           BUILD=$(mktemp -d)
 
-          # Handler and local runtime modules (server.py is the Lambda entry point).
-          cp tools/enceladus-mcp-server/server.py              "$BUILD/"
-          cp tools/enceladus-mcp-server/manifest_projection.py "$BUILD/"
-          cp tools/enceladus-mcp-server/dispatch_plan_generator.py "$BUILD/"
+          # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): copy every runtime
+          # module in tools/enceladus-mcp-server/ (excluding tests) instead of
+          # a hand-maintained file list. The prior explicit `cp` list silently
+          # drifts out of sync with whatever server.py actually imports next
+          # -- this is the same glob v4/main's matrix `build` job uses for
+          # mcp_code/coordination_api/mcp_streamable/mcp_streaming_gateway
+          # (see `git show origin/v4/main:.github/workflows/_build.yml`).
+          for py in tools/enceladus-mcp-server/*.py; do
+            base=$(basename "$py")
+            case "$base" in
+              test_*) continue ;;
+            esac
+            cp "$py" "$BUILD/$base"
+          done
+          # server.py imports the decomposed mcp_server package on v4/main
+          # (ENC-TSK-L09). main has not adopted that decomposition -- there is
+          # no tools/enceladus-mcp-server/mcp_server/ here yet -- but copy it
+          # defensively the moment it does exist, so this job (and the
+          # assert_lambda_artifact_contents.py guard below) stay correct
+          # without a follow-up edit.
+          if [ -d tools/enceladus-mcp-server/mcp_server ]; then
+            rsync -a --exclude='__pycache__' --exclude='*.pyc' \
+              tools/enceladus-mcp-server/mcp_server/ "$BUILD/mcp_server/"
+          fi
           # appconfig_flags fallback: server.py imports enceladus_shared.appconfig_flags
           # (SharedLayer) with a local-file try/except fallback for environments where
           # the layer is absent. Copy the file so the fallback resolves cleanly.
@@ -263,6 +296,13 @@ jobs:
           # Zip (matches Lambda handler expectation: server.lambda_handler).
           ZIP="/tmp/mcp_code-${SHA}.zip"
           (cd "$BUILD" && zip -qrX "$ZIP" .)
+
+          # ENC-TSK-Q07 guard: fail the build, not the invoke, if the zip is
+          # missing an entry server.lambda_handler needs. main has not
+          # adopted the mcp_server/ package decomposition (see above), so
+          # override the built-in mcp_code default (which also requires
+          # mcp_server/__init__.py) down to what this job actually produces.
+          python3 tools/assert_lambda_artifact_contents.py "$ZIP" mcp_code --require server.py
 
           KEY="${PREFIX}/arm64-py3.12/mcp_code-${SHA}.zip"
           put_out=$(aws s3api put-object \
