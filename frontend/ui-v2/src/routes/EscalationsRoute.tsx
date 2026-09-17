@@ -20,10 +20,23 @@
  *     retrying or degrading. A refused decision is a correct outcome to show,
  *     not an error to swallow.
  *
+ * CROSS-PROJECT AGGREGATION (ENC-ISS-773). The cockpit used to pin itself to
+ * a single hardcoded project_id ('enceladus'), which made every OTHER
+ * project's escalations invisible — DVP-ESC-002 (devops) never appeared and
+ * the header read 0 pending even while an agent sat blocked on io. The feed
+ * is now read for every registered project (Promise.all) and merged into one
+ * queue; a single project's feed failing (a 500, a gamma route not yet
+ * deployed) is recorded in `errors` and never blanks the rows that DID load.
+ * Every row is stamped with its OWN project_id (escalationRows.ts,
+ * `toEscalationRowsAcrossProjects`) so a decision is always issued against
+ * that row's project — never the page's — see the approve/deny mutations
+ * below and ENC-ISS-501's non-delegable-boundary note in api/escalations.ts.
+ *
  * State ownership (B67 AC-13/AC-14): all record data lives in TanStack Query.
- * The only useState here is view state — which bucket is selected, which row is
- * open, and the draft guidance note. No escalation is ever copied into
- * component state, so the queue cannot go stale behind an open modal.
+ * The only useState here is view state — which bucket/project is selected,
+ * which row is open, and the draft guidance note. No escalation is ever
+ * copied into component state, so the queue cannot go stale behind an open
+ * modal.
  */
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -36,12 +49,16 @@ import {
   Header,
   KeyValuePairs,
   Modal,
+  Select,
   Table,
   Tabs,
 } from '../design-system'
+import { Badge } from '../components/Badge'
 import { StatusChip } from '../components/StatusChip'
 import { RecordLink } from '../components/RecordLink'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { SessionExpiredError } from '../api/client'
+import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
   approveEscalation,
   denyEscalation,
@@ -49,33 +66,79 @@ import {
   fetchEscalationsFeed,
   type EscalationDecisionResult,
   type EscalationItem,
+  type EscalationsFeed,
 } from '../api/escalations'
 import {
   countByBucket,
   describeDecisionError,
   describeDecisionResult,
   filterRows,
-  toEscalationRows,
+  toEscalationRowsAcrossProjects,
   type EscalationBucket,
   type EscalationRow,
+  type ProjectEscalationsFeed,
 } from './escalationRows'
 import './escalations.css'
 
-// ENC-ISS-527 / ENC-TSK-M60: the cockpit is pinned to enceladus — never
-// derived from projects[0], which resolves to 'agentharmony' on gamma and
-// silently renders an empty queue. Same pin as CoordinationRoute/Governance.
-const ESCALATIONS_PROJECT_ID = 'enceladus'
+/** Project filter's "everything" option — never a real project_id, so it can
+ *  never collide with one (project ids are lowercase slugs like 'enceladus'). */
+const ALL_PROJECTS = 'all'
 
 /** Poll cadence. ENC-TSK-J71's escalation.watch is the agent-side cursor feed;
  *  the cockpit uses the documented fallback (poll escalation.list) because a
  *  human queue does not need sub-30s latency and polling cannot wedge. */
 const POLL_INTERVAL_MS = 30_000
 
+/** One project's outcome from the aggregate fetch below. */
+interface ProjectFeedError {
+  projectId: string
+  message: string
+}
+
+interface AggregateFeedResult {
+  feeds: ProjectEscalationsFeed[]
+  errors: ProjectFeedError[]
+}
+
+/**
+ * Reads every project's escalation feed in parallel and tolerates any single
+ * project failing (ENC-ISS-773 AC-2): its error is recorded and the other
+ * projects still render. A SessionExpiredError is the one exception — it
+ * means the browser's own Cognito session is gone, which is true for every
+ * project at once, so it is re-thrown to fail the whole query the same way a
+ * single-project 401 always has.
+ */
+async function fetchEscalationsAcrossProjects(
+  projectIds: string[],
+  signal?: AbortSignal,
+): Promise<AggregateFeedResult> {
+  const settled = await Promise.all(
+    projectIds.map(async (projectId) => {
+      try {
+        const feed = await fetchEscalationsFeed(projectId, { signal })
+        return { projectId, feed, error: null as string | null }
+      } catch (error) {
+        if (error instanceof SessionExpiredError) throw error
+        const message = error instanceof Error ? error.message : String(error)
+        return { projectId, feed: null as EscalationsFeed | null, error: message }
+      }
+    }),
+  )
+  const feeds: ProjectEscalationsFeed[] = []
+  const errors: ProjectFeedError[] = []
+  for (const result of settled) {
+    if (result.feed) feeds.push({ projectId: result.projectId, feed: result.feed })
+    else errors.push({ projectId: result.projectId, message: result.error ?? 'Unknown error' })
+  }
+  return { feeds, errors }
+}
+
 export function EscalationsRoute() {
   useDocumentTitle('Escalations')
   const queryClient = useQueryClient()
 
   const [bucket, setBucket] = useState<EscalationBucket>('pending')
+  const [projectFilter, setProjectFilter] = useState<string>(ALL_PROJECTS)
   const [openId, setOpenId] = useState<string | null>(null)
   const [guidanceNote, setGuidanceNote] = useState('')
   const [notice, setNotice] = useState<{
@@ -85,16 +148,31 @@ export function EscalationsRoute() {
     hint?: string
   } | null>(null)
 
+  // Same project registry RecordLink already reads (projectRegistryQueryOptions),
+  // so this never issues a second /api/v1/projects request beyond cache staleness.
+  const projectsQuery = useQuery(projectRegistryQueryOptions)
+  const projectIds = (projectsQuery.data ?? []).map((project) => project.project_id)
+
   const feedQuery = useQuery({
-    queryKey: escalationKeys.feed(ESCALATIONS_PROJECT_ID),
-    queryFn: ({ signal }) => fetchEscalationsFeed(ESCALATIONS_PROJECT_ID, { signal }),
+    queryKey: escalationKeys.feed(ALL_PROJECTS),
+    queryFn: ({ signal }) => fetchEscalationsAcrossProjects(projectIds, signal),
+    enabled: projectsQuery.isSuccess,
     refetchInterval: POLL_INTERVAL_MS,
   })
 
   // AC-16: React Compiler owns memoization — no hand-written useMemo.
-  const rows = toEscalationRows(feedQuery.data)
-  const counts = countByBucket(rows)
-  const visibleRows = filterRows(rows, bucket)
+  const rows = toEscalationRowsAcrossProjects(feedQuery.data?.feeds ?? [])
+  const feedErrors = feedQuery.data?.errors ?? []
+  const projectOptions = [
+    { value: ALL_PROJECTS, label: 'All projects' },
+    ...Array.from(new Set(rows.map((row) => row.projectId)))
+      .sort()
+      .map((projectId) => ({ value: projectId, label: projectId })),
+  ]
+  const projectFilteredRows =
+    projectFilter === ALL_PROJECTS ? rows : rows.filter((row) => row.projectId === projectFilter)
+  const counts = countByBucket(projectFilteredRows)
+  const visibleRows = filterRows(projectFilteredRows, bucket)
   // The open row is READ FROM QUERY DATA every render, never copied into state:
   // a decision elsewhere (or the 30s poll) updates the modal in place, and an
   // escalation that leaves the feed closes it rather than showing a ghost.
@@ -107,7 +185,7 @@ export function EscalationsRoute() {
 
   function settleDecision(result: EscalationDecisionResult) {
     setNotice(describeDecisionResult(result))
-    void queryClient.invalidateQueries({ queryKey: escalationKeys.feed(ESCALATIONS_PROJECT_ID) })
+    void queryClient.invalidateQueries({ queryKey: escalationKeys.feed(ALL_PROJECTS) })
     closeModal()
   }
 
@@ -115,19 +193,22 @@ export function EscalationsRoute() {
     setNotice(describeDecisionError(error))
     // A 409 means someone/something already decided it — refresh so the queue
     // stops offering a control the server will keep refusing.
-    void queryClient.invalidateQueries({ queryKey: escalationKeys.feed(ESCALATIONS_PROJECT_ID) })
+    void queryClient.invalidateQueries({ queryKey: escalationKeys.feed(ALL_PROJECTS) })
   }
 
+  // ENC-ISS-773: decisions are issued against the ROW's own project_id — never
+  // a page-level default — so a devops escalation is decided at
+  // /coordination/escalations/devops/<id>/approve, not enceladus's route.
   const approveMutation = useMutation({
-    mutationFn: (escalationId: string) =>
-      approveEscalation(ESCALATIONS_PROJECT_ID, escalationId),
+    mutationFn: (vars: { projectId: string; escalationId: string }) =>
+      approveEscalation(vars.projectId, vars.escalationId),
     onSuccess: settleDecision,
     onError: settleError,
   })
 
   const denyMutation = useMutation({
-    mutationFn: (vars: { escalationId: string; note: string }) =>
-      denyEscalation(ESCALATIONS_PROJECT_ID, vars.escalationId, vars.note),
+    mutationFn: (vars: { projectId: string; escalationId: string; note: string }) =>
+      denyEscalation(vars.projectId, vars.escalationId, vars.note),
     onSuccess: settleDecision,
     onError: settleError,
   })
@@ -144,6 +225,11 @@ export function EscalationsRoute() {
           {row.id}
         </button>
       ),
+    },
+    {
+      id: 'project',
+      header: 'Project',
+      cell: (row: EscalationRow) => <Badge color="teal">{row.projectId}</Badge>,
     },
     {
       id: 'status',
@@ -242,6 +328,29 @@ export function EscalationsRoute() {
         </div>
       )}
 
+      {feedErrors.length > 0 && (
+        <div className="ev2-esc__notice">
+          <Alert type="warning" header="Some projects did not load">
+            {feedErrors.map((e) => `${e.projectId}: ${e.message}`).join(' · ')} — the rest of the
+            queue below is still current.
+          </Alert>
+        </div>
+      )}
+
+      <div className="ev2-esc__filters">
+        <FormField label="Project">
+          <Select
+            selectedOption={
+              projectOptions.find((option) => option.value === projectFilter) ?? projectOptions[0]!
+            }
+            options={projectOptions}
+            onChange={(event: { detail: { selectedOption: { value: string } } }) =>
+              setProjectFilter(event.detail.selectedOption.value)
+            }
+          />
+        </FormField>
+      </div>
+
       <Tabs
         tabs={tabs}
         activeTabId={bucket}
@@ -264,7 +373,11 @@ export function EscalationsRoute() {
                 disabled={deciding}
                 loading={denyMutation.isPending}
                 onClick={() =>
-                  denyMutation.mutate({ escalationId: openRow.id, note: guidanceNote })
+                  denyMutation.mutate({
+                    projectId: openRow.projectId,
+                    escalationId: openRow.id,
+                    note: guidanceNote,
+                  })
                 }
               >
                 {guidanceNote.trim() ? 'Deny with guidance' : 'Deny'}
@@ -273,7 +386,9 @@ export function EscalationsRoute() {
                 variant="primary"
                 disabled={deciding}
                 loading={approveMutation.isPending}
-                onClick={() => approveMutation.mutate(openRow.id)}
+                onClick={() =>
+                  approveMutation.mutate({ projectId: openRow.projectId, escalationId: openRow.id })
+                }
               >
                 Approve &amp; apply
               </Button>
