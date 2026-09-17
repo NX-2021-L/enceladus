@@ -130,6 +130,24 @@ PROBE_TABLE: Dict[str, ProbeTarget] = {
             ProbeSpec(path="/", healthy_status=(401,)),
         ),
     ),
+    # ENC-TSK-Q09 (ENC-ISS-782 P0): enceladus-mcp-streamable is the actual
+    # incident surface (mcp.jreese.net's Function URL, distinct from
+    # enceladus-mcp-code's own) -- it must be probed directly by its own
+    # Function URL rather than represented via "enceladus-mcp-code", which
+    # it is not. Same healthy signature as mcp_code (both serve the same
+    # MCP server runtime, just via a different Lambda/URL). This function's
+    # Function URL Qualifier is null (serves $LATEST directly, see
+    # get_function_url_qualifier() / run_function_smoke() below) -- an
+    # alias rollback CANNOT restore it; that was proven during the
+    # incident (update-alias from 15 back to 13 succeeded, endpoint stayed
+    # 502 on three probes; only update-function-code fixed it).
+    "enceladus-mcp-streamable": ProbeTarget(
+        base_url="https://4yhnhvq64ek34a2npdgbmjbp2m0wxjil.lambda-url.us-west-2.on.aws",
+        probes=(
+            ProbeSpec(path="/.well-known/oauth-protected-resource", healthy_status=(200,)),
+            ProbeSpec(path="/", healthy_status=(401,)),
+        ),
+    ),
 }
 
 
@@ -160,7 +178,23 @@ class SmokeOutcome:
 # 'no_probe_env_variant', and 'no_previous_version' are all clean,
 # non-failing outcomes -- see the module docstring for why 'rolled_back'
 # still fails even though the rollback itself succeeded.
-_FAILING_STATUSES = frozenset({"rollback_failed", "rollback_unverified", "rolled_back"})
+#
+# ENC-TSK-Q09 (ENC-ISS-782 P0): 'rollback_impossible_unqualified_url' and
+# 'rollback_impossible_qualifier_unknown' are the two new outcomes for a
+# function whose Function URL Qualifier is unqualified (serves $LATEST
+# directly) or could not be determined -- see run_function_smoke() /
+# get_function_url_qualifier(). Both fail the run: an alias rollback is
+# either PROVEN ineffective for that function (this incident: update-alias
+# from 15 back to 13 succeeded and the endpoint stayed 502 on three probes)
+# or its safety could not be confirmed, and this script must never attempt
+# -- or claim to have performed -- a rollback in either case.
+_FAILING_STATUSES = frozenset({
+    "rollback_failed",
+    "rollback_unverified",
+    "rolled_back",
+    "rollback_impossible_unqualified_url",
+    "rollback_impossible_qualifier_unknown",
+})
 
 
 def evaluate_probe_results(results: Dict[str, Optional[int]], target: ProbeTarget) -> bool:
@@ -197,6 +231,7 @@ def run_function_smoke(
     rollback_fn: Callable[[str, str], Tuple[bool, str]],
     dry_run: bool = False,
     environment_suffix: str = "",
+    qualifier_fn: Callable[[str], Tuple[Optional[str], Optional[str]]] = lambda name: ("live", None),
 ) -> SmokeOutcome:
     """Per-function decision pipeline. probe_fn(target) -> True/False (already
     retried with backoff by the caller's chosen implementation -- see
@@ -207,7 +242,20 @@ def run_function_smoke(
     legitimately has no health surface) from "no_probe_env_variant" (the
     KNOWN incident-surface function, deployed under a different
     environment's name, that PROBE_TABLE does not key -- see
-    _base_function_name())."""
+    _base_function_name()).
+
+    qualifier_fn(function_name) -> (qualifier, error) (ENC-TSK-Q09,
+    ENC-ISS-782): reports this function's Function URL Qualifier --
+    "" (falsy) means the URL is UNQUALIFIED and serves $LATEST directly, a
+    shape an alias rollback CANNOT restore (proven during the incident: an
+    update-alias call succeeds but the endpoint stays unhealthy, because the
+    URL never routes through the alias pointer at all). error carries an
+    AWS error string when the qualifier could not be determined. Called
+    ONLY when a rollback would otherwise be attempted (a healthy probe, or a
+    dry run, never reaches it) -- see get_function_url_qualifier() for the
+    production implementation. Defaults to a fixed alias-qualified result so
+    every EXISTING caller that does not pass this argument keeps exercising
+    the normal alias-rollback path unchanged."""
     target = PROBE_TABLE.get(function_name)
     if target is None:
         base_name = _base_function_name(function_name, environment_suffix)
@@ -235,6 +283,35 @@ def run_function_smoke(
             function_name, "unhealthy_dry_run",
             f"probe(s) failed; --dry-run, so no alias mutation was performed "
             f"(would have rolled back to live:{previous_version})",
+        )
+
+    # ENC-TSK-Q09 (ENC-ISS-782 P0): determine whether an alias rollback can
+    # even work for this function BEFORE attempting one. Checked here, not
+    # earlier, so a healthy probe or a dry run never pays for (or can be
+    # blocked by) this extra AWS call.
+    qualifier, qual_err = qualifier_fn(function_name)
+    if qual_err is not None:
+        return SmokeOutcome(
+            function_name, "rollback_impossible_qualifier_unknown",
+            f"probe(s) failed; could not determine whether this function's "
+            f"Function URL is alias-qualified (needed to know whether an "
+            f"alias rollback can restore service -- ENC-ISS-782 proved it "
+            f"cannot for an unqualified URL), so NO rollback was attempted: "
+            f"{qual_err}. Investigate and restore manually if needed.",
+        )
+    if not qualifier:
+        return SmokeOutcome(
+            function_name, "rollback_impossible_unqualified_url",
+            "probe(s) failed; this function's Function URL has NO alias "
+            "Qualifier (it serves $LATEST directly) -- an alias rollback is "
+            "PROVEN ineffective for this shape (ENC-ISS-782: update-alias "
+            "from 15 back to 13 succeeded and the endpoint stayed 502 on "
+            "three probes; only update-function-code restored it). "
+            "Automatic rollback is NOT implemented for this case, to avoid "
+            "silently 'succeeding' at an alias mutation that does not "
+            "change what the Function URL serves -- restore service "
+            "manually with update-function-code against the previously-"
+            "good artifact and investigate immediately.",
         )
 
     rb_ok, rb_detail = rollback_fn(function_name, previous_version)
@@ -380,6 +457,48 @@ def get_live_alias_version(function_name: str, region: str) -> Tuple[Optional[st
     return version or None, None
 
 
+def get_function_url_qualifier(function_name: str, region: str) -> Tuple[Optional[str], Optional[str]]:
+    """Returns (qualifier, error) (ENC-TSK-Q09, ENC-ISS-782 P0).
+
+    qualifier is the Function URL config's `Qualifier` field: an alias name
+    (e.g. "live") when the URL routes through an alias -- the shape an
+    alias rollback can actually restore -- or "" (empty string) when the
+    URL is UNQUALIFIED and serves $LATEST directly, bypassing the alias
+    pointer entirely. This is the exact shape that made
+    enceladus-mcp-streamable's ENC-ISS-782 outage un-rollback-able via
+    update-alias: the alias mutation itself succeeds (this function's
+    return contract has no way to represent "succeeded but pointless"), but
+    nothing the Function URL serves ever changes. qualifier is None only
+    when this function has no Function URL configured at all (a genuine
+    "not applicable" case -- every PROBE_TABLE entry's base_url IS a
+    Function URL, so this should not occur for a function this is called
+    for, but is handled the same way get_live_alias_version() handles a
+    genuinely absent alias, rather than being conflated with an error).
+
+    error is None for a CLEAN result (alias-qualified, unqualified, or no
+    URL configured). For any OTHER failure (throttling exhausted,
+    AccessDenied, a timeout, unparseable output), error carries the AWS
+    error text and callers MUST treat that as "cannot safely determine
+    whether a rollback will work" -- never silently assume alias-qualified
+    and attempt a rollback that may be exactly the proven-ineffective no-op
+    this function guards against."""
+    out, err = _run([
+        "aws", "lambda", "get-function-url-config",
+        "--function-name", function_name,
+        "--region", region,
+        "--output", "json",
+    ])
+    if out is None:
+        if _is_not_provisioned(err):
+            return None, None
+        return None, err or "get-function-url-config failed with no output and no error detail"
+    try:
+        qualifier = json.loads(out).get("Qualifier", "") or ""
+    except json.JSONDecodeError as exc:
+        return None, f"could not parse get-function-url-config JSON output: {exc}"
+    return qualifier, None
+
+
 def aws_rollback_alias(function_name: str, previous_version: str, region: str) -> Tuple[bool, str]:
     _out, err = _run([
         "aws", "lambda", "update-alias",
@@ -438,10 +557,14 @@ def run_check(
     def rollback_fn(name: str, version: str) -> Tuple[bool, str]:
         return aws_rollback_alias(name, version, region)
 
+    def qualifier_fn(name: str) -> Tuple[Optional[str], Optional[str]]:
+        return get_function_url_qualifier(name, region)
+
     outcomes = [
         run_function_smoke(
             name, previous_versions.get(name), probe_target, rollback_fn,
             dry_run=dry_run, environment_suffix=environment_suffix,
+            qualifier_fn=qualifier_fn,
         )
         for name in deployed
     ]
