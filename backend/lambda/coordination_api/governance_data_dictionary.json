@@ -7128,6 +7128,24 @@
           "definition": "The tracker record the requested mutation targets.",
           "usage_guidance": "Must be an existing task (TSK), issue (ISS), or feature (FTR) record. Validated for existence at request time with a consistent read."
         },
+        "target_record_type": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "immutable": true
+          },
+          "definition": "The tracker record type of target_record_id (e.g. task, issue, feature).",
+          "usage_guidance": "ENC-TSK-Q02: required by the live escalation.request handler contract alongside target_record_id and project_id, though it predates this dictionary entry -- see mcp_server.escalation_actions.escalation.request for the full required-arg-shape note. Used to disambiguate target_record_id's record type without a lookup."
+        },
+        "project_id": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "immutable": true
+          },
+          "definition": "The governed project the escalation and its target_record_id belong to.",
+          "usage_guidance": "ENC-TSK-Q02: required by the live escalation.request handler contract; also the DynamoDB partition key for this item (see dynamodb_key_schema.pk)."
+        },
         "mutation_type": {
           "type": "enum",
           "enum": [

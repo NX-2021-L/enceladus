@@ -2393,6 +2393,20 @@ def _normalize_code_on_main_evidence(
         normalized = dict(raw)
         if not normalized.get("commit_sha") and top_level_sha:
             normalized["commit_sha"] = top_level_sha
+        existing_sha = normalized.get("commit_sha")
+        if existing_sha is not None:
+            if not isinstance(existing_sha, str):
+                return None, (
+                    _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG
+                    + f"an object whose commit_sha is type {type(existing_sha).__name__}, not a string"
+                )
+            stripped = existing_sha.strip()
+            if re.match(r"^[0-9a-f]{40}$", stripped.lower()):
+                # Normalize to the same canonical (stripped, lowercased) form
+                # the bare-string and note-string shapes produce, so the
+                # persisted evidence is consistent regardless of which
+                # accepted shape the caller used (ENC-ISS-777 review).
+                normalized["commit_sha"] = stripped.lower()
         return normalized, None
 
     if isinstance(raw, str):

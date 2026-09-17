@@ -159,6 +159,20 @@ class CodeOnlyCloseSuccessTests(unittest.TestCase):
         self.assertEqual(stored["commit_sha"], _SHA_C)
         self.assertEqual(stored["note"], "reviewed in PR")
 
+    def test_dict_commit_sha_normalized_to_canonical_form(self, *_mocks):
+        """Regression for the review finding that the dict shape persisted
+        commit_sha byte-for-byte (uppercase/whitespace intact) while the
+        bare-string and note-string shapes normalized it — all three accepted
+        shapes must now persist the same stripped, lowercased 40-hex form."""
+        resp, mock_validate, mock_set, _release = self._advance(
+            {"commit_sha": f"  {_SHA_A.upper()}  "}
+        )
+        self.assertEqual(resp["statusCode"], 200)
+        stored = mock_set.call_args.kwargs["transition_evidence"]["code_on_main_evidence"]
+        self.assertEqual(stored["commit_sha"], _SHA_A)
+        validated_obj = mock_validate.call_args.args[2]
+        self.assertEqual(validated_obj["commit_sha"], _SHA_A)
+
 
 @patch.object(checkout_service, "_get_components_lifecycle",
               return_value={"comp-code": {"lifecycle_status": "active"}})
@@ -209,6 +223,20 @@ class CodeOnlyCloseMalformedTests(unittest.TestCase):
 
     def test_empty_object_rejected(self, *_mocks):
         self._assert_malformed_400(self._advance({}))
+
+    def test_dict_with_non_string_commit_sha_rejected(self, *_mocks):
+        """Regression: a dict-shaped code_on_main_evidence with a truthy
+        non-string commit_sha (int here) must 400 with the accepted-shapes
+        message, not raise an unhandled AttributeError out of
+        _validate_code_on_main_evidence's ``.strip()`` call."""
+        envelope = self._assert_malformed_400(self._advance({"commit_sha": 12345}))
+        self.assertIn("not a string", envelope["message"])
+
+    def test_dict_with_list_commit_sha_rejected(self, *_mocks):
+        self._assert_malformed_400(self._advance({"commit_sha": [_SHA_A]}))
+
+    def test_dict_with_bool_commit_sha_rejected(self, *_mocks):
+        self._assert_malformed_400(self._advance({"commit_sha": True}))
 
 
 @patch.object(checkout_service, "_get_components_lifecycle",
