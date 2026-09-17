@@ -5,6 +5,20 @@
   margin: 12px 0 16px;
 }
 
+/* ENC-ISS-773: project filter for the cross-project queue. Capped width so a
+   single-select does not stretch full-bleed on desktop; full-width on phone
+   like every other control in this cockpit. */
+.ev2-esc__filters {
+  max-width: 280px;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 600px) {
+  .ev2-esc__filters {
+    max-width: none;
+  }
+}
+
 .ev2-esc__hint {
   margin-top: 8px;
   font-size: 12.5px;

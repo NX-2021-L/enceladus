@@ -22,6 +22,10 @@ export interface EscalationRow {
   id: string
   status: string
   bucket: EscalationBucket
+  /** ENC-ISS-773: the project this escalation belongs to. Approve/deny MUST
+   *  target this project, never a page-level default — the whole point of
+   *  the cross-project feed is that rows come from more than one project. */
+  projectId: string
   targetRecordId: string
   /** Session that filed it — the agent side of the loop. */
   requestedBySession: string
@@ -104,13 +108,14 @@ export function formatAge(createdAt: string, now: Date = new Date()): string {
   return `${days}d`
 }
 
-export function toEscalationRow(item: EscalationItem, now?: Date): EscalationRow {
+export function toEscalationRow(item: EscalationItem, now?: Date, projectIdFallback?: string): EscalationRow {
   const status = String(item.status ?? '')
   const bucket = bucketForStatus(status)
   return {
     id: String(item.item_id ?? ''),
     status,
     bucket,
+    projectId: String(item.project_id ?? projectIdFallback ?? ''),
     targetRecordId: String(item.target_record_id ?? '—'),
     requestedBySession: String(item.requested_by?.session_id ?? '—'),
     mutationSummary: summarizeMutation(item),
@@ -129,7 +134,42 @@ export function toEscalationRow(item: EscalationItem, now?: Date): EscalationRow
  */
 export function toEscalationRows(feed: EscalationsFeed | undefined, now?: Date): EscalationRow[] {
   if (!feed) return []
-  return [...feed.pending, ...feed.terminal].map((item) => toEscalationRow(item, now))
+  return [...feed.pending, ...feed.terminal].map((item) =>
+    toEscalationRow(item, now, feed.project_id),
+  )
+}
+
+/** One project's feed, paired with the project_id it was fetched for — the
+ *  fallback stamped onto any row whose own item is missing project_id. */
+export interface ProjectEscalationsFeed {
+  projectId: string
+  feed: EscalationsFeed
+}
+
+/**
+ * ENC-ISS-773 — merge every project's feed into one row set for the cross-
+ * project cockpit. Each row carries its OWN project_id (never the page's),
+ * so a devops decision is always issued against /coordination/escalations/
+ * devops/<id>/..., never enceladus. Sorted newest-first by created_at across
+ * ALL projects, since the whole point of aggregating is one triage queue —
+ * a per-project newest-first order would hide an urgent row behind a stale
+ * one from a noisier project.
+ */
+export function toEscalationRowsAcrossProjects(
+  feeds: ProjectEscalationsFeed[],
+  now?: Date,
+): EscalationRow[] {
+  const rows = feeds.flatMap(({ projectId, feed }) => toEscalationRows(feed, now).map((row) => ({
+    ...row,
+    projectId: row.projectId || projectId,
+  })))
+  return rows.sort((a, b) => {
+    const at = Date.parse(a.createdAt)
+    const bt = Date.parse(b.createdAt)
+    const av = Number.isFinite(at) ? at : -Infinity
+    const bv = Number.isFinite(bt) ? bt : -Infinity
+    return bv - av
+  })
 }
 
 export function filterRows(rows: EscalationRow[], bucket: EscalationBucket): EscalationRow[] {
