@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -490,6 +491,197 @@ def test_warn_mode_get_role_policy_denied_on_merge_target_exits_nonzero(tmp_path
     captured = capsys.readouterr()
     assert "AccessDenied" in captured.err
     assert "ERROR" in captured.err
+
+
+# --- real subprocess-invocation layer (_run_aws_json / make_aws_fetcher /
+# make_aws_single_policy_fetcher), hermetic via a monkeypatched subprocess.run
+# -----------------------------------------------------------------------------
+
+
+class _FakeCompletedProcess:
+    """Stand-in for subprocess.CompletedProcess, just the attributes used."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_aws_json_prints_command_and_stderr_once_then_raises(monkeypatch, capsys):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(
+            254,
+            stdout="",
+            stderr="An error occurred (AccessDenied) when calling the ListRolePolicies operation\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        budget._run_aws_json(["aws", "iam", "list-role-policies", "--role-name", "some-role"])
+        assert False, "expected CalledProcessError"
+    except subprocess.CalledProcessError as exc:
+        assert exc.returncode == 254
+
+    captured = capsys.readouterr()
+    assert captured.err.count("AccessDenied") == 1
+    assert "aws CLI command failed (exit 254)" in captured.err
+
+
+def test_run_aws_json_returns_parsed_json_on_success(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps({"ok": True}), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert budget._run_aws_json(["aws", "iam", "list-role-policies"]) == {"ok": True}
+
+
+def test_make_aws_fetcher_wraps_denied_list_call_and_prints_stderr_once(monkeypatch, capsys):
+    def fake_run(args, **kwargs):
+        assert "list-role-policies" in args
+        return _FakeCompletedProcess(
+            254,
+            stderr="An error occurred (AccessDenied) when calling the ListRolePolicies operation\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    fetch = budget.make_aws_fetcher()
+    try:
+        fetch("enceladus-cloudformation-deploy-github-role")
+        assert False, "expected ListDenied"
+    except budget.ListDenied as exc:
+        assert exc.printed is True
+        assert "AccessDenied" in exc.stderr
+
+    captured = capsys.readouterr()
+    # _run_aws_json already printed this stderr exactly once; make_aws_fetcher
+    # must not print it again when wrapping into ListDenied.
+    assert captured.err.count("AccessDenied") == 1
+
+
+def test_make_aws_fetcher_fetches_policies_on_success(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if "list-role-policies" in args:
+            return _FakeCompletedProcess(0, stdout=json.dumps({"PolicyNames": ["p1"]}))
+        assert "get-role-policy" in args
+        return _FakeCompletedProcess(
+            0, stdout=json.dumps({"PolicyDocument": POLICY_A})
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    fetch = budget.make_aws_fetcher()
+    docs = fetch("enceladus-cloudformation-deploy-github-role")
+    assert docs == {"p1": POLICY_A}
+    assert any("list-role-policies" in c for c in calls)
+    assert any("get-role-policy" in c for c in calls)
+
+
+def test_make_aws_single_policy_fetcher_wraps_denied_get_call_and_prints_stderr_once(
+    monkeypatch, capsys
+):
+    def fake_run(args, **kwargs):
+        assert "get-role-policy" in args
+        return _FakeCompletedProcess(
+            254,
+            stderr="An error occurred (AccessDenied) when calling the GetRolePolicy operation\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    single_fetch = budget.make_aws_single_policy_fetcher()
+    try:
+        single_fetch("enceladus-cloudformation-deploy-github-role", "some-policy")
+        assert False, "expected GetPolicyDenied"
+    except budget.GetPolicyDenied as exc:
+        assert exc.printed is True
+        assert "AccessDenied" in exc.stderr
+
+    captured = capsys.readouterr()
+    assert captured.err.count("AccessDenied") == 1
+
+
+def test_make_aws_single_policy_fetcher_returns_none_on_no_such_entity(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(
+            254,
+            stderr="An error occurred (NoSuchEntity) when calling the GetRolePolicy operation\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    single_fetch = budget.make_aws_single_policy_fetcher()
+    assert (
+        single_fetch("enceladus-cloudformation-deploy-github-role", "brand-new-policy")
+        is None
+    )
+
+
+def test_main_with_real_fetcher_end_to_end_list_denied_warn_mode(monkeypatch, capsys):
+    """End-to-end: main() wired to the real (monkeypatched-subprocess) fetchers,
+    not an injected test fetcher, exercising the actual CalledProcessError ->
+    ListDenied conversion path this task added — and confirming stderr is
+    printed exactly once even through main()'s --on-list-denied warn handling.
+    """
+
+    def fake_run(args, **kwargs):
+        if "list-role-policies" in args:
+            return _FakeCompletedProcess(
+                254,
+                stderr="An error occurred (AccessDenied) when calling the ListRolePolicies operation\n",
+            )
+        assert "get-role-policy" in args
+        return _FakeCompletedProcess(0, stdout=json.dumps({"PolicyDocument": POLICY_D}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    merged_doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "CloudWatchDashboardOps",
+                "Effect": "Allow",
+                "Action": ["cloudwatch:PutDashboard"],
+                "Resource": "*",
+            }
+        ],
+    }
+    import tempfile
+    import os
+
+    fd, doc_path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(merged_doc, fh)
+
+        rc = budget.main(
+            [
+                "--role",
+                "enceladus-cloudformation-deploy-github-role",
+                "--merge-policy",
+                "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1",
+                "--merge-document",
+                doc_path,
+                "--on-list-denied",
+                "warn",
+            ]
+        )
+    finally:
+        os.remove(doc_path)
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err.count("AccessDenied") == 1
+    assert "WARNING: list-role-policies denied" in captured.err
+    expected_delta = budget.policy_size(merged_doc) - budget.policy_size(POLICY_D)
+    assert (
+        f"BUDGET total=unknown headroom=unknown delta={expected_delta} fits=unknown"
+        in captured.out
+    )
 
 
 def test_main_requires_merge_document_with_merge_policy():

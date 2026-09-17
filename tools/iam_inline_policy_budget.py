@@ -59,34 +59,51 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 DEFAULT_LIMIT = 10240
 
-_ACCESS_DENIED_MARKERS = (
-    "accessdenied",
-    "not authorized",
-    "unauthorizedoperation",
-)
-
 
 class ListDenied(Exception):
     """Raised by a fetcher when list-role-policies itself failed.
 
     Carries the offending command and stripped stderr so callers (main())
     can decide, per --on-list-denied, whether to fail closed or degrade to
-    measuring only the merge target.
+    measuring only the merge target. ``printed`` is True when the stderr was
+    already written to sys.stderr by the raiser (the real aws-CLI-backed
+    fetchers do this via _run_aws_json), so main() knows not to print it a
+    second time; a directly-raised ListDenied (as tests do) leaves it False
+    so main() prints the stderr itself.
     """
 
-    def __init__(self, message: str, *, cmd: Optional[List[str]] = None, stderr: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        cmd: Optional[List[str]] = None,
+        stderr: str = "",
+        printed: bool = False,
+    ):
         super().__init__(message)
         self.cmd = cmd
         self.stderr = stderr
+        self.printed = printed
 
 
 class GetPolicyDenied(Exception):
-    """Raised when get-role-policy for a specific policy failed (not NoSuchEntity)."""
+    """Raised when get-role-policy for a specific policy failed (not NoSuchEntity).
 
-    def __init__(self, message: str, *, cmd: Optional[List[str]] = None, stderr: str = ""):
+    See ListDenied for the meaning of ``printed``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cmd: Optional[List[str]] = None,
+        stderr: str = "",
+        printed: bool = False,
+    ):
         super().__init__(message)
         self.cmd = cmd
         self.stderr = stderr
+        self.printed = printed
 
 
 # Type alias for the injectable fetcher used by tests: given a role name,
@@ -97,11 +114,6 @@ Fetcher = Callable[[str], Dict[str, dict]]
 # (list-denied) mode: given (role, policy_name), returns the policy document
 # dict, or None if the policy does not exist (NoSuchEntity).
 SinglePolicyFetcher = Callable[[str, str], Optional[dict]]
-
-
-def _looks_like_access_denied(stderr: str) -> bool:
-    lowered = stderr.lower()
-    return any(marker in lowered for marker in _ACCESS_DENIED_MARKERS)
 
 
 def _run_aws_json(args: List[str]) -> dict:
@@ -152,6 +164,7 @@ def make_aws_fetcher(region: Optional[str] = None) -> Fetcher:
                 f"list-role-policies failed (exit {exc.returncode})",
                 cmd=list_args,
                 stderr=stderr,
+                printed=True,
             ) from exc
         names = listed.get("PolicyNames", [])
 
@@ -205,6 +218,7 @@ def make_aws_single_policy_fetcher(region: Optional[str] = None) -> SinglePolicy
                 f"get-role-policy failed (exit {exc.returncode}) for {policy_name}",
                 cmd=get_args,
                 stderr=stderr,
+                printed=True,
             ) from exc
         return got["PolicyDocument"]
 
@@ -383,7 +397,10 @@ def main(
     try:
         policies = fetch(args.role)
     except ListDenied as exc:
-        if exc.stderr:
+        # The real aws-CLI-backed fetcher already printed this stderr once
+        # (via _run_aws_json) before wrapping it into ListDenied; only print
+        # here for a fetcher that raised ListDenied directly (e.g. a test).
+        if exc.stderr and not exc.printed:
             print(exc.stderr, file=sys.stderr)
 
         if args.on_list_denied == "fail":
@@ -408,7 +425,7 @@ def main(
         try:
             existing_doc = single_fetch(args.role, args.merge_policy)
         except GetPolicyDenied as get_exc:
-            if get_exc.stderr:
+            if get_exc.stderr and not get_exc.printed:
                 print(get_exc.stderr, file=sys.stderr)
             print(f"ERROR: {get_exc}", file=sys.stderr)
             return 1
