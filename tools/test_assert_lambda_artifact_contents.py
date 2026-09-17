@@ -127,5 +127,78 @@ class TestMainCli:
         assert rc == 0
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q09 (ENC-ISS-782 P0): fixture zips for the OTHER functions
+# .github/workflows/_build.yml's matrix job now invokes this guard for
+# (mcp_streamable, mcp_streaming_gateway, coordination_api -- see
+# tools/mcp_runtime_functions.txt). These have no REQUIRED_ENTRIES built-in
+# (they are always invoked with an explicit --require in the workflow,
+# mirroring how the matrix job derives it from mcp_server_pkg_present), so
+# these tests exercise exactly that call shape end to end, including the
+# concrete incident shape: enceladus-mcp-streamable's real 502 zip (1,921
+# entries, no server.py, zero mcp_server/ entries, two top-level .py files).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def complete_mcp_streamable_zip(tmp_path: Path) -> Path:
+    return _make_zip(
+        tmp_path / "mcp_streamable-complete.zip",
+        {
+            "lambda_function.py": "from server import lambda_handler\n",
+            "server.py": "def lambda_handler(event, context):\n    return {}\n",
+            "mcp_server/__init__.py": "# package init\n",
+        },
+    )
+
+
+@pytest.fixture
+def incident_shaped_mcp_streamable_zip(tmp_path: Path) -> Path:
+    # The exact incident shape from ENC-ISS-782: a matrix build of
+    # mcp_streamable as an ordinary function -- its own two top-level
+    # modules (the build-discovery shim + requirements-driven deps), no
+    # tools/enceladus-mcp-server/ runtime at all.
+    return _make_zip(
+        tmp_path / "mcp_streamable-incident.zip",
+        {
+            "lambda_function.py": "from server import lambda_handler\n",
+            "requirements_shim.py": "# some pip-installed dependency\n",
+        },
+    )
+
+
+class TestMcpStreamableFixtureZips:
+    def test_complete_zip_passes_with_explicit_require(self, complete_mcp_streamable_zip):
+        rc = alac.main([
+            str(complete_mcp_streamable_zip), "mcp_streamable",
+            "--require", "server.py", "mcp_server/__init__.py",
+        ])
+        assert rc == 0
+
+    def test_incident_shaped_zip_fails_and_names_server_py(self, incident_shaped_mcp_streamable_zip, capsys):
+        rc = alac.main([
+            str(incident_shaped_mcp_streamable_zip), "mcp_streamable",
+            "--require", "server.py", "mcp_server/__init__.py",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "server.py" in err
+        assert "mcp_server/__init__.py" in err
+
+    def test_unregistered_function_name_requires_explicit_require(self, complete_mcp_streamable_zip):
+        # mcp_streamable has no built-in REQUIRED_ENTRIES default (only
+        # mcp_code does) -- omitting --require must fail closed with a
+        # usage error, not silently pass with zero required entries.
+        rc = alac.main([str(complete_mcp_streamable_zip), "mcp_streamable"])
+        assert rc == 2
+
+    def test_missing_entries_lists_exactly_what_is_absent(self, tmp_path):
+        zip_path = _make_zip(
+            tmp_path / "mcp_streaming_gateway-broken.zip",
+            {"asgi_app.py": "from server import app\n"},
+        )
+        missing = alac.missing_entries(zip_path, ["server.py", "mcp_server/__init__.py"])
+        assert missing == ["server.py", "mcp_server/__init__.py"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -44,6 +44,7 @@ from assert_deploy_lane_parity import (
     Divergence,
     compute_divergences,
     extract_dedicated_job_pins,
+    extract_inline_runtime_condition_names,
     extract_matrix_arch_py_pairs,
     extract_matrix_skip_list,
     extract_mcp_code_packaging,
@@ -51,6 +52,7 @@ from assert_deploy_lane_parity import (
     main,
     normalize_prefix_expr,
     normalize_override_value,
+    resolve_mcp_runtime_function_names,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -399,6 +401,113 @@ class TestMcpCodePackagingInputsDivergence(unittest.TestCase):
         self.assertIn("mcp_code_packaging_inputs", invariants)
 
 
+class TestMcpRuntimePackagedFunctionSetDivergence(unittest.TestCase):
+    """ENC-TSK-Q09 AC-3: the packaging invariant must compare WHICH
+    FUNCTIONS each lane packages the MCP server runtime for, not just a
+    single glob-source signature (TestMcpCodePackagingInputsDivergence
+    above). Fixture: the exact divergence ENC-ISS-782's investigation
+    found -- v4/main's matrix job packages the runtime for four functions
+    (mcp_code, coordination_api, mcp_streamable, mcp_streaming_gateway)
+    inline; pre-ENC-TSK-Q09 main packaged it for mcp_code alone (the
+    dedicated build-mcp-code job, no shared list file). This guard passed
+    on the real lanes throughout the incident precisely because it never
+    compared function SETS -- see test_pre_ac3_signature_check_alone_missed_it.
+    """
+
+    BUILD_OTHER_FOUR_FUNCTIONS = BUILD_OTHER.replace(
+        'if [ "$fn" = "mcp_code" ]; then',
+        'if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || '
+        '[ "$fn" = "mcp_streamable" ] || [ "$fn" = "mcp_streaming_gateway" ]; then',
+    )
+
+    def test_fixture_mutation_applied_and_extracts_four_names(self):
+        self.assertNotEqual(self.BUILD_OTHER_FOUR_FUNCTIONS, BUILD_OTHER)
+        self.assertEqual(
+            extract_inline_runtime_condition_names(self.BUILD_OTHER_FOUR_FUNCTIONS),
+            ["mcp_code", "coordination_api", "mcp_streamable", "mcp_streaming_gateway"],
+        )
+        self.assertEqual(extract_inline_runtime_condition_names(BUILD_OTHER), ["mcp_code"])
+
+    def test_pre_fix_main_vs_four_function_other_is_reported_with_missing_names(self):
+        # main packages the runtime for mcp_code alone (BUILD_MAIN's
+        # dedicated build-mcp-code job, no --main-runtime-functions-text
+        # supplied -- the pre-ENC-TSK-Q09 shape with no shared list file).
+        divs = compute_divergences(
+            DEPLOY_MAIN, DEPLOY_OTHER, BUILD_MAIN, self.BUILD_OTHER_FOUR_FUNCTIONS,
+        )
+        matches = [d for d in divs if d.invariant == "mcp_runtime_packaged_function_set"]
+        self.assertEqual(len(matches), 1, "expected exactly one packaged-function-set divergence")
+        d = matches[0]
+        for fn in ("coordination_api", "mcp_streamable", "mcp_streaming_gateway"):
+            self.assertIn(fn, d.summary, f"{fn} must be named in the divergence summary")
+        self.assertIn("mcp_code", d.summary + d.main_value + d.other_value)
+
+    def test_pre_ac3_signature_check_alone_missed_it(self):
+        # extract_mcp_code_packaging()'s existing (c) signature comparison
+        # -- glob source / test_* exclusion / mcp_server/ reference -- is
+        # IDENTICAL for BUILD_MAIN and BUILD_OTHER_FOUR_FUNCTIONS (both
+        # still glob tools/enceladus-mcp-server/*.py the same way); only the
+        # WHICH-FUNCTIONS comparison this class adds catches the four-vs-one
+        # divergence.
+        self.assertEqual(
+            extract_mcp_code_packaging(BUILD_MAIN),
+            extract_mcp_code_packaging(self.BUILD_OTHER_FOUR_FUNCTIONS),
+        )
+
+    def test_post_ac1_main_list_matches_four_function_other_with_zero_divergence(self):
+        # ENC-TSK-Q09 AC-1 lands main's shared list file
+        # (tools/mcp_runtime_functions.txt) naming the same four functions
+        # v4/main already packages inline. Once compute_divergences() is
+        # given that file's content for main, the widened invariant must
+        # report NOTHING for this function -- "must still pass once AC-1
+        # lands" (ENC-TSK-Q09 AC-3).
+        main_runtime_text = (
+            "# comment lines and blanks must be ignored\n"
+            "\n"
+            "mcp_code\n"
+            "coordination_api\n"
+            "mcp_streamable\n"
+            "mcp_streaming_gateway\n"
+        )
+        divs = compute_divergences(
+            DEPLOY_MAIN, DEPLOY_OTHER, BUILD_MAIN, self.BUILD_OTHER_FOUR_FUNCTIONS,
+            main_runtime_functions_text=main_runtime_text,
+        )
+        matches = [d for d in divs if d.invariant == "mcp_runtime_packaged_function_set"]
+        self.assertEqual(matches, [], "post-AC-1 main's shared list must match v4/main's four-function set")
+
+    def test_full_parity_fixture_still_reports_nothing_with_the_new_invariant(self):
+        # TestFullParity.test_no_divergences's baseline (mcp_code-only on
+        # both sides) must remain divergence-free with this invariant added.
+        divs = compute_divergences(DEPLOY_MAIN, DEPLOY_OTHER, BUILD_MAIN, BUILD_OTHER)
+        matches = [d for d in divs if d.invariant == "mcp_runtime_packaged_function_set"]
+        self.assertEqual(matches, [])
+
+
+class TestSharedMcpRuntimeFunctionsFile(unittest.TestCase):
+    """ENC-TSK-Q09 AC-1: tools/mcp_runtime_functions.txt is the single
+    source of truth _build.yml's two jobs (and this guard) all read from --
+    assert its real on-disk content directly, independent of any git_show()
+    mocking or network access to the real origin/v4/main."""
+
+    RUNTIME_FILE_PATH = REPO_ROOT / "tools" / "mcp_runtime_functions.txt"
+
+    def test_file_exists_and_names_exactly_the_four_known_functions(self):
+        text = self.RUNTIME_FILE_PATH.read_text()
+        names = resolve_mcp_runtime_function_names("", text)
+        self.assertEqual(
+            sorted(names),
+            sorted(["mcp_code", "coordination_api", "mcp_streamable", "mcp_streaming_gateway"]),
+        )
+
+    def test_mcp_code_is_a_member(self):
+        # The build-mcp-code job's own sanity check (ENC-TSK-Q09) asserts
+        # this at build time via `grep -qx`; assert it here too so a
+        # regression is caught by the fast unit suite as well.
+        names = resolve_mcp_runtime_function_names("", self.RUNTIME_FILE_PATH.read_text())
+        self.assertIn("mcp_code", names)
+
+
 class TestPureHelpers(unittest.TestCase):
     def test_normalize_prefix_expr_reduces_both_lane_spellings_identically(self):
         bash_form = normalize_prefix_expr("${{ env.ARTIFACT_KEY_PREFIX }}/${ARCH}-py${PY}")
@@ -477,6 +586,26 @@ class TestWorkflowFileAndBaseline(unittest.TestCase):
             doc = yaml.safe_load(f)
         self.assertEqual(doc.get("permissions", {}).get("contents"), "read")
 
+    def test_workflow_triggers_on_mcp_runtime_functions_list_changes(self):
+        # ENC-TSK-Q09 review finding (major): the guard's new
+        # mcp_runtime_packaged_function_set invariant reads
+        # tools/mcp_runtime_functions.txt via --runtime-functions-path, but a
+        # PR that edits only that file (e.g. adding/removing a function from
+        # MCP-runtime packaging) must still trigger this workflow, or the
+        # exact divergence this guard exists to catch can land unchecked.
+        with DEPLOY_WORKFLOW_PATH.open() as f:
+            doc = yaml.safe_load(f)
+        # PyYAML parses the bare `on:` key as the boolean True (see
+        # test_workflow_has_pull_request_push_and_dispatch_triggers above).
+        on_block = doc[True]
+        for trigger in ("pull_request", "push"):
+            paths = on_block[trigger]["paths"]
+            self.assertIn(
+                "tools/mcp_runtime_functions.txt", paths,
+                f"{trigger}.paths must include tools/mcp_runtime_functions.txt "
+                "so edits to the runtime function list re-run the guard",
+            )
+
     def test_baseline_contains_the_new_workflow_entry(self):
         with BASELINE_PATH.open() as f:
             baseline = json.load(f)
@@ -544,8 +673,10 @@ class TestMainCli(unittest.TestCase):
     def setUp(self):
         self.real_deploy_path = REPO_ROOT / ".github" / "workflows" / "_deploy.yml"
         self.real_build_path = REPO_ROOT / ".github" / "workflows" / "_build.yml"
+        self.real_runtime_path = REPO_ROOT / "tools" / "mcp_runtime_functions.txt"
         self.real_deploy_text = self.real_deploy_path.read_text()
         self.real_build_text = self.real_build_path.read_text()
+        self.real_runtime_text = self.real_runtime_path.read_text()
 
     def _argv(self):
         return [
@@ -554,16 +685,34 @@ class TestMainCli(unittest.TestCase):
             "--build-path", str(self.real_build_path),
         ]
 
+    def _fake_git_show(self, deploy_text=None, build_text=None, runtime_text=None):
+        """A git_show() double that routes on path suffix, defaulting each
+        of the three files "other" fetches to main's own real content (so
+        "other" is byte-identical to "main" unless a test overrides one
+        file) -- ENC-TSK-Q09 extends the original deploy/build-only double
+        with the new tools/mcp_runtime_functions.txt fetch, which real
+        v4/main does not have (see main()'s own graceful RuntimeError
+        handling for that path); this double instead mirrors main's real
+        list so lane-identical fixtures stay lane-identical across all
+        three files, not just the original two."""
+        deploy_text = self.real_deploy_text if deploy_text is None else deploy_text
+        build_text = self.real_build_text if build_text is None else build_text
+        runtime_text = self.real_runtime_text if runtime_text is None else runtime_text
+
+        def _fake(ref, path):
+            if path.endswith("_deploy.yml"):
+                return deploy_text
+            if path.endswith("mcp_runtime_functions.txt"):
+                return runtime_text
+            return build_text
+
+        return _fake
+
     def test_no_divergences_exits_zero(self):
         # "other" lane's files are mocked to be byte-identical to main's own
         # -- every extract_*() comparison is therefore necessarily equal, so
         # this is a real exercise of main()'s wiring, not a hand-tuned fixture.
-        with patch.object(
-            alp, "git_show",
-            side_effect=lambda ref, path: (
-                self.real_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
-            ),
-        ):
+        with patch.object(alp, "git_show", side_effect=self._fake_git_show()):
             rc = main(self._argv())
         self.assertEqual(rc, 0)
 
@@ -577,10 +726,7 @@ class TestMainCli(unittest.TestCase):
         )
 
         with patch.object(
-            alp, "git_show",
-            side_effect=lambda ref, path: (
-                other_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
-            ),
+            alp, "git_show", side_effect=self._fake_git_show(deploy_text=other_deploy_text),
         ):
             rc = main(self._argv())
         self.assertEqual(rc, 1)
@@ -614,10 +760,7 @@ class TestMainCli(unittest.TestCase):
         # main() must accept an explicit argv (like the sibling AC-2/AC-3
         # scripts' main()) so it is testable without mutating sys.argv.
         with patch.object(
-            alp, "git_show",
-            side_effect=lambda ref, path: (
-                self.real_deploy_text if path.endswith("_deploy.yml") else self.real_build_text
-            ),
+            alp, "git_show", side_effect=self._fake_git_show(),
         ), patch.object(sys, "argv", ["assert_deploy_lane_parity.py"]):
             rc = main(self._argv())
         self.assertEqual(rc, 0, "main(argv) must parse the explicit argv, not fall back to sys.argv")

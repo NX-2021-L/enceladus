@@ -193,6 +193,71 @@ def extract_dedicated_job_pins(build_text: str) -> Dict[str, str]:
     return pins
 
 
+_INLINE_RUNTIME_CONDITION_RE = re.compile(
+    r'if\s+(\[\s*"\$fn"\s*=\s*"[a-zA-Z_][a-zA-Z0-9_]*"\s*\]'
+    r'(?:\s*\|\|\s*\[\s*"\$fn"\s*=\s*"[a-zA-Z_][a-zA-Z0-9_]*"\s*\])*)\s*;\s*then'
+)
+_INLINE_CONDITION_NAME_RE = re.compile(r'"\$fn"\s*=\s*"([a-zA-Z_][a-zA-Z0-9_]*)"')
+
+
+def extract_inline_runtime_condition_names(build_text: str) -> Optional[List[str]]:
+    """v4/main's shape (ENC-TSK-Q09): the matrix job's single
+    `if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || ...; then`
+    gate immediately preceding the tools/enceladus-mcp-server/*.py glob
+    copy. Returns the ordered, de-duplicated list of function names it
+    names, or None if no such condition is present in this lane's
+    _build.yml (e.g. main pre-ENC-TSK-Q09, which used a dedicated
+    per-function job instead, or post-ENC-TSK-Q09 main, which reads
+    tools/mcp_runtime_functions.txt instead of naming functions inline)."""
+    m = _INLINE_RUNTIME_CONDITION_RE.search(build_text)
+    if not m:
+        return None
+    names: List[str] = []
+    for name in _INLINE_CONDITION_NAME_RE.findall(m.group(1)):
+        if name not in names:
+            names.append(name)
+    return names or None
+
+
+def resolve_mcp_runtime_function_names(
+    build_text: str, runtime_list_text: Optional[str]
+) -> List[str]:
+    """The set of function names this lane packages the MCP server runtime
+    for (ENC-TSK-Q09 AC-3), resolved in priority order:
+
+      1. `runtime_list_text` -- the content of tools/mcp_runtime_functions.txt
+         for this lane, when the caller could read one (ENC-TSK-Q09's single
+         source of truth for main; comments and blank lines ignored). This
+         is the ONLY reliable source once a lane's _build.yml stops naming
+         functions inline (main, post-ENC-TSK-Q09) -- the matrix job's
+         `needs_mcp_runtime "$fn"` gate names no functions in the workflow
+         text itself.
+      2. The matrix job's inline `if [ "$fn" = ... ] || ...; then` condition
+         (v4/main's shape, and main's shape before ENC-TSK-Q09).
+      3. Fallback: the dedicated per-function job pins' names
+         (extract_dedicated_job_pins() keys) -- main's pre-ENC-TSK-Q09
+         shape, where only a hand-written build-mcp-code job packages the
+         runtime and the matrix job packages it for nobody.
+
+    Always returns a list (never None) so two lanes can be compared
+    structurally without a tri-state Optional; an empty list means "this
+    lane's _build.yml packages the runtime for no function we could detect
+    by any of the three methods above"."""
+    if runtime_list_text is not None:
+        names: List[str] = []
+        for line in runtime_list_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line not in names:
+                names.append(line)
+        return names
+    inline = extract_inline_runtime_condition_names(build_text)
+    if inline is not None:
+        return inline
+    return sorted(extract_dedicated_job_pins(build_text).keys())
+
+
 def extract_mcp_code_packaging(build_text: str) -> Dict[str, Optional[str]]:
     """The mcp_code packaging-inputs signature, wherever it lives in this
     lane's _build.yml (main: the dedicated build-mcp-code job; v4/main: the
@@ -222,6 +287,8 @@ def compute_divergences(
     other_deploy_text: str,
     main_build_text: str,
     other_build_text: str,
+    main_runtime_functions_text: Optional[str] = None,
+    other_runtime_functions_text: Optional[str] = None,
 ) -> List[Divergence]:
     divergences: List[Divergence] = []
 
@@ -400,6 +467,33 @@ def compute_divergences(
             str(main_pkg), str(other_pkg),
         ))
 
+    # --- (d) WHICH FUNCTIONS get the MCP server runtime (ENC-TSK-Q09 AC-3) ---
+    #
+    # (c) above only compares a per-lane boolean-ish signature of HOW the
+    # runtime is packaged (glob source, test_* exclusion, mcp_server/
+    # reference) -- it says nothing about WHICH functions that packaging
+    # applies to. That blind spot is exactly how ENC-ISS-782 shipped: this
+    # guard passed on the real lanes throughout because main's matrix job
+    # skipped everything except a hardcoded mcp_code special case while
+    # v4/main's matrix job packaged the runtime for four functions inline,
+    # and (c)'s signature comparison never looked at the function set at all.
+    main_runtime_fns = resolve_mcp_runtime_function_names(main_build_text, main_runtime_functions_text)
+    other_runtime_fns = resolve_mcp_runtime_function_names(other_build_text, other_runtime_functions_text)
+    if set(main_runtime_fns) != set(other_runtime_fns):
+        missing_from_main = sorted(set(other_runtime_fns) - set(main_runtime_fns))
+        missing_from_other = sorted(set(main_runtime_fns) - set(other_runtime_fns))
+        divergences.append(Divergence(
+            "mcp_runtime_packaged_function_set",
+            "The SET of functions each lane packages the MCP server "
+            "runtime (tools/enceladus-mcp-server/*.py + mcp_server/) into "
+            f"differs -- missing from main: {missing_from_main or '[]'}; "
+            f"missing from other: {missing_from_other or '[]'}. A function "
+            "in this gap ships without server.py/mcp_server/ on whichever "
+            "lane is missing it and 502s at invoke time instead of failing "
+            "at build time (ENC-ISS-782).",
+            str(sorted(main_runtime_fns)), str(sorted(other_runtime_fns)),
+        ))
+
     return divergences
 
 
@@ -462,6 +556,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--deploy-path", default=".github/workflows/_deploy.yml")
     parser.add_argument("--build-path", default=".github/workflows/_build.yml")
+    parser.add_argument(
+        "--runtime-functions-path", default="tools/mcp_runtime_functions.txt",
+        help="ENC-TSK-Q09: the shared MCP-runtime function list. Read as a "
+        "plain local file for main (never via --other-ref) and via "
+        "`git show` for the other lane, whose absence there is expected "
+        "today (v4/main names functions inline instead) and never fails "
+        "the run -- see resolve_mcp_runtime_function_names().",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -470,6 +572,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except OSError as exc:
         print(f"::error::could not read main's own workflow file(s): {exc}", file=sys.stderr)
         return 1
+
+    try:
+        main_runtime_text: Optional[str] = (REPO_ROOT / args.runtime_functions_path).read_text()
+    except OSError:
+        # ENC-TSK-Q09: absent locally is unexpected once AC-1 lands, but
+        # this is an additive signal, not the guard's core contract -- fall
+        # back to text-based extraction from main_build_text (see
+        # resolve_mcp_runtime_function_names()) rather than failing the
+        # whole run over it. A real regression here still surfaces: the
+        # fallback under-reports main's packaged set, which the (d)
+        # invariant above then reports as a divergence anyway.
+        main_runtime_text = None
 
     try:
         other_deploy_text = git_show(args.other_ref, args.deploy_path)
@@ -483,11 +597,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 1
 
+    try:
+        other_runtime_text: Optional[str] = git_show(args.other_ref, args.runtime_functions_path)
+    except RuntimeError:
+        # Expected on the real v4/main lane today -- it has no shared list
+        # file; that lane's packaged-function set is instead recovered from
+        # its own inline `if [ "$fn" = ... ] || ...; then` condition.
+        other_runtime_text = None
+
     divergences = compute_divergences(
         main_deploy_text=main_deploy_text,
         other_deploy_text=other_deploy_text,
         main_build_text=main_build_text,
         other_build_text=other_build_text,
+        main_runtime_functions_text=main_runtime_text,
+        other_runtime_functions_text=other_runtime_text,
     )
 
     if not divergences:

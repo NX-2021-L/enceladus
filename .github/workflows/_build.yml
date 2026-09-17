@@ -79,6 +79,25 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
 
+      # ENC-TSK-Q09 (ENC-ISS-782 P0): this job's primary checkout above is
+      # the PROMOTED tree (inputs.commit_sha is whatever v4/main SHA a
+      # v3-prod promote points at) -- it does not carry this repo's own
+      # tooling. Fetch the shared MCP-runtime function list and the zip-
+      # contents guard from the workflow's own branch (main) into a
+      # separate path, the same pattern the build-mcp-code job below
+      # already uses for the guard script alone (ENC-TSK-Q07 follow-up 2).
+      # Must NOT be conditional on either file existing in the primary
+      # checkout -- a promoted tree lacking them is exactly the normal case.
+      - name: Checkout guard tooling (workflow branch)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .guard-tools
+          sparse-checkout: |
+            tools/assert_lambda_artifact_contents.py
+            tools/mcp_runtime_functions.txt
+          sparse-checkout-cone-mode: false
+
       - name: Set up Python ${{ matrix.py_version }}
         uses: actions/setup-python@v5
         with:
@@ -113,6 +132,29 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/build-out
           declare -A version_ids
+
+          # ENC-TSK-Q09 (ENC-ISS-782 P0): the shared, single-source-of-truth
+          # list of functions that require the MCP server runtime
+          # (tools/enceladus-mcp-server/*.py + mcp_server/) packaged into
+          # their zip. Read from the .guard-tools checkout (main), never
+          # duplicated inline here -- see tools/mcp_runtime_functions.txt
+          # for the membership reasoning (mcp_code/mcp_streamable/
+          # mcp_streaming_gateway declare a server.* handler; coordination_api
+          # is a deliberate parity inclusion, not a hard requirement). This
+          # job and the dedicated build-mcp-code job below both read it, so
+          # editing membership in one place keeps both in agreement.
+          mapfile -t MCP_RUNTIME_FUNCTIONS < <(
+            grep -v '^[[:space:]]*#' .guard-tools/tools/mcp_runtime_functions.txt \
+              | grep -v '^[[:space:]]*$'
+          )
+          needs_mcp_runtime() {
+            local target="$1" x
+            for x in "${MCP_RUNTIME_FUNCTIONS[@]}"; do
+              [ "$x" = "$target" ] && return 0
+            done
+            return 1
+          }
+
           while IFS= read -r fn; do
             [ -z "$fn" ] && continue
             # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): mcp_code's real
@@ -128,7 +170,10 @@ jobs:
             # <sha>.zip once this matrix's arm64-py3.12 row lines up with
             # build-mcp-code's key) and race, with whichever finishes last
             # silently winning -- this is what shipped the unservable zip as
-            # prod version 40.
+            # prod version 40. mcp_code stays a MEMBER of MCP_RUNTIME_FUNCTIONS
+            # (ENC-TSK-Q09) -- this skip is the ONLY thing that keeps this loop
+            # from also trying to build it; both jobs must still agree it
+            # needs the runtime even though only one of them produces it.
             case "$fn" in
               mcp_code) echo "[skip] mcp_code - built by the dedicated build-mcp-code job (ENC-ISS-778)"; continue ;;
             esac
@@ -141,6 +186,33 @@ jobs:
 
             # Copy source.
             rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
+
+            # ENC-TSK-Q09 (ENC-ISS-782 P0): package the MCP server runtime
+            # for every OTHER function in MCP_RUNTIME_FUNCTIONS (mcp_code is
+            # routed past this point by the case/esac skip above). Mirrors
+            # v4/main's own inline packaging (see
+            # `git show origin/v4/main:.github/workflows/_build.yml`) and the
+            # build-mcp-code job's copy step below -- same glob, same test_*
+            # exclusion, same defensive mcp_server/ copy (this repo has not
+            # adopted the mcp_server/ package decomposition yet, so that
+            # directory does not exist here today; copy it the moment it
+            # does, with no follow-up edit needed).
+            mcp_server_pkg_present=0
+            if needs_mcp_runtime "$fn"; then
+              for py in tools/enceladus-mcp-server/*.py; do
+                base=$(basename "$py")
+                case "$base" in
+                  test_*) continue ;;
+                esac
+                cp "$py" "$workdir/$base"
+              done
+              if [ -d tools/enceladus-mcp-server/mcp_server ]; then
+                rsync -a --exclude='__pycache__' --exclude='*.pyc' \
+                  tools/enceladus-mcp-server/mcp_server/ "$workdir/mcp_server/"
+                mcp_server_pkg_present=1
+              fi
+              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules (ENC-TSK-Q09)"
+            fi
 
             # ENC-TSK-G43: cross-Lambda module sharing via .build_extras manifest.
             # Each non-comment line is a path (relative to repo root) to a single
@@ -177,6 +249,22 @@ jobs:
             # Zip at function root (matches Lambda handler expectations).
             zipfile="/tmp/build-out/$fn.zip"
             (cd "$workdir" && zip -qrX "$zipfile" .)
+
+            # ENC-TSK-Q09 AC-2 (ENC-ISS-782 P0): the contents guard must run
+            # for EVERY function in MCP_RUNTIME_FUNCTIONS, not mcp_code
+            # alone -- fail the build, not the invoke, when a zip is missing
+            # an entry its handler needs. Required entries are derived from
+            # mcp_server_pkg_present, the SAME condition the copy step above
+            # used, never hardcoded -- a hardcoded --require list would keep
+            # printing OK if that copy step regressed (wrong exclude, empty
+            # dir, wrong destination).
+            if needs_mcp_runtime "$fn"; then
+              REQUIRE_ARGS=(server.py)
+              if [ "$mcp_server_pkg_present" = "1" ]; then
+                REQUIRE_ARGS+=(mcp_server/__init__.py)
+              fi
+              python3 .guard-tools/tools/assert_lambda_artifact_contents.py "$zipfile" "$fn" --require "${REQUIRE_ARGS[@]}"
+            fi
 
             # S3 upload (bucket must have Versioning=Enabled).
             sha="${{ inputs.commit_sha }}"
@@ -276,7 +364,9 @@ jobs:
         with:
           ref: main
           path: .guard-tools
-          sparse-checkout: tools/assert_lambda_artifact_contents.py
+          sparse-checkout: |
+            tools/assert_lambda_artifact_contents.py
+            tools/mcp_runtime_functions.txt
           sparse-checkout-cone-mode: false
 
       - name: Set up Python 3.12
@@ -299,6 +389,18 @@ jobs:
         run: |
           set -euo pipefail
           BUILD=$(mktemp -d)
+
+          # ENC-TSK-Q09 (ENC-ISS-782 P0): mcp_code must still be a member of
+          # the shared MCP-runtime function list (tools/mcp_runtime_functions.txt,
+          # the same file the matrix `build` job above reads). If it is ever
+          # removed from that file without updating this job (or vice
+          # versa), fail loudly here instead of the two jobs silently
+          # disagreeing again about which functions need the runtime -- the
+          # exact defect family AC-1 exists to close.
+          if ! grep -qx "mcp_code" .guard-tools/tools/mcp_runtime_functions.txt; then
+            echo "ERROR: mcp_code is missing from tools/mcp_runtime_functions.txt -- this job and the matrix build job must agree on the shared MCP-runtime function list (ENC-TSK-Q09)" >&2
+            exit 1
+          fi
 
           # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): copy every runtime
           # module in tools/enceladus-mcp-server/ (excluding tests) instead of

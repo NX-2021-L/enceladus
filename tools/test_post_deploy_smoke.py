@@ -240,6 +240,290 @@ class TestRunFunctionSmoke(unittest.TestCase):
         self.assertEqual(outcome.status, "no_probe")
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q09 (ENC-ISS-782 P0): unqualified Function URL rollback handling.
+# An alias rollback is proven ineffective for a function whose Function URL
+# Qualifier is null (serves $LATEST directly) -- this must be detected
+# BEFORE attempting a rollback and must fail loudly, never silently mutate
+# an alias that does not serve traffic.
+# ---------------------------------------------------------------------------
+
+class TestUnqualifiedFunctionUrlRollback(unittest.TestCase):
+    def test_unqualified_url_fails_loudly_without_attempting_rollback(self):
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "should never be called"
+
+        # enceladus-mcp-streamable is QUALIFIER_UNQUALIFIED_CONFIRMED in the
+        # real PROBE_TABLE -- qualifier_fn must NOT be called at all (see
+        # the next test), so this asserts the outcome using a qualifier_fn
+        # that would raise if it were.
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-streamable", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: (_ for _ in ()).throw(AssertionError("must not be called")),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        self.assertIn(outcome.status, pds._FAILING_STATUSES)
+        self.assertEqual(rollback_calls, [], "an unqualified Function URL must never be rolled back")
+        self.assertIn("update-function-code", outcome.detail)
+        self.assertIn("ENC-ISS-782", outcome.detail)
+
+    def test_qualified_url_still_rolls_back_normally(self):
+        # enceladus-mcp-code is QUALIFIER_ALIAS_QUALIFIED in the real
+        # PROBE_TABLE -- the normal rollback path runs, and (see next test)
+        # qualifier_fn is never called to get there.
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code", "41",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (True, "rolled back"),
+            qualifier_fn=lambda name: ("live", None),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+
+    def test_qualifier_fn_is_never_called_when_healthy(self):
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-streamable", "13",
+            probe_fn=lambda target: True,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: (_ for _ in ()).throw(AssertionError("must not be called")),
+        )
+        self.assertEqual(outcome.status, "healthy")
+
+    def test_qualifier_fn_is_never_called_on_dry_run(self):
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-streamable", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: (_ for _ in ()).throw(AssertionError("must not be called")),
+            dry_run=True,
+        )
+        self.assertEqual(outcome.status, "unhealthy_dry_run")
+
+    def test_qualifier_fn_is_never_called_for_a_confirmed_alias_qualified_target(self):
+        # ENC-TSK-Q09 review finding (critical), core regression test: a
+        # QUALIFIER_ALIAS_QUALIFIED target must attempt the rollback
+        # WITHOUT ever calling qualifier_fn -- so an AWS permission this PR
+        # never provisioned (lambda:GetFunctionUrlConfig on the deploy role
+        # that runs `check`) cannot silently disable automatic recovery for
+        # a function, like enceladus-mcp-code, that has always been
+        # alias-qualified and rolled back successfully before ENC-TSK-Q09
+        # existed.
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "rolled back"
+
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code", "41",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: (_ for _ in ()).throw(
+                AssertionError("qualifier_fn must not be called for a QUALIFIER_ALIAS_QUALIFIED target")
+            ),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+        self.assertEqual(rollback_calls, [("enceladus-mcp-code", "41")])
+
+    def test_default_qualifier_fn_preserves_pre_q09_behavior(self):
+        # No qualifier_fn passed at all -- the default must behave as if
+        # alias-qualified, exactly like every pre-ENC-TSK-Q09 caller.
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code", "41",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (True, "rolled back"),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+
+
+class TestVerifyAtRuntimeQualifierState(unittest.TestCase):
+    """ENC-TSK-Q09 review finding (critical): QUALIFIER_VERIFY_AT_RUNTIME is
+    the fallback state for a hypothetical future PROBE_TABLE entry that
+    hasn't been classified yet -- the live qualifier_fn() AWS call, and its
+    fail-closed-on-error behavior, is now scoped to ONLY this state, never
+    to QUALIFIER_ALIAS_QUALIFIED or QUALIFIER_UNQUALIFIED_CONFIRMED. Uses a
+    synthetic ProbeTarget since neither real PROBE_TABLE entry is in this
+    state."""
+
+    def setUp(self):
+        self.target = pds.ProbeTarget(
+            base_url="https://example.lambda-url.us-west-2.on.aws",
+            probes=(pds.ProbeSpec(path="/", healthy_status=(200,)),),
+            qualifier_state=pds.QUALIFIER_VERIFY_AT_RUNTIME,
+        )
+        # Patch a throwaway name into PROBE_TABLE for the duration of each
+        # test rather than relying on a real entry.
+        self._patcher = patch.dict(pds.PROBE_TABLE, {"some-future-function": self.target})
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+
+    def test_qualifier_unknown_fails_loudly_without_attempting_rollback(self):
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "should never be called"
+
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: (None, "AccessDeniedException: not authorized"),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_qualifier_unknown")
+        self.assertIn(outcome.status, pds._FAILING_STATUSES)
+        self.assertEqual(rollback_calls, [])
+        self.assertIn("AccessDeniedException", outcome.detail)
+
+    def test_live_confirmed_unqualified_url_fails_loudly(self):
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "should never be called"
+
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: ("", None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        self.assertIn(outcome.status, pds._FAILING_STATUSES)
+        self.assertEqual(rollback_calls, [])
+
+    def test_live_confirmed_no_url_configured_also_fails_loudly(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: (None, None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        # Review finding (info): a genuinely absent Function URL (None) must
+        # not claim it "serves $LATEST directly" -- that is the OTHER
+        # ("" / unqualified) case's fact, not this one's.
+        self.assertNotIn("$LATEST", outcome.detail)
+        self.assertIn("NO Function URL configured", outcome.detail)
+
+    def test_live_confirmed_unqualified_url_message_asserts_latest(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: ("", None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        self.assertIn("$LATEST", outcome.detail)
+
+    def test_live_confirmed_alias_qualified_proceeds_with_rollback(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (True, "rolled back"),
+            qualifier_fn=lambda name: ("live", None),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+
+
+class TestGetFunctionUrlQualifier(unittest.TestCase):
+    def test_alias_qualified_url_returns_qualifier_name(self):
+        with patch.object(pds, "_run", return_value=(json.dumps({"Qualifier": "live"}), None)):
+            qualifier, err = pds.get_function_url_qualifier("enceladus-mcp-code", "us-west-2")
+        self.assertEqual(qualifier, "live")
+        self.assertIsNone(err)
+
+    def test_unqualified_url_returns_empty_string(self):
+        with patch.object(pds, "_run", return_value=(json.dumps({}), None)):
+            qualifier, err = pds.get_function_url_qualifier("enceladus-mcp-streamable", "us-west-2")
+        self.assertEqual(qualifier, "")
+        self.assertIsNone(err)
+
+    def test_explicit_null_qualifier_returns_empty_string(self):
+        with patch.object(pds, "_run", return_value=(json.dumps({"Qualifier": None}), None)):
+            qualifier, err = pds.get_function_url_qualifier("enceladus-mcp-streamable", "us-west-2")
+        self.assertEqual(qualifier, "")
+        self.assertIsNone(err)
+
+    def test_no_function_url_configured_is_a_clean_not_applicable_case(self):
+        with patch.object(
+            pds, "_run",
+            return_value=(None, "An error occurred (ResourceNotFoundException) when calling GetFunctionUrlConfig"),
+        ):
+            qualifier, err = pds.get_function_url_qualifier("some-function", "us-west-2")
+        self.assertIsNone(qualifier)
+        self.assertIsNone(err)
+
+    def test_transient_or_unexpected_error_is_reported_not_collapsed(self):
+        with patch.object(
+            pds, "_run",
+            return_value=(None, "An error occurred (AccessDeniedException) when calling GetFunctionUrlConfig"),
+        ):
+            qualifier, err = pds.get_function_url_qualifier("enceladus-mcp-streamable", "us-west-2")
+        self.assertIsNone(qualifier)
+        self.assertIsNotNone(err)
+        self.assertIn("AccessDeniedException", err)
+
+    def test_unparseable_output_is_an_error(self):
+        with patch.object(pds, "_run", return_value=("not json", None)):
+            qualifier, err = pds.get_function_url_qualifier("enceladus-mcp-streamable", "us-west-2")
+        self.assertIsNone(qualifier)
+        self.assertIsNotNone(err)
+
+
+class TestMcpStreamableProbeTableEntry(unittest.TestCase):
+    def test_probe_table_has_its_own_function_url_entry(self):
+        target = pds.PROBE_TABLE["enceladus-mcp-streamable"]
+        self.assertEqual(target.base_url, "https://4yhnhvq64ek34a2npdgbmjbp2m0wxjil.lambda-url.us-west-2.on.aws")
+        self.assertNotEqual(
+            target.base_url, pds.PROBE_TABLE["enceladus-mcp-code"].base_url,
+            "mcp_streamable must be probed on ITS OWN Function URL, not represented via mcp.jreese.net",
+        )
+
+    def test_healthy_signature_matches_mcp_code(self):
+        target = pds.PROBE_TABLE["enceladus-mcp-streamable"]
+        self.assertTrue(pds.evaluate_probe_results(
+            {"/.well-known/oauth-protected-resource": 200, "/": 401}, target,
+        ))
+        self.assertFalse(pds.evaluate_probe_results(
+            {"/.well-known/oauth-protected-resource": 502, "/": 502}, target,
+        ))
+
+
+class TestCheckCliQualifierWiring(unittest.TestCase):
+    def _args(self, previous_versions, function_name_map=None, version_ids=None):
+        return [
+            "check",
+            "--function-name-map-json", json.dumps(function_name_map or {"mcp_streamable": "enceladus-mcp-streamable"}),
+            "--version-ids-json", json.dumps(version_ids or {"mcp_streamable": "v1"}),
+            "--previous-alias-versions-json", json.dumps(previous_versions),
+        ]
+
+    def test_check_cli_never_mutates_an_unqualified_function_url(self):
+        with patch.object(pds, "probe_target", return_value=False), \
+             patch.object(pds, "get_function_url_qualifier", return_value=("", None)), \
+             patch.object(pds, "aws_rollback_alias") as mock_rollback:
+            rc = pds.main(self._args({"enceladus-mcp-streamable": "13"}))
+        mock_rollback.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    def test_check_cli_qualified_function_still_rolls_back(self):
+        with patch.object(pds, "probe_target", return_value=False), \
+             patch.object(pds, "get_function_url_qualifier", return_value=("live", None)), \
+             patch.object(pds, "aws_rollback_alias", return_value=(True, "ok")) as mock_rollback:
+            rc = pds.main(self._args(
+                {"enceladus-mcp-code": "41"},
+                function_name_map={"mcp_code": "enceladus-mcp-code"},
+                version_ids={"mcp_code": "v1"},
+            ))
+        mock_rollback.assert_called_once()
+        self.assertEqual(rc, 1)
+
+
 class TestBaseFunctionName(unittest.TestCase):
     def test_strips_known_suffix(self):
         self.assertEqual(pds._base_function_name("enceladus-mcp-code-gamma", "-gamma"), "enceladus-mcp-code")
