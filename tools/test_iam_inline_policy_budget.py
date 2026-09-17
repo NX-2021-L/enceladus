@@ -316,6 +316,182 @@ def test_main_exits_one_when_merge_does_not_fit(tmp_path, capsys):
     assert "fits=false" in out
 
 
+# --- --on-list-denied {warn,fail} behaviour ---------------------------------
+
+
+def denied_fetcher(role: str):
+    raise budget.ListDenied(
+        "list-role-policies failed (exit 254)",
+        cmd=["aws", "iam", "list-role-policies", "--role-name", role],
+        stderr="An error occurred (AccessDenied) when calling the ListRolePolicies operation",
+    )
+
+
+def test_warn_mode_list_denied_with_merge_policy_present(tmp_path, capsys):
+    merged_doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "CloudWatchDashboardOps",
+                "Effect": "Allow",
+                "Action": [
+                    "cloudwatch:PutDashboard",
+                    "cloudwatch:GetDashboard",
+                    "cloudwatch:DeleteDashboards",
+                    "cloudwatch:ListDashboards",
+                ],
+                "Resource": [
+                    "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma",
+                    "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture",
+                ],
+            }
+        ],
+    }
+    doc_path = tmp_path / "merged.json"
+    doc_path.write_text(json.dumps(merged_doc))
+
+    def single_fetcher(role: str, policy_name: str):
+        assert role == "enceladus-cloudformation-deploy-github-role"
+        assert policy_name == "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1"
+        return POLICY_D
+
+    rc = budget.main(
+        [
+            "--role",
+            "enceladus-cloudformation-deploy-github-role",
+            "--merge-policy",
+            "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1",
+            "--merge-document",
+            str(doc_path),
+            "--on-list-denied",
+            "warn",
+        ],
+        fetcher=denied_fetcher,
+        single_fetcher=single_fetcher,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "AccessDenied" in captured.err
+    assert "WARNING: list-role-policies denied" in captured.err
+    expected_delta = budget.policy_size(merged_doc) - budget.policy_size(POLICY_D)
+    assert (
+        f"BUDGET total=unknown headroom=unknown delta={expected_delta} fits=unknown"
+        in captured.out
+    )
+
+
+def test_warn_mode_list_denied_with_merge_policy_absent_treats_as_new(tmp_path, capsys):
+    new_doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "BrandNew",
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "*",
+            }
+        ],
+    }
+    doc_path = tmp_path / "new.json"
+    doc_path.write_text(json.dumps(new_doc))
+
+    def single_fetcher(role: str, policy_name: str):
+        # NoSuchEntity -> the policy does not exist yet.
+        return None
+
+    rc = budget.main(
+        [
+            "--role",
+            "enceladus-cloudformation-deploy-github-role",
+            "--merge-policy",
+            "enceladus-cfn-deploy-brand-new-v1",
+            "--merge-document",
+            str(doc_path),
+            "--on-list-denied",
+            "warn",
+        ],
+        fetcher=denied_fetcher,
+        single_fetcher=single_fetcher,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    expected_delta = budget.policy_size(new_doc)
+    assert (
+        f"BUDGET total=unknown headroom=unknown delta={expected_delta} fits=unknown"
+        in captured.out
+    )
+    assert "existing size      : 0" in captured.out
+
+
+def test_warn_mode_list_denied_without_merge_policy(capsys):
+    rc = budget.main(
+        [
+            "--role",
+            "enceladus-cloudformation-deploy-github-role",
+            "--on-list-denied",
+            "warn",
+        ],
+        fetcher=denied_fetcher,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "WARNING: list-role-policies denied" in captured.err
+    assert "BUDGET total=unknown headroom=unknown delta=n/a fits=n/a" in captured.out
+
+
+def test_fail_mode_list_denied_exits_nonzero_and_prints_stderr(capsys):
+    rc = budget.main(
+        ["--role", "enceladus-cloudformation-deploy-github-role"],
+        fetcher=denied_fetcher,
+    )
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "AccessDenied" in captured.err
+    assert "ERROR" in captured.err
+
+
+def test_warn_mode_get_role_policy_denied_on_merge_target_exits_nonzero(tmp_path, capsys):
+    merged_doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "New",
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "*",
+            }
+        ],
+    }
+    doc_path = tmp_path / "merged.json"
+    doc_path.write_text(json.dumps(merged_doc))
+
+    def single_fetcher(role: str, policy_name: str):
+        raise budget.GetPolicyDenied(
+            f"get-role-policy failed (exit 254) for {policy_name}",
+            cmd=["aws", "iam", "get-role-policy", "--role-name", role, "--policy-name", policy_name],
+            stderr="An error occurred (AccessDenied) when calling the GetRolePolicy operation",
+        )
+
+    rc = budget.main(
+        [
+            "--role",
+            "enceladus-cloudformation-deploy-github-role",
+            "--merge-policy",
+            "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1",
+            "--merge-document",
+            str(doc_path),
+            "--on-list-denied",
+            "warn",
+        ],
+        fetcher=denied_fetcher,
+        single_fetcher=single_fetcher,
+    )
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "AccessDenied" in captured.err
+    assert "ERROR" in captured.err
+
+
 def test_main_requires_merge_document_with_merge_policy():
     try:
         budget.main(
