@@ -207,5 +207,50 @@ class TestComputeTemplateWidensScope(unittest.TestCase):
         self.assertEqual(result["affected_functions"], [])
 
 
+class TestExtraSourceMapMcpCode(unittest.TestCase):
+    """ENC-ISS-778: the mcp_code Lambda's source lives in
+    tools/enceladus-mcp-server/, not backend/lambda/mcp_code/ (which holds
+    only requirements/config) -- so LAMBDA_DIR_RE alone never marks mcp_code
+    affected for a server-source change. Exercises compute_from_changed_files
+    directly (no _run/subprocess faking needed for pure mapping logic)."""
+
+    def test_mcp_server_source_change_marks_mcp_code_affected(self):
+        result = cat.compute_from_changed_files([
+            "tools/enceladus-mcp-server/server.py",
+        ])
+        self.assertFalse(result["full_scope"], result["reason"])
+        self.assertIn("mcp_code", result["affected_functions"])
+
+    def test_mcp_code_lambda_dir_still_works(self):
+        result = cat.compute_from_changed_files([
+            "backend/lambda/mcp_code/requirements.txt",
+        ])
+        self.assertFalse(result["full_scope"], result["reason"])
+        self.assertIn("mcp_code", result["affected_functions"])
+
+    def test_unrelated_tools_path_does_not_mark_mcp_code_or_full_scope(self):
+        result = cat.compute_from_changed_files([
+            "tools/elr/elr_lib/config.py",
+        ])
+        self.assertFalse(result["full_scope"], result["reason"])
+        self.assertNotIn("mcp_code", result["affected_functions"])
+
+    def test_scoping_script_change_forces_full_scope(self):
+        result = cat.compute_from_changed_files([
+            "tools/compute_affected_targets.py",
+        ])
+        self.assertTrue(result["full_scope"], result["reason"])
+
+    def test_scoping_script_change_forces_full_scope_via_compute(self):
+        # Same case through the full compute() seam (with git/gh faked), to
+        # confirm the CLI path (compute -> compute_from_changed_files) also
+        # widens rather than narrows on a change to itself.
+        with patch.object(cat, "_run", _fake_run_factory([
+            "tools/compute_affected_targets.py",
+        ])):
+            result = cat.compute("v4-gamma", "org/repo", "headsha", base_sha_override="basesha")
+        self.assertTrue(result["full_scope"], result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
