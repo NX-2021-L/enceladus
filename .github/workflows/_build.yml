@@ -298,11 +298,20 @@ jobs:
           (cd "$BUILD" && zip -qrX "$ZIP" .)
 
           # ENC-TSK-Q07 guard: fail the build, not the invoke, if the zip is
-          # missing an entry server.lambda_handler needs. main has not
-          # adopted the mcp_server/ package decomposition (see above), so
-          # override the built-in mcp_code default (which also requires
-          # mcp_server/__init__.py) down to what this job actually produces.
-          python3 tools/assert_lambda_artifact_contents.py "$ZIP" mcp_code --require server.py
+          # missing an entry server.lambda_handler needs. The required-entries
+          # list here MUST track the mcp_server/ copy step's own condition
+          # above (not be hardcoded to server.py alone) -- otherwise this
+          # guard would still print "OK" once main adopts the mcp_server/
+          # package decomposition (ENC-TSK-L09) if that rsync step ever
+          # regresses (wrong exclude, empty dir, wrong destination), which is
+          # the exact defect class this guard exists to catch. So: require
+          # mcp_server/__init__.py only when this job actually attempted to
+          # copy that package in, matching the `if` above byte-for-byte.
+          REQUIRE_ARGS=(server.py)
+          if [ -d tools/enceladus-mcp-server/mcp_server ]; then
+            REQUIRE_ARGS+=(mcp_server/__init__.py)
+          fi
+          python3 tools/assert_lambda_artifact_contents.py "$ZIP" mcp_code --require "${REQUIRE_ARGS[@]}"
 
           KEY="${PREFIX}/arm64-py3.12/mcp_code-${SHA}.zip"
           put_out=$(aws s3api put-object \
