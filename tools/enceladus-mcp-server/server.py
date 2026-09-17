@@ -6736,7 +6736,14 @@ async def _documents_patch(args: dict) -> list[TextContent]:
 # (anchor, op, body, if_match, include_heading, rebase_headings,
 # idempotency_key, caused_by, dry_run) forward automatically with no
 # whitelist edit required here.
-_DOCUMENTS_PATCH_SECTION_BODY_DENYLIST = frozenset({"governance_hash", "document_id"})
+#
+# ENC-ISS-776: governance_hash is REQUIRED by document_api's
+# POST /documents/{id}/sections handler (backend/lambda/document_api,
+# ~line 4424) and must be forwarded in the body -- only document_id (the
+# path param) and the session-carriage args provider/sci (not document_api
+# fields) are stripped here. The MCP-level _require_governance_hash_envelope
+# check above still enforces governance_hash's presence on the incoming args.
+_DOCUMENTS_PATCH_SECTION_BODY_DENYLIST = frozenset({"document_id", "provider", "sci"})
 
 
 async def _documents_patch_section(args: dict) -> list[TextContent]:

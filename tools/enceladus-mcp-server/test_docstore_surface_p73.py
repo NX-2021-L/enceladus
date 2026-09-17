@@ -75,6 +75,7 @@ def test_patch_section_denylist_forwards_body_and_copies_if_match_header():
         captured.update(method=method, path=path, payload=payload, query=query, extra_headers=extra_headers)
         return {"success": True, "document_id": "DOC-P73-UNIT"}
 
+    governance_hash = server._compute_governance_hash()
     args = {
         "document_id": "DOC-P73-UNIT",
         "project_id": "enceladus",
@@ -87,7 +88,9 @@ def test_patch_section_denylist_forwards_body_and_copies_if_match_header():
         "idempotency_key": "idem-1",
         "caused_by": "ENC-TSK-P73",
         "dry_run": False,
-        "governance_hash": server._compute_governance_hash(),
+        "governance_hash": governance_hash,
+        "provider": "ENC-SES-UNIT",
+        "sci": "sci-unit-token",
     }
 
     with patch.object(server, "_document_api_request", _fake_request):
@@ -99,16 +102,54 @@ def test_patch_section_denylist_forwards_body_and_copies_if_match_header():
     assert captured["path"] == "/DOC-P73-UNIT/sections"
     assert captured["extra_headers"] == {"If-Match": "a" * 64}
     body = captured["payload"]
-    # document_id / governance_hash are denylisted out of the body; every
-    # other field forwards untouched with no per-field whitelist edit.
+    # document_id (path param) / provider / sci (session-carriage args, not
+    # document_api fields) are denylisted out of the body. governance_hash
+    # IS forwarded -- document_api's POST /documents/{id}/sections handler
+    # requires it (ENC-ISS-776) -- and every other field forwards untouched
+    # with no per-field whitelist edit.
     assert "document_id" not in body
-    assert "governance_hash" not in body
+    assert "provider" not in body
+    assert "sci" not in body
+    assert body["governance_hash"] == governance_hash
     for key in (
         "project_id", "anchor", "op", "body", "if_match", "include_heading",
         "rebase_headings", "idempotency_key", "caused_by",
     ):
         assert body[key] == args[key]
     assert body["dry_run"] is False
+
+
+def test_patch_section_forwards_governance_hash_to_document_api_iss():
+    """ENC-ISS-776 regression: document_api's POST /documents/{id}/sections
+    handler (backend/lambda/document_api ~line 4424) requires governance_hash
+    in the body and returns 400 INVALID_INPUT without it. The denylist must
+    NOT strip governance_hash -- only document_id/provider/sci."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+
+    assert "governance_hash" not in server._DOCUMENTS_PATCH_SECTION_BODY_DENYLIST
+    assert server._DOCUMENTS_PATCH_SECTION_BODY_DENYLIST == frozenset(
+        {"document_id", "provider", "sci"}
+    )
+
+    captured = {}
+
+    def _fake_request(method, path="", payload=None, query=None, extra_headers=None):
+        captured.update(payload=payload)
+        return {"success": True, "document_id": "DOC-ISS-776"}
+
+    governance_hash = server._compute_governance_hash()
+    with patch.object(server, "_document_api_request", _fake_request):
+        result = _run(server._documents_patch_section({
+            "document_id": "DOC-ISS-776",
+            "anchor": {"block_id": "b1"},
+            "op": "replace",
+            "body": "new text",
+            "governance_hash": governance_hash,
+        }))
+    payload = json.loads(result[0].text)
+
+    assert payload["success"] is True
+    assert captured["payload"]["governance_hash"] == governance_hash
 
 
 def test_manifest_history_diff_query_passthrough():
