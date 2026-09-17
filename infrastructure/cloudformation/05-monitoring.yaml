@@ -347,6 +347,7 @@ Resources:
   # namespaces the AWS resource identifiers to avoid prod/gamma collisions.
   # ---------------------------------------------------------------------------
   McpGammaSyntheticRole:
+    Condition: IsGamma
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
@@ -382,6 +383,7 @@ Resources:
           Value: ENC-TSK-K78
 
   McpGammaSyntheticFunction:
+    Condition: IsGamma
     Type: AWS::Lambda::Function
     Properties:
       # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
@@ -487,6 +489,7 @@ Resources:
           Value: ENC-TSK-K78
 
   McpGammaSyntheticSchedule:
+    Condition: IsGamma
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "enceladus-mcp-gamma-synthetic-schedule${EnvironmentSuffix}"
@@ -500,6 +503,7 @@ Resources:
           Arn: !GetAtt McpGammaSyntheticFunction.Arn
 
   McpGammaSyntheticInvokePermission:
+    Condition: IsGamma
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref McpGammaSyntheticFunction
@@ -508,6 +512,7 @@ Resources:
       SourceArn: !GetAtt McpGammaSyntheticSchedule.Arn
 
   McpGammaHealthAlarm:
+    Condition: IsGamma
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "enceladus-mcp-gamma-health${EnvironmentSuffix}"
