@@ -115,6 +115,23 @@ jobs:
           declare -A version_ids
           while IFS= read -r fn; do
             [ -z "$fn" ] && continue
+            # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): mcp_code's real
+            # source lives in tools/enceladus-mcp-server/, not backend/lambda/
+            # mcp_code/ -- that directory holds only a deploy.sh + requirements.txt
+            # shim (and, on trees that have promoted a lambda_function.py stub
+            # into it, that stub is a shim too). A matrix build of it packages
+            # backend/lambda/mcp_code/* plus pip deps WITHOUT server.py or
+            # mcp_server/, producing a zip that is missing server.lambda_handler
+            # and cannot serve. The dedicated build-mcp-code job below is the
+            # single producer of the mcp_code artifact; without this skip both
+            # jobs upload to the same S3 key (<prefix>/<arch>-py<py>/mcp_code-
+            # <sha>.zip once this matrix's arm64-py3.12 row lines up with
+            # build-mcp-code's key) and race, with whichever finishes last
+            # silently winning -- this is what shipped the unservable zip as
+            # prod version 40.
+            case "$fn" in
+              mcp_code) echo "[skip] mcp_code - built by the dedicated build-mcp-code job (ENC-ISS-778)"; continue ;;
+            esac
             srcdir="backend/lambda/$fn"
             [ -d "$srcdir" ] || { echo "skip missing $srcdir"; continue; }
 
@@ -207,8 +224,13 @@ jobs:
   # (ENC-TSK-I39). server.py is the Lambda handler (Handler: server.lambda_handler)
   # with deps bundled in-zip (no SharedLayer). arm64/py3.12 — matches the prod
   # and gamma Lambda runtime since the ARM64 cutover (ENC-ISS-778 retired the
-  # prior x86_64/py3.11 pin, see _deploy.yml). The matrix build skips mcp_code
-  # (no lambda_function.py).
+  # prior x86_64/py3.11 pin, see _deploy.yml). The matrix `build` job above
+  # explicitly skips mcp_code (see the `case "$fn" in mcp_code) ... esac`
+  # guard in its build loop, ENC-TSK-Q07) so this job is the mcp_code
+  # artifact's single producer -- do not rely on backend/lambda/mcp_code/
+  # lacking a lambda_function.py to keep the matrix job out; a promoted tree
+  # that adds one (even as a shim) would otherwise make both jobs write the
+  # same S3 key and race (ENC-ISS-778 P0, shipped as prod version 40).
   #
   # ENC-TSK-Q07 (ENC-ISS-778 P0 true root cause): kept this job rather than
   # deleting it in favor of resolving mcp_code from the v4/main gamma-built
