@@ -228,6 +228,20 @@ Resources:
                   - cloudwatch:UntagResource
                 Resource: "*"
 
+              # Codifies the ENC-TSK-K59 (gamma) and ENC-TSK-P97 (prod) inline
+              # patch grants; the live role carries those inline policies until
+              # the github-roles stack is next reconciled.
+              - Sid: CloudWatchDashboardOps
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:GetDashboard
+                  - cloudwatch:DeleteDashboards
+                  - cloudwatch:ListDashboards
+                Resource:
+                  - !Sub "arn:aws:cloudwatch::${AWS::AccountId}:dashboard/enceladus-v4-architecture"
+                  - !Sub "arn:aws:cloudwatch::${AWS::AccountId}:dashboard/enceladus-v4-architecture-gamma"
+
               # ENC-TSK-J29 / ENC-ISS-453 — DATA-STACK (01-data.yaml) resource
               # types. The role deploys 01-data (14 DynamoDB::Table, 6 SNS::Topic,
               # 6 SQS::Queue) but the policy granted none of sqs/dynamodb/sns, so a
