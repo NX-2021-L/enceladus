@@ -14,7 +14,15 @@ name: IAM CFN Deploy Role - CloudWatch Dashboard Patch (prod)
 # covering both dashboard ARNs, and overwrites that SAME policy name in
 # place (no new name, no delete) so the role's inline-policy count never
 # grows. tools/iam_inline_policy_budget.py computes the merged size and
-# FAILS the job before any write if it would not fit.
+# FAILS the job before any write if it would not fit. ENC-TSK-Q03: run
+# 35172068267 failed because the assumed OIDC role can put/get-role-policy
+# on this one role but not list-role-policies, so the budget script's own
+# aggregate listing was denied and it never even printed why. Both budget
+# invocations below now pass --on-list-denied warn: if the listing is
+# denied the script degrades to measuring only the merge target policy via
+# get-role-policy (still gated) instead of failing the job — the atomic
+# put-role-policy call below is IAM's own LimitExceeded-guarded write, so a
+# denied aggregate LIST must not block it.
 
 on:
   workflow_dispatch:
@@ -79,7 +87,8 @@ jobs:
           python3 tools/iam_inline_policy_budget.py \
             --role "enceladus-cloudformation-deploy-github-role" \
             --merge-policy "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
-            --merge-document "/tmp/merged-cloudwatch-dashboard-policy.json"
+            --merge-document "/tmp/merged-cloudwatch-dashboard-policy.json" \
+            --on-list-denied warn
 
       - name: Apply merged inline policy — CloudWatch Dashboard (gamma + prod)
         run: |
@@ -103,4 +112,5 @@ jobs:
       - name: Post-write inline-policy budget (visibility for the next patch)
         run: |
           python3 tools/iam_inline_policy_budget.py \
-            --role "enceladus-cloudformation-deploy-github-role"
+            --role "enceladus-cloudformation-deploy-github-role" \
+            --on-list-denied warn
