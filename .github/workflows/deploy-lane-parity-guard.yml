@@ -28,12 +28,14 @@ on:
       - ".github/workflows/_deploy.yml"
       - ".github/workflows/_build.yml"
       - "tools/assert_deploy_lane_parity.py"
+      - "tools/mcp_runtime_functions.txt"
   push:
     branches: [main]
     paths:
       - ".github/workflows/_deploy.yml"
       - ".github/workflows/_build.yml"
       - "tools/assert_deploy_lane_parity.py"
+      - "tools/mcp_runtime_functions.txt"
   workflow_dispatch:
 
 permissions:

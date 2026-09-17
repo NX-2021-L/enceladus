@@ -586,6 +586,26 @@ class TestWorkflowFileAndBaseline(unittest.TestCase):
             doc = yaml.safe_load(f)
         self.assertEqual(doc.get("permissions", {}).get("contents"), "read")
 
+    def test_workflow_triggers_on_mcp_runtime_functions_list_changes(self):
+        # ENC-TSK-Q09 review finding (major): the guard's new
+        # mcp_runtime_packaged_function_set invariant reads
+        # tools/mcp_runtime_functions.txt via --runtime-functions-path, but a
+        # PR that edits only that file (e.g. adding/removing a function from
+        # MCP-runtime packaging) must still trigger this workflow, or the
+        # exact divergence this guard exists to catch can land unchecked.
+        with DEPLOY_WORKFLOW_PATH.open() as f:
+            doc = yaml.safe_load(f)
+        # PyYAML parses the bare `on:` key as the boolean True (see
+        # test_workflow_has_pull_request_push_and_dispatch_triggers above).
+        on_block = doc[True]
+        for trigger in ("pull_request", "push"):
+            paths = on_block[trigger]["paths"]
+            self.assertIn(
+                "tools/mcp_runtime_functions.txt", paths,
+                f"{trigger}.paths must include tools/mcp_runtime_functions.txt "
+                "so edits to the runtime function list re-run the guard",
+            )
+
     def test_baseline_contains_the_new_workflow_entry(self):
         with BASELINE_PATH.open() as f:
             baseline = json.load(f)

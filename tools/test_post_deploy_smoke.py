@@ -256,11 +256,15 @@ class TestUnqualifiedFunctionUrlRollback(unittest.TestCase):
             rollback_calls.append((name, version))
             return True, "should never be called"
 
+        # enceladus-mcp-streamable is QUALIFIER_UNQUALIFIED_CONFIRMED in the
+        # real PROBE_TABLE -- qualifier_fn must NOT be called at all (see
+        # the next test), so this asserts the outcome using a qualifier_fn
+        # that would raise if it were.
         outcome = pds.run_function_smoke(
             "enceladus-mcp-streamable", "13",
             probe_fn=lambda target: False,
             rollback_fn=rollback_fn,
-            qualifier_fn=lambda name: ("", None),
+            qualifier_fn=lambda name: (_ for _ in ()).throw(AssertionError("must not be called")),
         )
         self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
         self.assertIn(outcome.status, pds._FAILING_STATUSES)
@@ -268,44 +272,10 @@ class TestUnqualifiedFunctionUrlRollback(unittest.TestCase):
         self.assertIn("update-function-code", outcome.detail)
         self.assertIn("ENC-ISS-782", outcome.detail)
 
-    def test_qualifier_none_no_url_configured_is_also_treated_as_unable_to_roll_back(self):
-        rollback_calls = []
-
-        def rollback_fn(name, version):
-            rollback_calls.append((name, version))
-            return True, "should never be called"
-
-        outcome = pds.run_function_smoke(
-            "enceladus-mcp-streamable", "13",
-            probe_fn=lambda target: False,
-            rollback_fn=rollback_fn,
-            qualifier_fn=lambda name: (None, None),
-        )
-        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
-        self.assertIn(outcome.status, pds._FAILING_STATUSES)
-        self.assertEqual(rollback_calls, [])
-
-    def test_qualifier_unknown_fails_loudly_without_attempting_rollback(self):
-        rollback_calls = []
-
-        def rollback_fn(name, version):
-            rollback_calls.append((name, version))
-            return True, "should never be called"
-
-        outcome = pds.run_function_smoke(
-            "enceladus-mcp-streamable", "13",
-            probe_fn=lambda target: False,
-            rollback_fn=rollback_fn,
-            qualifier_fn=lambda name: (None, "AccessDeniedException: not authorized"),
-        )
-        self.assertEqual(outcome.status, "rollback_impossible_qualifier_unknown")
-        self.assertIn(outcome.status, pds._FAILING_STATUSES)
-        self.assertEqual(rollback_calls, [])
-        self.assertIn("AccessDeniedException", outcome.detail)
-
     def test_qualified_url_still_rolls_back_normally(self):
-        # An alias-qualified Function URL (e.g. "live") is unaffected by
-        # this change -- the normal rollback path still runs.
+        # enceladus-mcp-code is QUALIFIER_ALIAS_QUALIFIED in the real
+        # PROBE_TABLE -- the normal rollback path runs, and (see next test)
+        # qualifier_fn is never called to get there.
         outcome = pds.run_function_smoke(
             "enceladus-mcp-code", "41",
             probe_fn=lambda target: False,
@@ -333,6 +303,32 @@ class TestUnqualifiedFunctionUrlRollback(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "unhealthy_dry_run")
 
+    def test_qualifier_fn_is_never_called_for_a_confirmed_alias_qualified_target(self):
+        # ENC-TSK-Q09 review finding (critical), core regression test: a
+        # QUALIFIER_ALIAS_QUALIFIED target must attempt the rollback
+        # WITHOUT ever calling qualifier_fn -- so an AWS permission this PR
+        # never provisioned (lambda:GetFunctionUrlConfig on the deploy role
+        # that runs `check`) cannot silently disable automatic recovery for
+        # a function, like enceladus-mcp-code, that has always been
+        # alias-qualified and rolled back successfully before ENC-TSK-Q09
+        # existed.
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "rolled back"
+
+        outcome = pds.run_function_smoke(
+            "enceladus-mcp-code", "41",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: (_ for _ in ()).throw(
+                AssertionError("qualifier_fn must not be called for a QUALIFIER_ALIAS_QUALIFIED target")
+            ),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+        self.assertEqual(rollback_calls, [("enceladus-mcp-code", "41")])
+
     def test_default_qualifier_fn_preserves_pre_q09_behavior(self):
         # No qualifier_fn passed at all -- the default must behave as if
         # alias-qualified, exactly like every pre-ENC-TSK-Q09 caller.
@@ -340,6 +336,96 @@ class TestUnqualifiedFunctionUrlRollback(unittest.TestCase):
             "enceladus-mcp-code", "41",
             probe_fn=lambda target: False,
             rollback_fn=lambda name, version: (True, "rolled back"),
+        )
+        self.assertEqual(outcome.status, "rollback_unverified")
+
+
+class TestVerifyAtRuntimeQualifierState(unittest.TestCase):
+    """ENC-TSK-Q09 review finding (critical): QUALIFIER_VERIFY_AT_RUNTIME is
+    the fallback state for a hypothetical future PROBE_TABLE entry that
+    hasn't been classified yet -- the live qualifier_fn() AWS call, and its
+    fail-closed-on-error behavior, is now scoped to ONLY this state, never
+    to QUALIFIER_ALIAS_QUALIFIED or QUALIFIER_UNQUALIFIED_CONFIRMED. Uses a
+    synthetic ProbeTarget since neither real PROBE_TABLE entry is in this
+    state."""
+
+    def setUp(self):
+        self.target = pds.ProbeTarget(
+            base_url="https://example.lambda-url.us-west-2.on.aws",
+            probes=(pds.ProbeSpec(path="/", healthy_status=(200,)),),
+            qualifier_state=pds.QUALIFIER_VERIFY_AT_RUNTIME,
+        )
+        # Patch a throwaway name into PROBE_TABLE for the duration of each
+        # test rather than relying on a real entry.
+        self._patcher = patch.dict(pds.PROBE_TABLE, {"some-future-function": self.target})
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+
+    def test_qualifier_unknown_fails_loudly_without_attempting_rollback(self):
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "should never be called"
+
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: (None, "AccessDeniedException: not authorized"),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_qualifier_unknown")
+        self.assertIn(outcome.status, pds._FAILING_STATUSES)
+        self.assertEqual(rollback_calls, [])
+        self.assertIn("AccessDeniedException", outcome.detail)
+
+    def test_live_confirmed_unqualified_url_fails_loudly(self):
+        rollback_calls = []
+
+        def rollback_fn(name, version):
+            rollback_calls.append((name, version))
+            return True, "should never be called"
+
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=rollback_fn,
+            qualifier_fn=lambda name: ("", None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        self.assertIn(outcome.status, pds._FAILING_STATUSES)
+        self.assertEqual(rollback_calls, [])
+
+    def test_live_confirmed_no_url_configured_also_fails_loudly(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: (None, None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        # Review finding (info): a genuinely absent Function URL (None) must
+        # not claim it "serves $LATEST directly" -- that is the OTHER
+        # ("" / unqualified) case's fact, not this one's.
+        self.assertNotIn("$LATEST", outcome.detail)
+        self.assertIn("NO Function URL configured", outcome.detail)
+
+    def test_live_confirmed_unqualified_url_message_asserts_latest(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (_ for _ in ()).throw(AssertionError("must not be called")),
+            qualifier_fn=lambda name: ("", None),
+        )
+        self.assertEqual(outcome.status, "rollback_impossible_unqualified_url")
+        self.assertIn("$LATEST", outcome.detail)
+
+    def test_live_confirmed_alias_qualified_proceeds_with_rollback(self):
+        outcome = pds.run_function_smoke(
+            "some-future-function", "13",
+            probe_fn=lambda target: False,
+            rollback_fn=lambda name, version: (True, "rolled back"),
+            qualifier_fn=lambda name: ("live", None),
         )
         self.assertEqual(outcome.status, "rollback_unverified")
 
