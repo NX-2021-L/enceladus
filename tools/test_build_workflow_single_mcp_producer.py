@@ -161,6 +161,167 @@ class TestBuildWorkflowSingleMcpProducer(unittest.TestCase):
             "build-mcp-code job, not the matrix build job",
         )
 
+    def _build_mcp_code_job_text(self) -> str:
+        # Isolate the build-mcp-code job from the rest of the file (mirrors
+        # the matrix-loop isolation helper above) so the guard-path
+        # assertions below can't accidentally match something in the matrix
+        # `build` job.
+        start = self.build_text.find("build-mcp-code:")
+        self.assertNotEqual(start, -1, "_build.yml is missing the build-mcp-code job")
+        return self.build_text[start:]
+
+    def test_guard_is_invoked_via_guard_tools_path_not_bare_tools_path(self):
+        # ENC-TSK-Q07 follow-up 2 (ENC-ISS-778 P0, run 35178646448): a real
+        # v3-prod promote checks out a PROMOTED (v4/main) tree in this job's
+        # primary checkout, which does not contain
+        # tools/assert_lambda_artifact_contents.py (that script exists only
+        # on main). The guard MUST be invoked from the separate workflow-
+        # branch checkout path (.guard-tools/tools/...), never from the bare
+        # "tools/" path inside the primary checkout, or every promote fails
+        # with "No such file or directory" and deploys nothing.
+        job_text = self._build_mcp_code_job_text()
+
+        guard_invocation = re.search(
+            r"python3\s+(\S+)/tools/assert_lambda_artifact_contents\.py",
+            job_text,
+        )
+        self.assertIsNotNone(
+            guard_invocation,
+            "_build.yml's build-mcp-code job is missing the "
+            "assert_lambda_artifact_contents.py guard invocation",
+        )
+        self.assertEqual(
+            guard_invocation.group(1),
+            ".guard-tools",
+            "the guard must be invoked as .guard-tools/tools/"
+            "assert_lambda_artifact_contents.py (workflow-branch checkout), "
+            f"found prefix {guard_invocation.group(1)!r} instead -- a bare "
+            "tools/ path resolves against the PROMOTED tree and is absent "
+            "there (ENC-TSK-Q07 follow-up 2)",
+        )
+
+        # Guard against a stale bare-path invocation existing anywhere in the
+        # job on a non-comment line (excluding shell `#` comments and this
+        # file's own explanatory prose, which legitimately quotes the bare
+        # path when describing the failure mode).
+        bare_invocation_lines = [
+            line
+            for line in job_text.splitlines()
+            if "python3 tools/assert_lambda_artifact_contents.py" in line
+            and not line.strip().startswith("#")
+        ]
+        self.assertEqual(
+            bare_invocation_lines,
+            [],
+            "_build.yml's build-mcp-code job must not invoke the guard via "
+            "the bare tools/ path on a live (non-comment) line -- that path "
+            f"does not exist in a promoted (v4/main) checkout; found: {bare_invocation_lines!r}",
+        )
+
+    def test_guard_step_is_not_conditional_or_soft_failing(self):
+        # The guard must run unconditionally on every promote. Making it
+        # conditional on the script's existence (or otherwise letting the
+        # step fail softly) would disable it exactly when it matters -- every
+        # promote checks out a v4/main tree lacking the script by design.
+        job_text = self._build_mcp_code_job_text()
+
+        guard_pos = job_text.find("assert_lambda_artifact_contents.py")
+        self.assertNotEqual(
+            guard_pos, -1, "build-mcp-code job is missing the guard invocation"
+        )
+
+        # No existence check (e.g. `[ -f ... ] &&` / `if [ -f ... ]; then`)
+        # gating the guard invocation line itself.
+        guard_line_start = job_text.rfind("\n", 0, guard_pos)
+        guard_line = job_text[guard_line_start:job_text.find("\n", guard_pos)]
+        self.assertNotIn(
+            "[ -f",
+            guard_line,
+            "the guard invocation must not be gated behind a file-existence "
+            "check (that would disable it exactly when the promoted tree "
+            "lacks the script, which is always)",
+        )
+
+        # No continue-on-error anywhere in the build-mcp-code job (the guard
+        # step, and the job as a whole, must be allowed to fail the build).
+        self.assertNotIn(
+            "continue-on-error",
+            job_text,
+            "the build-mcp-code job (including its guard step) must not use "
+            "continue-on-error -- the guard's whole purpose is to fail the "
+            "build when the artifact is bad",
+        )
+
+        # The guard invocation must not be wrapped in a shell conditional
+        # that would let a nonzero exit pass silently (e.g. `... || true`,
+        # `if python3 ...; then`).
+        self.assertNotIn("|| true", guard_line)
+        self.assertNotRegex(
+            guard_line,
+            r"^\s*if\s+python3",
+            "the guard invocation must not be wrapped in an `if` that could "
+            "swallow a nonzero exit code",
+        )
+
+    def test_guard_tooling_checkout_pins_main_with_a_path(self):
+        # The second checkout step must fetch the workflow's own branch
+        # (main) — never the promoted commit_sha — into a distinct `path:`
+        # subdirectory, so it can't clobber the primary (promoted-tree)
+        # checkout the rest of the job depends on.
+        job_text = self._build_mcp_code_job_text()
+
+        step_match = re.search(
+            r"- name:\s*Checkout guard tooling \(workflow branch\)\s*\n"
+            r"\s*uses:\s*actions/checkout@v4\s*\n"
+            r"\s*with:\s*\n"
+            r"((?:\s{10,}\S.*\n?)+)",
+            job_text,
+        )
+        self.assertIsNotNone(
+            step_match,
+            "_build.yml is missing the 'Checkout guard tooling (workflow "
+            "branch)' step in the build-mcp-code job",
+        )
+        step_with_block = step_match.group(1)
+
+        self.assertRegex(
+            step_with_block,
+            r"ref:\s*main\b",
+            "the guard tooling checkout must pin ref: main (the workflow's "
+            "own branch), not inputs.commit_sha (the promoted tree)",
+        )
+        self.assertNotIn(
+            "inputs.commit_sha",
+            step_with_block,
+            "the guard tooling checkout must NOT use inputs.commit_sha -- "
+            "that is exactly the promoted tree missing the guard script",
+        )
+        path_match = re.search(r"path:\s*(\S+)", step_with_block)
+        self.assertIsNotNone(
+            path_match,
+            "the guard tooling checkout must specify a path: subdirectory "
+            "so it cannot clobber the primary checkout's working tree",
+        )
+        self.assertEqual(
+            path_match.group(1),
+            ".guard-tools",
+            "the guard tooling checkout's path: must be .guard-tools to "
+            "match the guard invocation's .guard-tools/tools/... prefix",
+        )
+
+        # The second checkout step must come AFTER the primary (promoted-
+        # tree) checkout in this job, not before.
+        primary_checkout_pos = job_text.find("Checkout repo at requested SHA")
+        second_checkout_pos = job_text.find("Checkout guard tooling")
+        self.assertNotEqual(primary_checkout_pos, -1)
+        self.assertNotEqual(second_checkout_pos, -1)
+        self.assertLess(
+            primary_checkout_pos,
+            second_checkout_pos,
+            "the guard tooling checkout must run after the primary "
+            "promoted-tree checkout",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -254,6 +254,31 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
 
+      # ENC-TSK-Q07 follow-up 2 (ENC-ISS-778 P0, run 35178646448): the
+      # primary checkout above is the PROMOTED tree -- inputs.commit_sha is
+      # whatever v4/main SHA a v3-prod promote points at, not this workflow's
+      # own main. tools/assert_lambda_artifact_contents.py lives on main only
+      # (this file, .github/workflows/_build.yml, only ever runs for
+      # main-based dispatches -- v4/main has its own separate _build.yml), so
+      # a promoted v4/main tree checked out above does not contain the guard
+      # script and `python3 tools/assert_lambda_artifact_contents.py` fails
+      # with "No such file or directory", which silently deployed NOTHING
+      # (the guard step's failure aborted the job before the S3 upload, but
+      # the failure itself was invisible unless someone read the run logs).
+      # Fetch the guard tooling from the workflow's own branch (main) into a
+      # separate path instead of relying on it being present in the
+      # already-checked-out (possibly foreign) tree. This must NOT be made
+      # conditional on the script existing in the primary checkout -- that
+      # would disable the guard exactly when it matters (every promote
+      # checks out a v4/main tree that lacks it).
+      - name: Checkout guard tooling (workflow branch)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .guard-tools
+          sparse-checkout: tools/assert_lambda_artifact_contents.py
+          sparse-checkout-cone-mode: false
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -333,7 +358,11 @@ jobs:
           if [ -d tools/enceladus-mcp-server/mcp_server ]; then
             REQUIRE_ARGS+=(mcp_server/__init__.py)
           fi
-          python3 tools/assert_lambda_artifact_contents.py "$ZIP" mcp_code --require "${REQUIRE_ARGS[@]}"
+          # The guard script comes from .guard-tools (the workflow-branch
+          # checkout above), NOT the primary "tools/" path -- the primary
+          # checkout is the promoted (possibly v4/main) tree, which does not
+          # carry this script. See the "Checkout guard tooling" step comment.
+          python3 .guard-tools/tools/assert_lambda_artifact_contents.py "$ZIP" mcp_code --require "${REQUIRE_ARGS[@]}"
 
           KEY="${PREFIX}/arm64-py3.12/mcp_code-${SHA}.zip"
           put_out=$(aws s3api put-object \
