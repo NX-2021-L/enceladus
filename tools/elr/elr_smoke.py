@@ -132,11 +132,12 @@ def run_health_smoke(
                 status,
                 identity_posture=identity_ctx.posture,
                 anomalies=list(identity_ctx.anomalies) + ["tls_ca_bundle_missing"],
-                # ENC-TSK-P77: elr.smoke_digest schema fields -- present
-                # even on the TLS-unresolved short-circuit path.
+                # ENC-TSK-P77: elr.smoke_digest schema field -- present
+                # even on the TLS-unresolved short-circuit path. (The two
+                # ENC-TSK-P90 prefix-resolution fields that used to sit
+                # here were removed by ENC-TSK-Q10; the schema no longer
+                # carries them.)
                 profile=resolved_profile_name,
-                prefix_map_source="none",
-                unclassified=[],
                 **extra,
             )
 
@@ -178,11 +179,11 @@ def run_health_smoke(
             identity_posture=identity_ctx.posture,
             anomalies=anomalies,
             counts=counts,
-            # ENC-TSK-P77 / BRD elr.smoke_digest schema:
+            # ENC-TSK-P77 / BRD elr.smoke_digest schema. The two ENC-TSK-P90
+            # prefix-resolution fields were removed by ENC-TSK-Q10 -- ELR
+            # holds no prefix map at all (see elr_batch_get.PROJECT_SENTINEL).
             profile=resolved_profile_name,
             governance_hash=governance_hash,
-            prefix_map_source="none",  # health checks classify no record ids (see elr_lib.prefix)
-            unclassified=[],
             **extra,
         )
     finally:

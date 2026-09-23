@@ -76,9 +76,10 @@ class _FakeHttpResponse:
 
 
 class EnvironmentProfileSmokeTests(unittest.TestCase):
-    """ENC-TSK-P77 AC-2/AC-4: profile/governance_hash/prefix_map_source/
-    unclassified fields, environment selection by flag and env var, and
-    per-profile digest emission via --all-profiles (network mocked).
+    """ENC-TSK-P77 AC-2/AC-4: profile/governance_hash fields (the two
+    ENC-TSK-P90 prefix-resolution fields were removed by ENC-TSK-Q10),
+    environment selection by flag and env var, and per-profile digest
+    emission via --all-profiles (network mocked).
     """
 
     def _fake_response(self, governance_hash="abc123"):
@@ -90,8 +91,10 @@ class EnvironmentProfileSmokeTests(unittest.TestCase):
             digest = elr_smoke.run_health_smoke("v4-gamma", 5)
         self.assertEqual(digest["profile"], "v4-gamma")
         self.assertEqual(digest["governance_hash"], "abc123")
-        self.assertEqual(digest["prefix_map_source"], "none")
-        self.assertEqual(digest["unclassified"], [])
+        # ENC-TSK-Q10: no prefix-resolution fields on any digest -- ELR
+        # holds no prefix map, so there is nothing to report.
+        self.assertNotIn("prefix_map_source", digest)
+        self.assertNotIn("unclassified", digest)
 
     def test_default_environment_profile_is_prod(self):
         with patch("elr_lib.transport.urllib.request.urlopen", return_value=self._fake_response()):
