@@ -7,6 +7,7 @@ Routes (via API Gateway):
   GET    /api/v1/tracker/pending-updates                          — pending updates
   GET    /api/v1/tracker/{project}                                — list records
   GET    /api/v1/tracker/{project}/{type}/{id}                    — get record
+  GET    /api/v1/tracker/_/{type}/{id}                            — get record, project derived from the id (ENC-TSK-Q10)
   POST   /api/v1/tracker/{project}/{type}                         — create record
   PATCH  /api/v1/tracker/{project}/{type}/{id}                    — update field / PWA action
   POST   /api/v1/tracker/{project}/{type}/{id}/log                — append worklog
@@ -3762,30 +3763,88 @@ def _handle_create_record(
 # Prefix map cache for bidirectional relationships
 _prefix_map_cache: Optional[Dict[str, str]] = None
 _prefix_map_cache_at: float = 0.0
+# ENC-TSK-Q10 / ENC-ISS-791: alias prefix -> project_id, filled by the same scan.
+# Kept separate so the mint map returned by _get_prefix_map_cached() is unchanged
+# for its existing callers; a mint prefix always wins over an alias (ENC-TSK-O47).
+_alias_prefix_map_cache: Dict[str, str] = {}
 
 
 def _get_prefix_map_cached() -> Dict[str, str]:
-    global _prefix_map_cache, _prefix_map_cache_at
+    global _prefix_map_cache, _prefix_map_cache_at, _alias_prefix_map_cache
     now = time.time()
     if _prefix_map_cache is not None and (now - _prefix_map_cache_at) < 300.0:
         return _prefix_map_cache
     try:
         ddb = _get_ddb()
-        resp = ddb.scan(
-            TableName=PROJECTS_TABLE,
-            ProjectionExpression="project_id, prefix",
-        )
+        # "#pfx" aliases the attribute name defensively (parity with
+        # coordination_api/project_utils.py); the scan is paginated so a
+        # project past the first page can never be silently unresolvable.
+        scan_kwargs = {
+            "TableName": PROJECTS_TABLE,
+            "ProjectionExpression": "project_id, #pfx, alias_prefixes",
+            "ExpressionAttributeNames": {"#pfx": "prefix"},
+        }
+        resp = ddb.scan(**scan_kwargs)
+        items = list(resp.get("Items", []))
+        while resp.get("LastEvaluatedKey"):
+            resp = ddb.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **scan_kwargs)
+            items.extend(resp.get("Items", []))
         mapping = {}
-        for item in resp.get("Items", []):
+        aliases: Dict[str, str] = {}
+        for item in items:
             pid = item.get("project_id", {}).get("S", "")
             pfx = item.get("prefix", {}).get("S", "")
             if pid and pfx:
-                mapping[pfx] = pid
+                mapping[pfx.upper()] = pid
+            if not pid:
+                continue
+            raw_aliases = item.get("alias_prefixes", {})
+            # Tolerate either DynamoDB shape: a List of strings or a String Set.
+            alias_values = [a.get("S", "") for a in raw_aliases.get("L", [])] + list(raw_aliases.get("SS", []))
+            for raw_alias in alias_values:
+                alias = str(raw_alias or "").strip().upper()
+                if alias and alias not in aliases:
+                    aliases[alias] = pid
+        for collided in [a for a in aliases if a in mapping]:
+            if aliases[collided] != mapping[collided]:
+                logger.warning(
+                    "[PREFIX-COLLISION] alias %s (%s) shadowed by mint prefix of %s",
+                    collided, aliases[collided], mapping[collided],
+                )
+            aliases.pop(collided, None)
         _prefix_map_cache = mapping
+        _alias_prefix_map_cache = aliases
         _prefix_map_cache_at = now
         return mapping
     except Exception:
         return _prefix_map_cache or {}
+
+
+_RECORD_ID_PREFIX_RE = re.compile(r"^([A-Za-z]{2,8})-")
+
+
+def _resolve_project_for_record_id(record_id: str) -> Optional[str]:
+    """ENC-TSK-Q10 / ENC-ISS-791: derive the owning project_id from a record id's
+    leading prefix using the projects table -- mint prefix first, then
+    alias_prefixes (a mint prefix always wins). One forced re-scan on a miss so a
+    project registered after the cache was filled still resolves (parity with
+    server.py's _resolve_prefix, ENC-ISS-123). Returns None for an unknown
+    prefix; callers answer 404, never guess.
+    """
+    global _prefix_map_cache_at
+    match = _RECORD_ID_PREFIX_RE.match(str(record_id or "").strip())
+    if not match:
+        return None
+    prefix = match.group(1).upper()
+    for attempt in (0, 1):
+        mint = _get_prefix_map_cached()
+        if prefix in mint:
+            return mint[prefix]
+        if prefix in _alias_prefix_map_cache:
+            return _alias_prefix_map_cache[prefix]
+        if attempt == 0:
+            _prefix_map_cache_at = 0.0  # force exactly one refresh
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -8366,6 +8425,12 @@ _RE_RELATIONSHIP = re.compile(
 _RE_RECORD_SUB = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
+# ENC-TSK-Q10 / ENC-ISS-791: reserved project segment. GET /_/{type}/{id} asks the
+# server to derive the owning project from the record id (projects table), so a
+# client such as ELR needs zero prefix knowledge. Reads only -- every other
+# method on '_' falls through to project validation and its 404.
+PROJECT_SENTINEL = "_"
+
 _RE_RECORD = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)$"
 )
@@ -8548,6 +8613,19 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         )
         if auth_err:
             return auth_err
+
+        # ENC-TSK-Q10 / ENC-ISS-791: sentinel project -> resolve from the record id.
+        # GET only; writes never get the sentinel (they hit project validation below).
+        if project_id == PROJECT_SENTINEL and method == "GET":
+            resolved_project = _resolve_project_for_record_id(record_id)
+            if not resolved_project:
+                prefix_match = _RECORD_ID_PREFIX_RE.match(record_id)
+                return _error(
+                    404,
+                    f"Record not found: {record_id}",
+                    unknown_prefix=prefix_match.group(1).upper() if prefix_match else "",
+                )
+            return _handle_get_record(resolved_project, record_type, record_id)
 
         project_err = _validate_project_exists(project_id)
         if project_err:
