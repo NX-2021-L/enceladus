@@ -1,12 +1,32 @@
 {
-  "version": "2026-09-16.11",
-  "updated_at": "2026-09-17T02:15:00Z",
-  "last_change_summary": "ENC-TSK-Q02 (ENC-ISS-777): checkout_service's code_only closed gate accepts the documented code_on_main_evidence shapes -- an object {commit_sha}, a bare 40-hex commit sha string, or a note string alongside a top-level transition_evidence.commit_sha -- via a new _normalize_code_on_main_evidence() helper, instead of rejecting anything that was not already a non-empty dict. The rejection envelope for malformed input, _CODE_ON_MAIN_EVIDENCE_SCHEMA's required_fields key, and _example_advance_fix now all agree on the nested path transition_evidence.code_on_main_evidence.commit_sha (previously the envelope named the flat label while the schema and example named only commit_sha). The no_code closed gate's schema was aligned the same way (transition_evidence.no_code_evidence) with no change to its accepted input. transition_type_matrix.py CLOSED_EVIDENCE is unchanged (comment only); MATRIX_VERSION not bumped. mcp_server.escalation_actions.escalation.request's arg-shape contract is documented below: target_record_id (not record_id), target_record_type, project_id, mutation_type in [deploy_arc_change, direct_state_override], payload as a non-empty object (payload.target_status required for direct_state_override), justification, requested_by.session_id, governance_hash.",
+  "version": "2026-09-23.1",
+  "updated_at": "2026-09-23T15:40:50Z",
+  "last_change_summary": "ENC-TSK-Q10 (ENC-ISS-791): tracker_mutation's single-record GET accepts the reserved project segment '_' (PROJECT_SENTINEL) and derives the owning project from the record id via the projects table -- mint prefix first, then alias_prefixes, mint wins on a collision, one forced re-scan on a miss; an unknown prefix answers 404 NOT_FOUND with details.unknown_prefix, never a 400/500. New entity tracker_mutation.get_record_project_sentinel. _get_prefix_map_cached now projects alias_prefixes into a separate alias map (List or String Set tolerated); the mint map returned to its existing caller is unchanged. mcp_server.projects_prefix_map.prefixes definition corrected to prefix -> project_id, the direction _get_prefix_map() actually returns. Consumer: ELR batch reads (ENC-TSK-Q11) drop the client-side prefix map entirely and send only the record id.",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
+    "tracker_mutation.get_record_project_sentinel": {
+      "description": "ENC-TSK-Q10 (ENC-ISS-791): GET /api/v1/tracker/_/{type}/{id} -- the reserved project segment '_' (PROJECT_SENTINEL in tracker_mutation) asks the handler to derive the owning project from the record id's leading prefix via the projects table, then serve the unchanged single-record GET (_handle_get_record). Consumer: the Enceladus Local Runner (tools/elr elr_batch_get, ENC-TSK-Q11), which holds zero client-side prefix or project knowledge. Reads only: any non-GET method on '_' falls through to _validate_project_exists and its existing 404 (\"Project '_' is not registered.\"), which is also how a client detects a plane that predates this route.",
+      "fields": {
+        "project_sentinel": {
+          "type": "string",
+          "definition": "The literal path segment '_' in place of {project} on the single-record GET route. Never a real project_id (project_service requires a 3-letter upper-case prefix and a slug project_id)."
+        },
+        "resolution_order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "['mint prefix', 'alias_prefixes']: the upper-cased leading segment of the record id is looked up in projects.prefix first, then in any project's alias_prefixes (ENC-TSK-O47). A mint prefix always wins a collision; the shadowed alias is dropped from the alias map and logged as [PREFIX-COLLISION]. On a miss the 300s cache is refreshed exactly once so a project registered after the cache filled still resolves (parity with server.py _resolve_prefix, ENC-ISS-123)."
+        },
+        "unknown_prefix": {
+          "type": "string",
+          "definition": "Present in error_envelope.details (and mirrored top-level) when the prefix is unknown: the route answers HTTP 404, error_envelope.code NOT_FOUND, message 'Record not found: {id}', never a 400 or 500 and never a client-side 'unclassified' state. Empty string when the id has no PREFIX- shape at all."
+        }
+      }
+    },
     "tracker.dedup_auto_merge": {
       "description": "ENC-TSK-I09 (Dedup P5): the MECHANICAL arc-walker auto-merge surface for certificate-certified T-HIGH duplicate pairs (DOC-DF651F07D5C2 §P5). Exposed as POST /{project}/dedup-review op=auto-merge in tracker_mutation (tracker:write scope). Unlike op=approve (ENC-TSK-I08, io-Cognito-gated), auto-merge is MECHANICAL — judgment is proved away by the P2 certainty model, so there is no per-merge io gate. io sovereignty is preserved in substance by four rails. Each eligible duplicate is soft-superseded into the cluster's canonical via the reversible ENC-TSK-I07 superseded-by primitive, stamped with the system:arc-walker write_source; every executed merge streams to the io-reviewable audit feed (EventBridge DetailType record.dedup.auto_merged, source enceladus.tracker). Input shape mirrors op=propose: {clusters:[I05 cluster], verdicts:[I06 verdict-with-certificate], precision_lcb_floor?}. Output reports per-cluster per-member actions (auto-merged / would-merge / skipped / failed). Per-member failures (e.g. evidence-orphan 409) are surfaced, never forced.",
       "fields": {
@@ -8484,11 +8504,11 @@
       }
     },
     "mcp_server.projects_prefix_map": {
-      "description": "Cached project_id -> prefix lookup used by MCP-side tools that need to validate or normalize a project_id before forwarding a call to a Lambda HTTP API (e.g. resolving the {project_id} segment used throughout document.body_versioning's S3 key patterns). Governance-dictionary contract carried on behalf of ENC-TSK-P82.",
+      "description": "Cached prefix -> project_id lookup (direction corrected by ENC-TSK-Q10; earlier text said project_id -> prefix) used by MCP-side tools that need to validate or normalize a project_id before forwarding a call to a Lambda HTTP API (e.g. resolving the {project_id} segment used throughout document.body_versioning's S3 key patterns). Governance-dictionary contract carried on behalf of ENC-TSK-P82.",
       "fields": {
         "prefixes": {
           "type": "object",
-          "definition": "Map of project_id -> its canonical prefix string, matching the {project_id} path segment used throughout document.body_versioning's S3 key patterns and the tracker/documents DynamoDB partition keys."
+          "definition": "Map of upper-case record-id PREFIX -> project_id (e.g. {\"ENC\": \"enceladus\"}), exactly what _get_prefix_map() returns: mint prefix union alias_prefixes with mint winning a collision (ENC-TSK-O47). The value is the {project_id} path segment used throughout document.body_versioning's S3 key patterns and the tracker/documents DynamoDB partition keys. Direction corrected by ENC-TSK-Q10 (ENC-ISS-791); the earlier definition had it inverted."
         },
         "source": {
           "type": "string",
@@ -9225,6 +9245,12 @@
   },
   "change_summary": "ENC-TSK-O80 (ENC-FTR-136 AC-4 follow-through, ENC-PLN-086 Wave 3): migrates the GAMMA governance-mart trigger from an EventBridge Rule to an EventBridge Scheduler schedule (GovernanceMartScheduleGamma, 02-compute.yaml) with an explicit RetryPolicy and a dead-letter queue (GovernanceMartScheduleDlq), and declares the previously out-of-band gamma outputs -- GovernanceMartBucketGamma (S3) and GovernanceMartDatabaseGamma (Glue) -- as real IaC for the first time. Production keeps the plain Rule (ENC-PLN-086 is gamma-only by charter); the two paths diverging is noted debt, not an oversight. The gamma schedule is left DISABLED -- the bucket/database are declared here but not provisioned until a deploy applies this template, so nothing can yet prove plane separation; enabling is handed to ENC-TSK-O81. Touches backend/lambda/governance_mart/lambda_function.py (a docstring only, documenting how Target.Input pins `last_day` to the <aws.scheduler.scheduled-time> Scheduler context attribute so a retry crossing midnight UTC still overwrites the day it was meant to -- AC-2) and backend/lambda/governance_mart/test_governance_mart.py (four new tests for _parse_last_day's ISO-8601 handling of that shape). NO governed entity is added, removed, or modified by this change -- governance_mart's Lambda code matched the check_governance_dictionary_sync.py glob (backend/lambda/*/lambda_function.py) on a docstring-only edit unrelated to the tracker/document schema this dictionary describes; this version bump exists solely to satisfy that mechanical gate, recorded honestly rather than padded with an unrelated entity edit.",
   "change_log": [
+    {
+      "version": "2026-09-23.1",
+      "date": "2026-09-23",
+      "summary": "ENC-TSK-Q10 (ENC-ISS-791): tracker_mutation's single-record GET accepts the reserved project segment '_' (PROJECT_SENTINEL) and derives the owning project from the record id via the projects table -- mint prefix first, then alias_prefixes, mint wins on a collision, one forced re-scan on a miss; an unknown prefix answers 404 NOT_FOUND with details.unknown_prefix, never a 400/500. New entity tracker_mutation.get_record_project_sentinel. _get_prefix_map_cached now projects alias_prefixes into a separate alias map (List or String Set tolerated); the mint map returned to its existing caller is unchanged. mcp_server.projects_prefix_map.prefixes definition corrected to prefix -> project_id, the direction _get_prefix_map() actually returns. Consumer: ELR batch reads (ENC-TSK-Q11) drop the client-side prefix map entirely and send only the record id.",
+      "task_id": "ENC-TSK-Q10"
+    },
     {
       "version": "2026-09-16.11",
       "date": "2026-09-17",

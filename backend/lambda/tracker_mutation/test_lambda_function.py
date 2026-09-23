@@ -754,5 +754,135 @@ class JreeseGPTRouteTests(unittest.TestCase):
         mock_get.assert_called_once_with("jreeseGPT", "feature", "JGP-FTR-201")
 
 
+class SentinelProjectRouteTests(unittest.TestCase):
+    """ENC-TSK-Q10 / ENC-ISS-791: GET /api/v1/tracker/_/{type}/{id} derives the
+    project from the record id via the projects table (mint prefix, then alias),
+    answers 404 NOT_FOUND for an unknown prefix, and never serves writes."""
+
+    PROJECTS = [
+        {"project_id": {"S": "enceladus"}, "prefix": {"S": "ENC"}},
+        {
+            "project_id": {"S": "intelligence"},
+            "prefix": {"S": "INT"},
+            # "ENC" collides with enceladus's mint prefix -- mint must win.
+            "alias_prefixes": {"L": [{"S": "OLD"}, {"S": "ENC"}]},
+        },
+        {"project_id": {"S": "devops"}, "prefix": {"S": "DVP"}, "alias_prefixes": {"SS": ["LEG"]}},
+    ]
+
+    def setUp(self):
+        tracker_mutation._prefix_map_cache = None
+        tracker_mutation._prefix_map_cache_at = 0.0
+        tracker_mutation._alias_prefix_map_cache = {}
+        self.ddb = MagicMock()
+        self.ddb.scan.return_value = {"Items": self.PROJECTS}
+        ok = {"statusCode": 200, "body": "{}", "headers": {}}
+        patches = [
+            patch.object(tracker_mutation, "_get_ddb", return_value=self.ddb),
+            patch.object(tracker_mutation, "_authenticate", return_value=({"sub": "elr"}, None)),
+            patch.object(tracker_mutation, "_validate_project_exists", return_value=None),
+            patch.object(tracker_mutation, "_handle_get_record", return_value=ok),
+            patch.object(tracker_mutation, "_handle_update_field", return_value=ok),
+        ]
+        self.mock_ddb, self.mock_auth, self.mock_validate, self.mock_get, self.mock_update = [
+            p.start() for p in patches
+        ]
+        for p in patches:
+            self.addCleanup(p.stop)
+
+    @staticmethod
+    def _event(project, record_type, record_id, method="GET"):
+        path = f"/api/v1/tracker/{project}/{record_type}/{record_id}"
+        return {
+            "requestContext": {"http": {"method": method, "path": path}},
+            "headers": {"x-coordination-internal-key": "valid-key", "host": "example.com"},
+            "rawPath": path,
+            "queryStringParameters": {},
+            "body": "{}",
+        }
+
+    def test_sentinel_resolves_mint_prefix_enc(self):
+        resp = tracker_mutation.lambda_handler(self._event("_", "task", "ENC-TSK-Q10"), None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.mock_get.assert_called_once_with("enceladus", "task", "ENC-TSK-Q10")
+        self.mock_validate.assert_not_called()
+
+    def test_sentinel_resolves_mint_prefix_int(self):
+        tracker_mutation.lambda_handler(self._event("_", "task", "INT-TSK-396"), None)
+        self.mock_get.assert_called_once_with("intelligence", "task", "INT-TSK-396")
+
+    def test_sentinel_resolves_alias_prefix_in_list_and_set_shapes(self):
+        tracker_mutation.lambda_handler(self._event("_", "issue", "OLD-ISS-7"), None)
+        self.mock_get.assert_called_once_with("intelligence", "issue", "OLD-ISS-7")
+        self.mock_get.reset_mock()
+        tracker_mutation.lambda_handler(self._event("_", "task", "LEG-TSK-1"), None)
+        self.mock_get.assert_called_once_with("devops", "task", "LEG-TSK-1")
+
+    def test_mint_prefix_wins_over_alias_collision(self):
+        tracker_mutation.lambda_handler(self._event("_", "task", "ENC-TSK-1"), None)
+        self.mock_get.assert_called_once_with("enceladus", "task", "ENC-TSK-1")
+
+    def test_sentinel_lowercase_record_id_resolves(self):
+        tracker_mutation.lambda_handler(self._event("_", "task", "enc-tsk-q10"), None)
+        self.mock_get.assert_called_once_with("enceladus", "task", "enc-tsk-q10")
+
+    def test_unknown_prefix_returns_404_not_found_envelope(self):
+        resp = tracker_mutation.lambda_handler(self._event("_", "task", "ZZZ-TSK-1"), None)
+        self.assertEqual(resp["statusCode"], 404)
+        body = json.loads(resp["body"])
+        self.assertFalse(body["success"])
+        self.assertEqual(body["error"], "Record not found: ZZZ-TSK-1")
+        self.assertEqual(body["error_envelope"]["code"], "NOT_FOUND")
+        self.assertEqual(body["error_envelope"]["details"]["unknown_prefix"], "ZZZ")
+        self.mock_get.assert_not_called()
+        self.mock_validate.assert_not_called()
+
+    def test_unknown_prefix_forces_exactly_one_refresh(self):
+        tracker_mutation.lambda_handler(self._event("_", "task", "ZZZ-TSK-1"), None)
+        self.assertEqual(self.ddb.scan.call_count, 2)
+
+    def test_scan_projection_requests_alias_prefixes(self):
+        tracker_mutation.lambda_handler(self._event("_", "task", "ENC-TSK-1"), None)
+        kwargs = self.ddb.scan.call_args.kwargs
+        self.assertEqual(kwargs["ProjectionExpression"], "project_id, #pfx, alias_prefixes")
+        self.assertEqual(kwargs["ExpressionAttributeNames"], {"#pfx": "prefix"})
+
+    def test_scan_pagination_reaches_projects_on_later_pages(self):
+        first = {"Items": self.PROJECTS[:1], "LastEvaluatedKey": {"project_id": {"S": "enceladus"}}}
+        second = {"Items": self.PROJECTS[1:]}
+        self.ddb.scan.side_effect = [first, second]
+        tracker_mutation.lambda_handler(self._event("_", "task", "DVP-TSK-739"), None)
+        self.mock_get.assert_called_once_with("devops", "task", "DVP-TSK-739")
+        self.assertEqual(self.ddb.scan.call_count, 2)
+        self.assertEqual(
+            self.ddb.scan.call_args_list[1].kwargs["ExclusiveStartKey"], {"project_id": {"S": "enceladus"}}
+        )
+
+    def test_sentinel_is_never_served_for_writes(self):
+        self.mock_validate.return_value = "Project '_' is not registered."
+        resp = tracker_mutation.lambda_handler(self._event("_", "task", "ENC-TSK-Q10", method="PATCH"), None)
+        self.assertEqual(resp["statusCode"], 404)
+        self.mock_validate.assert_called_once_with("_")
+        self.mock_update.assert_not_called()
+        self.mock_get.assert_not_called()
+
+    def test_real_project_path_is_unchanged(self):
+        tracker_mutation.lambda_handler(self._event("jreeseGPT", "feature", "JGP-FTR-201"), None)
+        self.mock_validate.assert_called_once_with("jreeseGPT")
+        self.mock_get.assert_called_once_with("jreeseGPT", "feature", "JGP-FTR-201")
+        self.ddb.scan.assert_not_called()
+
+    def test_mint_map_for_existing_callers_excludes_aliases(self):
+        mapping = tracker_mutation._get_prefix_map_cached()
+        self.assertEqual(mapping, {"ENC": "enceladus", "INT": "intelligence", "DVP": "devops"})
+        self.assertEqual(tracker_mutation._alias_prefix_map_cache, {"OLD": "intelligence", "LEG": "devops"})
+
+    def test_scan_failure_leaves_resolver_answering_not_found(self):
+        self.ddb.scan.side_effect = RuntimeError("ddb down")
+        resp = tracker_mutation.lambda_handler(self._event("_", "task", "ENC-TSK-Q10"), None)
+        self.assertEqual(resp["statusCode"], 404)
+        self.mock_get.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
