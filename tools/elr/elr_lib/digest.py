@@ -18,7 +18,8 @@ a future caller cannot silently smuggle a full response body into a
 
 ``rows`` (added for ENC-TSK-O52 / elr_batch_get.py) carries per-item
 COMPACT summary dicts for a batch operation -- e.g.
-{id, kind, ok, status_or_version, title} -- never full record bodies.
+{id, kind, ok, outcome, http_status, project_id, status_or_version, title}
+-- never full record bodies.
 It is still subject to the same digest-first discipline as every other
 field: small, stable, no raw payloads.
 
@@ -44,16 +45,24 @@ CLI's local refusal helper already uses, folded into build_digest so
 elr_sync can reuse ONE digest builder for both its success and its
 refuse-activation paths.
 
-``profile``, ``governance_hash``, ``prefix_map_source``, and
-``unclassified`` (added for ENC-TSK-P77 / elr_smoke.py's elr.smoke_digest
-schema; wired for real by ENC-TSK-P90 / elr_lib.prefix.PrefixResolver)
-carry: the ENVIRONMENT profile name ("prod"/"v4-gamma") the run used;
-the live governance_hash echoed by the health endpoint body;
-prefix_map_source -- one of "network"/"cache"/"builtin"/"none" (the last
-meaning no id in this run ever needed prefix resolution, e.g. elr_smoke's
-health check, which classifies no record ids at all); and an
-always-present (possibly empty) list of unclassified record ids that a
-resolver's map (of whatever provenance) could not classify.
+``profile`` and ``governance_hash`` (added for ENC-TSK-P77 / elr_smoke.py's
+elr.smoke_digest schema) carry the ENVIRONMENT profile name
+("prod"/"v4-gamma") the run used and the live governance_hash echoed by
+the health endpoint body. The two ENC-TSK-P90 prefix-resolution fields
+that used to sit beside them (the map's provenance, and the client-side
+list of record ids that map could not classify) were REMOVED by
+ENC-TSK-Q10 (ENC-ISS-791): ELR no longer holds any prefix->project map --
+the server resolves a record's project from its id on the tracker
+sentinel route (elr_batch_get.PROJECT_SENTINEL) -- so there is no map
+provenance to report and no client-side verdict to list; an id the
+server cannot resolve is a per-row outcome "not_found" in ``rows``.
+
+``removed_paths`` (added for ENC-TSK-Q10 AC-9 / elr_sync.py) is the small
+list of local file paths a successful ``pull`` deleted on upgrade --
+today only the dead ENC-TSK-P90 prefix-map cache
+(elr_sync.STALE_PREFIX_MAP_RELATIVE under the user's home), when a stale
+copy exists. Always a list of path strings, never file contents; empty
+when nothing needed removing.
 
 ``ca_bundle`` and ``remediation`` (added for ENC-TSK-P76 / elr_lib.tls)
 carry the TLS CA-bundle resolution report: ca_bundle is the small
@@ -121,6 +130,7 @@ _OPTIONAL_FIELDS = (
     "files_failed",
     "mismatched",
     "refusal",
+    "removed_paths",
     "session_id",
     "agent_type_id",
     "sci_ttl_remaining_s",
@@ -128,8 +138,6 @@ _OPTIONAL_FIELDS = (
     "remediation",
     "profile",
     "governance_hash",
-    "prefix_map_source",
-    "unclassified",
     "digest_path",
     "anchor_resolved",
     "bytes_changed",

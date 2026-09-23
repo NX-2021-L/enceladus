@@ -28,3 +28,15 @@ python3 tools/elr/elr_smoke.py                 # prints digest JSON only
 python3 -m pytest tools/elr/tests -q
 python3 -m unittest discover -s tools/elr/tests -v
 ```
+
+## Project-agnostic reads (ENC-TSK-Q10)
+
+`elr_batch_get.py` sends only the record id: every tracker read goes to the
+sentinel route `GET /_/{record_type}/{record_id}` and the server resolves the
+owning project from the id (ENC-ISS-791). ELR carries no prefix-to-project
+knowledge -- no prefix map, no cache file; `elr_sync pull` removes a stale
+prefix-map cache left under `~/.enceladus` by older installs and lists it in
+`removed_paths`. Each row of the batch digest reports one of four outcomes:
+`found` (2xx), `not_found` (404 -- reported, never an anomaly), `forbidden`
+(401/403), or `error` (5xx, unreachable, unsupported id shape, or a plane that
+predates the sentinel route, flagged `sentinel_route_unsupported_by_server`).

@@ -2,13 +2,13 @@
   "files": [
     {
       "path": "tools/elr/README.md",
-      "sha256": "67d0f0c9bc4d1e5826c365877a123c5f37d9f2e244940f3c8ed53f79a3795b60",
-      "size_bytes": 1364
+      "sha256": "97a6cd6cbbc3afc779da9d2ddd7ca6aef1a722006bf61a6379a9eaa497b5f3d8",
+      "size_bytes": 2096
     },
     {
       "path": "tools/elr/elr_batch_get.py",
-      "sha256": "15b218ae97b55ba9e17ee13cfa45f5a6ab55d984c9d7f22e9e7bc898fd245a29",
-      "size_bytes": 19861
+      "sha256": "3f867e57c17488c5b43ba79c0dd349fae65088c10fcf462f02dd97f773f20574",
+      "size_bytes": 24437
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -42,8 +42,8 @@
     },
     {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "9be3a3ee9eec7927ed813181fde9ddfd34a1b3d07ce6532ce9a3bbf651fa1bc3",
-      "size_bytes": 8308
+      "sha256": "c361bf05e1d15c014b633fcbb9e52aab235962a0edddebb5047ea5e395d46343",
+      "size_bytes": 8769
     },
     {
       "path": "tools/elr/elr_lib/identity.py",
@@ -59,11 +59,6 @@
       "path": "tools/elr/elr_lib/plane_safety.py",
       "sha256": "eb595a25e4181deed6770e0687690df7254948a6b6c977c82dcc0b896f3c8f75",
       "size_bytes": 15585
-    },
-    {
-      "path": "tools/elr/elr_lib/prefix.py",
-      "sha256": "6220903dbfeca89ce98081aa54ab8e25b8c98449068d37d6334237a6e1b381a5",
-      "size_bytes": 10914
     },
     {
       "path": "tools/elr/elr_lib/profiles.py",
@@ -107,13 +102,13 @@
     },
     {
       "path": "tools/elr/elr_smoke.py",
-      "sha256": "5e871c9ab05829584283f411aae412424755be48c82d26565ae7f95b2b9c5dbf",
-      "size_bytes": 10184
+      "sha256": "557611e461eb79a736937a72066f75e4384bf7728faa60086889c5afb4bccba6",
+      "size_bytes": 10340
     },
     {
       "path": "tools/elr/elr_sync.py",
-      "sha256": "b935a5fd407897e4f5f7a5de781970d69c4d790e5e37fc9e4043a64df2088012",
-      "size_bytes": 31410
+      "sha256": "5d3cd1ccb554ae205f0246f81d704af9fda552c1f9220623b62ccf10bee28fb9",
+      "size_bytes": 33083
     },
     {
       "path": "tools/elr/elr_validate.py",
@@ -121,7 +116,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-16T04:47:29-07:00",
+  "generated_at": "2026-09-16T23:28:18-07:00",
   "manifest_version": 1,
-  "source_ref": "ec0f8157d42d625bdb96325374cc90659f92caf8"
+  "source_ref": "db2b65ef683428a1a75694c5b81ce20b613e2393"
 }

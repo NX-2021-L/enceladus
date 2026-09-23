@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -686,6 +687,99 @@ class GithubApiSourceAuthTests(unittest.TestCase):
         with patch.dict("os.environ", {"GITHUB_TOKEN": "super-secret-value"}, clear=False):
             source = elr_sync.GithubApiSource()
             self.assertNotIn("super-secret-value", repr(vars(source).get("auth_mode")))
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q10 AC-9 -- the dead P90 prefix-map cache is removed on upgrade
+# ---------------------------------------------------------------------------
+
+
+class StalePrefixMapRemovalTests(_GitFixtureCase):
+    """A successful pull removes the ENC-TSK-P90 prefix-map cache
+    (STALE_PREFIX_MAP_RELATIVE under HOME -- dead data since ENC-TSK-Q10
+    moved project resolution server-side) and reports it in removed_paths.
+    HOME is pointed at a temp dir for every test here so the real
+    ~/.enceladus is never read, written, or deleted from.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_home = self.root / "home"
+        self.fake_home.mkdir()
+        self.stale_path = self.fake_home / elr_sync.STALE_PREFIX_MAP_RELATIVE
+
+    def _pull_with_fake_home(self, ref: Optional[str] = None) -> dict:
+        with patch.dict(os.environ, {"HOME": str(self.fake_home)}):
+            # Guard: the helper resolves HOME at call time, so this must hold
+            # inside the patch or the assertions below would be testing the
+            # real home directory.
+            self.assertEqual(Path.home(), self.fake_home)
+            return elr_sync.pull_manifest_at_ref(ref or self.sha, f"local:{self.repo_dir}", str(self.dest))
+
+    def test_stale_cache_constant_is_relative_and_names_the_p90_cache_file(self):
+        # Safety pin: the helper unlinks a file under the user's HOME, so the
+        # exact relative target is contract, not implementation detail.
+        self.assertFalse(elr_sync.STALE_PREFIX_MAP_RELATIVE.is_absolute())
+        self.assertEqual(elr_sync.STALE_PREFIX_MAP_RELATIVE.as_posix(), ".enceladus/prefix_map.json")
+
+    def test_pull_success_removes_stale_cache_and_lists_it(self):
+        self.stale_path.parent.mkdir(parents=True)
+        self.stale_path.write_text('{"prefixes": {"ENC": "enceladus"}, "generated_at": 0}', encoding="utf-8")
+
+        digest = self._pull_with_fake_home()
+
+        self.assertTrue(digest["ok"], digest)
+        self.assertFalse(self.stale_path.exists())
+        self.assertEqual(digest["removed_paths"], [str(self.stale_path)])
+        # Only the cache file goes; its parent directory is left alone.
+        self.assertTrue(self.stale_path.parent.is_dir())
+
+    def test_pull_success_with_no_stale_cache_reports_empty_list(self):
+        digest = self._pull_with_fake_home()
+
+        self.assertTrue(digest["ok"], digest)
+        self.assertEqual(digest["removed_paths"], [])
+        # Never creates the directory just to look inside it.
+        self.assertFalse((self.fake_home / ".enceladus").exists())
+
+    def test_ref_refusal_leaves_stale_cache_in_place(self):
+        self.stale_path.parent.mkdir(parents=True)
+        self.stale_path.write_text("{}", encoding="utf-8")
+
+        digest = self._pull_with_fake_home(ref="main")  # ref-not-40-hex refusal
+
+        self.assertFalse(digest["ok"])
+        self.assertEqual(digest["refusal"]["reason"], "ref-not-40-hex")
+        self.assertTrue(self.stale_path.is_file())
+        self.assertNotIn("removed_paths", digest)
+
+    def test_activation_refusal_leaves_stale_cache_in_place(self):
+        ghost_entry = {"path": "tools/elr/elr_ghost.py", "sha256": "0" * 64, "size_bytes": 1}
+        sha_ghost = _commit_manifest(self.repo_dir, self.elr_dir, extra_entries=[ghost_entry], message="ghost entry")
+        self.stale_path.parent.mkdir(parents=True)
+        self.stale_path.write_text("{}", encoding="utf-8")
+
+        digest = self._pull_with_fake_home(ref=sha_ghost)  # listed-file-missing refusal
+
+        self.assertFalse(digest["ok"])
+        self.assertEqual(digest["refusal"]["reason"], "listed-file-missing")
+        self.assertTrue(self.stale_path.is_file())
+        self.assertNotIn("removed_paths", digest)
+
+    def test_remove_helper_treats_oserror_as_nothing_removed(self):
+        self.stale_path.parent.mkdir(parents=True)
+        self.stale_path.write_text("{}", encoding="utf-8")
+        with patch.dict(os.environ, {"HOME": str(self.fake_home)}), patch.object(
+            Path, "unlink", side_effect=OSError("simulated unlink failure")
+        ):
+            self.assertEqual(elr_sync._remove_stale_prefix_map(), [])
+        self.assertTrue(self.stale_path.is_file())
+
+    def test_remove_helper_skips_a_non_regular_file_at_the_cache_path(self):
+        self.stale_path.mkdir(parents=True)  # a DIRECTORY where the cache file would be
+        with patch.dict(os.environ, {"HOME": str(self.fake_home)}):
+            self.assertEqual(elr_sync._remove_stale_prefix_map(), [])
+        self.assertTrue(self.stale_path.is_dir())
 
 
 if __name__ == "__main__":

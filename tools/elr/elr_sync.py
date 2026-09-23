@@ -40,7 +40,11 @@ Three subcommands:
       left completely untouched -- this is the REFUSE ACTIVATION
       contract. --ref must be a full 40-hex commit sha; a branch name or
       short sha is rejected before any network/local access is attempted
-      (pinning means immutable).
+      (pinning means immutable). On success the digest also carries
+      ``removed_paths`` -- local files deleted on upgrade (ENC-TSK-Q10
+      AC-9: today only a stale copy of the dead ENC-TSK-P90 prefix-map
+      cache, STALE_PREFIX_MAP_RELATIVE under the user's home); refusals
+      never touch local state.
 
   verify [--dest DIR]
       Re-hashes an existing install against the manifest recorded at
@@ -105,6 +109,14 @@ GITHUB_REPO = "NX-2021-L/enceladus"
 # manifest that install was verified against -- `verify` re-hashes local
 # disk contents against this file, entirely offline.
 SYNC_MANIFEST_METAFILE = ".elr-sync-manifest.json"
+
+# ENC-TSK-Q10 AC-9: the ENC-TSK-P90 prefix-map cache is dead data now that
+# the server resolves a record's project from its id (tracker sentinel
+# route, ENC-ISS-791). A successful ``pull`` removes a stale copy so an
+# upgraded install carries no client-side project knowledge at all.
+# Relative to the user's home and resolved at CALL time (see
+# _remove_stale_prefix_map) so a test can point HOME at a temp dir.
+STALE_PREFIX_MAP_RELATIVE = Path(".enceladus") / "prefix_map.json"
 
 # HARD RULE (ENC-FTR-134 AC-1): the governance dictionary, and anything
 # resembling a session-cache artifact, must NEVER be part of the
@@ -456,6 +468,23 @@ def _refusal_digest(operation: str, status: int, reason: str, violations: List[D
     )
 
 
+def _remove_stale_prefix_map() -> List[str]:
+    """Best-effort unlink of the dead ENC-TSK-P90 prefix-map cache
+    (ENC-TSK-Q10 AC-9). Resolves Path.home() at call time. Returns the
+    list of paths actually removed -- [path] or [] -- for the digest's
+    ``removed_paths``; any OSError (vanished, permission, not a regular
+    file) is treated as nothing removed. Never creates anything.
+    """
+    path = Path.home() / STALE_PREFIX_MAP_RELATIVE
+    try:
+        if not path.is_file():
+            return []
+        path.unlink()
+    except OSError:
+        return []
+    return [str(path)]
+
+
 def pull_manifest_at_ref(ref: str, source_spec: str, dest: str, *, timeout: int = 20) -> Dict[str, Any]:
     operation = "elr_sync.pull"
 
@@ -625,6 +654,11 @@ def pull_manifest_at_ref(ref: str, source_spec: str, dest: str, *, timeout: int 
         meta["_pulled_source_ref"] = ref
         (dest_path / SYNC_MANIFEST_METAFILE).write_text(json.dumps(meta, sort_keys=True), encoding="utf-8")
 
+        # ENC-TSK-Q10 AC-9: the P90 prefix-map cache is dead data; a stale
+        # copy is removed on upgrade. Success path ONLY -- every refusal
+        # above returns before this point and leaves local state alone.
+        removed_paths = _remove_stale_prefix_map()
+
         return build_digest(
             operation,
             True,
@@ -635,6 +669,7 @@ def pull_manifest_at_ref(ref: str, source_spec: str, dest: str, *, timeout: int 
             dest=str(dest_path),
             source_ref=ref,
             manifest_version=manifest.get("manifest_version"),
+            removed_paths=removed_paths,
         )
     finally:
         if staging_dir.exists():
