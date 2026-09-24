@@ -219,6 +219,11 @@ GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 # ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
 DOCUMENT_API_LAMBDA_NAME = os.environ.get("DOCUMENT_API_LAMBDA_NAME", "devops-document-api")
+# ENC-TSK-Q26: push-on-write bundle-root recompute (ENC-ISS-799). Empty value disables the
+# nudge and leaves the hourly devops-recompute-governance-backstop rule as the only trigger.
+RECOMPUTE_GOVERNANCE_LAMBDA_NAME = os.environ.get(
+    "RECOMPUTE_GOVERNANCE_LAMBDA_NAME", "devops-recompute-governance"
+)
 # ENC-FTR-121 Ph3 (ENC-TSK-J70): tracker_mutation Lambda hosting applyEscalatedMutation.
 # Default derives the environment suffix so a code deploy that races the CFN env
 # addition still targets the same environment's tracker mutation function.
@@ -1784,8 +1789,12 @@ def _compute_governance_hash_local() -> str:
     """Read governance hash from authoritative sources (ENC-TSK-I29).
 
     Resolution order:
-      1) Canonical governance-version DDB record (devops-recompute-governance output;
-         always live S3-consistent; never a frozen stale value).
+      1) Canonical governance-version DDB record (devops-recompute-governance output).
+         NOTE (ENC-TSK-Q26 / ENC-ISS-799): live S3-consistent only once that recompute
+         has run. Callers on the governance WRITE path reach this helper microseconds
+         after their own S3 put, so they necessarily read the PRE-write value;
+         _handle_governance_update therefore reports it as governance_hash_pending
+         rather than as the post-write truth.
       2) Direct S3 recomputation via MCP server module (live-derived; tie-breaks if DDB
          temporarily behind).
 
@@ -14739,6 +14748,46 @@ def _handle_governance_hash() -> Dict[str, Any]:
         return _error(500, f"Failed to compute governance hash: {exc}")
 
 
+_S3_METADATA_TRANSLITERATIONS = {
+    "\u00a7": "section ",   # § — by far the most common offender in a §13 summary
+    "\u2014": "-",          # em dash
+    "\u2013": "-",          # en dash
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
+    "\u00a0": " ",          # non-breaking space
+    "\u2192": "->",
+}
+
+
+def _s3_metadata_safe(value: str, limit: int = 256) -> str:
+    """Render a caller-supplied string safe for an S3 object-metadata value (ENC-ISS-800).
+
+    S3 object metadata is ASCII-only and rejects control characters, so passing a
+    change_summary straight through makes a perfectly valid governance write fail
+    botocore validation and abort as an opaque HTTP 500 — a §13 summary naturally
+    contains "§". This transliterates the common typographic offenders, drops any
+    remaining non-ASCII, collapses whitespace (newlines are not legal in a metadata
+    value), and only then truncates.
+
+    Truncating after the ASCII reduction is what makes the length limit byte-safe:
+    the result is pure ASCII, so `[:limit]` can never split a multi-byte sequence.
+    The caller's original string is never mutated — it is preserved verbatim
+    everywhere it is stored outside S3 metadata (worklogs, responses, DDB).
+    """
+    if not value:
+        return ""
+    text = str(value)
+    for bad, good in _S3_METADATA_TRANSLITERATIONS.items():
+        text = text.replace(bad, good)
+    # Drop anything still outside printable ASCII, including control chars and newlines.
+    text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
 def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     fn = str(file_name or "").strip()
     if fn == "agents.md":
@@ -15008,6 +15057,48 @@ def _handle_tracker_creation_rules(event: Dict[str, Any]) -> Dict[str, Any]:
             "attachment_contract": attachment_contract,
         },
     )
+
+
+def _trigger_governance_recompute_push(s3_key: str) -> None:
+    """Fire-and-forget nudge so the bundle-root hash converges now, not in an hour.
+
+    ENC-TSK-Q26 / ENC-ISS-799. The prod bucket's governance/live/ ObjectCreated
+    notification relays through a cross-region SNS topic whose only subscriber is the
+    GAMMA recompute function, so the prod devops-recompute-governance has no event
+    trigger at all - its sole trigger is the hourly devops-recompute-governance-backstop
+    rule. That left the canonical governance-version record lagging a governance write by
+    up to 60 minutes and made the "backstop" load-bearing.
+
+    The payload deliberately mirrors the synthetic S3-shaped Input that the backstop rule
+    already supplies, so the recompute's own _extract_s3_record contract is unchanged.
+    Failures are warnings only: the backstop remains the authoritative fallback, exactly
+    as the on-demand sync backs up _trigger_governance_doc_sync_push.
+    """
+    fn_name = RECOMPUTE_GOVERNANCE_LAMBDA_NAME
+    if not fn_name:
+        logger.info(
+            "[GOVERNANCE] RECOMPUTE_GOVERNANCE_LAMBDA_NAME unset; relying on the hourly "
+            "backstop for the bundle-root recompute after %s", s3_key,
+        )
+        return
+    payload = json.dumps({
+        "Records": [{
+            "eventSource": "aws:governance-update-push",
+            "s3": {"object": {"key": s3_key, "sequencer": "", "versionId": ""}},
+        }]
+    }).encode("utf-8")
+    try:
+        _get_lambda_client().invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",
+            Payload=payload,
+        )
+        logger.info("[GOVERNANCE] recompute nudge triggered: %s -> %s", s3_key, fn_name)
+    except Exception as exc:  # noqa: BLE001 - best-effort; backstop is the fallback
+        logger.warning(
+            "[GOVERNANCE] recompute nudge failed for %s (%s); hourly backstop still applies: %s",
+            s3_key, fn_name, exc,
+        )
 
 
 def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None:
@@ -15363,8 +15454,12 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
                 Key=archive_key,
                 Body=existing_content,
                 ContentType="text/markdown; charset=utf-8",
+                # ENC-TSK-Q26 (ENC-ISS-799): devops-recompute-governance derives the bundle
+                # root from each object's SHA256 additional checksum and raises if one is
+                # absent, so a write without this silently bricks every later recompute.
+                ChecksumAlgorithm="SHA256",
                 Metadata={
-                    "change_summary": change_summary[:256],
+                    "change_summary": _s3_metadata_safe(change_summary),
                     "archived_at": _now_z(),
                     "previous_hash": hashlib.sha256(existing_content).hexdigest(),
                 },
@@ -15383,8 +15478,11 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
             Key=live_key,
             Body=content_bytes,
             ContentType="text/markdown; charset=utf-8",
+            # ENC-TSK-Q26 (ENC-ISS-799): required by devops-recompute-governance; omitting it
+            # freezes the canonical governance-version record for the WHOLE bundle.
+            ChecksumAlgorithm="SHA256",
             Metadata={
-                "change_summary": change_summary[:256],
+                "change_summary": _s3_metadata_safe(change_summary),
                 "updated_at": _now_z(),
                 "content_sha256": new_hash,
             },
@@ -15393,9 +15491,20 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         logger.exception("Failed to write governance file to S3")
         return _error(500, f"Failed to write governance file to S3: {exc}")
 
-    # Recompute governance hash after update
-    new_governance_hash = _compute_governance_hash_local()
-    logger.info("[GOVERNANCE] Updated %s — new governance_hash: %s", uri, new_governance_hash)
+    # ENC-TSK-Q26 (ENC-ISS-799): nudge the bundle-root recompute so the canonical record
+    # converges in seconds instead of waiting up to an hour for the backstop rule.
+    _trigger_governance_recompute_push(live_key)
+
+    # The canonical governance-version record is written BY that recompute, so reading it
+    # here necessarily returns the PRE-write value. Report it as pending rather than
+    # presenting a known-stale hash as the post-write truth. If it still equals the hash
+    # the caller supplied as its precondition, it demonstrably has not converged yet.
+    canonical_hash = _compute_governance_hash_local()
+    governance_hash_pending = (not canonical_hash) or canonical_hash == governance_hash
+    logger.info(
+        "[GOVERNANCE] Updated %s — content_hash=%s canonical=%s pending=%s",
+        uri, new_hash, canonical_hash or "(unavailable)", governance_hash_pending,
+    )
 
     result = {
         "status": "updated",
@@ -15403,7 +15512,16 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         "s3_key": live_key,
         "content_hash": new_hash,
         "content_size_bytes": len(content_bytes),
-        "governance_hash": new_governance_hash,
+        "governance_hash": canonical_hash,
+        "governance_hash_pending": governance_hash_pending,
+        "governance_hash_note": (
+            "content_hash is this object's SHA256 and is final. governance_hash is the "
+            "canonical bundle root maintained by devops-recompute-governance; when "
+            "governance_hash_pending is true it has not yet absorbed this write. Re-read "
+            "connection_health() or GET /api/v1/governance/hash before the next governed "
+            "write, and do not read a lagging value as drift."
+        ),
+        "canonical_recompute_backstop_seconds": 3600,
         "updated_at": _now_z(),
     }
     if archive_key:
