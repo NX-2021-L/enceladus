@@ -14,9 +14,11 @@ from fake_ddb_paging import PagingTable
 
 
 def _base_item(n, project_id="proj", record_type="task", status="open"):
+    item_id = f"ENC-TSK-{n:04d}"
     return {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"{record_type}#TSK-{n:04d}"},
+        "record_id": {"S": f"{record_type}#{item_id}"},
+        "item_id": {"S": item_id},
         "record_type": {"S": record_type},
         "status": {"S": status},
         "title": {"S": f"Task {n}"},
@@ -103,6 +105,58 @@ class TestCensusWalk(unittest.TestCase):
 
         self.assertEqual(result["branch"], "gsi")
         self.assertEqual(len(result["rows"]), 3)
+
+    def test_census_walk_rows_carry_raw_record_id_unchanged(self):
+        """ENC-TSK-Q27: `rows` (internal, feeds _encode_list_cursor) keeps
+        the RAW '<record_type>#<item_id>' record_id -- id normalization
+        happens only at the caller-facing payload boundary
+        (_census_pages/_handle_list_census), never inside the walk."""
+        items = [_base_item(n) for n in range(1, 4)]
+        table = PagingTable(items, raw_page_size=200)
+
+        result = self._walk(table)
+
+        for n, row in zip(range(1, 4), result["rows"]):
+            self.assertEqual(row["record_id"], f"task#ENC-TSK-{n:04d}")
+            self.assertEqual(row["item_id"], f"ENC-TSK-{n:04d}")
+
+
+class TestCensusItemId(unittest.TestCase):
+    """ENC-TSK-Q27: _census_item_id -- the caller-facing id normalization
+    helper shared by _census_pages (page anchors) and _handle_list_census
+    (`ids`). Fixes the live defect where both emitted the raw DynamoDB sort
+    key ('task#ENC-TSK-L80') instead of the item id ('ENC-TSK-L80')."""
+
+    def setUp(self):
+        import lambda_function as lf
+        self.lf = lf
+
+    def test_prefers_projected_item_id_attribute(self):
+        row = {"record_id": "task#ENC-TSK-L80", "item_id": "ENC-TSK-L80"}
+        self.assertEqual(self.lf._census_item_id(row), "ENC-TSK-L80")
+
+    def test_falls_back_to_stripping_record_id_prefix_when_item_id_absent(self):
+        row = {"record_id": "task#ENC-TSK-L80"}
+        self.assertEqual(self.lf._census_item_id(row), "ENC-TSK-L80")
+
+    def test_falls_back_when_item_id_present_but_empty(self):
+        row = {"record_id": "task#ENC-TSK-L80", "item_id": ""}
+        self.assertEqual(self.lf._census_item_id(row), "ENC-TSK-L80")
+
+    def test_escalation_prefix_normalizes_the_same_way(self):
+        """The escalation second walk's own rows (record_id begins_with
+        'escalation#') get IDENTICAL normalization -- no record_type
+        special-casing in the helper."""
+        row = {"record_id": "escalation#ENC-ESC-0004"}
+        self.assertEqual(self.lf._census_item_id(row), "ENC-ESC-0004")
+
+    def test_record_id_with_no_hash_returned_unchanged(self):
+        row = {"record_id": "malformed-no-prefix"}
+        self.assertEqual(self.lf._census_item_id(row), "malformed-no-prefix")
+
+    def test_splits_on_first_hash_only(self):
+        row = {"record_id": "task#ENC-TSK-L80#extra"}
+        self.assertEqual(self.lf._census_item_id(row), "ENC-TSK-L80#extra")
 
 
 if __name__ == "__main__":

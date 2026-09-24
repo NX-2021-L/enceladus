@@ -17,9 +17,11 @@ from fake_ddb_paging import PagingTable
 
 
 def _task_item(n, project_id="proj", status="open"):
+    item_id = f"ENC-TSK-{n:04d}"
     return {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"task#TSK-{n:04d}"},
+        "record_id": {"S": f"task#{item_id}"},
+        "item_id": {"S": item_id},
         "record_type": {"S": "task"},
         "status": {"S": status},
         "title": {"S": f"Task {n}"},
@@ -30,7 +32,7 @@ def _task_item(n, project_id="proj", status="open"):
 def _escalation_item(n, project_id="proj", status=None):
     item = {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"escalation#ESC-{n:04d}"},
+        "record_id": {"S": f"escalation#ENC-ESC-{n:04d}"},
     }
     if status is not None:
         item["status"] = {"S": status}

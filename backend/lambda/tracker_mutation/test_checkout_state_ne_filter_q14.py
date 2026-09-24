@@ -20,8 +20,8 @@ from fake_ddb_paging import PagingTable
 def _raw_item(n, project_id="proj", record_type="task", status="open", checkout_state=None):
     item = {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"{record_type}#TSK-{n:04d}"},
-        "item_id": {"S": f"TSK-{n:04d}"},
+        "record_id": {"S": f"{record_type}#ENC-TSK-{n:04d}"},
+        "item_id": {"S": f"ENC-TSK-{n:04d}"},
         "record_type": {"S": record_type},
         "status": {"S": status},
         "title": {"S": f"Task {n}"},
@@ -35,7 +35,7 @@ def _raw_item(n, project_id="proj", record_type="task", status="open", checkout_
 def _escalation_item(n, project_id="proj", status="requested"):
     return {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"escalation#ESC-{n:04d}"},
+        "record_id": {"S": f"escalation#ENC-ESC-{n:04d}"},
         "status": {"S": status},
     }
 
@@ -63,7 +63,7 @@ class TestListRecordsCheckoutStateNe(unittest.TestCase):
 
         self.assertEqual(resp["statusCode"], 200)
         returned_ids = {r["item_id"] for r in body["records"]}
-        self.assertEqual(returned_ids, {f"TSK-{n:04d}" for n in range(4, 9)})
+        self.assertEqual(returned_ids, {f"ENC-TSK-{n:04d}" for n in range(4, 9)})
         self.assertEqual(body["count"], 5)
 
     def test_rows_missing_checkout_state_attribute_always_pass(self):
@@ -90,7 +90,7 @@ class TestListRecordsCheckoutStateNe(unittest.TestCase):
         body = json.loads(resp["body"])
 
         returned_ids = {r["item_id"] for r in body["records"]}
-        self.assertEqual(returned_ids, {"TSK-0002", "TSK-0003"})
+        self.assertEqual(returned_ids, {"ENC-TSK-0002", "ENC-TSK-0003"})
 
     def test_gsi_branch_also_excludes_checked_out_rows(self):
         items = [
@@ -103,7 +103,7 @@ class TestListRecordsCheckoutStateNe(unittest.TestCase):
         body = json.loads(resp["body"])
 
         returned_ids = {r["item_id"] for r in body["records"]}
-        self.assertEqual(returned_ids, {"TSK-0003", "TSK-0004", "TSK-0005"})
+        self.assertEqual(returned_ids, {"ENC-TSK-0003", "ENC-TSK-0004", "ENC-TSK-0005"})
 
     def test_absent_param_is_unchanged_behaviour(self):
         items = (
@@ -138,7 +138,8 @@ class TestCensusWalkCheckoutStateNe(unittest.TestCase):
 
         self.assertTrue(walk["exhausted"])
         returned_ids = {row["record_id"] for row in walk["rows"]}
-        self.assertEqual(returned_ids, {f"task#TSK-{n:04d}" for n in range(4, 9)})
+        self.assertEqual(returned_ids, {f"task#ENC-TSK-{n:04d}" for n in range(4, 9)},
+                         "walk['rows'] keeps the RAW record_id -- unaffected by ENC-TSK-Q27")
 
     def test_census_walk_absent_param_is_unchanged_behaviour(self):
         items = (
@@ -170,7 +171,8 @@ class TestCensusWalkCheckoutStateNe(unittest.TestCase):
 
         self.assertEqual(resp["statusCode"], 200)
         self.assertEqual(body["count"], 5)
-        self.assertEqual(set(body["ids"]), {f"task#TSK-{n:04d}" for n in range(4, 9)})
+        self.assertEqual(set(body["ids"]), {f"ENC-TSK-{n:04d}" for n in range(4, 9)},
+                         "ENC-TSK-Q27: payload ids are item ids, not raw record_ids")
 
     def test_escalation_walk_unaffected_by_checkout_state_ne(self):
         """D5/M36: escalations have no checkout_state -> never excluded,

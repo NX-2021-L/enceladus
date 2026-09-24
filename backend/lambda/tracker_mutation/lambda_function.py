@@ -2964,10 +2964,18 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
     this is the count/anchor source for census mode, not a paginated list.
 
     `ProjectionExpression` trims each item to project_id, record_id,
-    record_type, status, title, updated_at (O2.1) -- census never needs the
-    full record. project_id/record_id/record_type are kept even though
-    they're constant/filtered-on because _encode_list_cursor (O1.1) needs
-    them to mint page-anchor cursors (O2.2) straight from these rows.
+    record_type, status, title, updated_at, item_id (O2.1) -- census never
+    needs the full record. project_id/record_id/record_type are kept even
+    though they're constant/filtered-on because _encode_list_cursor (O1.1)
+    needs them to mint page-anchor cursors (O2.2) straight from these rows
+    -- `record_id` here is always the RAW DynamoDB sort key
+    (`<record_type>#<item_id>`), never the caller-facing item id, and
+    _encode_list_cursor/_decode_list_cursor keep using it unchanged
+    (ENC-TSK-Q27). `item_id` is projected so `_census_item_id` (O2.4a,
+    ENC-TSK-Q27) can prefer the row's own attribute over deriving it by
+    string-splitting `record_id` -- see that helper's docstring. `rows`
+    itself is never id-normalized; only the caller-facing payload built
+    from it is (`_census_pages` anchors, `_handle_list_census`'s `ids`).
     `checkout_state` is deliberately NOT added here even when
     `checkout_state_ne` is set -- FilterExpression is evaluated against the
     full stored item before ProjectionExpression trims it for return, so
@@ -3015,7 +3023,7 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
                 ":pid": _ser_s(project_id),
                 ":rtype": _ser_s(record_type),
             },
-            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at, item_id",
             "ExpressionAttributeNames": {"#st": "status"},
             "Limit": _CENSUS_RAW_PAGE_LIMIT,
         }
@@ -3036,7 +3044,7 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
             "TableName": DYNAMODB_TABLE,
             "KeyConditionExpression": "project_id = :pid",
             "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
-            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at, item_id",
             "ExpressionAttributeNames": {"#st": "status"},
             "Limit": _CENSUS_RAW_PAGE_LIMIT,
         }
@@ -3101,6 +3109,35 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
     }
 
 
+def _census_item_id(row: Dict[str, Any]) -> str:
+    """ENC-TSK-Q27: caller-facing item id for a census row (e.g. 'ENC-TSK-L80').
+
+    A census row's `record_id` is the RAW DynamoDB sort key
+    (`<record_type>#<item_id>`, e.g. 'task#ENC-TSK-L80') -- internal key
+    material _encode_list_cursor mints page cursors from (O1.1), never
+    something a caller should see in `pages[].first/last.id` or the `ids`
+    payload field. This is the one place those caller-facing ids get
+    derived, so every emission point (`_census_pages` anchors,
+    `_handle_list_census`'s `ids`) goes through it identically -- including
+    for escalation rows ('escalation#ENC-ESC-0001' -> 'ENC-ESC-0001'), which the
+    same generic prefix-strip handles with no special-casing.
+
+    Prefers the row's own `item_id` attribute when `_census_walk` /
+    `_census_escalation_walk` projected it (real tracker records always
+    carry one, minted by `_next_record_id`). Falls back to splitting
+    `record_id` on the FIRST '#' when `item_id` is absent or empty --
+    covers rows from a caller/test that didn't project it, and any legacy
+    row that predates the attribute. Falls back to the raw `record_id`
+    unchanged when it carries no '#' at all (defensive; every real
+    record_id is prefixed).
+    """
+    item_id = row.get("item_id")
+    if item_id:
+        return str(item_id)
+    rid = str(row.get("record_id") or "")
+    return rid.split("#", 1)[1] if "#" in rid else rid
+
+
 def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> List[Dict[str, Any]]:
     """ENC-TSK-Q14 (O2.2): slice a completed _census_walk's rows into page anchors.
 
@@ -3109,9 +3146,13 @@ def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> Li
     as _handle_list_records (min 1, raw max 200). Page k's `cursor` is the
     O1.1 (_encode_list_cursor) encoding of the LAST row of page k-1, so
     feeding it to _handle_list_records resumes exactly at page k's first
-    row (cross-tested against the O1.2 route). Page 0's cursor is None --
-    there is no prior row to encode. `first`/`last` carry ONLY id, status,
-    title (D placeholder in o2_spec.md), never the full row.
+    row (cross-tested against the O1.2 route) -- `_encode_list_cursor`
+    reads `row["record_id"]` directly (the raw sort key, unaffected by
+    ENC-TSK-Q27) so this replay is untouched by the id-normalization below.
+    Page 0's cursor is None -- there is no prior row to encode. `first`/
+    `last` carry ONLY id, status, title (D placeholder in o2_spec.md),
+    never the full row -- `id` is the caller-facing item id
+    (`_census_item_id`, ENC-TSK-Q27), never the raw record_id sort key.
     """
     page_size = max(1, min(page_size, 200))
     pages: List[Dict[str, Any]] = []
@@ -3124,12 +3165,12 @@ def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> Li
         pages.append({
             "cursor": prev_cursor,
             "first": {
-                "id": first.get("record_id"),
+                "id": _census_item_id(first),
                 "status": first.get("status"),
                 "title": first.get("title"),
             },
             "last": {
-                "id": last.get("record_id"),
+                "id": _census_item_id(last),
                 "status": last.get("status"),
                 "title": last.get("title"),
             },
@@ -3170,6 +3211,17 @@ def _census_escalation_walk(project_id: str, status_filter: str = "",
 
     Returns {count, exhausted, truncated_reason}. Same exhaustion/budget
     semantics as _census_walk.
+
+    ENC-TSK-Q27: this walk returns only a count, never row/id data, so
+    there is no `_census_item_id` normalization to apply here today --
+    `_handle_list_census`'s `ids` payload field is built from the PRIMARY
+    walk's `rows` alone (`_census_collect`'s `rows` never includes
+    escalation rows, D5), and this walk's own raw 'escalation#ENC-ESC-...'
+    record_ids never reach a caller. If this walk is ever extended to
+    surface escalation rows/ids, they go through `_census_item_id` exactly
+    like primary-walk rows -- the helper is prefix-agnostic (it strips up
+    to the first '#' regardless of record_type), so 'escalation#ENC-ESC-0001'
+    normalizes to 'ENC-ESC-0001' with no escalation-specific casing needed.
     """
     max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
     wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
@@ -3360,9 +3412,11 @@ def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
     page of records; a caller wanting the actual rows follows `pages[k]
     .cursor` into the ordinary _handle_list_records route. `ids` is present
     iff `count <= ids_inline_cap` (500, D-placeholder in decisions.md) --
-    the full list of primary-walk record ids, omitted entirely otherwise
-    rather than silently truncated (a caller must not mistake a capped
-    `ids` list for a complete one). `order` follows D6 (typed GSI branch:
+    the full list of primary-walk ITEM ids (`_census_item_id`,
+    ENC-TSK-Q27 -- e.g. 'ENC-TSK-L80', never the raw
+    '<record_type>#<item_id>' DynamoDB sort key), omitted entirely
+    otherwise rather than silently truncated (a caller must not mistake a
+    capped `ids` list for a complete one). `order` follows D6 (typed GSI branch:
     "unspecified"; untyped base-table branch: "record_id_asc"). `as_of`
     follows D4 -- watermark kind "wall_clock+max_updated_at", `started_at`
     captured before either walk runs, `max_updated_at` the maximum
@@ -3424,7 +3478,7 @@ def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
         "ids_inline_cap": _CENSUS_IDS_INLINE_CAP,
     }
     if result["count"] <= _CENSUS_IDS_INLINE_CAP:
-        payload["ids"] = [row.get("record_id") for row in rows]
+        payload["ids"] = [_census_item_id(row) for row in rows]
     if result["excluded_types"]:
         payload["excluded_types"] = result["excluded_types"]
 
