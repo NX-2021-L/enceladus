@@ -181,7 +181,7 @@ Parameters:
     Description: AppConfig Environment ID from 06-feature-flags stack. Pass via --parameter-overrides.
 
   # ENC-TSK-F63 AC-2: SnapStart.ApplyOn=PublishedVersions. Only arm64/py3.12 supports it.
-  # v3-prod (x86_64/py3.11): false. v4-gamma/v4-prod (arm64/py3.12): true.
+  # Historical: v3-prod ran x86_64/py3.11 until the ENC-PLN-082 cutover; every plane is arm64/py3.12 now (envs/architecture.yaml).
   EnableSnapStart:
     Type: String
     Default: "false"
