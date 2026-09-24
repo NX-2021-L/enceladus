@@ -2931,8 +2931,11 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
     exhaustion or a budget (D3) instead of stopping at one handler page --
     this is the count/anchor source for census mode, not a paginated list.
 
-    `ProjectionExpression` trims each item to record_id, record_type,
-    status, title, updated_at (O2.1) -- census never needs the full record.
+    `ProjectionExpression` trims each item to project_id, record_id,
+    record_type, status, title, updated_at (O2.1) -- census never needs the
+    full record. project_id/record_id/record_type are kept even though
+    they're constant/filtered-on because _encode_list_cursor (O1.1) needs
+    them to mint page-anchor cursors (O2.2) straight from these rows.
     Counter rows (record_id starting with `_TRACKER_COUNTER_PREFIX`, the
     same sentinel `_query_all_project_tasks` guards against) are dropped
     from `rows` as they stream in, same as `_handle_list_records` drops
@@ -2965,7 +2968,7 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
                 ":pid": _ser_s(project_id),
                 ":rtype": _ser_s(record_type),
             },
-            "ProjectionExpression": "record_id, record_type, #st, title, updated_at",
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
             "ExpressionAttributeNames": {"#st": "status"},
             "Limit": _CENSUS_RAW_PAGE_LIMIT,
         }
@@ -2979,7 +2982,7 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
             "TableName": DYNAMODB_TABLE,
             "KeyConditionExpression": "project_id = :pid",
             "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
-            "ProjectionExpression": "record_id, record_type, #st, title, updated_at",
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
             "ExpressionAttributeNames": {"#st": "status"},
             "Limit": _CENSUS_RAW_PAGE_LIMIT,
         }
@@ -3029,6 +3032,44 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
         "truncated_reason": truncated_reason,
         "branch": branch,
     }
+
+
+def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> List[Dict[str, Any]]:
+    """ENC-TSK-Q14 (O2.2): slice a completed _census_walk's rows into page anchors.
+
+    Anchors are computed directly from `rows` -- the same rows census
+    already walked -- never re-queried. `page_size` is capped the same way
+    as _handle_list_records (min 1, raw max 200). Page k's `cursor` is the
+    O1.1 (_encode_list_cursor) encoding of the LAST row of page k-1, so
+    feeding it to _handle_list_records resumes exactly at page k's first
+    row (cross-tested against the O1.2 route). Page 0's cursor is None --
+    there is no prior row to encode. `first`/`last` carry ONLY id, status,
+    title (D placeholder in o2_spec.md), never the full row.
+    """
+    page_size = max(1, min(page_size, 200))
+    pages: List[Dict[str, Any]] = []
+    prev_cursor: Optional[str] = None
+    for start in range(0, len(rows), page_size):
+        chunk = rows[start:start + page_size]
+        if not chunk:
+            continue
+        first, last = chunk[0], chunk[-1]
+        pages.append({
+            "cursor": prev_cursor,
+            "first": {
+                "id": first.get("record_id"),
+                "status": first.get("status"),
+                "title": first.get("title"),
+            },
+            "last": {
+                "id": last.get("record_id"),
+                "status": last.get("status"),
+                "title": last.get("title"),
+            },
+            "n": len(chunk),
+        })
+        prev_cursor = _encode_list_cursor(last, branch)
+    return pages
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
