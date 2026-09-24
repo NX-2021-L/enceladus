@@ -142,8 +142,22 @@ jobs:
 
           ROLE=$(_parse deploy_role_arn)
           ENV=$(_parse environment)
-          ARCH=$(_parse architecture)
-          RUNTIME=$(_parse runtime)
+          ARCH=$(_parse architecture || true)
+          RUNTIME=$(_parse runtime || true)
+          # ENC-TSK-Q19 / DOC-5368FE6515ED FR-1 compat: v4/main envs/*.yaml no
+          # longer restate architecture/runtime; they name an architecture_plane
+          # declared once in envs/architecture.yaml of the SAME commit tree.
+          # Literal keys win when present, so older shas resolve unchanged.
+          if [[ -z "$ARCH" || -z "$RUNTIME" ]]; then
+            PLANE=$(_parse architecture_plane || true)
+            DECL="envs/architecture.yaml"
+            [[ -n "$PLANE" && -f "$DECL" ]] || { echo "::error::$MANIFEST has no architecture/runtime and no architecture_plane + $DECL"; exit 1; }
+            DECL_LINE=$(grep -E "^[[:space:]]+${PLANE}:[[:space:]]*[{]" "$DECL" | head -1 || true)
+            ARCH=$(sed -nE 's/.*[{ ,]arch:[[:space:]]*([a-z0-9_]+).*/\1/p' <<<"$DECL_LINE")
+            RUNTIME=$(sed -nE 's/.*[{ ,]runtime:[[:space:]]*(python[0-9.]+).*/\1/p' <<<"$DECL_LINE")
+            [[ -n "$ARCH" && -n "$RUNTIME" ]] || { echo "::error::could not resolve plane '$PLANE' from $DECL"; exit 1; }
+            echo "Resolved architecture from $DECL plane=$PLANE: $ARCH/$RUNTIME"
+          fi
           PY="${RUNTIME#python}"
           CANARY=$(_parse canary_preference)
           # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy fields
