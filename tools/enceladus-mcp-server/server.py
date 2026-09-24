@@ -3743,10 +3743,19 @@ async def list_tools() -> list[Tool]:
                     "exhaust": {
                         "type": "boolean",
                         "description": (
-                            "If true, walk next_cursor to exhaustion (bounded, see ENC-ISS-558) before "
-                            "computing 'total', instead of reporting a lower bound. Costs one raw-API round "
-                            "trip per page -- expensive on large result sets, so leave false for hot-path / "
+                            "If true, get an exact/truncated total from a server-side census "
+                            "(ENC-TSK-Q15) before computing 'total', instead of reporting a lower "
+                            "bound. Costs one extra raw-API round trip -- leave false for hot-path / "
                             "session-init reads and reserve for callers that need an exact count."
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["census"],
+                        "description": (
+                            "Set to 'census' to bypass the normal records page entirely and return the "
+                            "raw route's census payload (count/pages/as_of/by_type/...) verbatim under "
+                            "'result'. Mutually exclusive with the records/total list contract."
                         ),
                     },
                 },
@@ -6079,11 +6088,6 @@ async def _tracker_creation_rules(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
-# ENC-ISS-558: bounded exhaustion guard for tracker_list(exhaust=true), mirroring
-# sense.py's ENC-ISS-557 _MAX_PAGES pattern. Never walk next_cursor unbounded.
-_TRACKER_LIST_MAX_EXHAUST_PAGES = 50
-
-
 def _summarize_tracker_records(items: list) -> tuple:
     """Build the compact summary shape plus an orphan count for a list of raw records."""
     orphan_count = 0
@@ -6113,6 +6117,7 @@ async def _tracker_list(args: dict) -> list[TextContent]:
     page_size = max(1, min(int(args.get("page_size", 25)), 100))
     cursor = args.get("cursor")
     exhaust = bool(args.get("exhaust", False))
+    mode = args.get("mode")
 
     def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
         params: Dict[str, Any] = {"page_size": page_size}
@@ -6139,6 +6144,38 @@ async def _tracker_list(args: dict) -> list[TextContent]:
             params["type"] = record_type
         return _tracker_api_request("GET", f"/{project_id}", query=params)
 
+    def _fetch_census(page_cursor: Optional[str] = None) -> Dict[str, Any]:
+        # ENC-TSK-Q15 (O3.1): mode=census is forwarded to the raw route
+        # unchanged, with the same clamped page_size so the returned page
+        # anchors line up with this caller's paging. The escalation reroute
+        # above is deliberately NOT applied here -- the backend census walk
+        # covers escalations itself (O2.3) via its own second bounded walk,
+        # so a census request must always hit the base project route.
+        params: Dict[str, Any] = {"page_size": page_size, "mode": "census"}
+        if status_filter:
+            params["status"] = status_filter
+        if record_type:
+            params["type"] = record_type
+        if page_cursor:
+            params["next_cursor"] = page_cursor
+        return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    if mode == "census":
+        # Pass-through: the raw route owns the whole census payload shape
+        # (count/pages/as_of/by_type/...). Return it verbatim -- never
+        # reshape it into the records/count/total list contract below.
+        return _result_text(_fetch_census(cursor))
+
+    # ENC-TSK-Q15 (O3.3): exhaust=true is re-implemented over the census
+    # count instead of a bounded raw-page walk. Call the census first (same
+    # filters + page_size) for the exact/truncated total, then fetch page 1
+    # of rows as today -- the 50-raw-page walk and its guard are gone.
+    census_resp = None
+    if exhaust:
+        census_resp = _fetch_census()
+        if census_resp.get("error"):
+            return _result_text(census_resp)
+
     # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
     # only 'count' (this page) and 'next_cursor' (more data outstanding or not).
     # Forward the caller's page_size/cursor to the RAW request (previously this
@@ -6151,43 +6188,39 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         return _result_text(resp)
     first_page_items = resp.get("records", [])
     next_cursor = resp.get("next_cursor")
-    all_items = list(first_page_items)
-    truncated = False
+
+    page_summary, orphan_count = _summarize_tracker_records(first_page_items)
 
     if exhaust:
-        pages_fetched = 1
-        walk_cursor = next_cursor
-        while walk_cursor:
-            if pages_fetched >= _TRACKER_LIST_MAX_EXHAUST_PAGES:
-                truncated = True
-                break
-            resp = _fetch_page(walk_cursor)
-            if resp.get("error"):
-                return _result_text(resp)
-            all_items.extend(resp.get("records", []))
-            pages_fetched += 1
-            walk_cursor = resp.get("next_cursor")
-        next_cursor = walk_cursor
-
-    page_summary, page_orphan_count = _summarize_tracker_records(first_page_items)
-    if exhaust:
-        total = len(all_items)
-        _, orphan_count = _summarize_tracker_records(all_items)
+        total = census_resp.get("count", len(first_page_items))
+        exhaustion_truncated = bool(census_resp.get("count_truncated"))
+        total_is_lower_bound = exhaustion_truncated
     else:
         total = len(first_page_items)
-        orphan_count = page_orphan_count
+        exhaustion_truncated = False
+        # Honest floor, never a silently-wrong measurement: 'total' (and
+        # 'orphan_tasks') only claim exactness when no next_cursor remains
+        # outstanding after whatever fetching this call actually did.
+        total_is_lower_bound = bool(next_cursor)
 
-    # Honest floor, never a silently-wrong measurement: 'total' (and
-    # 'orphan_tasks') only claim exactness when no next_cursor remains
-    # outstanding after whatever fetching this call actually did.
-    total_is_lower_bound = bool(next_cursor)
+    # orphan_tasks/orphan_count are ALWAYS computed from only first_page_items
+    # -- even under exhaust=true, which (ENC-TSK-Q15 O3.3) no longer walks
+    # every page and instead gets 'total' from the server-side census. A
+    # census can be exact (count_truncated=False) while the project still has
+    # more rows than a single page, in which case next_cursor is non-empty
+    # here even though total_is_lower_bound (driven solely by the census) is
+    # False. orphan_tasks must key off whether THIS page fetch actually saw
+    # every row, never solely off the census-derived total_is_lower_bound,
+    # or it silently under-reports as if exact. See surrounding comment:
+    # honest floor, never a silently-wrong measurement.
+    orphan_tasks_is_lower_bound = total_is_lower_bound or bool(next_cursor)
 
     result: Dict[str, Any] = {"records": page_summary, "count": len(page_summary), "total": total}
     if total_is_lower_bound:
         result["total_is_lower_bound"] = True
     if next_cursor:
         result["next_cursor"] = next_cursor
-    if exhaust and truncated:
+    if exhaust and exhaustion_truncated:
         result["exhaustion_truncated"] = True
     if orphan_count > 0:
         result["orphan_tasks"] = orphan_count
@@ -6195,7 +6228,7 @@ async def _tracker_list(args: dict) -> list[TextContent]:
             f"{orphan_count} task(s) have no parent or feature lineage. "
             "Consider linking them to a feature for traceability."
         )
-        if total_is_lower_bound:
+        if orphan_tasks_is_lower_bound:
             result["orphan_tasks_is_lower_bound"] = True
     return _result_text(result)
 
@@ -9954,6 +9987,21 @@ async def _component_propose(args: dict) -> list[TextContent]:
         payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
     if args.get("category"):
         payload["category"] = args["category"]
+    # ENC-TSK-Q24 (ENC-ISS-797): v3 component-address fields were accepted by
+    # this tool's args but silently dropped before reaching coordination_api
+    # -- forward them (and their rationale) whenever the caller supplies them.
+    if args.get("component_address"):
+        payload["component_address"] = args["component_address"]
+    if args.get("component_repo_dir"):
+        payload["component_repo_dir"] = args["component_repo_dir"]
+    if args.get("component_address_class"):
+        payload["component_address_class"] = args["component_address_class"]
+    if args.get("component_class"):
+        payload["component_class"] = args["component_class"]
+    if args.get("requested_required_transition_type"):
+        payload["requested_required_transition_type"] = args["requested_required_transition_type"]
+    if args.get("required_transition_type_rationale"):
+        payload["required_transition_type_rationale"] = args["required_transition_type_rationale"]
 
     resp = _coordination_api_request(
         "POST", "/components/propose", payload=payload,
