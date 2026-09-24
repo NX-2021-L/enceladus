@@ -1,0 +1,21 @@
+{
+  "name": "delete_include_heading",
+  "request": {
+    "anchor": {
+      "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "op": "delete",
+    "include_heading": true
+  },
+  "ok": true,
+  "bytes_changed": 116,
+  "stamped": false,
+  "block_id_was_none_before": false,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

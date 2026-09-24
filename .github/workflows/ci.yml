@@ -144,6 +144,26 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/assert_function_name_map_lockstep.py --self-test
           python3 tools/assert_function_name_map_lockstep.py
+      # DVP-TSK-671 (BRD B2-R2) Warehouse registration contract tests: removed
+      # during ENC-TSK-Q21 reconciliation -- backend/lambda/shared_layer/
+      # test_warehouse_registration.py is a main-only file dropped under rule A
+      # (backend/ must be EXACT origin/v4/main content; deployable main-only
+      # changes are out of scope for this forward-port, io reviews separately).
+
+      # DVP-TSK-703: the platform health monitor and the ad-hoc promotion
+      # transform tests used to run here. Both lambdas moved to
+      # NX-2021-L/devops (services/lambda/platform_health,
+      # services/lambda/adhoc_promotion) because they operate on
+      # data.jreese.net rather than on the governance ontology; their suites
+      # run in that repo's CI. The governance mart step above STAYS: BRD
+      # B3-R4 keeps the mart's projection logic and schema here.
+
+      # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
+      # computation, direction-lock refusal, counter-reset step (stdlib-only).
+      - name: Gamma tracker mirror tests (ENC-TSK-M98)
+        run: |
+          set -euo pipefail
+          python3 tools/test_gamma_tracker_mirror.py
 
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified

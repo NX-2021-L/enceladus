@@ -1,0 +1,232 @@
+name: Wire S3 governance/live notification via SNS relay → Lambda (I28)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_suffix:
+        description: "Environment suffix: '-gamma' or '' (production)"
+        type: string
+        required: false
+        default: "-gamma"
+      reason:
+        description: "Why this wiring is being applied"
+        type: string
+        required: false
+        default: "Wire S3 governance/live/* via SNS relay → devops-recompute-governance Lambda (ENC-TSK-I28)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  wire-notification:
+    name: Wire S3 → SNS (us-west-1) → Lambda (us-west-2) for governance/live/*
+    # ENC-TSK-J65 / ENC-FTR-120: bucket-notification wiring -- gamma-suffixed dispatches flow via v4-gamma; prod pauses at v3-prod.
+    environment: ${{ github.event.inputs.environment_suffix == '-gamma' && 'v4-gamma' || 'v3-prod' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Create SNS relay topic in bucket region (us-west-1)
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          bucket="jreese-net"
+          bucket_region="us-west-1"
+          # S3 event notification destinations must be in the same region as the bucket.
+          # jreese-net is in us-west-1; devops-recompute-governance is in us-west-2.
+          # Solution: create SNS relay topic in us-west-1 → subscribe Lambda cross-region.
+          relay_topic="enceladus-governance-live-relay${SUFFIX}"
+          relay_arn="arn:aws:sns:${bucket_region}:${account}:${relay_topic}"
+
+          topic_arn=$(aws sns create-topic \
+            --name "${relay_topic}" \
+            --region "${bucket_region}" \
+            --query "TopicArn" \
+            --output text)
+          echo "SNS relay topic: ${topic_arn}"
+
+          cat > /tmp/sns-relay-policy.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AllowS3GovernanceLivePublish",
+                "Effect": "Allow",
+                "Principal": {"Service": "s3.amazonaws.com"},
+                "Action": "SNS:Publish",
+                "Resource": "${relay_arn}",
+                "Condition": {
+                  "ArnLike": {"aws:SourceArn": "arn:aws:s3:::${bucket}"},
+                  "StringEquals": {"aws:SourceAccount": "${account}"}
+                }
+              }
+            ]
+          }
+          JSON
+
+          aws sns set-topic-attributes \
+            --topic-arn "${relay_arn}" \
+            --attribute-name Policy \
+            --attribute-value "$(cat /tmp/sns-relay-policy.json)" \
+            --region "${bucket_region}"
+
+          echo "SNS relay policy set: s3.amazonaws.com → ${relay_arn}"
+
+      - name: Add Lambda invoke permission for SNS relay
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          lambda_region="us-west-2"
+          bucket_region="us-west-1"
+          fn="devops-recompute-governance${SUFFIX}"
+          relay_arn="arn:aws:sns:${bucket_region}:${account}:enceladus-governance-live-relay${SUFFIX}"
+          stmt="SNSGovernanceLiveRelay${SUFFIX//-/}"
+
+          aws lambda remove-permission \
+            --function-name "${fn}" \
+            --statement-id "${stmt}" \
+            --region "${lambda_region}" 2>/dev/null || echo "Statement not present, adding fresh."
+
+          aws lambda add-permission \
+            --function-name "${fn}" \
+            --statement-id "${stmt}" \
+            --action lambda:InvokeFunction \
+            --principal sns.amazonaws.com \
+            --source-arn "${relay_arn}" \
+            --region "${lambda_region}"
+
+          echo "Lambda permission added: sns.amazonaws.com (${relay_arn}) → ${fn}"
+
+      - name: Subscribe Lambda to SNS relay topic (cross-region)
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          lambda_region="us-west-2"
+          bucket_region="us-west-1"
+          relay_arn="arn:aws:sns:${bucket_region}:${account}:enceladus-governance-live-relay${SUFFIX}"
+          lambda_arn="arn:aws:lambda:${lambda_region}:${account}:function:devops-recompute-governance${SUFFIX}"
+
+          existing=$(aws sns list-subscriptions-by-topic \
+            --topic-arn "${relay_arn}" \
+            --region "${bucket_region}" \
+            --query "Subscriptions[?Protocol=='lambda' && Endpoint=='${lambda_arn}'].SubscriptionArn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "${existing}" ] && [ "${existing}" != "None" ] && [ "${existing}" != "" ]; then
+            echo "Subscription already exists: ${existing}"
+          else
+            sub_arn=$(aws sns subscribe \
+              --topic-arn "${relay_arn}" \
+              --protocol lambda \
+              --notification-endpoint "${lambda_arn}" \
+              --region "${bucket_region}" \
+              --query "SubscriptionArn" \
+              --output text)
+            echo "Cross-region SNS subscription: ${sub_arn}"
+          fi
+
+      - name: Wire S3 → SNS relay notification
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          bucket="jreese-net"
+          bucket_region="us-west-1"
+          relay_arn="arn:aws:sns:${bucket_region}:${account}:enceladus-governance-live-relay${SUFFIX}"
+          entry_id="GovernanceLiveRecompute${SUFFIX//-/}"
+
+          aws s3api get-bucket-notification-configuration \
+            --bucket "${bucket}" --region "${bucket_region}" \
+            > /tmp/s3-notify-current.json 2>/dev/null || true
+          if [ ! -s /tmp/s3-notify-current.json ]; then
+            echo '{}' > /tmp/s3-notify-current.json
+          fi
+          echo "Current S3 notification config:"
+          cat /tmp/s3-notify-current.json
+
+          cat > /tmp/s3-notify-new.json <<JSON
+          {
+            "Id": "${entry_id}",
+            "TopicArn": "${relay_arn}",
+            "Events": ["s3:ObjectCreated:*"],
+            "Filter": {
+              "Key": {
+                "FilterRules": [
+                  {"Name": "prefix", "Value": "governance/live/"}
+                ]
+              }
+            }
+          }
+          JSON
+
+          python3 - /tmp/s3-notify-current.json /tmp/s3-notify-new.json /tmp/s3-notify-merged.json <<'PYEOF'
+          import json, sys
+          current_path, new_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(current_path) as f:
+              cfg = json.load(f)
+          with open(new_path) as f:
+              new = json.load(f)
+          existing = cfg.get('TopicConfigurations', [])
+          existing = [e for e in existing if e.get('Id') != new['Id']]
+          existing.append(new)
+          cfg['TopicConfigurations'] = existing
+          with open(out_path, 'w') as f:
+              json.dump(cfg, f, indent=2)
+          print(f"Merged: {len(existing)} TopicConfiguration(s)")
+          PYEOF
+
+          cat /tmp/s3-notify-merged.json
+
+          aws s3api put-bucket-notification-configuration \
+            --bucket "${bucket}" \
+            --notification-configuration "file:///tmp/s3-notify-merged.json" \
+            --region "${bucket_region}"
+
+          echo "S3 notification wired: ${bucket}/governance/live/* → ${relay_arn}"
+
+      - name: Verify wiring
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          account="356364570033"
+          bucket="jreese-net"
+          bucket_region="us-west-1"
+          lambda_region="us-west-2"
+          relay_arn="arn:aws:sns:${bucket_region}:${account}:enceladus-governance-live-relay${SUFFIX}"
+          fn="devops-recompute-governance${SUFFIX}"
+
+          echo "=== S3 TopicConfigurations ==="
+          aws s3api get-bucket-notification-configuration \
+            --bucket "${bucket}" --region "${bucket_region}" \
+            --query "TopicConfigurations[?contains(TopicArn, 'governance-live-relay')].[Id,TopicArn,Events[0]]" \
+            --output table || true
+
+          echo "=== SNS Lambda Subscriptions ==="
+          aws sns list-subscriptions-by-topic \
+            --topic-arn "${relay_arn}" \
+            --region "${bucket_region}" \
+            --query "Subscriptions[?Protocol=='lambda'].[Protocol,Endpoint,SubscriptionArn]" \
+            --output table || true
+
+          echo "=== Lambda Resource Policy (SNS permission) ==="
+          aws lambda get-policy \
+            --function-name "${fn}" \
+            --region "${lambda_region}" \
+            --query "Policy" --output text 2>/dev/null \
+            | python3 -c "import json,sys; p=json.load(sys.stdin); print([s['Sid'] for s in p.get('Statement',[])])" || true

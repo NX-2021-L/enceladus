@@ -85,6 +85,11 @@ Tasks declare a `deploy_target` field:
 
 PR label convention: `target:prod`, `target:gamma`, `target:undeclared`.
 
+> **Fork-mode control (ENC-PLN-006 / ENC-TSK-H63):** the `main → v4/main` auto-sync
+> workflow (`sync-main-to-v4main.yml`) is **DISABLED** via job-level `if: ${{ false }}`.
+> v4/main has diverged ahead of main; do **not** re-enable without io approval.
+> `promote-gamma-to-prod-request.yml` stays active as the cutover toggle (ENC-TSK-G71).
+
 ### Evolution Chapter Contribution
 
 Agent sessions contribute to the active generation's evolution chapter document via

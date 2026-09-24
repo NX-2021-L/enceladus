@@ -1,0 +1,86 @@
+name: IAM CFN Deploy Role — S3 Lifecycle Config Patch
+
+# ENC-TSK-N70: the CFN deploy role (enceladus-cloudformation-deploy-github-role,
+# shared across prod and gamma CFN deploy workflows) never had s3:Get/PutLifecycleConfiguration
+# on jreese-net. tools/apply_rhythm_artifact_lifecycle.py (ENC-TSK-N49), which runs as a step
+# in the CloudFormation Compute Stack Deploy apply job, needs both to equalize the
+# rhythm-cycle artifact retention policy. Without this grant, that step fails AccessDenied
+# and drags the whole apply job's conclusion to failure even when the actual CFN change-set
+# execution succeeded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant s3:Get/PutLifecycleConfiguration on jreese-net to CFN deploy role (ENC-TSK-N49 unblock)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with S3 lifecycle-configuration permissions
+    # ENC-TSK-N70 / ENC-FTR-120: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      # ENC-TSK-N70: the role's aggregate inline-policy size is already at AWS's 10,240-byte
+      # ceiling (8 existing inline policies from prior one-off patches) -- a first attempt at
+      # this fix via put-role-policy failed LimitExceeded (run 29316730253, no mutation occurred).
+      # Several sibling permissions (e.g. enceladus-cfn-deploy-appconfig-governance-v1) are live
+      # as standalone customer-managed policies for the same reason, so this follows that
+      # established, already-working pattern instead: create-policy + attach-role-policy, which
+      # draws from the separate (much larger) managed-policy quota and touches nothing existing.
+      - name: Create managed policy — S3 lifecycle configuration read/write on jreese-net
+        run: |
+          set -euo pipefail
+          cat > /tmp/cfn-deploy-role-s3-lifecycle-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "S3LifecycleConfigRhythmCycle",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetLifecycleConfiguration",
+                  "s3:PutLifecycleConfiguration"
+                ],
+                "Resource": "arn:aws:s3:::jreese-net"
+              }
+            ]
+          }
+          JSON
+
+          if aws iam get-policy --policy-arn "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1" >/dev/null 2>&1; then
+            echo "Managed policy already exists, skipping create-policy."
+          else
+            aws iam create-policy \
+              --policy-name "enceladus-cfn-deploy-s3-lifecycle-v1" \
+              --policy-document "file:///tmp/cfn-deploy-role-s3-lifecycle-policy.json" \
+              --description "s3:Get/PutLifecycleConfiguration on jreese-net for the CFN deploy role (ENC-TSK-N70 / ENC-TSK-N49 rhythm-cycle unblock)"
+          fi
+
+          aws iam attach-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-arn "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1"
+
+      - name: Verify managed policy attached
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query "AttachedPolicies[?PolicyName=='enceladus-cfn-deploy-s3-lifecycle-v1']" \
+            --output table

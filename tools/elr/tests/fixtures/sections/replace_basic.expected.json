@@ -1,0 +1,24 @@
+{
+  "name": "replace_basic",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Alpha"
+      ]
+    },
+    "op": "replace",
+    "body": "New alpha content.",
+    "rebase_headings": true
+  },
+  "ok": true,
+  "bytes_changed": 53,
+  "stamped": true,
+  "block_id_was_none_before": true,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

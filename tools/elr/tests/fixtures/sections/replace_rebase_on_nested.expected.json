@@ -1,0 +1,24 @@
+{
+  "name": "replace_rebase_on_nested",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Beta"
+      ]
+    },
+    "op": "replace",
+    "body": "# Sub One\n\ntext\n\n## Sub Two\n\nmore\n\n```\n# fenced not a heading\n```\n",
+    "rebase_headings": true
+  },
+  "ok": true,
+  "bytes_changed": 104,
+  "stamped": true,
+  "block_id_was_none_before": true,
+  "anchor_resolved": {
+    "heading_path": [
+      "Beta"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}
