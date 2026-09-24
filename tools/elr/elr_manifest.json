@@ -97,8 +97,8 @@
     },
     {
       "path": "tools/elr/elr_list.py",
-      "sha256": "da151a407508e1a2f8f434a5bff0b6ae1ffb3baf73f371df2c4df330abf3b872",
-      "size_bytes": 19844
+      "sha256": "aa13ae7479a092df4d61ad8b1c3191c12b1abb381d265b7430da2172a94d618b",
+      "size_bytes": 20516
     },
     {
       "path": "tools/elr/elr_publish.py",
@@ -121,7 +121,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-23T23:13:55-07:00",
+  "generated_at": "2026-09-24T00:01:03-07:00",
   "manifest_version": 1,
-  "source_ref": "cfc9b338f0851757d92f41ff3fe00991eaa026fa"
+  "source_ref": "95cb874df27dfbefefc316fcdd965c5320d61fd3"
 }

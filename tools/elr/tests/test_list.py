@@ -72,7 +72,24 @@ _HEALTH_CENSUS_ABSENT = _ok({})
 
 
 def _records(ids):
-    return [{"record_id": rid, "record_type": "task", "status": "open", "title": rid} for rid in ids]
+    """REALISTIC raw records as the real server actually returns them
+    (ENC-TSK-Q28): record_id is the DynamoDB sort key, prefixed with the
+    record type and a "#" (e.g. "task#ENC-TSK-B95"), and item_id is
+    absent. _extract_ids must strip that prefix to recover the plain
+    item id elr_batch_get --ids-file expects."""
+    return [
+        {"record_id": f"task#{rid}", "record_type": "task", "status": "open", "title": rid} for rid in ids
+    ]
+
+
+def _records_with_item_id(ids):
+    """Records that also carry the caller-facing item_id alongside the
+    prefixed record_id -- _extract_ids must prefer item_id over stripping
+    record_id."""
+    return [
+        {"item_id": rid, "record_id": f"task#{rid}", "record_type": "task", "status": "open", "title": rid}
+        for rid in ids
+    ]
 
 
 def _run_main(argv, responses):
@@ -334,10 +351,60 @@ class CensusModeTests(unittest.TestCase):
             self.assertNotIn("next_cursor", query)
 
 
+class ExtractIdsTests(unittest.TestCase):
+    """Direct coverage of the id-extraction fallback chain (ENC-TSK-Q28):
+    prefer item_id, then id, then a '<type>#'-stripped record_id; never
+    emit an empty id; preserve order."""
+
+    def test_prefers_item_id_over_prefixed_record_id(self):
+        records = [{"item_id": "ENC-TSK-1", "record_id": "task#ENC-TSK-1"}]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-1"])
+
+    def test_prefers_id_over_prefixed_record_id_when_item_id_absent(self):
+        records = [{"id": "ENC-TSK-2", "record_id": "task#ENC-TSK-2"}]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-2"])
+
+    def test_strips_leading_type_hash_prefix_from_record_id(self):
+        records = [{"record_id": "task#ENC-TSK-B95"}]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-B95"])
+
+    def test_record_id_without_a_prefix_passes_through_unchanged(self):
+        records = [{"record_id": "ENC-TSK-3"}]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-3"])
+
+    def test_order_is_preserved_across_mixed_shapes(self):
+        records = [
+            {"item_id": "ENC-TSK-1", "record_id": "task#ENC-TSK-1"},
+            {"record_id": "task#ENC-TSK-2"},
+            {"id": "ENC-TSK-3", "record_id": "task#ENC-TSK-3"},
+        ]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-1", "ENC-TSK-2", "ENC-TSK-3"])
+
+    def test_never_emits_an_empty_id(self):
+        records = [
+            {"record_id": "task#"},  # strips to empty -- must be skipped, not emitted
+            {"record_id": ""},  # falsy -- skipped
+            {},  # no id fields at all -- skipped
+            {"record_id": "task#ENC-TSK-4"},
+        ]
+        self.assertEqual(elr_list._extract_ids(records), ["ENC-TSK-4"])
+
+    def test_non_list_or_non_dict_entries_are_ignored(self):
+        self.assertEqual(elr_list._extract_ids(None), [])
+        self.assertEqual(elr_list._extract_ids("not-a-list"), [])
+        self.assertEqual(elr_list._extract_ids(["not-a-dict", {"record_id": "task#ENC-TSK-5"}]), ["ENC-TSK-5"])
+
+
 class PageModeTests(unittest.TestCase):
     def test_single_page_writes_ids_file_loadable_by_batch_get(self):
         ids = [f"ENC-TSK-{i}" for i in range(51, 71)]
-        page_body = {"success": True, "records": _records(ids), "count": len(ids), "page_size": 50}
+        # Mix both realistic record shapes -- half carry item_id
+        # (preferred path), half only the prefixed record_id (fallback
+        # strip path) -- to prove --page's ids-file matches the plain
+        # item ids elr_batch_get.load_ids_file expects either way.
+        midpoint = len(ids) // 2
+        records = _records_with_item_id(ids[:midpoint]) + _records(ids[midpoint:])
+        page_body = {"success": True, "records": records, "count": len(ids), "page_size": 50}
         with tempfile.TemporaryDirectory() as tmp:
             exit_code, digest, mock_urlopen, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", "CURSOR-1"],
@@ -601,7 +668,13 @@ class RoundTripTests(unittest.TestCase):
             self.assertEqual(second_page_cursor, "CURSOR-1")
 
             page_ids = [f"ENC-TSK-{i}" for i in range(51, 71)]
-            page_body = {"success": True, "records": _records(page_ids), "count": 20, "page_size": 50}
+            # Realistic mixed raw shape (ENC-TSK-Q28): the real server's
+            # record_id carries the "task#" sort-key prefix, and only
+            # some rows also carry item_id -- both must round-trip to the
+            # plain item id.
+            midpoint = len(page_ids) // 2
+            records = _records_with_item_id(page_ids[:midpoint]) + _records(page_ids[midpoint:])
+            page_body = {"success": True, "records": records, "count": 20, "page_size": 50}
             exit_code, _page_digest, _mock, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", second_page_cursor],
                 [_ok(page_body)],
@@ -611,12 +684,18 @@ class RoundTripTests(unittest.TestCase):
             ids_path = elr_list.page_ids_file_path(tmp, "enceladus", second_page_cursor)
             self.assertTrue(ids_path.is_file())
 
+            # The --page ids-file itself must already hold the plain item
+            # ids, not the raw "task#..." record_id -- prove that before
+            # even touching the (unchanged) elr_batch_get loader.
+            loaded_ids = elr_batch_get.load_ids_file(str(ids_path))
+            self.assertEqual(loaded_ids, page_ids)
+
             # batch_get --ids-file round trip: every id 404s (kept offline),
             # proving the file is in the loader's exact expected shape and
             # nothing in it is silently dropped.
             responses = [_http_error(404, json.dumps({"error": f"Record not found: {rid}"}).encode()) for rid in page_ids]
             with patch(_URLOPEN, side_effect=responses):
-                batch_digest = elr_batch_get.run_batch_get(elr_batch_get.load_ids_file(str(ids_path)), "prod", 5)
+                batch_digest = elr_batch_get.run_batch_get(loaded_ids, "prod", 5)
             self.assertEqual(len(batch_digest["rows"]), 20)
             self.assertEqual({r["id"] for r in batch_digest["rows"]}, set(page_ids))
 
