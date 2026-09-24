@@ -3012,7 +3012,7 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
         if cursor:
             try:
-                decoded_cursor = _decode_list_cursor(cursor, branch)
+                decoded_cursor = _decode_list_cursor(cursor, branch, record_type)
             except ListCursorBranchMismatch:
                 raise
             except Exception:
@@ -8129,7 +8129,9 @@ def _encode_list_cursor(item: Dict[str, Any], branch: str) -> str:
     ).decode("ascii")
 
 
-def _decode_list_cursor(token: str, branch: str) -> Dict[str, str]:
+def _decode_list_cursor(
+    token: str, branch: str, record_type: str = ""
+) -> Dict[str, str]:
     """Decode + validate a _handle_list_records next_cursor.
 
     `branch` is the branch the *current* request would query ("base" or
@@ -8137,6 +8139,20 @@ def _decode_list_cursor(token: str, branch: str) -> Dict[str, str]:
     other branch. Any other malformed-token failure (bad base64, bad JSON,
     missing keys) propagates as a plain exception — the route maps both
     cases to 400, never 500.
+
+    ENC-TSK-Q13-0A review fix: `branch` alone ("base" vs "gsi") is not
+    query-shape-granular enough on the gsi branch. Two gsi requests with
+    different `type` filters both compare equal on branch (both "gsi"), so
+    without this check a cursor minted under type=task and replayed under
+    type=issue would decode as a match, then feed a decoded['t']=="task"
+    ExclusiveStartKey.record_type into a Query whose
+    ExpressionAttributeValues[':rtype'] is "issue" -- two different values
+    in the same call, producing a falsely-exhausted, wrong page (or a raw
+    ValidationException from real DynamoDB, masked into an opaque 500 by
+    the route's generic except-Exception handler) instead of the documented
+    400 CURSOR_BRANCH_MISMATCH. `record_type` is the CURRENT request's type
+    filter; passing "" (the default, e.g. from the codec's own round-trip
+    tests) skips this extra check and preserves prior behavior.
     """
     import base64
     cursor_obj = json.loads(
@@ -8155,6 +8171,11 @@ def _decode_list_cursor(token: str, branch: str) -> Dict[str, str]:
     }
     if cursor_branch == "gsi":
         decoded["t"] = str(cursor_obj["t"])
+        if record_type and decoded["t"] != record_type:
+            raise ListCursorBranchMismatch(
+                f"next_cursor record_type '{decoded['t']}' does not match "
+                f"this query's record_type '{record_type}'"
+            )
     return decoded
 
 
