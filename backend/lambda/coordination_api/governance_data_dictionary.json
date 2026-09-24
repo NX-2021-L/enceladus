@@ -1,7 +1,7 @@
 {
-  "version": "2026-09-24.01",
-  "updated_at": "2026-09-24T05:58:00Z",
-  "last_change_summary": "ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
+  "version": "2026-09-24.02",
+  "updated_at": "2026-09-24T06:30:00Z",
+  "last_change_summary": "ENC-TSK-Q13 (O1.1-O1.3, ENC-PLN-093 objective O1): tracker_mutation._handle_list_records (GET /api/v1/tracker/{project}) now returns honest, value-based next_cursor pagination -- _encode_list_cursor/_decode_list_cursor (beside the ENC-ISS-699 escalation-list codec) build a base64url boundary from the last item actually RETURNED, never a raw DynamoDB LastEvaluatedKey, so a response with no next_cursor is always provably exhausted. The accumulate loop keeps pulling raw pages (bounded by _LIST_RECORDS_MAX_RAW_PAGES=10) until accumulated items exceed page_size, LastEvaluatedKey is absent, or the raw-page budget runs out with LastEvaluatedKey still present (page_truncated: true). A cursor minted on the base-table branch replayed against the project-type-index branch (or vice versa) raises ListCursorBranchMismatch, mapped to HTTP 400 CURSOR_BRANCH_MISMATCH rather than a 500 or a silent reinterpret against the wrong key schema. New entity tracker.list_cursor. feed_query/corpus.py is not touched (D1). PREVIOUS: ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9241,10 +9241,69 @@
         ],
         "reference_doc": "DOC-8F6CF7700EAD"
       }
+    },
+    "tracker.list_cursor": {
+      "description": "ENC-TSK-Q13 (O1.1-O1.3, ENC-PLN-093 objective O1): value-based next_cursor codec for GET /api/v1/tracker/{project} (tracker_mutation._handle_list_records, D1 -- this is the RAW route, not feed_query's corpus; feed_query/corpus.py is untouched). Mirrors the ENC-ISS-699 escalation-list cursor fix: _encode_list_cursor/_decode_list_cursor (defined beside the escalation-list codec) build a base64url JSON boundary from the last item this call actually RETURNED -- or, when a raw-page budget is exhausted with zero matches this call, from the last EVALUATED key -- never a raw DynamoDB LastEvaluatedKey. A response carrying no next_cursor is therefore always provably exhausted.",
+      "fields": {
+        "b": {
+          "type": "enum",
+          "enum": [
+            "base",
+            "gsi"
+          ],
+          "definition": "Which query branch minted this cursor. 'base': the base-table walk (KeyConditionExpression on project_id alone; sort order record_id ascending, D6). 'gsi': the project-type-index walk (KeyConditionExpression on project_id + record_type; GSI-branch order unspecified, D6). No GSI schema change."
+        },
+        "p": {
+          "type": "string",
+          "definition": "project_id of the boundary item."
+        },
+        "r": {
+          "type": "string",
+          "definition": "record_id (base table sort key, e.g. 'task#TSK-001') of the boundary item."
+        },
+        "t": {
+          "type": "string",
+          "nullable": true,
+          "definition": "record_type of the boundary item. Present if and only if b == 'gsi': DynamoDB's GSI-pagination contract requires the base table's own primary key (project_id, record_id) alongside the index's key (project_id, record_type) to resume a project-type-index query, so the gsi branch's ExclusiveStartKey -- and therefore this cursor -- carries record_type."
+        },
+        "next_cursor": {
+          "type": "string",
+          "nullable": true,
+          "definition": "Response field carrying the encoded token (not part of the cursor payload above). Absent -- never null or empty-string -- exactly when this call proved the walk exhausted: either accumulated items exceeded page_size, or DynamoDB reported no LastEvaluatedKey at all."
+        },
+        "page_truncated": {
+          "type": "boolean",
+          "definition": "Response field, true only when the per-invocation raw-page budget (_LIST_RECORDS_MAX_RAW_PAGES=10 raw ddb.query() calls) was exhausted while DynamoDB's LastEvaluatedKey was still present -- next_cursor is still emitted, but this call alone could not prove whether more matching rows exist beyond it. Absent (not merely false) otherwise."
+        }
+      },
+      "error_codes": {
+        "CURSOR_BRANCH_MISMATCH": {
+          "http_status": 400,
+          "definition": "next_cursor was decoded and its 'b' did not match the branch the current request would query (a base-branch cursor replayed with ?type=<record_type>, or a gsi-branch cursor replayed without one/with a different type). Raised as ListCursorBranchMismatch by _decode_list_cursor and mapped here rather than a 500 or a silent reinterpret against the wrong key schema. A malformed/undecodable next_cursor maps to the same 400 via the existing INVALID_INPUT path, not this code.",
+          "fields": [
+            "recommended_next_actions"
+          ]
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-Q13"
+        ],
+        "plans": [
+          "ENC-PLN-093"
+        ],
+        "note": "Leaves O1.1 (0A, codec) / O1.2 (0B, accumulate-loop rewrite) / O1.3 (0C, branch-mismatch 400). Cursor shape borrowed conceptually from feed_query corpus's (sort_value, record_key) idea per plan decision D1 -- feed_query/corpus.py itself is not touched."
+      }
     }
   },
   "change_summary": "ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
   "change_log": [
+    {
+      "version": "2026-09-24.02",
+      "date": "2026-09-24",
+      "summary": "ENC-TSK-Q13 (O1.1-O1.3, ENC-PLN-093 objective O1): tracker_mutation._handle_list_records (GET /api/v1/tracker/{project}) now returns honest, value-based next_cursor pagination -- _encode_list_cursor/_decode_list_cursor (beside the ENC-ISS-699 escalation-list codec) build a base64url boundary from the last item actually RETURNED, never a raw DynamoDB LastEvaluatedKey, so a response with no next_cursor is always provably exhausted. The accumulate loop keeps pulling raw pages (bounded by _LIST_RECORDS_MAX_RAW_PAGES=10) until accumulated items exceed page_size, LastEvaluatedKey is absent, or the raw-page budget runs out with LastEvaluatedKey still present (page_truncated: true). A cursor minted on the base-table branch replayed against the project-type-index branch (or vice versa) raises ListCursorBranchMismatch, mapped to HTTP 400 CURSOR_BRANCH_MISMATCH rather than a 500 or a silent reinterpret against the wrong key schema. New entity tracker.list_cursor. feed_query/corpus.py is not touched (D1).",
+      "task_id": "ENC-TSK-Q13"
+    },
     {
       "version": "2026-09-24.01",
       "date": "2026-09-24",
