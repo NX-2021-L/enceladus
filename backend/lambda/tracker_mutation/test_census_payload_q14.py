@@ -90,9 +90,11 @@ def _validate(instance, schema, root=None, path="$"):
 
 
 def _raw_item(n, project_id="proj", record_type="task", status="open"):
+    item_id = f"ENC-TSK-{n:04d}"
     return {
         "project_id": {"S": project_id},
-        "record_id": {"S": f"{record_type}#TSK-{n:04d}"},
+        "record_id": {"S": f"{record_type}#{item_id}"},
+        "item_id": {"S": item_id},
         "record_type": {"S": record_type},
         "status": {"S": status},
         "title": {"S": f"Task {n}"},
@@ -101,7 +103,7 @@ def _raw_item(n, project_id="proj", record_type="task", status="open"):
 
 
 def _escalation_item(n, project_id="proj", status=None):
-    item = {"project_id": {"S": project_id}, "record_id": {"S": f"escalation#ESC-{n:04d}"}}
+    item = {"project_id": {"S": project_id}, "record_id": {"S": f"escalation#ENC-ESC-{n:04d}"}}
     if status is not None:
         item["status"] = {"S": status}
     return item
@@ -153,6 +155,25 @@ class TestCensusPayloadSchema(unittest.TestCase):
         _validate(body_501, self.schema)
         self.assertEqual(body_501["count"], 501)
         self.assertNotIn("ids", body_501)
+
+    def test_ids_and_page_anchors_are_item_ids_not_raw_record_ids(self):
+        """ENC-TSK-Q27: the live defect -- `ids` and `pages[].first/last.id`
+        must be item ids ('ENC-TSK-0001'), never the raw DynamoDB sort key
+        ('task#ENC-TSK-0001')."""
+        items = [_raw_item(n) for n in range(1, 11)]
+        resp, body = self._call({"mode": "census", "type": "task"}, items)
+        self.assertEqual(resp["statusCode"], 200)
+        _validate(body, self.schema)
+
+        expected_ids = {f"ENC-TSK-{n:04d}" for n in range(1, 11)}
+        self.assertEqual(set(body["ids"]), expected_ids)
+        for raw_id in body["ids"]:
+            self.assertFalse(raw_id.startswith("task#"), f"leaked raw record_id: {raw_id!r}")
+
+        for page in body["pages"]:
+            for anchor in (page["first"], page["last"]):
+                self.assertIn(anchor["id"], expected_ids)
+                self.assertFalse(anchor["id"].startswith("task#"))
 
     def test_unknown_mode_is_400_not_a_silent_plain_list(self):
         with mock.patch.object(self.lf, "_get_ddb", return_value=PagingTable([], raw_page_size=200)):
