@@ -3743,9 +3743,9 @@ async def list_tools() -> list[Tool]:
                     "exhaust": {
                         "type": "boolean",
                         "description": (
-                            "If true, walk next_cursor to exhaustion (bounded, see ENC-ISS-558) before "
-                            "computing 'total', instead of reporting a lower bound. Costs one raw-API round "
-                            "trip per page -- expensive on large result sets, so leave false for hot-path / "
+                            "If true, get an exact/truncated total from a server-side census "
+                            "(ENC-TSK-Q15) before computing 'total', instead of reporting a lower "
+                            "bound. Costs one extra raw-API round trip -- leave false for hot-path / "
                             "session-init reads and reserve for callers that need an exact count."
                         ),
                     },
@@ -6088,11 +6088,6 @@ async def _tracker_creation_rules(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
-# ENC-ISS-558: bounded exhaustion guard for tracker_list(exhaust=true), mirroring
-# sense.py's ENC-ISS-557 _MAX_PAGES pattern. Never walk next_cursor unbounded.
-_TRACKER_LIST_MAX_EXHAUST_PAGES = 50
-
-
 def _summarize_tracker_records(items: list) -> tuple:
     """Build the compact summary shape plus an orphan count for a list of raw records."""
     orphan_count = 0
@@ -6171,6 +6166,16 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         # reshape it into the records/count/total list contract below.
         return _result_text(_fetch_census(cursor))
 
+    # ENC-TSK-Q15 (O3.3): exhaust=true is re-implemented over the census
+    # count instead of a bounded raw-page walk. Call the census first (same
+    # filters + page_size) for the exact/truncated total, then fetch page 1
+    # of rows as today -- the 50-raw-page walk and its guard are gone.
+    census_resp = None
+    if exhaust:
+        census_resp = _fetch_census()
+        if census_resp.get("error"):
+            return _result_text(census_resp)
+
     # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
     # only 'count' (this page) and 'next_cursor' (more data outstanding or not).
     # Forward the caller's page_size/cursor to the RAW request (previously this
@@ -6183,43 +6188,27 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         return _result_text(resp)
     first_page_items = resp.get("records", [])
     next_cursor = resp.get("next_cursor")
-    all_items = list(first_page_items)
-    truncated = False
+
+    page_summary, orphan_count = _summarize_tracker_records(first_page_items)
 
     if exhaust:
-        pages_fetched = 1
-        walk_cursor = next_cursor
-        while walk_cursor:
-            if pages_fetched >= _TRACKER_LIST_MAX_EXHAUST_PAGES:
-                truncated = True
-                break
-            resp = _fetch_page(walk_cursor)
-            if resp.get("error"):
-                return _result_text(resp)
-            all_items.extend(resp.get("records", []))
-            pages_fetched += 1
-            walk_cursor = resp.get("next_cursor")
-        next_cursor = walk_cursor
-
-    page_summary, page_orphan_count = _summarize_tracker_records(first_page_items)
-    if exhaust:
-        total = len(all_items)
-        _, orphan_count = _summarize_tracker_records(all_items)
+        total = census_resp.get("count", len(first_page_items))
+        exhaustion_truncated = bool(census_resp.get("count_truncated"))
+        total_is_lower_bound = exhaustion_truncated
     else:
         total = len(first_page_items)
-        orphan_count = page_orphan_count
-
-    # Honest floor, never a silently-wrong measurement: 'total' (and
-    # 'orphan_tasks') only claim exactness when no next_cursor remains
-    # outstanding after whatever fetching this call actually did.
-    total_is_lower_bound = bool(next_cursor)
+        exhaustion_truncated = False
+        # Honest floor, never a silently-wrong measurement: 'total' (and
+        # 'orphan_tasks') only claim exactness when no next_cursor remains
+        # outstanding after whatever fetching this call actually did.
+        total_is_lower_bound = bool(next_cursor)
 
     result: Dict[str, Any] = {"records": page_summary, "count": len(page_summary), "total": total}
     if total_is_lower_bound:
         result["total_is_lower_bound"] = True
     if next_cursor:
         result["next_cursor"] = next_cursor
-    if exhaust and truncated:
+    if exhaust and exhaustion_truncated:
         result["exhaustion_truncated"] = True
     if orphan_count > 0:
         result["orphan_tasks"] = orphan_count
