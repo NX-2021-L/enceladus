@@ -1,0 +1,9 @@
+# ENC-TSK-Q19 / DOC-5368FE6515ED FR-1: the ONE architecture declaration. Every guard derives from this file.
+schema_version: 1
+planes:
+  prod: {arch: arm64, runtime: python3.12, runner: ubuntu-24.04-arm}
+  gamma: {arch: arm64, runtime: python3.12, runner: ubuntu-24.04-arm}
+env_plane:
+  v3-prod: prod
+  v4-prod: prod
+  v4-gamma: gamma

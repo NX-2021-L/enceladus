@@ -186,6 +186,12 @@ jobs:
             zipfile="/tmp/build-out/$fn.zip"
             (cd "$workdir" && zip -qrX "$zipfile" .)
 
+            # ENC-TSK-Q19 FR-4: inspect the actual zip contents for a wrong-ABI
+            # .so before it ever reaches S3 -- a Gen2 package-arch gate, not
+            # just a pre-build pip-flag check (stdlib-only; no extra install).
+            python3 tools/verify_lambda_package_arch.py \
+              --package "$zipfile" --expected-arch "${{ matrix.arch }}"
+
             # S3 upload (bucket must have Versioning=Enabled).
             sha="${{ inputs.commit_sha }}"
             key="${{ inputs.artifact_key_prefix }}/${{ matrix.arch }}-py${{ matrix.py_version }}/${fn}-${sha}.zip"

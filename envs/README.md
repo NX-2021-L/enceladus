@@ -27,8 +27,8 @@ every YAML file in this directory. Required top-level keys:
 
 ```yaml
 env_name: string       # v3-gamma | v3-prod | v4-gamma | v4-prod
-architecture: x86_64|arm64
-runtime: python3.11|python3.12
+architecture_plane: prod|gamma   # ENC-TSK-Q19 FR-1: see envs/architecture.yaml,
+                                  # the ONE declaration architecture/runtime derive from
 stack_name: string
 deploy_role_arn: arn
 artifact_bucket: string
@@ -41,10 +41,14 @@ environment: string    # GitHub environment name (v3-prod, v4-prod, etc.)
 
 ## Invariants
 
-- `architecture == arm64` MUST pair with `runtime == python3.12` and
-  `runner_label == ubuntu-24.04-arm`.
-- `architecture == x86_64` MUST pair with `runtime == python3.11` and
-  `runner_label == ubuntu-latest`.
+- `architecture_plane` MUST be a key declared in `envs/architecture.yaml`'s
+  `planes:` block (`prod` or `gamma`) and MUST match that file's `env_plane`
+  mapping for this manifest's `env_name` (ENC-TSK-Q19 FR-1). Every plane
+  currently declares `arch: arm64`, `runtime: python3.12`,
+  `runner: ubuntu-24.04-arm` -- `envs/architecture.yaml` is the single place
+  that pairing is asserted; this file no longer repeats it.
+- `runner_label` MUST equal the `runner` declared for this manifest's plane
+  in `envs/architecture.yaml` (currently `ubuntu-24.04-arm` for every plane).
 - `deploy_role_arn` MUST match the OIDC trust policy scope for `environment`
   (see `infrastructure/iam/github-actions-*-prod-deploy-role-trust-policy.json`).
 

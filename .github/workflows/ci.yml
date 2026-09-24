@@ -75,6 +75,22 @@ jobs:
           python3 tools/verify_lambda_arch_parity.py \
             --exceptions-base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
 
+      - name: Manifest / declaration parity (ENC-TSK-Q19 FR-3)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 tools/verify_lambda_arch_parity.py --manifest-parity-only
+
+      - name: Architecture literal lint (ENC-TSK-Q19 FR-1)
+        run: |
+          set -euo pipefail
+          python3 tools/lint_architecture_literals.py
+
+      - name: Gen2 package-arch gate self-test (ENC-TSK-Q19 FR-4)
+        run: |
+          set -euo pipefail
+          python3 tools/ci_selftest_package_arch_gate.py
+
       - name: Test Lambda package architecture parity guard (ENC-TSK-E19)
         run: |
           set -euo pipefail

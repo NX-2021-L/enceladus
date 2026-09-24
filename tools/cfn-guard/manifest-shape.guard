@@ -5,8 +5,7 @@
 # The manifest schema is owned by this rule file; any change to required fields
 # MUST land here first (with a CODEOWNERS review per /.github/CODEOWNERS Phase 0).
 
-let architecture_allowed = [ "x86_64", "arm64" ]
-let runtime_allowed = [ "python3.11", "python3.12" ]
+let architecture_plane_allowed = [ "prod", "gamma" ]
 let canary_allowed = [
     "Linear10PercentEvery1Minute",
     "Linear10PercentEvery2Minutes",
@@ -18,15 +17,16 @@ let canary_allowed = [
     "Canary10Percent30Minutes",
     "AllAtOnce"
 ]
-let runner_label_allowed = [ "ubuntu-latest", "ubuntu-24.04-arm" ]
+# ENC-TSK-Q19 FR-1: every plane in envs/architecture.yaml declares
+# runner: ubuntu-24.04-arm today, so this is pinned rather than enumerated;
+# a second runner value returns when a plane's declared runner diverges.
+let runner_label_required = "ubuntu-24.04-arm"
 
 rule manifest_required_fields {
     env_name exists
         <<ENC-FTR-090 AC-7: manifest missing required env_name>>
-    architecture exists
-        <<ENC-FTR-090 AC-7: manifest missing required architecture>>
-    runtime exists
-        <<ENC-FTR-090 AC-7: manifest missing required runtime>>
+    architecture_plane exists
+        <<ENC-TSK-Q19 FR-1: manifest missing required architecture_plane>>
     stack_name exists
         <<ENC-FTR-090 AC-7: manifest missing required stack_name>>
     deploy_role_arn exists
@@ -46,35 +46,20 @@ rule manifest_required_fields {
 }
 
 rule manifest_field_values {
-    architecture in %architecture_allowed
-        <<ENC-FTR-090 AC-7: architecture must be one of [x86_64, arm64]>>
-    runtime in %runtime_allowed
-        <<ENC-FTR-090 AC-7: runtime must be one of [python3.11, python3.12]>>
+    # ENC-TSK-Q19 FR-1: architecture/runtime are no longer per-manifest
+    # literals -- envs/architecture.yaml is the ONE declaration they derive
+    # from (tools/arch_declaration.py; cross-validated against it by
+    # tools/verify_lambda_arch_parity.py's declaration check). This guard
+    # only owns the manifest's own shape: which plane it points at, and that
+    # its runner_label agrees with that plane's declared runner.
+    architecture_plane in %architecture_plane_allowed
+        <<ENC-TSK-Q19 FR-1: architecture_plane must be one of [prod, gamma]>>
     canary_preference in %canary_allowed
         <<ENC-FTR-090 AC-7: canary_preference not in SAM DeploymentPreference enum>>
-    runner_label in %runner_label_allowed
-        <<ENC-FTR-090 AC-7: runner_label must be ubuntu-latest (x86_64) or ubuntu-24.04-arm (arm64)>>
+    runner_label == %runner_label_required
+        <<ENC-TSK-Q19 FR-1: runner_label must be ubuntu-24.04-arm (see envs/architecture.yaml)>>
     deploy_role_arn == /^arn:aws:iam::[0-9]{12}:role\/.+$/
         <<ENC-FTR-090 AC-7: deploy_role_arn must be a valid IAM role ARN>>
-}
-
-rule manifest_architecture_runtime_runner_consistency {
-    # Enforces the ENC-FTR-090 matrix invariant: x86_64<->py3.11<->ubuntu-latest
-    # and arm64<->py3.12<->ubuntu-24.04-arm. Any cross-pairing is a matrix misroute
-    # that produces a bit-incompatible artifact for the target Lambda arch
-    # (ENC-ISS-213 aarch64-abi3 wheel class).
-    when architecture == "x86_64" {
-        runtime == "python3.11"
-            <<ENC-FTR-090 AC-7: x86_64 manifest must use runtime python3.11>>
-        runner_label == "ubuntu-latest"
-            <<ENC-FTR-090 AC-7: x86_64 manifest must use runner_label ubuntu-latest>>
-    }
-    when architecture == "arm64" {
-        runtime == "python3.12"
-            <<ENC-FTR-090 AC-7: arm64 manifest must use runtime python3.12>>
-        runner_label == "ubuntu-24.04-arm"
-            <<ENC-FTR-090 AC-7: arm64 manifest must use runner_label ubuntu-24.04-arm>>
-    }
 }
 
 # ENC-FTR-090 / ENC-TSK-F59 Phase 1 extension \u2014 artifact promotion schema.

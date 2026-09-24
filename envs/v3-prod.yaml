@@ -8,8 +8,10 @@
 # This manifest is the canonical state declaration for v3-prod post-cutover.
 
 env_name: v3-prod
-architecture: arm64
-runtime: python3.12
+# ENC-TSK-Q19 FR-1: architecture/runtime are no longer declared per-env.
+# See envs/architecture.yaml (the ONE declaration) -- this env resolves to
+# the "prod" plane there.
+architecture_plane: prod
 
 stack_name: enceladus-compute
 deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V3Prod-DeployRole
