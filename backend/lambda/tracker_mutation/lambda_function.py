@@ -2912,6 +2912,125 @@ _LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
 # page_truncated: true) instead of silently truncating with no way back in.
 
 
+# ENC-TSK-Q14 (O2.1) -- census mode (`mode=census`) budgets, D3. Bounded
+# synchronous walk: no async materialized census in v1. Either bound trips
+# -> count_truncated: true, exhausted: false. Env-overridable so a prod
+# incident can widen/narrow the budget without a redeploy.
+CENSUS_MAX_RAW_PAGES = int(os.environ.get("CENSUS_MAX_RAW_PAGES", "50"))
+CENSUS_WALL_CLOCK_MS = int(os.environ.get("CENSUS_WALL_CLOCK_MS", "6000"))
+_CENSUS_RAW_PAGE_LIMIT = 200  # D3: raw Query() Limit per page (max page_size).
+
+
+def _census_walk(project_id: str, record_type: str = "", status_filter: str = "",
+                  max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                  clock=None) -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.1): bounded raw walk over every matching record.
+
+    Reuses the O1 (_handle_list_records) branch selection (base table vs
+    project-type-index GSI, D6) and loop shape, but always walks to
+    exhaustion or a budget (D3) instead of stopping at one handler page --
+    this is the count/anchor source for census mode, not a paginated list.
+
+    `ProjectionExpression` trims each item to record_id, record_type,
+    status, title, updated_at (O2.1) -- census never needs the full record.
+    Counter rows (record_id starting with `_TRACKER_COUNTER_PREFIX`, the
+    same sentinel `_query_all_project_tasks` guards against) are dropped
+    from `rows` as they stream in, same as `_handle_list_records` drops
+    record_type == "counter" (ENC-TSK-Q13) -- counters are bookkeeping
+    rows, never census subjects.
+
+    Returns {rows, exhausted, truncated_reason, branch}. `exhausted` is
+    True iff the FINAL DynamoDB call had no LastEvaluatedKey -- the only
+    proof the walk covered everything. `truncated_reason` is "pages",
+    "time", or None (exhausted). Budget checks happen AFTER each raw page
+    is fetched and its rows folded in (mirroring the O1 loop): a walk
+    always makes at least one raw call, and `rows` always reflects exactly
+    what was walked before the tripped bound, never a partial page.
+    """
+    ddb = _get_ddb()
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+    clock = clock or time.monotonic
+    started = clock()
+
+    if record_type and record_type in _RECORD_TYPES:
+        # GSI branch (D6): order is left unspecified -- no GSI change, no
+        # forced base-table walk.
+        branch = "gsi"
+        kwargs: Dict[str, Any] = {
+            "TableName": DYNAMODB_TABLE,
+            "IndexName": "project-type-index",
+            "KeyConditionExpression": "project_id = :pid AND record_type = :rtype",
+            "ExpressionAttributeValues": {
+                ":pid": _ser_s(project_id),
+                ":rtype": _ser_s(record_type),
+            },
+            "ProjectionExpression": "record_id, record_type, #st, title, updated_at",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        if status_filter:
+            kwargs["FilterExpression"] = "#st = :st"
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+    else:
+        # Base-table branch (D6): record_id ascending -- order="record_id_asc".
+        branch = "base"
+        kwargs = {
+            "TableName": DYNAMODB_TABLE,
+            "KeyConditionExpression": "project_id = :pid",
+            "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
+            "ProjectionExpression": "record_id, record_type, #st, title, updated_at",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        filter_parts = []
+        if status_filter:
+            filter_parts.append("#st = :st")
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        if record_type:
+            filter_parts.append("record_type = :rtype")
+            kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
+
+    rows: List[Dict[str, Any]] = []
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        for raw in resp.get("Items", []):
+            item = _deser_item(raw)
+            rid = item.get("record_id", "")
+            if isinstance(rid, str) and rid.startswith(_TRACKER_COUNTER_PREFIX):
+                continue
+            rows.append(item)
+
+        if not last_evaluated_key:
+            exhausted = True  # proof: DynamoDB walk exhausted
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"  # unproven -- wall-clock budget hit
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"  # unproven -- raw-page budget hit
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {
+        "rows": rows,
+        "exhausted": exhausted,
+        "truncated_reason": truncated_reason,
+        "branch": branch,
+    }
+
+
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     """GET /{project} — list records with optional type/status filters.
 
