@@ -3749,6 +3749,15 @@ async def list_tools() -> list[Tool]:
                             "session-init reads and reserve for callers that need an exact count."
                         ),
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["census"],
+                        "description": (
+                            "Set to 'census' to bypass the normal records page entirely and return the "
+                            "raw route's census payload (count/pages/as_of/by_type/...) verbatim under "
+                            "'result'. Mutually exclusive with the records/total list contract."
+                        ),
+                    },
                 },
                 "required": ["project_id"],
             },
@@ -6113,6 +6122,7 @@ async def _tracker_list(args: dict) -> list[TextContent]:
     page_size = max(1, min(int(args.get("page_size", 25)), 100))
     cursor = args.get("cursor")
     exhaust = bool(args.get("exhaust", False))
+    mode = args.get("mode")
 
     def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
         params: Dict[str, Any] = {"page_size": page_size}
@@ -6138,6 +6148,28 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         if record_type:
             params["type"] = record_type
         return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    def _fetch_census(page_cursor: Optional[str] = None) -> Dict[str, Any]:
+        # ENC-TSK-Q15 (O3.1): mode=census is forwarded to the raw route
+        # unchanged, with the same clamped page_size so the returned page
+        # anchors line up with this caller's paging. The escalation reroute
+        # above is deliberately NOT applied here -- the backend census walk
+        # covers escalations itself (O2.3) via its own second bounded walk,
+        # so a census request must always hit the base project route.
+        params: Dict[str, Any] = {"page_size": page_size, "mode": "census"}
+        if status_filter:
+            params["status"] = status_filter
+        if record_type:
+            params["type"] = record_type
+        if page_cursor:
+            params["next_cursor"] = page_cursor
+        return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    if mode == "census":
+        # Pass-through: the raw route owns the whole census payload shape
+        # (count/pages/as_of/by_type/...). Return it verbatim -- never
+        # reshape it into the records/count/total list contract below.
+        return _result_text(_fetch_census(cursor))
 
     # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
     # only 'count' (this page) and 'next_cursor' (more data outstanding or not).

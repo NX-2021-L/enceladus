@@ -181,6 +181,48 @@ def test_orphan_count_also_marked_as_lower_bound_when_capped():
     assert result["orphan_tasks_is_lower_bound"] is True
 
 
+def test_mode_census_forwards_verbatim_and_bypasses_escalation_reroute():
+    """ENC-TSK-Q15 (O3.1): mode=census forwards unchanged with the clamped
+    page_size, returns the census payload verbatim under 'result' with no
+    'records' key, and never invokes the escalation reroute even when
+    record_type=escalation is passed."""
+    captured = []
+
+    def fake_request(method, path, payload=None, query=None):
+        captured.append((method, path, dict(query) if query else {}))
+        return {
+            "count": 12,
+            "count_truncated": False,
+            "exhausted": True,
+            "pages": [],
+            "page_size": query["page_size"],
+            "as_of": {"kind": "wall_clock+max_updated_at", "started_at": "t0", "max_updated_at": "t0"},
+            "order": "unspecified",
+            "by_type": {"task": 12},
+        }
+
+    with patch.object(server, "_tracker_api_request", side_effect=fake_request):
+        result = _call_tracker_list(
+            {
+                "project_id": "enceladus",
+                "record_type": "escalation",
+                "page_size": 500,
+                "mode": "census",
+            }
+        )
+
+    assert len(captured) == 1
+    method, path, query = captured[0]
+    assert method == "GET"
+    assert path == "/enceladus"
+    assert query["mode"] == "census"
+    assert query["page_size"] == 100  # clamped 1..100
+    assert query["type"] == "escalation"
+    assert "records" not in result
+    assert result["count"] == 12
+    assert result["by_type"] == {"task": 12}
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):
