@@ -372,6 +372,73 @@ class PageModeTests(unittest.TestCase):
         self.assertTrue(digest["page_truncated"])
         self.assertEqual(digest["next_cursor"], "CURSOR-2")
 
+    def test_single_page_request_sends_next_cursor_param(self):
+        """The AC-mandated request contract for --page: the outgoing GET
+        must carry next_cursor=<cursor> -- a regression that dropped
+        next_cursor from the query dict would still pass every digest/
+        side-file assertion in this class."""
+        page_body = {"success": True, "records": _records(["ENC-TSK-1"]), "count": 1, "page_size": 50}
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, _digest, mock_urlopen, _stderr = _run_main(
+                ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--page", "CURSOR-1"],
+                [_ok(page_body)],
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_urlopen.call_count, 2)  # health + the one page fetch
+            req = mock_urlopen.call_args_list[1][0][0]
+            parts = urllib.parse.urlsplit(req.full_url)
+            self.assertEqual(parts.path, "/api/v1/tracker/enceladus")
+            query = urllib.parse.parse_qs(parts.query)
+            self.assertEqual(query["next_cursor"], ["CURSOR-1"])
+            self.assertEqual(query["type"], ["task"])
+            self.assertEqual(query["status"], ["open"])
+            self.assertNotIn("mode", query)
+
+    def test_page_truncated_prefers_server_field_false_over_next_cursor_heuristic(self):
+        """The raw list route contract (O4 contract facts) documents the
+        server sending its own page_truncated field. A server that echoes
+        a next_cursor for idempotent-retry purposes while reporting
+        page_truncated: false must not have that overridden by the
+        next_cursor-presence heuristic."""
+        page_body = {
+            "success": True,
+            "records": _records(["ENC-TSK-1"]),
+            "count": 1,
+            "page_size": 50,
+            "next_cursor": "CURSOR-2",
+            "page_truncated": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--page", "CURSOR-1"],
+                [_ok(page_body)],
+            )
+        self.assertEqual(exit_code, 0)
+        # "present only when True" convention: a False server value is
+        # omitted from the digest, same as never having been truncated.
+        self.assertNotIn("page_truncated", digest)
+        self.assertEqual(digest["next_cursor"], "CURSOR-2")
+
+    def test_page_truncated_true_from_server_field_without_next_cursor(self):
+        """A server-reported page_truncated: true must surface even when
+        no next_cursor accompanies it (a truncation reason not tied to a
+        continuation cursor) -- the heuristic alone would report None."""
+        page_body = {
+            "success": True,
+            "records": _records(["ENC-TSK-1"]),
+            "count": 1,
+            "page_size": 50,
+            "page_truncated": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--page", "CURSOR-1"],
+                [_ok(page_body)],
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(digest["page_truncated"])
+        self.assertNotIn("next_cursor", digest)
+
     def test_page_start_cursor_is_none(self):
         # The first census page anchor has cursor=None -- --page must accept
         # that as "start of the walk" and still produce a stable file name.
@@ -442,6 +509,57 @@ class PagesLoopTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(mock_urlopen.call_count, 4)
             self.assertNotIn("lower_bound", digest)
+
+    def test_pages_loop_requests_send_the_page_boundary_cursors(self):
+        """The AC-mandated request contract for --pages N: each outgoing
+        GET must carry next_cursor=<that page-boundary cursor from the
+        census side file>, in order -- a regression that dropped
+        next_cursor from the shared _fetch_raw_page query dict would
+        still pass every digest/side-file assertion in this class."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_census_file(tmp)  # cursors: None, CURSOR-1, CURSOR-2
+            page0 = {"success": True, "records": _records(["ENC-TSK-1"]), "count": 1, "page_size": 50}
+            page1 = {"success": True, "records": _records(["ENC-TSK-2"]), "count": 1, "page_size": 50}
+            exit_code, _digest, mock_urlopen, _stderr = _run_main(
+                ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--pages", "2"],
+                [_ok(page0), _ok(page1)],
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_urlopen.call_count, 3)  # health + 2 page fetches
+            page_requests = mock_urlopen.call_args_list[1:]
+            expected_cursors = [None, "CURSOR-1"]
+            for expected_cursor, call in zip(expected_cursors, page_requests):
+                req = call[0][0]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+                self.assertNotIn("mode", query)
+                if expected_cursor is None:
+                    self.assertNotIn("next_cursor", query)
+                else:
+                    self.assertEqual(query["next_cursor"], [expected_cursor])
+
+    def test_pages_loop_page_truncated_prefers_server_field(self):
+        """Same server-field precedence as run_single_page (O4 contract
+        facts), applied to the last page fetched by a --pages N loop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_census_file(tmp, pages=[{"cursor": None, "n": 1}, {"cursor": "CURSOR-1", "n": 1}])
+            page0 = {"success": True, "records": _records(["ENC-TSK-1"]), "count": 1, "page_size": 50}
+            page1 = {
+                "success": True,
+                "records": _records(["ENC-TSK-2"]),
+                "count": 1,
+                "page_size": 50,
+                "next_cursor": "CURSOR-2",
+                "page_truncated": False,
+            }
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
+                ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--pages", "2"],
+                [_ok(page0), _ok(page1)],
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_urlopen.call_count, 3)
+            self.assertTrue(digest["ok"])
+            self.assertNotIn("page_truncated", digest)
+            self.assertEqual(digest["next_cursor"], "CURSOR-2")
 
     def test_pages_with_no_matching_census_file_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:

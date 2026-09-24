@@ -341,10 +341,18 @@ def run_single_page(client: InternalClient, key_sent: bool, args: argparse.Names
         ids = _extract_ids(body.get("records"))
         n = len(ids)
         next_cursor = body.get("next_cursor") or None
-        # A next_cursor means the server has more rows for this walk than
-        # this one page returned -- from this single --page call's point of
-        # view that page is "truncated" relative to the full remaining set.
-        page_truncated = True if next_cursor else None
+        # Prefer the server's own page_truncated field (raw list route
+        # contract, U1) -- it is the authoritative signal and can diverge
+        # from next_cursor presence (e.g. a final page that still echoes a
+        # cursor for idempotent-retry purposes, or a truncation reason not
+        # tied to a next_cursor). Only fall back to the next_cursor
+        # heuristic when the server omits the field (pre-U1 servers).
+        # "present only when True" convention preserved either way.
+        server_page_truncated = body.get("page_truncated")
+        if server_page_truncated is not None:
+            page_truncated = True if server_page_truncated else None
+        else:
+            page_truncated = True if next_cursor else None
         out_path = page_ids_file_path(args.lists_dir, args.project, args.page)
         _write_ids_file(out_path, ids)
 
@@ -401,6 +409,7 @@ def run_pages_loop(client: InternalClient, key_sent: bool, args: argparse.Namesp
     all_ids: List[str] = []
     last_status = 0
     last_next_cursor: Optional[str] = None
+    last_server_page_truncated: Any = None
     aggregate_ok = True
     anomalies: List[str] = []
     posture = "unknown"
@@ -421,9 +430,15 @@ def run_pages_loop(client: InternalClient, key_sent: bool, args: argparse.Namesp
             break
         all_ids.extend(_extract_ids(body.get("records")))
         last_next_cursor = body.get("next_cursor") or None
+        last_server_page_truncated = body.get("page_truncated")
 
     lower_bound = True if (aggregate_ok and len(to_fetch) < len(all_pages)) else None
-    page_truncated = True if last_next_cursor else None
+    # Prefer the last fetched page's own server-reported page_truncated
+    # field over the next_cursor heuristic -- see run_single_page.
+    if last_server_page_truncated is not None:
+        page_truncated = True if last_server_page_truncated else None
+    else:
+        page_truncated = True if last_next_cursor else None
 
     if aggregate_ok:
         out_path = pages_ids_file_path(args.lists_dir, args.project, args.type, args.status, args.pages)

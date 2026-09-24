@@ -113,8 +113,12 @@ run, next_cursor is the raw list route's own opaque continuation cursor
 when True: lower_bound means a ``--pages N`` run fetched fewer pages than
 its census side file actually has, so its accumulated id count is a
 lower bound, not a total; page_truncated means the raw page(s) just
-fetched carried a next_cursor -- more rows remain beyond what was
-written to the local ids file.
+fetched left more rows unread than were written to the local ids file.
+page_truncated is read from the raw list route's own ``page_truncated``
+response field when the server reports one (the authoritative signal,
+since it can diverge from next_cursor presence); only a server that
+omits the field (pre-U1) falls back to the next_cursor-presence
+heuristic.
 """
 
 from __future__ import annotations
