@@ -35,10 +35,10 @@ class TestListRecordsPagination(unittest.TestCase):
         with mock.patch.object(self.lf, "_get_ddb", return_value=table):
             return self.lf._handle_list_records("proj", query_params)
 
-    # -- test_list_mode_a: raw pages accumulate past page_size (50) over
+    # -- test_list_mode_b: raw pages accumulate past page_size (50) over
     # 70 total matches -> two handler-level pages totalling 70, no
     # duplicates, no gaps. -----------------------------------------------
-    def test_list_mode_a(self):
+    def test_list_mode_b(self):
         items = [_raw_item(n) for n in range(1, 71)]
         table = PagingTable(items, raw_page_size=50)
 
@@ -61,12 +61,12 @@ class TestListRecordsPagination(unittest.TestCase):
         self.assertEqual(len(set(all_ids)), 70, "no duplicates across pages")
         self.assertEqual(set(all_ids), {f"TSK-{n:03d}" for n in range(1, 71)}, "no gaps")
 
-    # -- test_list_mode_b: seed 10*page_size non-matching rows before one
+    # -- test_list_mode_a: seed 10*page_size non-matching rows before one
     # matching row -> the matching row is reachable by following cursors.
     # (PagingTable applies the status FilterExpression after Limit, so
     # every one of the first 10 raw pages evaluates 50 closed rows and
     # returns 0 Items while still advancing LastEvaluatedKey.) ----------
-    def test_list_mode_b(self):
+    def test_list_mode_a(self):
         items = [_raw_item(n, status="closed") for n in range(1, 501)] + [
             _raw_item(501, status="open")
         ]
