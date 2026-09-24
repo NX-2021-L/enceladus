@@ -110,6 +110,19 @@ on:
         type: boolean
         required: false
         default: true
+      # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the plan job's change-set replacement
+      # gate (tools/cfn_changeset_replacement_gate.sh) fails closed on any Data or
+      # Compute change-set change whose Replacement is True/Conditional, or whose
+      # Action is Remove -- a template edit that would replace or delete a live
+      # resource must be visible and deliberate, never a side effect of an
+      # unrelated change riding through plan unnoticed. Defaults FALSE, same
+      # posture as allow_apply above: only an explicit, logged affirmative act
+      # waves a replacing/removing change-set through.
+      acknowledge_replacements:
+        description: "io-only: allow a change set that replaces or removes resources; record the justification in the run"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -393,6 +406,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): fail-closed gate -- a Data
+      # change-set that would REPLACE or REMOVE a live resource must be
+      # visible and deliberate, never a silent side effect of an unrelated
+      # template edit riding through plan. Skipped entirely when the step
+      # above already exited on "No changes to deploy" (has_changes=false).
+      - name: Data change-set replacement gate (ENC-TSK-Q22)
+        if: steps.data_changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          bash tools/cfn_changeset_replacement_gate.sh \
+            "${{ steps.params.outputs.data_stack_name }}" \
+            "${{ steps.data_changeset.outputs.changeset_arn }}" \
+            "${{ github.event.inputs.acknowledge_replacements == 'true' }}"
+
       - name: Create Compute stack change-set (02-compute, no execute)
         id: compute_changeset
         run: |
@@ -526,6 +553,19 @@ jobs:
               --output table
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): same fail-closed gate as the
+      # Data change-set above, for the Compute change-set. Skipped entirely
+      # when the step above already exited on "No changes to deploy"
+      # (has_changes=false).
+      - name: Compute change-set replacement gate (ENC-TSK-Q22)
+        if: steps.compute_changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          bash tools/cfn_changeset_replacement_gate.sh \
+            "${{ steps.params.outputs.stack_name }}" \
+            "${{ steps.compute_changeset.outputs.changeset_arn }}" \
+            "${{ github.event.inputs.acknowledge_replacements == 'true' }}"
 
   apply:
     name: Apply Data + Compute change-sets
