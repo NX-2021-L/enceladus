@@ -188,6 +188,39 @@ def test_orphan_count_also_marked_as_lower_bound_when_capped():
     assert result["orphan_tasks_is_lower_bound"] is True
 
 
+def test_exhaust_orphan_tasks_is_lower_bound_when_page_one_is_partial():
+    """Review-fix regression (ENC-TSK-Q15-0C): under exhaust=true, orphan_tasks
+    is always computed from only first_page_items (page 1), never a full
+    project walk. If the census total happens to be EXACT (count_truncated=
+    False) while page 1's own fetch still leaves a next_cursor outstanding,
+    'total' correctly carries no lower-bound flag (the census covered the
+    whole project) but 'orphan_tasks' must still be marked as a lower bound,
+    because only page 1's rows were ever scanned for orphan status. Failing
+    to do so would silently under-report the orphan count as if exact."""
+    page = [_task(i) for i in range(5)]
+    page[0].pop("parent")  # one orphan visible on page 1
+
+    def fake_request(method, path, payload=None, query=None):
+        if query.get("mode") == "census":
+            # Exact census total: the WHOLE project was walked and counted,
+            # so count_truncated=False -- but that says nothing about
+            # whether page 1 alone (fetched separately below) covers every
+            # row, since page_size can be far smaller than the project.
+            return {"count": 437, "count_truncated": False, "pages": []}
+        # Page 1's own fetch still has more rows outstanding.
+        return {"records": page, "count": len(page), "next_cursor": "page-2-and-beyond"}
+
+    with patch.object(server, "_tracker_api_request", side_effect=fake_request):
+        result = _call_tracker_list(
+            {"project_id": "enceladus", "record_type": "task", "status": "open", "page_size": 5, "exhaust": True}
+        )
+
+    assert result["total"] == 437
+    assert "total_is_lower_bound" not in result  # census itself was exact
+    assert result["orphan_tasks"] == 1
+    assert result["orphan_tasks_is_lower_bound"] is True  # but orphan scan only saw page 1
+
+
 def test_mode_census_forwards_verbatim_and_bypasses_escalation_reroute():
     """ENC-TSK-Q15 (O3.1): mode=census forwards unchanged with the clamped
     page_size, returns the census payload verbatim under 'result' with no

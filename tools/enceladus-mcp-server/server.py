@@ -6203,6 +6203,18 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         # outstanding after whatever fetching this call actually did.
         total_is_lower_bound = bool(next_cursor)
 
+    # orphan_tasks/orphan_count are ALWAYS computed from only first_page_items
+    # -- even under exhaust=true, which (ENC-TSK-Q15 O3.3) no longer walks
+    # every page and instead gets 'total' from the server-side census. A
+    # census can be exact (count_truncated=False) while the project still has
+    # more rows than a single page, in which case next_cursor is non-empty
+    # here even though total_is_lower_bound (driven solely by the census) is
+    # False. orphan_tasks must key off whether THIS page fetch actually saw
+    # every row, never solely off the census-derived total_is_lower_bound,
+    # or it silently under-reports as if exact. See surrounding comment:
+    # honest floor, never a silently-wrong measurement.
+    orphan_tasks_is_lower_bound = total_is_lower_bound or bool(next_cursor)
+
     result: Dict[str, Any] = {"records": page_summary, "count": len(page_summary), "total": total}
     if total_is_lower_bound:
         result["total_is_lower_bound"] = True
@@ -6216,7 +6228,7 @@ async def _tracker_list(args: dict) -> list[TextContent]:
             f"{orphan_count} task(s) have no parent or feature lineage. "
             "Consider linking them to a feature for traceability."
         )
-        if total_is_lower_bound:
+        if orphan_tasks_is_lower_bound:
             result["orphan_tasks_is_lower_bound"] = True
     return _result_text(result)
 
