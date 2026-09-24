@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -16,10 +16,13 @@ from config import PROJECTS_TABLE, TRACKER_TABLE, _SEGMENT_TO_TYPE, _TYPE_TO_SEG
 from serialization import _deserialize, _serialize
 from aws_clients import _get_ddb
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "ProjectMeta",
     "_ENCELADUS_MCP_SERVER_MODULE",
     "_MCP_RESOURCE_CACHE",
+    "_PREFIX_COLLISIONS",
     "_PROJECT_CACHE_TTL",
     "_build_record_id",
     "_key_for_record_id",
@@ -39,6 +42,15 @@ _PROJECT_CACHE_TTL = 300.0
 _ENCELADUS_MCP_SERVER_MODULE = None
 _MCP_RESOURCE_CACHE: Dict[str, str] = {}
 _TRACKER_COUNTER_PREFIX = "counter#"
+# Populated on every _key_for_record_id() prefix resolution with any
+# prefix that is simultaneously one project's MINT `prefix` and another
+# project's `alias_prefixes` entry. MINT always wins the resolution
+# (see _key_for_record_id), but the collision is kept here -- in addition
+# to a logger.warning -- so it stays programmatically detectable instead
+# of silently resolving (ENC-TSK-O47; mirrors tools/enceladus-mcp-server/
+# server.py::_PREFIX_COLLISIONS; guards against re-creating the
+# ENC-ISS-538 collision class inside this same fix).
+_PREFIX_COLLISIONS: Dict[str, Dict[str, str]] = {}
 
 
 @dataclass
@@ -261,6 +273,56 @@ def _build_record_id(prefix: str, record_type: str, seq: int) -> str:
     return f"{prefix}-{_TYPE_TO_SEGMENT[record_type]}-{_format_sequence(seq)}"
 
 
+def _normalize_alias_prefixes(raw_aliases: Any) -> List[str]:
+    """Normalize a project row's alias_prefixes value the same way `prefix`
+    is normalized (.strip().upper()); skip empty/malformed entries
+    (ENC-TSK-O47)."""
+    if not isinstance(raw_aliases, list):
+        return []
+    normalized: List[str] = []
+    for alias in raw_aliases:
+        alias_pfx = str(alias or "").strip().upper()
+        if alias_pfx:
+            normalized.append(alias_pfx)
+    return normalized
+
+
+def _record_prefix_collision(prefix: str, *, mint_project_id: str, alias_project_id: str) -> None:
+    """Surface a MINT-vs-alias prefix collision (ENC-TSK-O47): logged AND
+    recorded in _PREFIX_COLLISIONS so it is never resolved silently (guards
+    against re-creating the ENC-ISS-538 collision class inside this fix)."""
+    _PREFIX_COLLISIONS[prefix] = {"mint_project_id": mint_project_id, "alias_project_id": alias_project_id}
+    logger.warning(
+        "[PREFIX-COLLISION] prefix %r is project %r's MINT prefix but also project %r's "
+        "alias_prefixes entry; MINT wins (ENC-ISS-538 collision class)",
+        prefix,
+        mint_project_id,
+        alias_project_id,
+    )
+
+
+def _resolve_prefix_from_cache(prefix: str) -> Optional[str]:
+    """Resolve prefix -> project_id from the in-memory _project_cache.
+
+    Each cache entry may carry both a MINT `prefix` and a list of
+    `alias_prefixes` (ENC-TSK-O47). If `prefix` matches one project's MINT
+    prefix AND a different project's alias, the MINT owner always wins,
+    deterministically and independent of cache iteration order; the
+    collision is surfaced via _record_prefix_collision rather than resolved
+    silently.
+    """
+    mint_owner: Optional[str] = None
+    alias_owner: Optional[str] = None
+    for project_id, data in _project_cache.items():
+        if data.get("prefix") == prefix:
+            mint_owner = project_id
+        if prefix in (data.get("alias_prefixes") or ()):
+            alias_owner = project_id
+    if mint_owner and alias_owner and mint_owner != alias_owner:
+        _record_prefix_collision(prefix, mint_project_id=mint_owner, alias_project_id=alias_owner)
+    return mint_owner or alias_owner
+
+
 def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
     parts = record_id.upper().split("-")
     if len(parts) < 3 or len(parts) > 4:
@@ -271,20 +333,28 @@ def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
     if not record_type:
         raise ValueError(f"Unsupported record ID segment '{segment}'")
 
-    # Resolve project by prefix from cache (or table scan fallback).
-    for project_id, data in _project_cache.items():
-        if data.get("prefix") == prefix:
-            return project_id, record_type, f"{record_type}#{record_id.upper()}"
+    # Resolve project by prefix (MINT `prefix` or `alias_prefixes`, ENC-TSK-O47)
+    # from cache first.
+    cached_project_id = _resolve_prefix_from_cache(prefix)
+    if cached_project_id:
+        return cached_project_id, record_type, f"{record_type}#{record_id.upper()}"
 
-    # Slow fallback if prefix cache does not include this project yet.
+    # Slow fallback if prefix cache does not include this project yet. Must
+    # project alias_prefixes too (ENC-TSK-O47) -- a resolver that reads a
+    # field the Scan never projects would silently never see it. Scans the
+    # full table (rather than short-circuiting on first prefix match) so a
+    # MINT-vs-alias collision can be detected across ALL rows before a
+    # winner is picked, regardless of table iteration/pagination order.
     ddb = _get_ddb()
-    scan = ddb.scan(TableName=PROJECTS_TABLE, ProjectionExpression="project_id, #pfx", ExpressionAttributeNames={"#pfx": "prefix"})
+    projection = "project_id, #pfx, alias_prefixes"
+    names = {"#pfx": "prefix"}
+    scan = ddb.scan(TableName=PROJECTS_TABLE, ProjectionExpression=projection, ExpressionAttributeNames=names)
     items = scan.get("Items", [])
     while scan.get("LastEvaluatedKey"):
         scan = ddb.scan(
             TableName=PROJECTS_TABLE,
-            ProjectionExpression="project_id, #pfx",
-            ExpressionAttributeNames={"#pfx": "prefix"},
+            ProjectionExpression=projection,
+            ExpressionAttributeNames=names,
             ExclusiveStartKey=scan["LastEvaluatedKey"],
         )
         items.extend(scan.get("Items", []))
@@ -293,10 +363,13 @@ def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
         row = _deserialize(raw)
         pid = row.get("project_id")
         pfx = str(row.get("prefix") or "").upper()
-        if pid and pfx:
-            _project_cache[pid] = {"prefix": pfx}
-        if pfx == prefix:
-            return pid, record_type, f"{record_type}#{record_id.upper()}"
+        aliases = _normalize_alias_prefixes(row.get("alias_prefixes"))
+        if pid:
+            _project_cache[pid] = {"prefix": pfx, "alias_prefixes": aliases}
+
+    resolved_project_id = _resolve_prefix_from_cache(prefix)
+    if resolved_project_id:
+        return resolved_project_id, record_type, f"{record_type}#{record_id.upper()}"
 
     raise ValueError(f"Unknown project prefix in record ID '{record_id}'")
 

@@ -334,6 +334,41 @@ class GetDocumentTests(unittest.TestCase):
     @patch.object(document_api, "_authenticate",
                   return_value=({"sub": "user1"}, None))
     @patch.object(document_api, "_get_ddb")
+    @patch.object(document_api, "_get_content", return_value="# Hello World\n\nRaw markdown body.")
+    def test_get_existing_document_exposes_raw_markdown_content(self, _mock_content, mock_ddb, _mock_auth):
+        """ENC-TSK-H79 (ENC-FTR-051 precondition): the document detail GET
+        response already returns the raw markdown source — unrendered, as
+        stored in S3 — under both `document.content` and the legacy
+        top-level `content` field. This locks down that existing behavior so
+        a future change cannot silently regress the precondition for
+        on-demand markdown download (ENC-TSK-H80).
+        """
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "document_id": {"S": "DOC-TEST123"},
+                "title": {"S": "Test Document"},
+                "project_id": {"S": "devops"},
+                "status": {"S": "active"},
+                "created_at": {"S": "2026-01-01T00:00:00Z"},
+                "updated_at": {"S": "2026-01-01T00:00:00Z"},
+            }
+        }
+
+        event = _make_event(method="GET", path="/api/v1/documents/DOC-TEST123")
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        raw_markdown = "# Hello World\n\nRaw markdown body."
+        # Top-level legacy field (mobile/raw clients).
+        self.assertEqual(body["content"], raw_markdown)
+        # Structured envelope field (current PWA client).
+        self.assertEqual(body["document"]["content"], raw_markdown)
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    @patch.object(document_api, "_get_ddb")
     def test_get_nonexistent_document_returns_404(self, mock_ddb, _mock_auth):
         fake_ddb = MagicMock()
         mock_ddb.return_value = fake_ddb
@@ -382,6 +417,68 @@ class ListDocumentsTests(unittest.TestCase):
         resp = document_api.lambda_handler(event, None)
         # Should require either project= or document ID
         self.assertIn(resp["statusCode"], [400, 200])
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    @patch.object(document_api, "_get_ddb")
+    def test_list_skill_metadata_projection(self, mock_ddb, _mock_auth):
+        """ENC-TSK-L93: include_content=false returns compact skill metadata."""
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.scan.return_value = {
+            "Items": [
+                {
+                    "document_id": {"S": "DOC-SKILL-1"},
+                    "title": {"S": "Test Skill"},
+                    "description": {"S": "Short desc"},
+                    "project_id": {"S": "enceladus"},
+                    "document_subtype": {"S": "skill"},
+                    "updated_at": {"S": "2026-07-07T00:00:00Z"},
+                    "version": {"S": "1.0.0"},
+                    "full_description": {"S": "X" * 5000},
+                    "claude_description": {"S": "Y" * 500},
+                    "agentskills_manifest": {"S": json.dumps({"name": "test", "description": "d", "version": "2.1.0"})},
+                    "runtime_variants": {"S": json.dumps({"claude-code": {}, "cursor": {}})},
+                },
+            ],
+        }
+
+        # Default: full metadata preserved
+        event_full = _make_event(
+            method="GET",
+            path="/api/v1/documents",
+            query_params={"project": "enceladus", "document_subtype": "skill"},
+        )
+        resp_full = document_api.lambda_handler(event_full, None)
+        body_full = json.loads(resp_full["body"])
+        self.assertIn("full_description", body_full["documents"][0])
+
+        # Metadata-only projection
+        event_meta = _make_event(
+            method="GET",
+            path="/api/v1/documents",
+            query_params={"project": "enceladus", "document_subtype": "skill", "include_content": "false"},
+        )
+        resp_meta = document_api.lambda_handler(event_meta, None)
+        body_meta = json.loads(resp_meta["body"])
+        doc = body_meta["documents"][0]
+        self.assertEqual(set(doc.keys()), {
+            "document_id", "title", "description", "version",
+            "updated_at", "runtime_hint", "document_subtype",
+        })
+        self.assertEqual(doc["version"], "2.1.0")
+        self.assertEqual(doc["runtime_hint"], "claude-code,cursor")
+        self.assertNotIn("full_description", doc)
+
+        # content=false alias
+        event_alias = _make_event(
+            method="GET",
+            path="/api/v1/documents",
+            query_params={"project": "enceladus", "content": "false"},
+        )
+        resp_alias = document_api.lambda_handler(event_alias, None)
+        body_alias = json.loads(resp_alias["body"])
+        self.assertNotIn("full_description", body_alias["documents"][0])
 
 
 class SearchDocumentsTests(unittest.TestCase):
@@ -537,101 +634,6 @@ class GovernanceSyncPushTests(unittest.TestCase):
         resp = document_api.lambda_handler(event, None)
         mock_sync.assert_not_called()
         self.assertIn(resp["statusCode"], [200, 204])
-
-
-class DictionaryPropagationTests(unittest.TestCase):
-    """ENC-TSK-I63 / ENC-TSK-I62: governance_data_dictionary.json -> governance-policies DDB
-    propagation (discrete version + updated_at + dictionary_json blob) with drift pre-check."""
-
-    @staticmethod
-    def _dict_bytes(version, entities):
-        # Compact, like the live S3 object (no pretty-print bloat).
-        return json.dumps(
-            {"version": version, "entities": entities}, separators=(",", ":")
-        ).encode("utf-8")
-
-    def _ddb_item(self, version, entities):
-        return {
-            "Item": {
-                "policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID},
-                "version": {"S": version},
-                "updated_at": {"S": "2026-06-27T00:00:00Z"},
-                "dictionary_json": {
-                    "S": json.dumps(
-                        {"version": version, "entities": entities}, separators=(",", ":")
-                    )
-                },
-            }
-        }
-
-    @patch.object(document_api, "_get_ddb")
-    def test_propagates_version_bump_entities_unchanged(self, mock_ddb):
-        ddb = MagicMock()
-        ddb.get_item.return_value = self._ddb_item("2026-06-27.08", {"tracker.task": {"x": 1}})
-        mock_ddb.return_value = ddb
-        s3_body = self._dict_bytes("2026-06-27.09", {"tracker.task": {"x": 1}})
-
-        document_api._propagate_dictionary_to_governance_policies(s3_body)
-
-        ddb.update_item.assert_called_once()
-        kwargs = ddb.update_item.call_args.kwargs
-        # reserved-word alias for `version`
-        self.assertEqual(kwargs["ExpressionAttributeNames"], {"#v": "version"})
-        self.assertIn("#v = :ver", kwargs["UpdateExpression"])
-        self.assertEqual(kwargs["ExpressionAttributeValues"][":ver"]["S"], "2026-06-27.09")
-        # byte-identical raw S3 bytes are written -> inherently 400KB-safe (no round-trip bloat)
-        self.assertEqual(
-            kwargs["ExpressionAttributeValues"][":blob"]["S"], s3_body.decode("utf-8")
-        )
-        self.assertEqual(
-            kwargs["Key"], {"policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID}}
-        )
-
-    @patch.object(document_api, "_get_ddb")
-    def test_drift_aborts_when_entities_differ(self, mock_ddb):
-        ddb = MagicMock()
-        ddb.get_item.return_value = self._ddb_item("2026-06-27.08", {"tracker.task": {"x": 1}})
-        mock_ddb.return_value = ddb
-        # entities changed alongside the version bump -> must abort, never clobber
-        s3_body = self._dict_bytes("2026-06-27.09", {"tracker.task": {"x": 2}})
-
-        with self.assertRaises(RuntimeError) as ctx:
-            document_api._propagate_dictionary_to_governance_policies(s3_body)
-        self.assertIn("DRIFT", str(ctx.exception))
-        ddb.update_item.assert_not_called()
-
-    @patch.object(document_api, "_get_ddb")
-    def test_idempotent_when_already_in_lockstep(self, mock_ddb):
-        ddb = MagicMock()
-        body = self._dict_bytes("2026-06-27.08", {"tracker.task": {"x": 1}})
-        ddb.get_item.return_value = {
-            "Item": {
-                "policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID},
-                "version": {"S": "2026-06-27.08"},
-                "dictionary_json": {"S": body.decode("utf-8")},
-            }
-        }
-        mock_ddb.return_value = ddb
-
-        document_api._propagate_dictionary_to_governance_policies(body)
-        ddb.update_item.assert_not_called()
-
-    @patch.object(document_api, "_get_ddb")
-    def test_missing_record_raises(self, mock_ddb):
-        ddb = MagicMock()
-        ddb.get_item.return_value = {}  # no Item
-        mock_ddb.return_value = ddb
-        with self.assertRaises(RuntimeError):
-            document_api._propagate_dictionary_to_governance_policies(
-                self._dict_bytes("2026-06-27.09", {})
-            )
-        ddb.update_item.assert_not_called()
-
-    @patch.object(document_api, "_get_ddb")
-    def test_missing_version_raises(self, mock_ddb):
-        mock_ddb.return_value = MagicMock()
-        with self.assertRaises(ValueError):
-            document_api._propagate_dictionary_to_governance_policies(b'{"entities":{}}')
 
 
 if __name__ == "__main__":

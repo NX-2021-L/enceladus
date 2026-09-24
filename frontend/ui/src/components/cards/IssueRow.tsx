@@ -10,7 +10,7 @@ export function IssueRow({ issue }: { issue: Issue }) {
   return (
     <Link
       to={`/issues/${issue.issue_id}`}
-      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-750 active:bg-slate-700 transition-colors"
+      className="block bg-slate-800 rounded-lg px-4 py-3 border border-[color:var(--border-subtle)] hover:border-[color:var(--border-hover)] hover:bg-slate-750 active:bg-slate-700 transition-colors"
     >
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="flex-1 min-w-0">

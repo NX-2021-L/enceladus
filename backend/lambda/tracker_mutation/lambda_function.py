@@ -7,6 +7,7 @@ Routes (via API Gateway):
   GET    /api/v1/tracker/pending-updates                          — pending updates
   GET    /api/v1/tracker/{project}                                — list records
   GET    /api/v1/tracker/{project}/{type}/{id}                    — get record
+  GET    /api/v1/tracker/_/{type}/{id}                            — get record, project derived from the id (ENC-TSK-Q10)
   POST   /api/v1/tracker/{project}/{type}                         — create record
   PATCH  /api/v1/tracker/{project}/{type}/{id}                    — update field / PWA action
   POST   /api/v1/tracker/{project}/{type}/{id}/log                — append worklog
@@ -41,7 +42,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import urllib.parse
 import urllib.request
 from urllib.parse import unquote
@@ -59,6 +60,17 @@ except ImportError:  # layer :7 lacks appconfig_flags — fall back to a direct 
     def _appconfig_flag(name, *, env_fallback=None, default=False):
         raw = os.environ.get(env_fallback, "") if env_fallback else ""
         return raw.strip().lower() == "true" if raw != "" else bool(default)
+try:
+    from enceladus_shared.version_seq import allocate_version_seq, version_seq_attr, version_seq_update_clause
+
+    _VERSION_SEQ_AVAILABLE = True
+except ImportError:
+    try:
+        from version_seq_util import allocate_version_seq, version_seq_attr, version_seq_update_clause
+
+        _VERSION_SEQ_AVAILABLE = True
+    except ImportError:
+        _VERSION_SEQ_AVAILABLE = False
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -160,6 +172,244 @@ MAX_NOTE_LENGTH = 2000
 # ENC-FTR-052: Governed Lesson Primitive — feature flag
 # ENC-TSK-H08 (F63): AppConfig is the source of truth (env_fallback preserves legacy/local behavior)
 ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-H46 / B63 Phase 2A — Lifecycle Service extraction.
+# When enable_lifecycle_service_extraction is ON, the standalone Lifecycle Service is the SOLE
+# authority for transition_type_matrix validation, STRICTNESS_RANK enforcement, and subtask gates
+# on task status transitions. Invocation is synchronous and FAIL-CLOSED: any invoke failure rejects
+# the transition (no inline fallback). The inline validators below are retained ONLY as the
+# flag-OFF rollback path (ENC-TSK-H46 AC #3). Flag is read at request time so an AppConfig toggle
+# takes effect (and rolls back) without a redeploy.
+# ---------------------------------------------------------------------------
+LIFECYCLE_SERVICE_FUNCTION = os.environ.get("LIFECYCLE_SERVICE_FUNCTION", "")
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client(
+            "lambda",
+            region_name=DYNAMODB_REGION,
+            config=Config(
+                retries={"max_attempts": 2, "mode": "standard"},
+                read_timeout=5,
+                connect_timeout=2,
+            ),
+        )
+    return _lambda_client
+
+
+def _lifecycle_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-H46 AC #3)."""
+    return _appconfig_flag("enable_lifecycle_service_extraction", env_fallback="ENABLE_LIFECYCLE_SERVICE")
+
+
+def _arc_walker_enabled() -> bool:
+    """ENC-TSK-H85 / ENC-FTR-111 Phase 1 — the Universal Arc-Walker is behind its OWN independent
+    feature flag, read at request time so it toggles (and rolls back) without a redeploy. It is
+    deliberately separate from enable_lifecycle_service_extraction: the validation extraction (H46)
+    and the synchronous mechanical walk (this task) graduate independently (DOC-078C57FC1BE6 §11)."""
+    return _appconfig_flag("enable_arc_walker", env_fallback="ENABLE_ARC_WALKER")
+
+
+def _invoke_lifecycle_action(payload: dict):
+    """Synchronously invoke the Lifecycle Service for an arbitrary action and return its raw verdict
+    dict, or None on ANY failure. Unlike _invoke_lifecycle_service this does NOT require an ``allow``
+    key, so it serves the ENC-TSK-H85 arc-walker which consumes the evaluate_auto_walk verdict
+    (auto_walkable / gate_class / matrix_version) in addition to validate_transition."""
+    fn = LIFECYCLE_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[H85] LIFECYCLE_SERVICE_FUNCTION not configured; arc-walk skipped")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[H85] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict):
+            logger.error("[H85] Lifecycle Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H85] Lifecycle Service invoke failed: %s", exc)
+        return None
+
+
+def _invoke_lifecycle_service(payload: dict):
+    """Synchronously invoke the Lifecycle Service and return its verdict dict, or None on ANY
+    failure (function not configured, invoke error, FunctionError, malformed verdict). Returning
+    None signals the caller to FAIL CLOSED — there is no inline fallback when the flag is ON
+    (ENC-TSK-H46 AC #2)."""
+    fn = LIFECYCLE_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[H46] LIFECYCLE_SERVICE_FUNCTION not configured; failing closed")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[H46] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict) or "allow" not in verdict:
+            logger.error("[H46] Lifecycle Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H46] Lifecycle Service invoke failed: %s", exc)
+        return None
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-L06 / B63 Phase 2 AC-6 — ID Service extraction.
+# When enable_id_service_extraction is ON, the standalone ID Service is the SOLE authority
+# for record-ID allocation (counter items now live in a dedicated enceladus-id-counters
+# table that only the ID Service's IAM role can touch — AC-0), the idempotency-key
+# contract, and HMAC provenance signing. Invocation is synchronous and FAIL-CLOSED,
+# mirroring the Lifecycle Service (H46) posture exactly: any invoke failure REJECTS the
+# create — there is no inline fallback to a different generation path when the flag is ON
+# (an ID-generation failure silently falling back would defeat the IAM isolation
+# property). The inline _next_record_id()/_encode_base36() path below (which still reads/
+# writes legacy counter#* rows in THIS table) is retained ONLY as the flag-OFF rollback
+# (zero-behavior-change deploy, matching the H46/H47 precedent).
+# ---------------------------------------------------------------------------
+ID_SERVICE_FUNCTION = os.environ.get("ID_SERVICE_FUNCTION", "")
+
+
+def _id_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-L06)."""
+    return _appconfig_flag("enable_id_service_extraction", env_fallback="ENABLE_ID_SERVICE")
+
+
+def _invoke_id_service(payload: dict):
+    """Synchronously invoke the ID Service and return its verdict dict, or None on ANY
+    failure (function not configured, invoke error, FunctionError, malformed verdict).
+    Returning None signals the caller to FAIL CLOSED — there is no inline fallback when the
+    flag is ON (ENC-TSK-L06, mirrors ENC-TSK-H46 AC #2)."""
+    fn = ID_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[L06] ID_SERVICE_FUNCTION not configured; failing closed")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[L06] ID Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict) or "allow" not in verdict:
+            logger.error("[L06] ID Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[L06] ID Service invoke failed: %s", exc)
+        return None
+
+
+def _record_id_boundary_violation(body: dict, record_type: str, field: str) -> None:
+    """ENC-TSK-L06 AC-4: best-effort trust-score feedback on an ID_BOUNDARY_VIOLATION reject.
+    Fires the ID Service's record_violation action (fire-and-forget style — failures are
+    logged and swallowed, matching the Scoring Service SNS-publish failure-isolation
+    precedent: the 400 rejection to the caller is the source of truth and must never be
+    blocked or altered by a violation-logging side-channel issue)."""
+    if not ID_SERVICE_FUNCTION:
+        return
+    try:
+        ws = _normalize_write_source(body)
+        caller_identity = ws.get("provider") or "unknown"
+        _get_lambda_client().invoke(
+            FunctionName=ID_SERVICE_FUNCTION,
+            InvocationType="Event",  # fire-and-forget; never blocks the 400 response
+            Payload=json.dumps({
+                "action": "record_violation",
+                "caller_identity": caller_identity,
+                "record_type": record_type,
+                "detail": f"forbidden field '{field}' present in create payload",
+            }).encode("utf-8"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[L06] ID boundary violation trust-score notify failed: %s", exc)
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-H47 / B63 Phase 2B — Scoring Service extraction.
+# When enable_scoring_service_extraction is ON, the standalone, SNS-triggered Scoring Service is the
+# SOLE owner of lesson constitutional scoring: tracker_mutation writes the lesson with
+# scoring_status='pending' (skipping the inline pillar_composite/resonance computation) and publishes
+# a {lesson.scoring.requested} message to the lesson-scoring SNS topic; the Scoring Service computes
+# the scores asynchronously and flips scoring_status -> 'scored'. When OFF (default), the inline
+# scoring below runs exactly as before and the lesson is written already-scored — that is the
+# zero-behavior-change rollback path (ENC-TSK-H47 AC #3). Unlike the synchronous, FAIL-CLOSED
+# Lifecycle Service (H46), this path is async and best-effort about the SNS publish: the lesson
+# write is the source of truth and is never blocked by a notification-side-channel failure (a
+# missed publish leaves the lesson scoring_status='pending' for a re-drive, never an unscored task
+# CRUD failure). The flag is read at request time so an AppConfig toggle takes effect — and rolls
+# back — without a redeploy.
+# ---------------------------------------------------------------------------
+LESSON_SCORING_TOPIC_ARN = os.environ.get("LESSON_SCORING_TOPIC_ARN", "")
+_sns_client = None
+
+
+def _get_sns():
+    global _sns_client
+    if _sns_client is None:
+        _sns_client = boto3.client(
+            "sns",
+            region_name=DYNAMODB_REGION,
+            config=Config(retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    return _sns_client
+
+
+def _scoring_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-H47 AC #3)."""
+    return _appconfig_flag("enable_scoring_service_extraction", env_fallback="ENABLE_SCORING_SERVICE")
+
+
+def _publish_lesson_scoring_request(project_id: str, record_id: str, item_id: str,
+                                    pillar_scores: Dict[str, float]) -> bool:
+    """Publish a {lesson.scoring.requested} SNS message so the Scoring Service can score the lesson
+    asynchronously. Best-effort: returns True on publish, False otherwise. Failures are logged and
+    swallowed — the lesson DynamoDB write is the source of truth and must never be blocked by an SNS
+    side-channel failure (the lesson simply stays scoring_status='pending' until a re-drive)."""
+    if not LESSON_SCORING_TOPIC_ARN:
+        logger.error("[H47] LESSON_SCORING_TOPIC_ARN not configured; lesson %s left scoring_status=pending", record_id)
+        return False
+    payload = {
+        "event_type": "lesson.scoring.requested",
+        "schema_version": 1,
+        "project_id": project_id,
+        "record_id": record_id,
+        "item_id": item_id,
+        "pillar_scores": pillar_scores,
+    }
+    try:
+        _get_sns().publish(
+            TopicArn=LESSON_SCORING_TOPIC_ARN,
+            Subject=f"Lesson scoring requested: {item_id}"[:100],
+            Message=json.dumps(payload),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H47] lesson scoring SNS publish failed for %s: %s", record_id, exc)
+        return False
 
 # Valid record types and their closed/default statuses
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
@@ -274,8 +524,12 @@ ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
     default=True,
 )
 
-# §5.2 escalation status lifecycle. `failed` is terminal: a corrective
-# request is a NEW escalation (exactly-once semantics stay trivial).
+# §5.2 escalation status lifecycle. `failed` is retryable in place
+# (ENC-TSK-P89): a failed apply (e.g. a DynamoDB ValidationException on the
+# target write) can be re-driven via failed->applying without minting a new
+# escalation, so long as applied_at is still unset. The conditional write on
+# the current status value (approved OR failed) keeps exactly-once semantics
+# even when two re-drives race.
 _ESCALATION_FSM = {
     "requested": {"approved", "denied", "denied_with_guidance"},
     "approved": {"applying"},
@@ -283,7 +537,7 @@ _ESCALATION_FSM = {
     "denied": set(),
     "denied_with_guidance": set(),
     "applied": set(),
-    "failed": set(),
+    "failed": {"applying"},
 }
 _ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
 _ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
@@ -469,6 +723,46 @@ def _apply_deploy_arc_change(project_id: str, escalation: Dict, target: Dict) ->
     return {"before": before, "after": after, "waived_fields": []}
 
 
+# ENC-ISS-759: bookkeeping paths this applier owns outright. A field_values
+# entry that names one of these is dropped rather than rendered as a second
+# SET clause on the same top-level document path -- e.g. ENC-ESC-105/106
+# store field_values={"status": <target_status>} restating payload.target_status
+# verbatim, which under the old code made #st and #fv{i} both resolve to the
+# top-level `status` path; DynamoDB rejects the whole UpdateItem with
+# ValidationException "Two document paths overlap" and NOTHING gets written
+# (no-partial-write -- the approval stays durable so this is safely retried
+# once fixed). The authoritative value for a reserved path always wins.
+_RESERVED_OVERRIDE_PATHS = {
+    "status", "updated_at", "last_update_note", "sync_version",
+    "history", "escalation_provenance", "escalated_closure", "closed_count",
+}
+
+
+def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
+    """Render a SET (+ optional ADD) UpdateExpression from an ordered list of
+    (top_level_path, expression_snippet) pairs, one snippet per DISTINCT
+    top-level attribute path.
+
+    Raises ValueError if the same top_level_path is supplied twice. DynamoDB
+    itself rejects an UpdateExpression that names one document path more than
+    once ("Two document paths overlap"); this raises the same defect in-process
+    so a future regression fails a unit test instead of a live UpdateItem call
+    (ENC-ISS-759).
+    """
+    seen = set()
+    set_clauses = []
+    for path, expr in ordered_assignments:
+        if path in seen:
+            raise ValueError(
+                f"duplicate top-level path in UpdateExpression: {path!r}")
+        seen.add(path)
+        set_clauses.append(expr)
+    expression = "SET " + ", ".join(set_clauses)
+    if add_clauses:
+        expression += " ADD " + ", ".join(add_clauses)
+    return expression
+
+
 def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict) -> Dict:
     """§5.3 handler 2 apply: land the record in target_status regardless of
     path legality, with supplied field_values verbatim and §5.6 waiver
@@ -476,6 +770,12 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalated_closure=true (ENC-FTR-118 metric filter) and, for tasks,
     increment closed_count for organic-gate parity. Single atomic UpdateItem —
     a handler exception leaves the target untouched (no-partial-write).
+
+    field_values keys that name a reserved bookkeeping path (see
+    _RESERVED_OVERRIDE_PATHS, ENC-ISS-759) are dropped rather than written —
+    the applier's own value for that path is authoritative — and recorded in
+    the returned `after["dropped_field_values"]` plus the provenance note so
+    the audit trail shows what was dropped and why.
     """
     payload = escalation.get("payload") or {}
     target_status = str(payload.get("target_status") or "").strip()
@@ -491,24 +791,33 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
     escalation_id = str(escalation.get("item_id") or "")
     now = _now_z()
     before = {"status": target.get("status")}
+
+    dropped_field_values = {
+        field: value for field, value in field_values.items()
+        if field in _RESERVED_OVERRIDE_PATHS
+    }
+    clean_field_values = {
+        field: value for field, value in field_values.items()
+        if field not in _RESERVED_OVERRIDE_PATHS
+    }
+
     waivable = _escalation_waivable_fields(target, target_status)
     waived = [
         field for field in waivable
-        if field not in field_values and not target.get(field)
+        if field not in _RESERVED_OVERRIDE_PATHS
+        and field not in clean_field_values
+        and not target.get(field)
     ]
     is_closure = target_status == _CLOSED_STATUS.get(record_type, "closed")
-    after = {"status": target_status, "field_values": sorted(field_values.keys()),
+    after = {"status": target_status, "field_values": sorted(clean_field_values.keys()),
              "escalated_closure": is_closure}
+    if dropped_field_values:
+        after["dropped_field_values"] = sorted(dropped_field_values.keys())
     note = _escalation_provenance_note(escalation, before, after, waived)
+    if dropped_field_values:
+        note += (" dropped_field_values="
+                 f"{json.dumps(sorted(dropped_field_values.keys()))}")
 
-    update_parts = [
-        "#st = :target_status",
-        "updated_at = :now",
-        "last_update_note = :note",
-        "sync_version = if_not_exists(sync_version, :zero) + :one",
-        "history = list_append(if_not_exists(history, :empty), :hentry)",
-        "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)",
-    ]
     names = {"#st": "status"}
     values = {
         ":target_status": _ser_s(target_status),
@@ -524,26 +833,40 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         }}]},
         ":esc": {"L": [_ser_s(escalation_id)]},
     }
-    for index, (field, value) in enumerate(sorted(field_values.items())):
+
+    assignments = [
+        ("status", "#st = :target_status"),
+        ("updated_at", "updated_at = :now"),
+        ("last_update_note", "last_update_note = :note"),
+        ("sync_version", "sync_version = if_not_exists(sync_version, :zero) + :one"),
+        ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
+        ("escalation_provenance",
+         "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
+    ]
+
+    for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
         value_key = f":fv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = str(field)
         values[value_key] = _ser_value(value)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
     for index, field in enumerate(waived):
         name_key = f"#wv{index}"
         value_key = f":wv{index}"
-        update_parts.append(f"{name_key} = {value_key}")
         names[name_key] = field
         values[value_key] = _escalation_waiver_sentinel(escalation_id, now)
-    update_expression = "SET " + ", ".join(update_parts)
+        assignments.append((field, f"{name_key} = {value_key}"))
+
+    add_clauses = []
     if is_closure:
-        update_parts.append("escalated_closure = :esc_closure")
+        assignments.append(("escalated_closure", "escalated_closure = :esc_closure"))
         values[":esc_closure"] = {"BOOL": True}
-        update_expression = "SET " + ", ".join(update_parts)
         if record_type == "task":
-            update_expression += " ADD closed_count :one_count"
+            add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
+
+    update_expression = _render_update_expression(assignments, add_clauses)
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -740,6 +1063,34 @@ EVENT_SOURCE = "enceladus.tracker"
 # empty/unset ARN disables publishing (logged skip — never fails the write).
 ESCALATION_ALERTS_TOPIC_ARN = os.environ.get("ESCALATION_ALERTS_TOPIC_ARN", "")
 EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
+# ENC-FTR-111 / ENC-TSK-H83: Artifact-Genesis telemetry for an auto_walk_opt_out latch
+# (feeds ENC-TSK-B66 / the T5 ARC_WALK telemetry consumer).
+EVENT_DETAIL_TYPE_OPT_OUT_LATCHED = "record.auto_walk_opt_out.latched"
+# ENC-FTR-111 / ENC-TSK-H86 (T5): the matching CLEAR-side telemetry. DOC-078C57FC1BE6 §10 requires
+# BOTH opt_out latch AND clear events to feed the ENC-TSK-B66 observability dashboard. The latch
+# (auto-set on a human walk-back, H83) emits EVENT_DETAIL_TYPE_OPT_OUT_LATCHED; an explicit
+# human/agent tracker.set(auto_walk_opt_out=...) emits latched-or-cleared via _emit_opt_out_state_event.
+EVENT_DETAIL_TYPE_OPT_OUT_CLEARED = "record.auto_walk_opt_out.cleared"
+# ENC-TSK-I09 (Dedup P5): io-reviewable audit feed for every MECHANICAL arc-walker
+# auto-merge. One event streams per certificate-certified T-HIGH supersession the
+# walker executes (DOC-DF651F07D5C2 §8 — the kill-switch + audit-feed rail).
+EVENT_DETAIL_TYPE_AUTO_MERGED = "record.dedup.auto_merged"
+# ENC-TSK-H85 / ENC-FTR-111 Phase 1: Artifact-Genesis audit feed for every MECHANICAL gate the
+# synchronous inline arc-walker crosses on its own (DOC-078C57FC1BE6 §8/§10 — no silent mutations).
+EVENT_DETAIL_TYPE_ARC_WALK = "record.arc_walk.advanced"
+
+# ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker.
+# Reserved write_source identity the (future, FTR-111 Phase 1 core / T4) arc-walker writes under.
+# The walker may observe a latched circuit breaker, but is STRUCTURALLY forbidden from CLEARING it.
+ARC_WALKER_ACTOR = "system:arc-walker"
+
+# Task lifecycle ordinal ranks — mirror of lifecycle_service.STATUS_RANK / checkout_service.
+# Used to classify a human task transition as non-forward (regression). 'coding-updates' is the
+# deploy-success re-entry case and has no forward rank; it is handled explicitly.
+_TASK_STATUS_RANK: Dict[str, int] = {
+    "open": 0, "in-progress": 1, "coding-complete": 2, "committed": 3, "pr": 4,
+    "merged-main": 5, "deploy-init": 6, "deploy-success": 7, "closed": 8,
+}
 
 # Type segment mapping for SK construction
 _TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature", "lesson": "lesson", "plan": "plan"}
@@ -783,6 +1134,20 @@ def _get_ddb():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _ddb
+
+
+def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
+    if not _VERSION_SEQ_AVAILABLE:
+        return
+    seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
+    item.update(version_seq_attr(seq))
+
+
+def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
+    if not _VERSION_SEQ_AVAILABLE:
+        return "", {}
+    seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
+    return version_seq_update_clause(seq)
 
 
 def _get_events():
@@ -981,6 +1346,34 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
 # deploys (PLN-047 / ENC-LSN-053 Sev1 class).
 SCI_ENFORCEMENT_EPOCH = "2026-07-02T12:00:00Z"
 
+# ENC-ISS-441 / ENC-TSK-J96: terminal-state retirement nudge (part 3 of the io-designed
+# session retirement lifecycle). Injected verbatim into terminal-state success envelopes;
+# the acting agent either retires its session autonomously (scope exhausted) or surfaces
+# the prompt to io. Exact io-specified text from the ENC-ISS-441 worklog.
+RETIREMENT_PROMPT = (
+    "Prompt the user if this session can now be retired, or retire the session if it "
+    "is certain that the full scope of the current session assignment is complete."
+)
+
+# Final lifecycle states per record type (io design decision on ENC-ISS-441: task closed,
+# issue closed, feature production/deprecated, plan complete). 'superseded' is set only by
+# the supersession op, not a direct status write, so it never reaches this map.
+_TERMINAL_STATUSES_BY_TYPE = {
+    "task": {"closed"},
+    "issue": {"closed"},
+    "feature": {"production", "deprecated"},
+    "plan": {"complete"},
+}
+
+
+def _is_terminal_transition(record_type: Any, value: Any) -> bool:
+    """True when a status write lands a record in its final lifecycle state (ENC-TSK-J96)."""
+    return (
+        str(value or "").strip().lower()
+        in _TERMINAL_STATUSES_BY_TYPE.get(str(record_type or "").strip().lower(), set())
+    )
+
+
 # J92 token shape: pk = "SCI-{uuid4_hex}"
 _SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
 # I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
@@ -1052,7 +1445,10 @@ def _get_agent_session(session_id: str) -> Optional[Dict]:
 
 
 def _touch_session_activity(session_id: str) -> None:
-    """Refresh the session's last_activity_at heartbeat (J83 pattern).
+    """Refresh the session's last_activity_at + updated_at heartbeat (J83 pattern,
+    extended by ENC-TSK-L35 to also stamp ``updated_at`` so the SES record's
+    updated-time bumps on every session-requiring call, matching the
+    updated_at convention every other tracker record type already exposes).
 
     Conditional on the session still being live (allocated/claimed); a retired
     or vanished session is a silent no-op — the touch must NEVER fail the
@@ -1062,7 +1458,7 @@ def _touch_session_activity(session_id: str) -> None:
         _get_ddb().update_item(
             TableName=AGENT_SESSIONS_TABLE,
             Key={"session_id": {"S": session_id}},
-            UpdateExpression="SET last_activity_at = :now",
+            UpdateExpression="SET last_activity_at = :now, updated_at = :now",
             ConditionExpression=(
                 "attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)"
             ),
@@ -1091,8 +1487,12 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[Dict]:
 
     Callers invoke this only when ``session_id`` matches _AGENT_SESSION_ID_RE.
     Returns None when the mutation may proceed (grandfathered session or valid
-    SCI, in which case last_activity_at is touched), else the 403 rejection
-    response naming the specific failure mode.
+    SCI), else the 403 rejection response naming the specific failure mode.
+
+    ENC-TSK-L35: the session heartbeat/updated_at touch now happens in
+    ``_sci_gate_for_request`` (the sole caller) BEFORE this function runs, so
+    it fires unconditionally — including for grandfathered sessions and
+    checkout-service-exempt requests that never reach this function at all.
     """
     # Step 1: the session must exist — a fabricated ENC-SES id must not bypass
     # the gate (fail closed).
@@ -1156,8 +1556,8 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[Dict]:
             f"'{token.get('session_id')}', not '{session_id}'.",
         )
 
-    # Valid SCI — refresh the session heartbeat (never fails the mutation).
-    _touch_session_activity(session_id)
+    # Valid SCI. The heartbeat/updated_at touch already ran at
+    # _sci_gate_for_request entry (ENC-TSK-L35), so no further touch here.
     return None
 
 
@@ -1172,11 +1572,19 @@ def _sci_gate_for_request(body: Dict, event: Optional[Dict]) -> Optional[Dict]:
     the identical gate at its own edge and the ENC-FTR-037 chain does not
     forward `sci` (same trust model / rollout semantics as the FTR-037 status
     gate, including permissive mode while CHECKOUT_SERVICE_KEY is unset).
+
+    ENC-TSK-L35: every agent-origin session-requiring call reaching this
+    function bumps the session's own last_activity_at/updated_at, UNCONDITIONALLY
+    — before the checkout-service exemption and before any SCI/grandfather
+    outcome — so the SES record's updated-time reflects every session-requiring
+    call it makes across every record type routed through this shared
+    mutation Lambda (task/issue/feature/lesson/plan/generation).
     """
     ws = _normalize_write_source(body)
     session_id = str(ws.get("provider", "")).strip()
     if not _AGENT_SESSION_ID_RE.match(session_id):
         return None
+    _touch_session_activity(session_id)
     if _is_checkout_service_request(event):
         return None
     return _validate_sci_gate(session_id, body.get("sci"))
@@ -1306,6 +1714,25 @@ def _verify_token(token: str) -> Dict[str, Any]:
     except jwt.PyJWTError as exc:
         raise ValueError(f"Token validation failed: {exc}") from exc
     return claims
+
+
+def _extract_if_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-Match header value (ENC-TSK-L47 revision-conflict contract).
+
+    Returns the raw revision token as a string (quotes stripped per ETag convention),
+    or None if the header is absent. Absence means "no concurrency check requested" —
+    callers must preserve today's unconditional-write behavior in that case.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-match") or headers.get("If-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
 
 
 def _is_checkout_service_request(event: Optional[Dict]) -> bool:
@@ -1519,6 +1946,41 @@ def _get_record_full(project_id: str, record_type: str, record_id: str) -> Optio
     if item is None:
         return None
     return _deser_item(item)
+
+
+# ENC-ISS-509: gamma runs its own physically-separate tracker table
+# (devops-project-tracker-gamma per EnvironmentSuffix, infrastructure/cloudformation/
+# 02-compute.yaml TrackerMutationFunction). It is seeded once and not continuously
+# synced from the canonical governed table, so recently-created records (e.g. ones
+# minted via the prod MCP connector moments ago) 404 on gamma's PWA detail route even
+# though tracker.get resolves them fine against the canonical table. This is a
+# read-only, GET-detail-only fallback: on a gamma-table miss, do a single GetItem
+# against the canonical table so the detail page can render. Never used for writes
+# or list/search — those keep gamma's isolated data plane untouched.
+_CANONICAL_TRACKER_TABLE = "devops-project-tracker"
+
+
+def _get_record_full_with_gamma_fallback(project_id: str, record_type: str, record_id: str) -> Optional[Dict]:
+    """As _get_record_full, but on gamma a local miss falls back to a read-only
+    GetItem against the canonical (prod) tracker table. No-op on prod (DYNAMODB_TABLE
+    already equals _CANONICAL_TRACKER_TABLE there, so the fallback branch is skipped)."""
+    item = _get_record_full(project_id, record_type, record_id)
+    if item is not None:
+        return item
+    if DYNAMODB_TABLE == _CANONICAL_TRACKER_TABLE:
+        return None
+    try:
+        ddb = _get_ddb()
+        key = _build_key(project_id, record_type, record_id)
+        resp = ddb.get_item(TableName=_CANONICAL_TRACKER_TABLE, Key=key, ConsistentRead=True)
+        fallback_item = resp.get("Item")
+    except ClientError as exc:
+        logger.warning("[ISS-509] gamma canonical-table fallback read failed for %s: %s", record_id, exc)
+        return None
+    if fallback_item is None:
+        return None
+    logger.info("[ISS-509] gamma miss on %s; served from canonical table fallback", record_id)
+    return _deser_item(fallback_item)
 
 
 def _get_record_raw(project_id: str, record_type: str, record_id: str) -> Optional[Dict]:
@@ -1967,13 +2429,438 @@ def _emit_reopen_event(project_id, record_type, record_id, previous_status, new_
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker (auto_walk_opt_out)
+# ---------------------------------------------------------------------------
+def _coerce_bool(val: Any) -> bool:
+    """Coerce a JSON/string/numeric/bool input to a real Python bool (for DynamoDB BOOL storage).
+    MCP/JSON callers may send the string 'false', which is truthy if stored verbatim."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _is_human_request(claims: Optional[Dict]) -> bool:
+    """A human (Cognito) request, as opposed to an internal-key / agent request. ENC-TSK-H83:
+    the auto_walk_opt_out latch fires only on human-initiated non-forward transitions."""
+    return bool(claims) and claims.get("auth_mode") != "internal-key"
+
+
+def _human_actor(claims: Optional[Dict]) -> str:
+    """Best-effort human identity for audit attribution."""
+    if not claims:
+        return "unknown_user"
+    return claims.get("cognito:username") or claims.get("sub") or "unknown_user"
+
+
+def _is_task_non_forward(current_status: str, target_status: str) -> Tuple[bool, str]:
+    """ENC-TSK-H83: classify a task status change as non-forward. Returns (is_non_forward, reason).
+    A regression is a backward move by ordinal rank; 'coding-updates' is the deploy-success
+    re-entry case (it has no forward rank). Same-status and forward moves return (False, '')."""
+    cur = (current_status or "").strip().lower()
+    tgt = (target_status or "").strip().lower()
+    if not tgt or tgt == cur:
+        return False, ""
+    if tgt == "coding-updates":
+        return True, "coding-updates re-entry"
+    cur_rank = _TASK_STATUS_RANK.get(cur)
+    tgt_rank = _TASK_STATUS_RANK.get(tgt)
+    if cur_rank is not None and tgt_rank is not None and tgt_rank < cur_rank:
+        return True, "regression"
+    return False, ""
+
+
+def _opt_out_latch_history_entry(now: str, latched_by: str, from_status: str,
+                                 to_status: str, reason: str) -> Dict:
+    """Build the Artifact-Genesis history entry recorded on an auto_walk_opt_out latch (AC-2/AC-4).
+    No silent mutations: every latch is accompanied by this governed audit entry."""
+    msg = (
+        f"[ARC-WALKER][OPT-OUT-LATCH] auto_walk_opt_out latched true: human {latched_by} "
+        f"non-forward transition {from_status or '?'} -> {to_status} ({reason}). The Universal "
+        f"Arc-Walker (ENC-FTR-111) will not auto-advance this record until the latch is cleared."
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+        "description": _ser_s(msg),
+    }}
+
+
+def _emit_opt_out_latch_event(project_id: str, record_type: str, record_id: str,
+                              from_status: str, to_status: str, reason: str,
+                              latched_by: str) -> None:
+    """Emit the Artifact-Genesis telemetry event for an auto_walk_opt_out latch (best-effort)."""
+    detail = {
+        "project_id": project_id, "record_type": record_type, "record_id": record_id,
+        "event": "auto_walk_opt_out_latched", "advanced_by": ARC_WALKER_ACTOR,
+        "latched_by": latched_by, "trigger": reason,
+        "from_status": from_status, "to_status": to_status, "latched_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_OPT_OUT_LATCHED,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:
+        logger.error("opt_out latch event emit failed: %s", exc)
+
+
+def _opt_out_state_history_entry(now: str, latched: bool, actor: str) -> Dict:
+    """ENC-TSK-H86 (T5): Artifact-Genesis history entry for an EXPLICIT (human/agent) set or clear
+    of auto_walk_opt_out via tracker.set. Carries an [ARC-WALKER][OPT-OUT-SET|OPT-OUT-CLEAR] marker
+    so the read-only convergence/telemetry probe (arc_walk_metrics) can count latch/clear events
+    from record history. The auto-latch path (H83) records its own [OPT-OUT-LATCH] entry."""
+    marker = "OPT-OUT-SET" if latched else "OPT-OUT-CLEAR"
+    verb = "latched true" if latched else "cleared (set false)"
+    msg = (
+        f"[ARC-WALKER][{marker}] auto_walk_opt_out {verb} by {actor or 'unknown'}. "
+        f"The Universal Arc-Walker (ENC-FTR-111) "
+        + ("will not auto-advance this record while the latch is set."
+           if latched else "may auto-advance this record across mechanical gates again.")
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"), "description": _ser_s(msg),
+    }}
+
+
+def _emit_opt_out_state_event(project_id: str, record_type: str, record_id: str,
+                              latched: bool, actor: str) -> None:
+    """ENC-TSK-H86 (T5) / ENC-FTR-111 AC-6: emit the opt_out latch-or-clear telemetry event for an
+    EXPLICIT tracker.set of auto_walk_opt_out (the H83 auto-latch path emits its own latch event).
+    Both latch and clear feed the ENC-TSK-B66 observability dashboard. Best-effort — a telemetry
+    failure never rolls back the already-committed field write."""
+    detail = {
+        "project_id": project_id, "record_type": record_type, "record_id": record_id,
+        "event": "auto_walk_opt_out_latched" if latched else "auto_walk_opt_out_cleared",
+        "advanced_by": ARC_WALKER_ACTOR, "actor": actor or "unknown",
+        "latched": bool(latched), "trigger": "explicit_set" if latched else "explicit_clear",
+        "changed_at": _now_z(),
+    }
+    detail_type = EVENT_DETAIL_TYPE_OPT_OUT_LATCHED if latched else EVENT_DETAIL_TYPE_OPT_OUT_CLEARED
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": detail_type,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("opt_out state event emit failed: %s", exc)
+
+
+def _emit_auto_merge_event(project_id: str, record_type: str, superseded_id: str,
+                           canonical_id: str, cluster_id: Optional[str], cosine: Any,
+                           calibrated_prob: Any, precision_lcb: Any) -> None:
+    """ENC-TSK-I09: stream one MECHANICAL auto-merge to the io-reviewable audit feed
+    (DOC-DF651F07D5C2 §8). Best-effort — a telemetry failure never rolls back the
+    (already-committed, reversible) supersession."""
+    detail = {
+        "project_id": project_id, "record_type": record_type,
+        "event": "dedup_auto_merged", "advanced_by": ARC_WALKER_ACTOR,
+        "superseded_id": superseded_id, "canonical_id": canonical_id,
+        "cluster_id": cluster_id, "cosine": cosine,
+        "calibrated_prob": calibrated_prob, "precision_lcb": precision_lcb,
+        "reversible": True, "merged_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_AUTO_MERGED,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:
+        logger.error("auto-merge audit event emit failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-H85 / ENC-FTR-111 Phase 1 — Universal Arc-Walker: synchronous inline mechanical walk.
+#
+# After any successful FORWARD task advance, the walker loops forward across the Phase-1 MECHANICAL
+# gates in the SAME Lambda invocation before returning (DOC-078C57FC1BE6 §6.1). Phase 1 covers
+# exactly two legs (§3.1 / §11):
+#   - <deploy-arc>|merged-main -> deploy-init  (auto-walkable only on ci_triggered projects; O-2)
+#   - code_only|merged-main    -> closed       (reuses the stored commit_sha + a GitHub compare)
+#
+# Eligibility is decided SOLELY by the Lifecycle Service evaluate_auto_walk verdict (gate_class
+# MECHANICAL + the deploy_policy O-2 qualifier) — NEVER from evidence-field emptiness (§7.2, the
+# "coding-complete trap"). The walk honors the auto_walk_opt_out latch (§7.4), pins the matrix
+# version (§8), integrity-checks checkout_transition_type (B07/B08 → 409 halt), performs each step
+# as an idempotent conditional write (advance iff status == expected_prior), halts at the first
+# attestation / opt-out / gate-fail boundary, and emits an Artifact-Genesis record per crossing.
+# The walker writes under write_source=system:arc-walker and can NEVER clear the opt-out latch.
+# ---------------------------------------------------------------------------
+_ARC_WALK_MAX_STEPS = 8  # safety depth cap (§9 cascade-runaway mitigation); Phase 1 needs <= 1.
+_ARC_WALK_DEPLOY_ARC_TYPES = frozenset({"github_pr_deploy", "lambda_deploy", "web_deploy"})
+
+
+def _arc_walk_next_candidate(transition_type: str, current_status: str) -> Optional[str]:
+    """Propose the single forward status the Phase-1 arc-walker would attempt from current_status,
+    or None when there is no Phase-1 MECHANICAL leg out of current_status. This only PROPOSES a
+    target; the authoritative mechanical/deploy_policy eligibility ruling is the Lifecycle Service
+    evaluate_auto_walk verdict (DOC-078C57FC1BE6 §3.1/§11)."""
+    tt = (transition_type or "github_pr_deploy").strip().lower()
+    cur = (current_status or "").strip().lower()
+    if cur == "merged-main":
+        if tt == "code_only":
+            return "closed"
+        if tt in _ARC_WALK_DEPLOY_ARC_TYPES:
+            return "deploy-init"
+    return None
+
+
+def _arc_walk_compare_commit_to_main(owner: str, repo: str, sha: str) -> Tuple[bool, str]:
+    """code_only|closed is MECHANICAL because the system already holds the commit_sha (the agent
+    supplied it at `committed`); the gate's only action is a system-run GitHub compare confirming the
+    commit is an ancestor of main (DOC-078C57FC1BE6 §3.1). Routed through github_integration (the
+    GitHub external-fact surface); tracker_mutation never calls GitHub directly."""
+    if not GITHUB_INTEGRATION_API_BASE:
+        logger.warning("[H85] GITHUB_INTEGRATION_API_BASE not set; cannot compare %s to main", sha)
+        return False, "github_integration_unconfigured"
+    url = (
+        f"{GITHUB_INTEGRATION_API_BASE}/commits/compare-main"
+        f"?owner={urllib.parse.quote(owner)}"
+        f"&repo={urllib.parse.quote(repo)}"
+        f"&sha={urllib.parse.quote(sha)}"
+    )
+    req = urllib.request.Request(url, method="GET", headers={
+        "X-Coordination-Internal-Key": COORDINATION_INTERNAL_API_KEY,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            if data.get("valid"):
+                return True, str(data.get("status", "ancestor"))
+            return False, str(data.get("reason", "not_ancestor_of_main"))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H85] commit compare-main call failed: %s", exc)
+        return False, f"compare_service_error: {exc}"
+
+
+def _arc_walk_history_entry(now: str, from_status: str, to_status: str, gate_class: Optional[str],
+                            derivation: str, matrix_version: Any) -> Dict:
+    """Artifact-Genesis history entry for one auto-walk crossing (DOC-078C57FC1BE6 §8 — no silent
+    mutations). Carries advanced_by, the gate crossed + its class, the derivation, the matrix ref,
+    and the trigger (sync)."""
+    msg = (
+        f"[ARC-WALKER][AUTO-ADVANCE] {from_status or '?'} -> {to_status} "
+        f"(gate_class={gate_class}, trigger=sync, matrix_version={matrix_version}). "
+        f"{derivation} advanced_by={ARC_WALKER_ACTOR}."
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"), "description": _ser_s(msg),
+    }}
+
+
+def _emit_arc_walk_event(project_id: str, record_id: str, from_status: str, to_status: str,
+                         gate_class: Optional[str], derivation: str, matrix_version: Any,
+                         latency_ms: int) -> None:
+    """Emit the ARC_WALK Artifact-Genesis telemetry event (DOC-078C57FC1BE6 §10). Best-effort — a
+    telemetry failure never rolls back the (already-committed) conditional advance."""
+    detail = {
+        "project_id": project_id, "record_type": "task", "record_id": record_id,
+        "event": "arc_walk_advanced", "advanced_by": ARC_WALKER_ACTOR,
+        "from_status": from_status, "to_status": to_status, "gate_class": gate_class,
+        "derivation": derivation, "trigger": "sync", "matrix_version": matrix_version,
+        "latency_ms": latency_ms, "advanced_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_ARC_WALK,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("arc_walk event emit failed: %s", exc)
+
+
+def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
+                            landed_status: str) -> Dict:
+    """ENC-TSK-H85 / ENC-FTR-111 Phase 1 (T4) — drive the synchronous inline mechanical walk.
+
+    Called after a successful forward task advance committed to `landed_status`. Loops forward across
+    the Phase-1 mechanical gates, halting at the first attestation / opt-out / gate-fail boundary.
+    Returns a structured summary (never raises into the caller's response). NEVER fails the agent's
+    original advance — the walk is a pure optimization on top of an already-committed transition."""
+    transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
+    checkout_tt = (item_data.get("checkout_transition_type") or "").strip().lower()
+    opt_out = _coerce_bool(item_data.get("auto_walk_opt_out", False))
+    commit_sha = (item_data.get("commit_sha") or "").strip().lower()
+    subtask_ids = item_data.get("subtask_ids") or []
+
+    pinned_raw = item_data.get("checkout_matrix_version")
+    try:
+        pinned_matrix = int(pinned_raw) if pinned_raw not in (None, "") else MATRIX_VERSION
+    except (TypeError, ValueError):
+        pinned_matrix = MATRIX_VERSION
+
+    summary: Dict[str, Any] = {"walked": [], "trigger": "sync", "matrix_version": pinned_matrix}
+
+    # §7.4 opt-out circuit breaker: a latched record is demoted to ATTESTATION. The walker halts
+    # before ANY evaluation or write and can never clear the latch (ENC-TSK-H83).
+    if opt_out:
+        summary["halted_reason"] = "opt_out_latched"
+        return summary
+
+    # §8 transition_type integrity (B07/B08): a mismatch between the type stamped at checkout and the
+    # live type is a governance-integrity violation — halt with 409 exactly as an agent advance would.
+    if checkout_tt and checkout_tt != transition_type:
+        summary["halted_reason"] = "transition_type_integrity_409"
+        summary["halt_status"] = 409
+        summary["checkout_transition_type"] = checkout_tt
+        summary["current_transition_type"] = transition_type
+        return summary
+
+    ddb = _get_ddb()
+    key = _build_key(project_id, "task", record_id)
+    current = (landed_status or "").strip().lower()
+
+    for _ in range(_ARC_WALK_MAX_STEPS):
+        target = _arc_walk_next_candidate(transition_type, current)
+        if target is None:
+            # No outgoing mechanical leg — the next gate is attestation / external-fact / terminal.
+            summary["halted_reason"] = "no_mechanical_gate"
+            break
+
+        step_start = dt.datetime.utcnow()
+
+        # (1) Eligibility — authoritative MECHANICAL + deploy_policy (O-2) verdict from the service.
+        verdict = _invoke_lifecycle_action({
+            "action": "evaluate_auto_walk",
+            "transition_type": transition_type,
+            "target_status": target,
+            "project_id": project_id,
+        })
+        if verdict is None:
+            summary["halted_reason"] = "lifecycle_service_unavailable"
+            break
+        gate_class = verdict.get("gate_class")
+        # §8 matrix pinning: never auto-cross under a matrix version other than the pinned one.
+        v_matrix = verdict.get("matrix_version")
+        if v_matrix is not None and int(v_matrix) != int(pinned_matrix):
+            summary["halted_reason"] = "matrix_version_mismatch"
+            summary["service_matrix_version"] = v_matrix
+            break
+        if not verdict.get("auto_walkable"):
+            # First attestation / external-fact / manual-deploy boundary — halt (§7).
+            summary["halted_reason"] = verdict.get("reason") or f"gate_not_auto_walkable:{gate_class}"
+            summary["gate_class"] = gate_class
+            break
+
+        # (2) Legality — reuse the full Lifecycle Service gate set (transition validity + subtask gate
+        # + evidence shape). code_only|closed evidence is the stored commit_sha the agent already gave.
+        evidence: Dict[str, Any] = {}
+        if target == "closed" and transition_type == "code_only":
+            evidence = {"code_on_main_evidence": {"commit_sha": commit_sha}}
+        legal = _invoke_lifecycle_action({
+            "action": "validate_transition",
+            "project_id": project_id, "record_id": record_id, "record_type": "task",
+            "current_status": current, "target_status": target,
+            "transition_type": transition_type, "transition_evidence": evidence,
+            "subtask_ids": subtask_ids, "is_checkout_service_request": True,
+        })
+        if legal is None:
+            summary["halted_reason"] = "lifecycle_service_unavailable"
+            break
+        if not legal.get("allow"):
+            err = legal.get("error") or {}
+            summary["halted_reason"] = f"gate_fail:{err.get('code', 'INVALID')}"
+            break
+
+        # (3) Per-leg derivation + extra evidence persistence.
+        extra_set = ""
+        extra_vals: Dict[str, Any] = {}
+        add_clause = ""
+        if target == "closed" and transition_type == "code_only":
+            if not re.match(r"^[0-9a-f]{40}$", commit_sha):
+                summary["halted_reason"] = "gate_fail:missing_commit_sha"
+                break
+            owner, repo = _resolve_github_repo(project_id)
+            if not owner or not repo:
+                summary["halted_reason"] = "gate_fail:repo_unresolved"
+                break
+            ok, why = _arc_walk_compare_commit_to_main(owner, repo, commit_sha)
+            if not ok:
+                summary["halted_reason"] = f"gate_fail:compare:{why}"
+                break
+            derivation = (
+                f"code_only|closed reuses commit_sha {commit_sha[:12]} (supplied at committed) and a "
+                f"system-run GitHub compare confirmed it is an ancestor of main ({why})."
+            )
+            extra_set = ", code_on_main_evidence = :coe"
+            extra_vals[":coe"] = {"M": {
+                "commit_sha": _ser_s(commit_sha), "github_verified": {"BOOL": True},
+            }}
+            add_clause = " ADD closed_count :one"
+        else:
+            derivation = (
+                "deploy-init records an initiation timestamp; on a ci_triggered project the merge "
+                "entails initiation (ruling O-2) — no new external-world claim is introduced."
+            )
+
+        # (4) Idempotent conditional write: advance iff status == expected_prior (§8 idempotency).
+        now2 = _now_z()
+        hentry = _arc_walk_history_entry(now2, current, target, gate_class, derivation, pinned_matrix)
+        note = f"[ARC-WALKER] auto-advanced {current} -> {target} (system:arc-walker)"
+        ws_av = {"M": {
+            "channel": _ser_s(ARC_WALKER_ACTOR), "provider": _ser_s(ARC_WALKER_ACTOR),
+            "dispatch_id": _ser_s(""), "coordination_request_id": _ser_s(""),
+            "timestamp": _ser_s(now2),
+        }}
+        update_expr = (
+            "SET #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "sync_version = if_not_exists(sync_version, :zero) + :one, "
+            "history = list_append(if_not_exists(history, :empty), :hentry)"
+            + extra_set + add_clause
+        )
+        attr_vals = {
+            ":next": _ser_s(target), ":now": _ser_s(now2), ":note": _ser_s(note), ":wsrc": ws_av,
+            ":zero": {"N": "0"}, ":one": {"N": "1"},
+            ":hentry": {"L": [hentry]}, ":empty": {"L": []},
+            ":expected": _ser_s(current),
+        }
+        attr_vals.update(extra_vals)
+        try:
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE, Key=key,
+                UpdateExpression=update_expr,
+                ConditionExpression="#s = :expected",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues=attr_vals,
+            )
+        except ClientError as exc:
+            if _is_conditional_check_failed(exc):
+                # A concurrent advance moved the record off expected_prior. The conditional write is
+                # the idempotency guard (§8/§9): no double-step, no lost update — halt cleanly.
+                summary["halted_reason"] = "concurrent_advance"
+                break
+            logger.error("[H85] arc-walk conditional write failed: %s", exc)
+            summary["halted_reason"] = "write_error"
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[H85] arc-walk write error: %s", exc)
+            summary["halted_reason"] = "write_error"
+            break
+
+        latency_ms = int((dt.datetime.utcnow() - step_start).total_seconds() * 1000)
+        _emit_arc_walk_event(project_id, record_id, current, target, gate_class,
+                             derivation, pinned_matrix, latency_ms)
+        summary["walked"].append({
+            "from": current, "to": target, "gate_class": gate_class,
+            "derivation": derivation, "matrix_version": pinned_matrix, "latency_ms": latency_ms,
+        })
+        current = target
+    else:
+        # Loop exhausted the depth cap without an explicit halt (should be unreachable in Phase 1).
+        summary.setdefault("halted_reason", "max_steps_reached")
+
+    summary["final_status"] = current
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
 
 def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dict:
     """GET /{project}/{type}/{id} — return full deserialized record."""
     try:
-        item = _get_record_full(project_id, record_type, record_id)
+        item = _get_record_full_with_gamma_fallback(project_id, record_type, record_id)
     except Exception as exc:
         logger.error("get_item failed: %s", exc)
         return _error(500, "Database read failed.")
@@ -1981,7 +2868,621 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     if item is None:
         return _error(404, f"Record not found: {record_id}")
 
+    id_key = f"{record_type}_id"
+    # _deser_item exposes item_id; feed_query maps that to {type}_id. Align GET
+    # responses so record_extensions can resolve the canonical id (ENC-TSK-K26).
+    canonical_id = str(item.get(id_key) or item.get("item_id") or record_id or "")
+    if canonical_id and not item.get(id_key):
+        item[id_key] = canonical_id
+    try:
+        from record_extensions import (
+            attach_record_extensions,
+            query_typed_relationships_for_projects,
+        )
+
+        def _ddb_str(raw: Dict, key: str) -> str:
+            val = raw.get(key, {})
+            return val.get("S", "") if isinstance(val, dict) else ""
+
+        def _ddb_float(raw: Dict, key: str) -> float:
+            val = raw.get(key, {})
+            try:
+                return float(val.get("N", "0"))
+            except (TypeError, ValueError):
+                return 0.0
+
+        edges_by_source = query_typed_relationships_for_projects(
+            _get_ddb(),
+            DYNAMODB_TABLE,
+            [project_id],
+            ddb_str=_ddb_str,
+            ddb_float=_ddb_float,
+        )
+        attach_record_extensions([item], id_key, record_type, edges_by_source)
+    except Exception as exc:
+        logger.warning("Failed to attach record extensions for %s: %s", record_id, exc)
+
     return _response(200, {"success": True, "record": item})
+
+
+def _add_checkout_state_ne_filter(checkout_state_ne: str, filter_parts: List[str],
+                                   expr_names: Dict[str, str], expr_values: Dict[str, Any]) -> None:
+    """ENC-TSK-Q14 (M36 tile/Feed invariant): `checkout_state_ne` query-param
+    support, shared verbatim by _handle_list_records's two branches (plain
+    list) and _census_walk's two branches (census primary walk) so a census
+    page cursor replayed into the list route excludes exactly the same rows
+    the census walk already excluded.
+
+    Appends `(attribute_not_exists(#cs) OR #cs <> :csne)` to `filter_parts`
+    -- a row with NO checkout_state attribute at all (the common case: most
+    records are never checked out) passes, and a row whose checkout_state
+    equals the given value is excluded; any other checkout_state value
+    passes. Mutates `filter_parts`/`expr_names`/`expr_values` in place;
+    no-op when `checkout_state_ne` is falsy/blank.
+
+    Deliberately does NOT touch ProjectionExpression -- DynamoDB evaluates
+    FilterExpression against the full stored item before projection is
+    applied, so a filtered-on attribute need not be projected for the
+    caller to receive back (real DynamoDB behavior; fake_ddb_paging.py's
+    PagingTable mirrors it).
+    """
+    checkout_state_ne = str(checkout_state_ne or "").strip()
+    if not checkout_state_ne:
+        return
+    filter_parts.append("(attribute_not_exists(#cs) OR #cs <> :csne)")
+    expr_names["#cs"] = "checkout_state"
+    expr_values[":csne"] = _ser_s(checkout_state_ne)
+
+
+_LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
+# budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
+# FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
+# this budget with rows still possible ALWAYS yields a next_cursor (+
+# page_truncated: true) instead of silently truncating with no way back in.
+
+
+# ENC-TSK-Q14 (O2.1) -- census mode (`mode=census`) budgets, D3. Bounded
+# synchronous walk: no async materialized census in v1. Either bound trips
+# -> count_truncated: true, exhausted: false. Env-overridable so a prod
+# incident can widen/narrow the budget without a redeploy.
+CENSUS_MAX_RAW_PAGES = int(os.environ.get("CENSUS_MAX_RAW_PAGES", "50"))
+CENSUS_WALL_CLOCK_MS = int(os.environ.get("CENSUS_WALL_CLOCK_MS", "6000"))
+_CENSUS_RAW_PAGE_LIMIT = 200  # D3: raw Query() Limit per page (max page_size).
+_CENSUS_IDS_INLINE_CAP = 500  # decisions.md: fixed constant, echoed in payload
+# (not adaptive) as `ids_inline_cap`. `ids` is included in the census
+# payload iff count <= this cap.
+
+
+def _census_walk(project_id: str, record_type: str = "", status_filter: str = "",
+                  max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                  clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.1): bounded raw walk over every matching record.
+
+    Reuses the O1 (_handle_list_records) branch selection (base table vs
+    project-type-index GSI, D6) and loop shape, but always walks to
+    exhaustion or a budget (D3) instead of stopping at one handler page --
+    this is the count/anchor source for census mode, not a paginated list.
+
+    `ProjectionExpression` trims each item to project_id, record_id,
+    record_type, status, title, updated_at, item_id (O2.1) -- census never
+    needs the full record. project_id/record_id/record_type are kept even
+    though they're constant/filtered-on because _encode_list_cursor (O1.1)
+    needs them to mint page-anchor cursors (O2.2) straight from these rows
+    -- `record_id` here is always the RAW DynamoDB sort key
+    (`<record_type>#<item_id>`), never the caller-facing item id, and
+    _encode_list_cursor/_decode_list_cursor keep using it unchanged
+    (ENC-TSK-Q27). `item_id` is projected so `_census_item_id` (O2.4a,
+    ENC-TSK-Q27) can prefer the row's own attribute over deriving it by
+    string-splitting `record_id` -- see that helper's docstring. `rows`
+    itself is never id-normalized; only the caller-facing payload built
+    from it is (`_census_pages` anchors, `_handle_list_census`'s `ids`).
+    `checkout_state` is deliberately NOT added here even when
+    `checkout_state_ne` is set -- FilterExpression is evaluated against the
+    full stored item before ProjectionExpression trims it for return, so
+    filtering on checkout_state needs no projection (_add_checkout_state_ne_filter).
+    Counter rows (record_id starting with `_TRACKER_COUNTER_PREFIX`, the
+    same sentinel `_query_all_project_tasks` guards against) are dropped
+    from `rows` as they stream in, same as `_handle_list_records` drops
+    record_type == "counter" (ENC-TSK-Q13) -- counters are bookkeeping
+    rows, never census subjects.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant): applied
+    IDENTICALLY to _handle_list_records's own `checkout_state_ne` handling
+    (_add_checkout_state_ne_filter, shared) -- rows whose checkout_state
+    equals this value are excluded INSIDE the walk via FilterExpression,
+    not post-filtered in Python, so a census page cursor (O2.2) replayed
+    into _handle_list_records with the same checkout_state_ne resumes at
+    exactly the next slice this walk would have produced. The escalation
+    second walk (_census_escalation_walk) does NOT take this parameter --
+    escalation rows have no checkout_state attribute at all, so they can
+    never match a checkout_state exclusion and are always unaffected.
+
+    Returns {rows, exhausted, truncated_reason, branch}. `exhausted` is
+    True iff the FINAL DynamoDB call had no LastEvaluatedKey -- the only
+    proof the walk covered everything. `truncated_reason` is "pages",
+    "time", or None (exhausted). Budget checks happen AFTER each raw page
+    is fetched and its rows folded in (mirroring the O1 loop): a walk
+    always makes at least one raw call, and `rows` always reflects exactly
+    what was walked before the tripped bound, never a partial page.
+    """
+    ddb = _get_ddb()
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+    clock = clock or time.monotonic
+    started = clock()
+
+    if record_type and record_type in _RECORD_TYPES:
+        # GSI branch (D6): order is left unspecified -- no GSI change, no
+        # forced base-table walk.
+        branch = "gsi"
+        kwargs: Dict[str, Any] = {
+            "TableName": DYNAMODB_TABLE,
+            "IndexName": "project-type-index",
+            "KeyConditionExpression": "project_id = :pid AND record_type = :rtype",
+            "ExpressionAttributeValues": {
+                ":pid": _ser_s(project_id),
+                ":rtype": _ser_s(record_type),
+            },
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at, item_id",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        filter_parts = []
+        if status_filter:
+            filter_parts.append("#st = :st")
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
+    else:
+        # Base-table branch (D6): record_id ascending -- order="record_id_asc".
+        branch = "base"
+        kwargs = {
+            "TableName": DYNAMODB_TABLE,
+            "KeyConditionExpression": "project_id = :pid",
+            "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at, item_id",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        filter_parts = []
+        if status_filter:
+            filter_parts.append("#st = :st")
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        if record_type:
+            filter_parts.append("record_type = :rtype")
+            kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
+
+    rows: List[Dict[str, Any]] = []
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        for raw in resp.get("Items", []):
+            item = _deser_item(raw)
+            rid = item.get("record_id", "")
+            if isinstance(rid, str) and rid.startswith(_TRACKER_COUNTER_PREFIX):
+                continue
+            if item.get("record_type") == "escalation":
+                # D5: escalations are counted ONLY through the dedicated
+                # _census_escalation_walk (ENC-TSK-Q14-0C) second walk, never
+                # through this general project-partition walk -- an
+                # unfiltered base-branch walk shares the same partition as
+                # escalation rows (record_id begins_with "escalation#") and
+                # would otherwise double count them.
+                continue
+            rows.append(item)
+
+        if not last_evaluated_key:
+            exhausted = True  # proof: DynamoDB walk exhausted
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"  # unproven -- wall-clock budget hit
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"  # unproven -- raw-page budget hit
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {
+        "rows": rows,
+        "exhausted": exhausted,
+        "truncated_reason": truncated_reason,
+        "branch": branch,
+        "raw_pages_fetched": raw_pages_fetched,
+    }
+
+
+def _census_item_id(row: Dict[str, Any]) -> str:
+    """ENC-TSK-Q27: caller-facing item id for a census row (e.g. 'ENC-TSK-L80').
+
+    A census row's `record_id` is the RAW DynamoDB sort key
+    (`<record_type>#<item_id>`, e.g. 'task#ENC-TSK-L80') -- internal key
+    material _encode_list_cursor mints page cursors from (O1.1), never
+    something a caller should see in `pages[].first/last.id` or the `ids`
+    payload field. This is the one place those caller-facing ids get
+    derived, so every emission point (`_census_pages` anchors,
+    `_handle_list_census`'s `ids`) goes through it identically -- including
+    for escalation rows ('escalation#ENC-ESC-0001' -> 'ENC-ESC-0001'), which the
+    same generic prefix-strip handles with no special-casing.
+
+    Prefers the row's own `item_id` attribute when `_census_walk` /
+    `_census_escalation_walk` projected it (real tracker records always
+    carry one, minted by `_next_record_id`). Falls back to splitting
+    `record_id` on the FIRST '#' when `item_id` is absent or empty --
+    covers rows from a caller/test that didn't project it, and any legacy
+    row that predates the attribute. Falls back to the raw `record_id`
+    unchanged when it carries no '#' at all (defensive; every real
+    record_id is prefixed).
+    """
+    item_id = row.get("item_id")
+    if item_id:
+        return str(item_id)
+    rid = str(row.get("record_id") or "")
+    return rid.split("#", 1)[1] if "#" in rid else rid
+
+
+def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> List[Dict[str, Any]]:
+    """ENC-TSK-Q14 (O2.2): slice a completed _census_walk's rows into page anchors.
+
+    Anchors are computed directly from `rows` -- the same rows census
+    already walked -- never re-queried. `page_size` is capped the same way
+    as _handle_list_records (min 1, raw max 200). Page k's `cursor` is the
+    O1.1 (_encode_list_cursor) encoding of the LAST row of page k-1, so
+    feeding it to _handle_list_records resumes exactly at page k's first
+    row (cross-tested against the O1.2 route) -- `_encode_list_cursor`
+    reads `row["record_id"]` directly (the raw sort key, unaffected by
+    ENC-TSK-Q27) so this replay is untouched by the id-normalization below.
+    Page 0's cursor is None -- there is no prior row to encode. `first`/
+    `last` carry ONLY id, status, title (D placeholder in o2_spec.md),
+    never the full row -- `id` is the caller-facing item id
+    (`_census_item_id`, ENC-TSK-Q27), never the raw record_id sort key.
+    """
+    page_size = max(1, min(page_size, 200))
+    pages: List[Dict[str, Any]] = []
+    prev_cursor: Optional[str] = None
+    for start in range(0, len(rows), page_size):
+        chunk = rows[start:start + page_size]
+        if not chunk:
+            continue
+        first, last = chunk[0], chunk[-1]
+        pages.append({
+            "cursor": prev_cursor,
+            "first": {
+                "id": _census_item_id(first),
+                "status": first.get("status"),
+                "title": first.get("title"),
+            },
+            "last": {
+                "id": _census_item_id(last),
+                "status": last.get("status"),
+                "title": last.get("title"),
+            },
+            "n": len(chunk),
+        })
+        prev_cursor = _encode_list_cursor(last, branch)
+    return pages
+
+
+def _census_escalation_walk(project_id: str, status_filter: str = "",
+                             max_raw_pages: Optional[int] = None,
+                             wall_clock_ms: Optional[int] = None, clock=None) -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): bounded raw walk counting a project's escalations.
+
+    Reuses `_handle_escalation_list`'s own query shape (ENC-ISS-699:
+    KeyConditionExpression begins_with(record_id, "escalation#")) but walks
+    to exhaustion or a budget -- like _census_walk -- instead of truncating
+    to a caller page_size. Only a count is needed here (census by_type),
+    not the escalation bodies, so ProjectionExpression trims to record_id
+    (plus #st when `status_filter` is set, so the FilterExpression below has
+    something to evaluate against).
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C): applied as a raw
+    `#st = :st` FilterExpression exactly like the plain-list route
+    (_handle_list_records / _census_walk) applies its own `status_filter`
+    -- no vocabulary validation against `_ESCALATION_STATUSES` here, same
+    as the primary census walk never validates a task/issue status value.
+    Before this fix, this walk ignored the caller's status filter entirely,
+    so a `mode=census` request with `status=...` silently counted
+    escalations of every status while the primary walk correctly filtered
+    -- contradicting the "status filter applies inside the walk exactly as
+    the list route" contract in `_handle_list_census`'s docstring.
+
+    `max_raw_pages <= 0` (the caller has no budget left, e.g. the primary
+    walk already spent it all) short-circuits to a single deterministic
+    not-exhausted result with zero DynamoDB calls -- there is nothing left
+    to spend, so there is no reason to make one doomed call first.
+
+    Returns {count, exhausted, truncated_reason}. Same exhaustion/budget
+    semantics as _census_walk.
+
+    ENC-TSK-Q27: this walk returns only a count, never row/id data, so
+    there is no `_census_item_id` normalization to apply here today --
+    `_handle_list_census`'s `ids` payload field is built from the PRIMARY
+    walk's `rows` alone (`_census_collect`'s `rows` never includes
+    escalation rows, D5), and this walk's own raw 'escalation#ENC-ESC-...'
+    record_ids never reach a caller. If this walk is ever extended to
+    surface escalation rows/ids, they go through `_census_item_id` exactly
+    like primary-walk rows -- the helper is prefix-agnostic (it strips up
+    to the first '#' regardless of record_type), so 'escalation#ENC-ESC-0001'
+    normalizes to 'ENC-ESC-0001' with no escalation-specific casing needed.
+    """
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        # Nothing to walk -- the escalation primitive itself is off, not a
+        # budget/data question. Treat as a trivially exhausted empty walk.
+        return {"count": 0, "exhausted": True, "truncated_reason": None}
+
+    if max_raw_pages <= 0:
+        return {"count": 0, "exhausted": False, "truncated_reason": "pages"}
+
+    ddb = _get_ddb()
+    clock = clock or time.monotonic
+    started = clock()
+
+    kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :esc_prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":esc_prefix": _ser_s("escalation#"),
+        },
+        "ProjectionExpression": "record_id",
+        "Limit": _CENSUS_RAW_PAGE_LIMIT,
+    }
+    if status_filter:
+        kwargs["FilterExpression"] = "#st = :st"
+        kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+        kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+
+    count = 0
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        count += len(resp.get("Items", []))
+
+        if not last_evaluated_key:
+            exhausted = True
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {"count": count, "exhausted": exhausted, "truncated_reason": truncated_reason}
+
+
+def _census_collect(project_id: str, record_type: str = "", status_filter: str = "",
+                     max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                     escalation_max_raw_pages: Optional[int] = None,
+                     escalation_wall_clock_ms: Optional[int] = None,
+                     clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): primary census walk + (in-scope) escalation walk, merged.
+
+    D5: the escalation second walk runs when there is no `type` filter, or
+    `type == "escalation"` -- any other explicit type filter omits it
+    entirely (by_type then carries only that one type; no escalation walk,
+    no wasted DynamoDB calls). `type == "escalation"` skips the *primary*
+    walk instead (there is nothing for it to usefully find -- see
+    _census_walk's own escalation-row exclusion) and relies solely on the
+    escalation walk for both `by_type["escalation"]` and `count`.
+
+    Escalation and primary-walk rows never overlap (_census_walk excludes
+    escalation rows the same way it excludes counter rows), so by_type's
+    two contributions are always additive, never double-counted.
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C) is passed to BOTH walks --
+    the primary walk already applied it; it is now also forwarded to
+    `_census_escalation_walk` whenever the escalation walk runs, so a
+    status-filtered census never silently mixes a filtered primary count
+    with an unfiltered escalation count under one `count`/`by_type`.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) is forwarded
+    to the PRIMARY walk only (`_census_walk`) -- never to
+    `_census_escalation_walk`. Escalation records carry no `checkout_state`
+    attribute at all (they are never checked out), so
+    `attribute_not_exists(checkout_state) OR checkout_state <> :csne`
+    would always evaluate true for every escalation row regardless of the
+    value given; forwarding it would be a no-op at best and a wasted
+    FilterExpression at worst. The escalation walk is documented here as
+    intentionally unaffected by this parameter.
+
+    Budget sharing ("under the remaining budget", per o2_spec.md O2.3):
+    unless `escalation_max_raw_pages`/`escalation_wall_clock_ms` are given
+    explicitly (tests use this to force deterministic truncation), the
+    escalation walk gets whatever raw-page/wall-clock budget the primary
+    walk did not spend out of the shared CENSUS_MAX_RAW_PAGES /
+    CENSUS_WALL_CLOCK_MS (or caller-supplied `max_raw_pages`/
+    `wall_clock_ms`) totals.
+
+    When the escalation walk truncates, its rows are excluded from `count`
+    and `by_type` entirely (D5) -- `excluded_types` is set to
+    `["escalation"]` and `count_truncated` is forced true, independent of
+    whether the primary walk itself was exhausted.
+
+    Returns {rows, exhausted, truncated_reason, branch, by_type, count,
+    count_truncated, excluded_types}. `rows` never contains escalation
+    rows -- O2.2 page anchors are built from `rows` alone, matching D5's
+    "escalation rows excluded from ... pages".
+    """
+    record_type = str(record_type or "").strip()
+    status_filter = str(status_filter or "").strip()
+    clock = clock or time.monotonic
+    started = clock()
+
+    total_max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    total_wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if record_type == "escalation":
+        primary = {
+            "rows": [], "exhausted": True, "truncated_reason": None,
+            "branch": "base", "raw_pages_fetched": 0,
+        }
+    else:
+        primary = _census_walk(
+            project_id, record_type=record_type, status_filter=status_filter,
+            max_raw_pages=total_max_raw_pages, wall_clock_ms=total_wall_clock_ms, clock=clock,
+            checkout_state_ne=checkout_state_ne,
+        )
+
+    by_type: Dict[str, int] = {}
+    for row in primary["rows"]:
+        rt = row.get("record_type")
+        if rt:
+            by_type[rt] = by_type.get(rt, 0) + 1
+
+    excluded_types: List[str] = []
+    escalation_truncated = False
+    include_escalations = (not record_type) or record_type == "escalation"
+
+    if include_escalations:
+        if escalation_max_raw_pages is None:
+            escalation_max_raw_pages = max(total_max_raw_pages - primary["raw_pages_fetched"], 0)
+        if escalation_wall_clock_ms is None:
+            elapsed_ms = (clock() - started) * 1000
+            escalation_wall_clock_ms = max(total_wall_clock_ms - elapsed_ms, 0)
+
+        esc = _census_escalation_walk(
+            project_id, status_filter=status_filter, max_raw_pages=escalation_max_raw_pages,
+            wall_clock_ms=escalation_wall_clock_ms, clock=clock,
+        )
+        if esc["exhausted"]:
+            by_type["escalation"] = esc["count"]
+        else:
+            excluded_types.append("escalation")
+            escalation_truncated = True
+
+    count = sum(by_type.values())
+
+    return {
+        "rows": primary["rows"],
+        "exhausted": primary["exhausted"],
+        "truncated_reason": primary["truncated_reason"],
+        "branch": primary["branch"],
+        "by_type": by_type,
+        "count": count,
+        "count_truncated": (not primary["exhausted"]) or escalation_truncated,
+        "excluded_types": excluded_types,
+    }
+
+
+_CENSUS_VALID_TYPES = _RECORD_TYPES | {"escalation"}
+
+
+def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
+    """GET /{project}?mode=census — ENC-TSK-Q14 (O2.4) payload assembly.
+
+    Ties together the O2.1-O2.3 pieces (_census_collect: primary + escalation
+    walk; _census_pages: page anchors) into the tracker.census response
+    contract (governance_data_dictionary.json tracker.census, ENC-TSK-Q14-0E):
+
+        {count, count_truncated, exhausted, pages, page_size, as_of, order,
+         by_type, ids?, ids_inline_cap: 500, excluded_types?}
+
+    Deliberately NO `records` key -- this is a bounded summary (D3), not a
+    page of records; a caller wanting the actual rows follows `pages[k]
+    .cursor` into the ordinary _handle_list_records route. `ids` is present
+    iff `count <= ids_inline_cap` (500, D-placeholder in decisions.md) --
+    the full list of primary-walk ITEM ids (`_census_item_id`,
+    ENC-TSK-Q27 -- e.g. 'ENC-TSK-L80', never the raw
+    '<record_type>#<item_id>' DynamoDB sort key), omitted entirely
+    otherwise rather than silently truncated (a caller must not mistake a
+    capped `ids` list for a complete one). `order` follows D6 (typed GSI branch:
+    "unspecified"; untyped base-table branch: "record_id_asc"). `as_of`
+    follows D4 -- watermark kind "wall_clock+max_updated_at", `started_at`
+    captured before either walk runs, `max_updated_at` the maximum
+    `updated_at` observed across every primary-walk row (escalation rows
+    are not part of the watermark scan). Status filter applies inside the
+    walk exactly as the plain-list route (D3/D5: unchanged FilterExpression
+    semantics, just walked to a budget instead of a caller page).
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) applies the
+    same way, inside the primary walk only -- see _census_collect's
+    docstring.
+    """
+    record_type = str(query_params.get("type") or "").strip()
+    if record_type and record_type not in _CENSUS_VALID_TYPES:
+        return _error(
+            400,
+            f"Unknown type filter '{record_type}' for census mode. "
+            f"Allowed: {sorted(_CENSUS_VALID_TYPES)}",
+        )
+    status_filter = str(query_params.get("status") or "").strip()
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): forwarded to _census_collect's
+    # primary walk only -- see _census_collect's docstring for why the
+    # escalation walk is unaffected.
+    checkout_state_ne = str(query_params.get("checkout_state_ne") or "").strip()
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    started_at = _now_z()
+    result = _census_collect(
+        project_id, record_type=record_type, status_filter=status_filter,
+        checkout_state_ne=checkout_state_ne,
+    )
+
+    rows = result["rows"]
+    pages = _census_pages(rows, page_size, result["branch"])
+
+    max_updated_at = ""
+    for row in rows:
+        updated_at = row.get("updated_at") or ""
+        if isinstance(updated_at, str) and updated_at > max_updated_at:
+            max_updated_at = updated_at
+
+    order = "unspecified" if result["branch"] == "gsi" else "record_id_asc"
+
+    payload: Dict[str, Any] = {
+        "count": result["count"],
+        "count_truncated": result["count_truncated"],
+        "exhausted": result["exhausted"],
+        "pages": pages,
+        "page_size": page_size,
+        "as_of": {
+            "kind": "wall_clock+max_updated_at",
+            "started_at": started_at,
+            "max_updated_at": max_updated_at,
+        },
+        "order": order,
+        "by_type": result["by_type"],
+        "ids_inline_cap": _CENSUS_IDS_INLINE_CAP,
+    }
+    if result["count"] <= _CENSUS_IDS_INLINE_CAP:
+        payload["ids"] = [_census_item_id(row) for row in rows]
+    if result["excluded_types"]:
+        payload["excluded_types"] = result["excluded_types"]
+
+    return _response(200, payload)
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
@@ -1993,10 +3494,57 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     more records remain. Prior behavior exhausted LastEvaluatedKey and returned
     everything, causing the pre-existing 413 surfaced during the 2026-04-20
     io-override session.
+
+    ENC-TSK-Q13 (O1.2): the cursor is now a value-based boundary (see
+    _encode_list_cursor/_decode_list_cursor) built from the last item this
+    call actually RETURNED, never a raw DynamoDB LastEvaluatedKey. The old
+    version had two honesty bugs mirroring ENC-ISS-699's escalation-list
+    fix:
+
+      1. When a single query() response already held >= page_size raw items
+         *and* was DynamoDB's last page (no LastEvaluatedKey), the old loop
+         condition (`len(items) < page_size`) never re-entered, so the
+         `if len(items) >= page_size: encode cursor` branch inside the loop
+         never ran either -- no cursor was ever emitted even though `items`
+         had already been silently trimmed to page_size, discarding
+         whatever came after in that same raw page.
+      2. The cursor (when emitted at all) was the raw LastEvaluatedKey of
+         whichever raw page happened to trip the page_size threshold --
+         positioned after everything DynamoDB had scanned so far, not after
+         everything this call actually returned to the caller. Combined
+         with (1) this meant a caller could lose rows with no signal.
+
+    Loop invariant here: keep pulling raw pages (bounded by
+    _LIST_RECORDS_MAX_RAW_PAGES) until either (a) accumulated items exceed
+    page_size -- proof at least one more match exists past the page
+    boundary, (b) DynamoDB reports no LastEvaluatedKey -- proof the walk is
+    exhausted, or (c) the raw-page budget runs out with LastEvaluatedKey
+    still present -- unproven, so next_cursor is still emitted (from the
+    last returned item, or -- if zero rows matched this call at all -- from
+    the last EVALUATED key re-encoded through the codec so the walk can
+    resume) and page_truncated: true is set. A response with no next_cursor
+    is therefore always provably exhausted.
     """
+    # ENC-TSK-Q14 (O2.4): `mode=census` dispatches to the bounded summary
+    # walk instead of a paginated record list -- checked before anything
+    # else touches DynamoDB. Any mode value other than the default ("",
+    # meaning plain list) or "census" is a 400, never a silent plain list
+    # (o2_acs.md: "unknown mode values -> 400 envelope").
+    mode = str(query_params.get("mode") or "").strip()
+    if mode and mode != "census":
+        return _error(400, f"Unknown mode '{mode}'. Supported: census.")
+    if mode == "census":
+        return _handle_list_census(project_id, query_params)
+
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): rows whose checkout_state
+    # equals this value are excluded INSIDE the walk (FilterExpression),
+    # applied identically here and in the census primary walk
+    # (_census_walk) via the shared _add_checkout_state_ne_filter helper --
+    # see that helper's docstring for the exact clause and rationale.
+    checkout_state_ne = query_params.get("checkout_state_ne", "")
     try:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
@@ -2005,7 +3553,14 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
     try:
         if record_type and record_type in _RECORD_TYPES:
-            # Query using GSI
+            # Query using GSI (project-type-index: HASH project_id, RANGE
+            # record_type). LastEvaluatedKey/ExclusiveStartKey for a GSI
+            # query carries the index's own key (project_id, record_type)
+            # PLUS the base table's primary key (project_id, record_id) --
+            # DynamoDB requires the base key to disambiguate position within
+            # the index. That's why the gsi-branch cursor payload carries
+            # record_type (`t`) alongside project_id/record_id.
+            branch = "gsi"
             kwargs: Dict[str, Any] = {
                 "TableName": DYNAMODB_TABLE,
                 "IndexName": "project-type-index",
@@ -2016,12 +3571,24 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 },
                 "Limit": page_size,
             }
+            filter_parts = []
+            expr_names: Dict[str, str] = {}
             if status_filter:
-                kwargs["FilterExpression"] = "#st = :st"
-                kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+                filter_parts.append("#st = :st")
+                expr_names["#st"] = "status"
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
+            if filter_parts:
+                kwargs["FilterExpression"] = " AND ".join(filter_parts)
+            if expr_names:
+                kwargs["ExpressionAttributeNames"] = expr_names
         else:
-            # Query all records for project
+            # Query all records for project (base table: HASH project_id,
+            # RANGE record_id). No GSI change (D6): this branch's sort order
+            # is record_id ascending, unmodified.
+            branch = "base"
             kwargs = {
                 "TableName": DYNAMODB_TABLE,
                 "KeyConditionExpression": "project_id = :pid",
@@ -2037,6 +3604,9 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if record_type:
                 filter_parts.append("record_type = :rtype")
                 kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
             if filter_parts:
                 kwargs["FilterExpression"] = " AND ".join(filter_parts)
             if expr_names:
@@ -2044,41 +3614,56 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
         if cursor:
             try:
-                import base64
-                kwargs["ExclusiveStartKey"] = json.loads(
-                    base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-                )
+                decoded_cursor = _decode_list_cursor(cursor, branch, record_type)
+            except ListCursorBranchMismatch:
+                raise
             except Exception:
                 return _error(400, "Invalid next_cursor")
+            exclusive_start: Dict[str, Any] = {
+                "project_id": _ser_s(decoded_cursor["p"]),
+                "record_id": _ser_s(decoded_cursor["r"]),
+            }
+            if branch == "gsi":
+                exclusive_start["record_type"] = _ser_s(decoded_cursor["t"])
+            kwargs["ExclusiveStartKey"] = exclusive_start
 
         items: List[Dict[str, Any]] = []
-        next_cursor = ""
-        # Accumulate up to page_size post-filter items. DDB Limit caps the
-        # pre-filter scan, so we may need multiple pages to fill page_size when
-        # a FilterExpression is applied. Bound the loop to prevent runaway.
-        max_pages = 10
-        while len(items) < page_size and max_pages > 0:
+        page_truncated = False
+        last_evaluated_key: Optional[Dict[str, Any]] = None
+        raw_pages_fetched = 0
+        while True:
             resp = ddb.query(**kwargs)
             items.extend(resp.get("Items", []))
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
-            max_pages -= 1
-            if len(items) >= page_size:
-                # Encode cursor for caller
-                import base64
-                next_cursor = base64.urlsafe_b64encode(
-                    json.dumps(last_key).encode("utf-8")
-                ).decode("ascii")
-                break
+            raw_pages_fetched += 1
+            last_evaluated_key = resp.get("LastEvaluatedKey")
+            if len(items) > page_size:
+                break  # proof: at least one more match exists past page_size
+            if not last_evaluated_key:
+                break  # proof: DynamoDB walk exhausted
+            if raw_pages_fetched >= _LIST_RECORDS_MAX_RAW_PAGES:
+                page_truncated = True
+                break  # unproven -- budget hit, more may still exist
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
 
-        # Trim to page_size exactly
-        items = items[:page_size]
+        next_cursor = ""
+        if len(items) > page_size:
+            visible_raw = items[:page_size]
+            next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+        elif last_evaluated_key:
+            visible_raw = items
+            if visible_raw:
+                next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+            else:
+                # Zero rows matched this call, budget hit -- re-encode the
+                # last EVALUATED key (not a returned item) so the walk can
+                # still resume past everything already scanned.
+                next_cursor = _encode_list_cursor(_deser_item(last_evaluated_key), branch)
+        else:
+            visible_raw = items
 
-        # Deserialize and filter out counter records
+        # Deserialize and filter out counter records.
         records = []
-        for raw in items:
+        for raw in visible_raw:
             item = _deser_item(raw)
             if item.get("record_type") == "counter":
                 continue
@@ -2092,8 +3677,26 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
         }
         if next_cursor:
             payload["next_cursor"] = next_cursor
+        if page_truncated:
+            payload["page_truncated"] = True
         return _response(200, payload)
 
+    except ListCursorBranchMismatch:
+        # ENC-TSK-Q13 (O1.3): a cursor minted on the other branch (base
+        # table walk vs project-type-index walk) is caller/version skew,
+        # not a decode failure or a server error -- surface it as a 400
+        # with enough self-correcting guidance to retry, same as every
+        # other operator-facing 400 in this file (see document_api's
+        # recommended_next_actions convention).
+        return _error(
+            400,
+            "next_cursor was issued for a different list query (base table "
+            "vs project-type-index) than this request. Restart the walk "
+            "without a cursor.",
+            code="CURSOR_BRANCH_MISMATCH",
+            retryable=False,
+            recommended_next_actions=["restart the walk without a cursor"],
+        )
     except Exception as exc:
         logger.error("list failed: %s", exc)
         return _error(500, "Database query failed.")
@@ -2226,40 +3829,6 @@ def _handle_create_record(
     location_hint = str(body.get("location_hint") or "")
     success_metrics = body.get("success_metrics") or []
     related_str = body.get("related", "")
-    # ENC-ISS-614 / ENC-TSK-N91: unified relation intake. The canonical typed
-    # fields (related_task_ids / related_issue_ids / related_feature_ids) were
-    # silently dropped at create because only the legacy "related" comma-string
-    # was ever read. Both spellings now converge on one ordered, de-duplicated
-    # related_ids list consumed by the forward write and the bidirectional
-    # back-link pass below, so create-time semantics are spelling-independent.
-    # Typed values reuse the ENC-ISS-059 PATCH-path coercion; a value that
-    # cannot be normalized fails loudly (400) instead of silently dropping.
-    if isinstance(related_str, list):
-        related_ids = [str(r).strip() for r in related_str if str(r).strip()]
-    else:
-        related_ids = [r.strip() for r in str(related_str or "").split(",") if r.strip()]
-    related_id_sources = {}  # upper-cased ID -> typed source field, for reclassification reporting
-    for rel_field in sorted(_RELATION_ID_FIELDS):
-        raw_rel_value = body.get(rel_field)
-        if raw_rel_value is None:
-            continue
-        normalized_rel, rel_err = _normalize_related_ids_value(raw_rel_value)
-        if rel_err:
-            return _error(400, f"Field '{rel_field}' is invalid: {rel_err}")
-        for rid in normalized_rel:
-            related_id_sources.setdefault(rid.upper(), rel_field)
-            related_ids.append(rid)
-    # De-duplicate case-insensitively, preserving first-seen order.
-    seen_rel_ids = set()
-    deduped_rel_ids = []
-    for rid in related_ids:
-        rid_key = rid.upper()
-        if rid_key in seen_rel_ids:
-            continue
-        seen_rel_ids.add(rid_key)
-        deduped_rel_ids.append(rid)
-    related_ids = deduped_rel_ids
-    related_intake_warnings = []
     user_story = str(body.get("user_story") or "").strip()
     category = str(body.get("category") or "").strip()
     intent = str(body.get("intent") or "").strip()
@@ -2270,6 +3839,10 @@ def _handle_create_record(
     dispatch_id = str(body.get("dispatch_id") or "").strip()
     is_child = bool(body.get("is_child", False))
     parent_task_id = str(body.get("parent_task_id") or "").strip()
+    # ENC-TSK-L06 AC-1: optional client-supplied idempotency key. A retry with the same
+    # key returns the SAME record_id instead of allocating a new one (ID Service contract;
+    # inert when enable_id_service_extraction is OFF).
+    idempotency_key = str(body.get("idempotency_key") or "").strip()
     # ENC-TSK-C26 / ENC-ISS-175: read transition_type at create time so the
     # create-time-only sealed values (no_code, code_only per ENC-FTR-060) can
     # actually be applied. Field-level immutability is enforced separately by
@@ -2541,6 +4114,11 @@ def _handle_create_record(
             "description": _ser_s(f"Created via tracker API{note_suffix}: {title}"),
         }}]},
     }
+    # ENC-FTR-111 / ENC-TSK-H83: the auto_walk_opt_out circuit breaker exists on
+    # task/issue/feature/plan and defaults false. An explicit create-time value
+    # (MCP denylist passthrough) is honored and coerced to a real BOOL.
+    if record_type in ("task", "issue", "feature", "plan"):
+        item["auto_walk_opt_out"] = {"BOOL": _coerce_bool(body.get("auto_walk_opt_out", False))}
     if coordination_request_id:
         item["coordination_request_id"] = _ser_s(coordination_request_id)
     if description:
@@ -2636,12 +4214,20 @@ def _handle_create_record(
         item["evidence_chain"] = {"L": [_ser_s(eid.strip()) for eid in evidence_chain]}
         item["provenance"] = _ser_s(provenance)
         item["confidence"] = {"N": str(body.get("confidence", 0.5))}
-        # ENC-FTR-054: Compute constitutional scores server-side
-        pillar_composite = _compute_lesson_pillar_composite(parsed_pillar_scores)
-        resonance_score = _compute_resonance_score(parsed_pillar_scores)
+        # ENC-FTR-054: Constitutional scores. ENC-TSK-H47 / B63 Phase 2B: when the Scoring Service
+        # is ON, defer the computation to the async SNS-triggered service — store only the validated
+        # pillar_scores and mark scoring_status='pending'; the service computes pillar_composite +
+        # resonance_score and flips scoring_status -> 'scored'. When OFF (rollback), score inline
+        # exactly as before and mark scoring_status='scored' (the lesson is born already scored).
         item["pillar_scores"] = {"M": {k: {"N": str(v)} for k, v in parsed_pillar_scores.items()}}
-        item["resonance_score"] = {"N": str(resonance_score)}
-        item["pillar_composite"] = {"N": str(pillar_composite)}
+        if _scoring_service_enabled():
+            item["scoring_status"] = {"S": "pending"}
+        else:
+            pillar_composite = _compute_lesson_pillar_composite(parsed_pillar_scores)
+            resonance_score = _compute_resonance_score(parsed_pillar_scores)
+            item["resonance_score"] = {"N": str(resonance_score)}
+            item["pillar_composite"] = {"N": str(pillar_composite)}
+            item["scoring_status"] = {"S": "scored"}
         item["extensions"] = {"L": []}
         item["lesson_version"] = {"N": "1"}
         if analysis_reference:
@@ -2661,72 +4247,127 @@ def _handle_create_record(
         item["intent"] = _ser_s(intent)
     if primary_task and record_type in ("feature", "issue"):
         item["primary_task"] = _ser_s(primary_task)
-    if related_ids:
-        # ENC-ISS-614 / ENC-TSK-N91: forward write consumes the unified list.
-        # Unclassifiable IDs and cross-field reclassifications are reported in
-        # the 201 body (related_intake_warnings) instead of silently vanishing.
-        classified_rel = _classify_related_ids(related_ids)
-        classified_rel_flat = {rid for ids in classified_rel.values() for rid in ids}
-        for rid in related_ids:
-            if rid.upper() not in classified_rel_flat:
-                related_intake_warnings.append(
-                    f"Related ID '{rid}' is not classifiable to a tracker record "
-                    "type and was NOT persisted."
-                )
-        for field_name, ids in classified_rel.items():
-            if not ids:
-                continue
-            item[field_name] = {"L": [_ser_s(i) for i in ids]}
-            for rid in ids:
-                source_field = related_id_sources.get(rid)
-                if source_field and source_field != field_name:
-                    related_intake_warnings.append(
-                        f"Related ID '{rid}' was supplied under '{source_field}' "
-                        f"but classified to '{field_name}' by its ID type segment."
-                    )
+    if related_str:
+        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
+        for field_name, ids in _classify_related_ids(related_ids).items():
+            if ids:
+                item[field_name] = {"L": [_ser_s(i) for i in ids]}
 
-    # ENC-ISS-132: Reject externally-provided record IDs — IDs are server-generated only
-    for forbidden_field in ("item_id", "record_id"):
+    # ENC-ISS-132 / ENC-TSK-L06 AC-3: Reject externally-provided record IDs — IDs are
+    # generated server-side only. AC-4: every rejection here also feeds the ID Service's
+    # per-caller trust-score violation counter (best-effort, fire-and-forget — the 400
+    # rejection itself never depends on or is delayed by the notify call).
+    for forbidden_field in ("item_id", "record_id", "item_id_provenance"):
         if body.get(forbidden_field):
-            return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
+            _record_id_boundary_violation(body, record_type, forbidden_field)
+            return _error(
+                400,
+                f"Field '{forbidden_field}' must not be provided — record IDs and their provenance "
+                f"are generated server-side.",
+                code="ID_BOUNDARY_VIOLATION",
+            )
     # ENC-TSK-F41 reserved-counter-field guard runs at the top of this handler
     # (before project prefix lookup) so body-level seed attempts fail fast.
 
-    # Create with counter-based ID allocation (or hierarchical sub-task ID)
-    try:
-        for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
-            if is_child and parent_task_id:
-                # ENC-FTR-056: Generate hierarchical sub-task ID
-                parent_upper = parent_task_id.upper()
-                parent_parts = parent_upper.split("-")
-                parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
-                suffix = _next_subtask_suffix(project_id, parent_root)
-                new_id = f"{parent_root}-{suffix}"
-                item["parent"] = _ser_s(parent_upper)
+    # ENC-TSK-L06 / B63 Phase 2 AC-6: when enable_id_service_extraction is ON, the standalone
+    # ID Service is the SOLE authority for record-ID allocation, the idempotency-key contract,
+    # and HMAC provenance signing. FAIL-CLOSED — an invoke failure rejects the create; the
+    # inline counter-based allocation below runs only as the flag-OFF rollback path.
+    item_id_provenance: str = ""
+    if _id_service_enabled():
+        ws = _normalize_write_source(body)
+        _id_verdict = _invoke_id_service({
+            "action": "allocate",
+            "project_id": project_id,
+            "prefix": prefix,
+            "record_type": record_type,
+            "idempotency_key": idempotency_key,
+            "is_child": is_child,
+            "parent_task_id": parent_task_id,
+            "created_at": now,
+            "caller_identity": ws.get("provider") or "",
+        })
+        if _id_verdict is None:
+            return _error(
+                503,
+                "ID Service unavailable; create rejected (fail-closed, ENC-TSK-L06). "
+                "Retry shortly, or disable the enable_id_service_extraction flag to fall "
+                "back to inline allocation.",
+                code="ID_SERVICE_UNAVAILABLE",
+                retryable=True,
+            )
+        if not _id_verdict.get("allow"):
+            _id_err = _id_verdict.get("error") or {}
+            return _error(
+                int(_id_err.get("status", 400) or 400),
+                _id_err.get("message", "ID Service rejected the allocation."),
+                code=_id_err.get("code", "INVALID_INPUT"),
+            )
+        new_id = _id_verdict["record_id"]
+        item_id_provenance = _id_verdict.get("item_id_provenance", "")
+        if is_child and parent_task_id:
+            item["parent"] = _ser_s(parent_task_id.upper())
+        sk = f"{record_type}#{new_id}"
+        item["record_id"] = _ser_s(sk)
+        item["item_id"] = _ser_s(new_id)
+        if item_id_provenance:
+            item["item_id_provenance"] = _ser_s(item_id_provenance)
+        _stamp_version_seq_on_create_item(item)
+        try:
+            ddb.put_item(
+                TableName=DYNAMODB_TABLE, Item=item,
+                ConditionExpression="attribute_not_exists(record_id)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("create failed (ID Service path): %s", exc)
+            return _error(500, "Database write failed.")
+        # Falls through to the shared post-write continuation below (lesson scoring publish,
+        # parent subtask_ids update, bidirectional relationships, response construction) —
+        # identical for both the ID-Service and inline-rollback allocation paths.
+    else:
+        # --- Flag-OFF rollback path: inline counter-based allocation (unchanged from pre-L06) ---
+        try:
+            for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
+                if is_child and parent_task_id:
+                    # ENC-FTR-056: Generate hierarchical sub-task ID
+                    parent_upper = parent_task_id.upper()
+                    parent_parts = parent_upper.split("-")
+                    parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
+                    suffix = _next_subtask_suffix(project_id, parent_root)
+                    new_id = f"{parent_root}-{suffix}"
+                    item["parent"] = _ser_s(parent_upper)
+                else:
+                    new_id = _next_record_id(project_id, prefix, record_type)
+                sk = f"{record_type}#{new_id}"
+                item["record_id"] = _ser_s(sk)
+                item["item_id"] = _ser_s(new_id)
+                _stamp_version_seq_on_create_item(item)
+                try:
+                    ddb.put_item(
+                        TableName=DYNAMODB_TABLE, Item=item,
+                        ConditionExpression="attribute_not_exists(record_id)",
+                    )
+                    break
+                except ClientError as exc:
+                    if _is_conditional_check_failed(exc) and attempt < _TRACKER_CREATE_MAX_ATTEMPTS:
+                        continue
+                    raise
             else:
-                new_id = _next_record_id(project_id, prefix, record_type)
-            sk = f"{record_type}#{new_id}"
-            item["record_id"] = _ser_s(sk)
-            item["item_id"] = _ser_s(new_id)
-            try:
-                ddb.put_item(
-                    TableName=DYNAMODB_TABLE, Item=item,
-                    ConditionExpression="attribute_not_exists(record_id)",
-                )
-                break
-            except ClientError as exc:
-                if _is_conditional_check_failed(exc) and attempt < _TRACKER_CREATE_MAX_ATTEMPTS:
-                    continue
-                raise
-        else:
-            return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
-    except ValueError as ve:
-        # Sub-task capacity exhausted
-        logger.error("create failed (capacity): %s", ve)
-        return _error(400, str(ve))
-    except Exception as exc:
-        logger.error("create failed: %s", exc)
-        return _error(500, "Database write failed.")
+                return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
+        except ValueError as ve:
+            # Sub-task capacity exhausted
+            logger.error("create failed (capacity): %s", ve)
+            return _error(400, str(ve))
+        except Exception as exc:
+            logger.error("create failed: %s", exc)
+            return _error(500, "Database write failed.")
+
+    # ENC-TSK-H47 / B63 Phase 2B: a lesson written with scoring_status='pending' (flag ON) needs the
+    # async Scoring Service kicked off. Publish AFTER the write succeeds (the lesson is the source of
+    # truth) and best-effort — a failed publish leaves the lesson scoring_status='pending' for a
+    # re-drive, never a failed create. No-op when the flag is OFF (inline scoring already ran).
+    if record_type == "lesson" and _scoring_service_enabled():
+        _publish_lesson_scoring_request(project_id, sk, new_id, parsed_pillar_scores)
 
     # ENC-FTR-056: Update parent record's subtask_ids list
     if is_child and parent_task_id:
@@ -2757,10 +4398,9 @@ def _handle_create_record(
             logger.warning("Failed to update parent subtask_ids for %s: %s", parent_task_id, exc)
 
     # Best-effort bidirectional relationships
-    # ENC-ISS-614 / ENC-TSK-N91: driven by the unified related_ids list so the
-    # typed fields and the legacy "related" string write identical back-links.
     bidi_warnings = []
-    if related_ids:
+    if related_str:
+        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
         inverse_field = f"related_{record_type}_ids"
         for target_id in related_ids:
             try:
@@ -2796,10 +4436,6 @@ def _handle_create_record(
         result["warning"] = category_warning
     if bidi_warnings:
         result["bidi_warnings"] = bidi_warnings
-    # ENC-ISS-614 / ENC-TSK-N91: surface relation-intake warnings without
-    # blocking creation — a silent drop is the failure class this fixes.
-    if related_intake_warnings:
-        result["related_intake_warnings"] = related_intake_warnings
     # ENC-ISS-105: surface location context warnings without blocking creation
     if record_type == "issue" and location_context_warnings:
         result["location_context_warnings"] = location_context_warnings
@@ -2809,30 +4445,88 @@ def _handle_create_record(
 # Prefix map cache for bidirectional relationships
 _prefix_map_cache: Optional[Dict[str, str]] = None
 _prefix_map_cache_at: float = 0.0
+# ENC-TSK-Q10 / ENC-ISS-791: alias prefix -> project_id, filled by the same scan.
+# Kept separate so the mint map returned by _get_prefix_map_cached() is unchanged
+# for its existing callers; a mint prefix always wins over an alias (ENC-TSK-O47).
+_alias_prefix_map_cache: Dict[str, str] = {}
 
 
 def _get_prefix_map_cached() -> Dict[str, str]:
-    global _prefix_map_cache, _prefix_map_cache_at
+    global _prefix_map_cache, _prefix_map_cache_at, _alias_prefix_map_cache
     now = time.time()
     if _prefix_map_cache is not None and (now - _prefix_map_cache_at) < 300.0:
         return _prefix_map_cache
     try:
         ddb = _get_ddb()
-        resp = ddb.scan(
-            TableName=PROJECTS_TABLE,
-            ProjectionExpression="project_id, prefix",
-        )
+        # "#pfx" aliases the attribute name defensively (parity with
+        # coordination_api/project_utils.py); the scan is paginated so a
+        # project past the first page can never be silently unresolvable.
+        scan_kwargs = {
+            "TableName": PROJECTS_TABLE,
+            "ProjectionExpression": "project_id, #pfx, alias_prefixes",
+            "ExpressionAttributeNames": {"#pfx": "prefix"},
+        }
+        resp = ddb.scan(**scan_kwargs)
+        items = list(resp.get("Items", []))
+        while resp.get("LastEvaluatedKey"):
+            resp = ddb.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **scan_kwargs)
+            items.extend(resp.get("Items", []))
         mapping = {}
-        for item in resp.get("Items", []):
+        aliases: Dict[str, str] = {}
+        for item in items:
             pid = item.get("project_id", {}).get("S", "")
             pfx = item.get("prefix", {}).get("S", "")
             if pid and pfx:
-                mapping[pfx] = pid
+                mapping[pfx.upper()] = pid
+            if not pid:
+                continue
+            raw_aliases = item.get("alias_prefixes", {})
+            # Tolerate either DynamoDB shape: a List of strings or a String Set.
+            alias_values = [a.get("S", "") for a in raw_aliases.get("L", [])] + list(raw_aliases.get("SS", []))
+            for raw_alias in alias_values:
+                alias = str(raw_alias or "").strip().upper()
+                if alias and alias not in aliases:
+                    aliases[alias] = pid
+        for collided in [a for a in aliases if a in mapping]:
+            if aliases[collided] != mapping[collided]:
+                logger.warning(
+                    "[PREFIX-COLLISION] alias %s (%s) shadowed by mint prefix of %s",
+                    collided, aliases[collided], mapping[collided],
+                )
+            aliases.pop(collided, None)
         _prefix_map_cache = mapping
+        _alias_prefix_map_cache = aliases
         _prefix_map_cache_at = now
         return mapping
     except Exception:
         return _prefix_map_cache or {}
+
+
+_RECORD_ID_PREFIX_RE = re.compile(r"^([A-Za-z]{2,8})-")
+
+
+def _resolve_project_for_record_id(record_id: str) -> Optional[str]:
+    """ENC-TSK-Q10 / ENC-ISS-791: derive the owning project_id from a record id's
+    leading prefix using the projects table -- mint prefix first, then
+    alias_prefixes (a mint prefix always wins). One forced re-scan on a miss so a
+    project registered after the cache was filled still resolves (parity with
+    server.py's _resolve_prefix, ENC-ISS-123). Returns None for an unknown
+    prefix; callers answer 404, never guess.
+    """
+    global _prefix_map_cache_at
+    match = _RECORD_ID_PREFIX_RE.match(str(record_id or "").strip())
+    if not match:
+        return None
+    prefix = match.group(1).upper()
+    for attempt in (0, 1):
+        mint = _get_prefix_map_cached()
+        if prefix in mint:
+            return mint[prefix]
+        if prefix in _alias_prefix_map_cache:
+            return _alias_prefix_map_cache[prefix]
+        if attempt == 0:
+            _prefix_map_cache_at = 0.0  # force exactly one refresh
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3309,6 +5003,69 @@ def _normalize_evidence_value(raw_value: Any) -> Tuple[Optional[List[Any]], Opti
     return parsed_list, None
 
 
+def _apply_reverse_relation_edges(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    field: str,
+    old_ids: Optional[List[str]],
+    new_ids: Optional[List[str]],
+) -> None:
+    """ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): mirror newly-added related_*_ids
+    onto each target's reverse field so cross-references are bidirectional.
+
+    Reverse field on the target is always related_{source_record_type}_ids —
+    symmetric to how the source stores related_{target_record_type}_ids.
+    Each target write is an independently atomic conditional append
+    (contains-check as the DynamoDB ConditionExpression); a target that
+    already carries the back-reference is a silent no-op (idempotent), and a
+    missing/unknown target is skipped without failing the primary write,
+    which has already committed by the time this runs.
+    """
+    old_set = set(old_ids or [])
+    added = [rid.strip().upper() for rid in (new_ids or []) if rid and rid.strip().upper() not in old_set]
+    if not added:
+        return
+    reverse_field = f"related_{record_type}_ids"
+    if reverse_field not in _RELATION_ID_FIELDS:
+        return
+    ddb = _get_ddb()
+    now = _now_z()
+    for target_id in added:
+        target_type = _record_type_from_id(target_id)
+        if target_type not in _TYPE_SEG_TO_SK_PREFIX:
+            continue
+        try:
+            target_key = _build_key(project_id, target_type, target_id)
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE,
+                Key=target_key,
+                UpdateExpression=(
+                    "SET #rf = list_append(if_not_exists(#rf, :empty), :new), updated_at = :now"
+                ),
+                ConditionExpression="attribute_not_exists(#rf) OR NOT contains(#rf, :rid)",
+                ExpressionAttributeNames={"#rf": reverse_field},
+                ExpressionAttributeValues={
+                    ":empty": {"L": []},
+                    ":new": {"L": [_ser_s(record_id.strip().upper())]},
+                    ":rid": _ser_s(record_id.strip().upper()),
+                    ":now": _ser_s(now),
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                continue  # target already carries the back-reference — idempotent no-op
+            logger.warning(
+                "[ENC-TSK-L07] reverse edge write failed %s.%s -> %s: %s",
+                record_id, reverse_field, target_id, exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ENC-TSK-L07] reverse edge write failed %s.%s -> %s: %s",
+                record_id, reverse_field, target_id, exc,
+            )
+
+
 def _normalize_related_ids_value(raw_value: Any) -> Tuple[Optional[List[str]], Optional[str]]:
     """Normalize PATCH related_*_ids payloads, including JSON-stringified arrays.
 
@@ -3429,6 +5186,16 @@ def _apply_user_initiated_advance(
     }}
     evidence_json = json.dumps(enriched_evidence, separators=(",", ":"))
 
+    # ENC-FTR-111 / ENC-TSK-H83: a human non-forward transition (regression or coding-updates
+    # re-entry) auto-latches the auto_walk_opt_out circuit breaker and records an Artifact-Genesis
+    # audit entry. This is the human path for tasks; the arc-walker can never clear the result.
+    cur_status_nf = (item_data.get("status") or "").strip().lower()
+    latch_nf, latch_reason = _is_task_non_forward(cur_status_nf, new_lower)
+    hentry_list = [history_entry]
+    if latch_nf:
+        hentry_list.append(_opt_out_latch_history_entry(
+            now, cognito_user, cur_status_nf, new_lower, latch_reason))
+
     # ENC-TSK-F41 / DOC-546B896390EA §5: even on the Cognito user-initiated
     # human-override path, closed_count must be incremented when the target
     # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
@@ -3439,23 +5206,31 @@ def _apply_user_initiated_advance(
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
         "history = list_append(if_not_exists(history, :empty), :hentry)"
     )
+    if latch_nf:
+        ui_update_expr += ", auto_walk_opt_out = :optout"
     if new_lower == "closed":
         ui_update_expr += " ADD closed_count :one"
+    ui_attr_values = {
+        ":val": _ser_value(new_lower), ":now": _ser_s(now),
+        ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": hentry_list}, ":empty": {"L": []},
+    }
+    if latch_nf:
+        ui_attr_values[":optout"] = {"BOOL": True}
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
             UpdateExpression=ui_update_expr,
             ExpressionAttributeNames={"#fld": "status"},
-            ExpressionAttributeValues={
-                ":val": _ser_value(new_lower), ":now": _ser_s(now),
-                ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
+            ExpressionAttributeValues=ui_attr_values,
         )
     except Exception as exc:
         logger.error("user_initiated status update failed: %s", exc)
         return _error(500, "Database write failed.")
+    if latch_nf:
+        _emit_opt_out_latch_event(
+            project_id, record_type, record_id, cur_status_nf, new_lower, latch_reason, cognito_user)
 
     # Step 3: Restore or release checkout (borrow-and-restore)
     if new_lower == "closed":
@@ -3543,6 +5318,10 @@ def _handle_update_field(
 
     field = body.get("field", "").strip()
     value = body.get("value", "")
+    # ENC-FTR-111 / ENC-TSK-H83: holds a latch-context dict when a human-initiated non-forward
+    # transition of an issue/feature/plan must auto-latch auto_walk_opt_out (applied at the
+    # generic write below). Task human reverts are latched in _apply_user_initiated_advance.
+    _optout_latch: Optional[Dict[str, str]] = None
     if not field:
         return _tracker_field_validation_error(
             "Field 'field' is required (or use 'action' for PWA mutations).",
@@ -3727,6 +5506,25 @@ def _handle_update_field(
             )
         value = normalized_ids
 
+    # ENC-FTR-111 / ENC-TSK-H83: auto_walk_opt_out is a real boolean (coerce string inputs), and
+    # the Universal Arc-Walker can NEVER clear the circuit breaker. A clear (set false) originating
+    # from the reserved arc-walker write_source is rejected; humans/agents may set or clear freely.
+    if field == "auto_walk_opt_out":
+        value = _coerce_bool(value)
+        if value is False:
+            _ws_guard = _normalize_write_source(body)
+            _actor = str(_ws_guard.get("provider", "")).strip().lower()
+            _chan = str(_ws_guard.get("channel", "")).strip().lower()
+            if ARC_WALKER_ACTOR in (_actor, _chan):
+                return _error(
+                    403,
+                    "The Universal Arc-Walker (system:arc-walker) cannot clear auto_walk_opt_out. "
+                    "The circuit breaker is cleared only by an explicit human or agent "
+                    "tracker.set(field='auto_walk_opt_out', value=false). (ENC-FTR-111 AC-2 / ENC-TSK-H83)",
+                    code="ARC_WALKER_OPT_OUT_IMMUTABLE",
+                    field=field,
+                )
+
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
 
@@ -3742,6 +5540,28 @@ def _handle_update_field(
 
     item_data = _deser_item(raw_item)
     warnings: List[str] = []
+
+    # --- ENC-TSK-L47: If-Match / HTTP 409 per-record revision contract ---
+    # Own lightweight counter (sync_version), decoupled from ENC-TSK-L27's version_seq.
+    # Absent header preserves today's unconditional-write behavior (backward compatible).
+    try:
+        _current_rev = int(item_data.get("sync_version", 0) or 0)
+    except (TypeError, ValueError):
+        _current_rev = 0
+    _if_match = _extract_if_match(event)
+    if _if_match is not None and _if_match != str(_current_rev):
+        return _error(
+            409,
+            f"If-Match revision mismatch: client expected revision '{_if_match}', "
+            f"server is at revision {_current_rev}.",
+            code="REVISION_CONFLICT",
+            field=field,
+            record_id=record_id,
+            record_type=record_type,
+            expected_revision=_if_match,
+            current_revision=_current_rev,
+            current=item_data,
+        )
 
     # --- ENC-ISS-092: user-initiated transitions (Cognito-only, bypass checkout gate) ---
     # Must be checked BEFORE session-ownership enforcement and the ENC-FTR-037 gate so
@@ -3920,7 +5740,46 @@ def _handle_update_field(
 
         # Enforce valid transitions — forward + revert (ENC-FTR-022)
         is_revert = False
-        if current_status != new_lower:
+        _lifecycle_owned = False
+        # ENC-TSK-H46 / B63 Phase 2A: when the flag is ON, the Lifecycle Service is the SOLE
+        # authority for transition_type_matrix validation, STRICTNESS_RANK, and subtask gates on
+        # task status transitions. FAIL-CLOSED — an invoke failure rejects the transition; the
+        # inline validators below run only as the flag-OFF rollback path (zero inline fallback).
+        if record_type == "task" and current_status != new_lower and _lifecycle_service_enabled():
+            _lc_verdict = _invoke_lifecycle_service({
+                "action": "validate_transition",
+                "project_id": project_id,
+                "record_type": record_type,
+                "record_id": record_id,
+                "current_status": current_status,
+                "target_status": new_lower,
+                "transition_type": (item_data.get("transition_type") or "github_pr_deploy").strip().lower(),
+                "transition_evidence": transition_evidence,
+                "components": item_data.get("components") or [],
+                "subtask_ids": item_data.get("subtask_ids") or [],
+                "is_checkout_service_request": _is_checkout_service_request(event),
+            })
+            if _lc_verdict is None:
+                return _error(
+                    503,
+                    "Lifecycle Service unavailable; transition rejected (fail-closed, ENC-TSK-H46). "
+                    "Retry shortly, or disable the enable_lifecycle_service_extraction flag to fall "
+                    "back to inline validation.",
+                    code="LIFECYCLE_SERVICE_UNAVAILABLE",
+                    retryable=True,
+                )
+            if not _lc_verdict.get("allow"):
+                _lc_err = _lc_verdict.get("error") or {}
+                return _error(
+                    int(_lc_err.get("status", 400) or 400),
+                    _lc_err.get("message", "Lifecycle Service rejected the transition."),
+                    code=_lc_err.get("code", "INVALID_INPUT"),
+                    **(_lc_err.get("details") or {}),
+                )
+            is_revert = bool(_lc_verdict.get("is_revert"))
+            _lifecycle_owned = True
+
+        if not _lifecycle_owned and current_status != new_lower:
             type_transitions = _VALID_TRANSITIONS.get(record_type, {})
             valid_next = type_transitions.get(current_status, set())
             revert_targets = _REVERT_TRANSITIONS.get(record_type, {}).get(current_status, set())
@@ -3973,6 +5832,16 @@ def _handle_update_field(
                     allowed_values=sorted(valid_next),
                     governed_rules=transition_governed_rules,
                 )
+
+        # --- ENC-FTR-111 / ENC-TSK-H83: auto_walk_opt_out latch on human non-forward transition ---
+        # Issue/feature/plan human-initiated reverts latch the circuit breaker here (the generic
+        # write below applies it + emits the Artifact-Genesis record). Task human reverts go through
+        # _apply_user_initiated_advance; agent/MCP transitions (internal-key) never latch.
+        if record_type in ("issue", "feature", "plan") and is_revert and _is_human_request(claims):
+            _optout_latch = {
+                "from": current_status, "to": new_lower,
+                "reason": "regression", "by": _human_actor(claims),
+            }
 
         # --- ENC-ISS-155: Plan completion gate ---
         # When setting a plan to 'complete', validate all objectives_set entries
@@ -4079,7 +5948,7 @@ def _handle_update_field(
                     expected_format="transition_evidence.commit_sha validated against GitHub",
                 )
 
-        if not is_revert and record_type == "task" and new_lower == "merged-main" \
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "merged-main" \
                 and not _is_checkout_service_request(event):
             # ENC-ISS-095: Skip merge_evidence requirement for checkout-service requests.
             # The checkout service validates pr_id + merged_at via GitHub API before writing;
@@ -4097,7 +5966,7 @@ def _handle_update_field(
                     expected_format="transition_evidence.merge_evidence (non-empty string)",
                 )
 
-        if not is_revert and record_type == "task" and new_lower == "deploy-success":
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "deploy-success":
             # ENC-FTR-059: Matrix-driven deploy evidence validation (v{MATRIX_VERSION}).
             # Replaces hardcoded if/else branching with registry lookup.
             task_transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
@@ -4130,7 +5999,7 @@ def _handle_update_field(
                         ),
                     )
 
-        if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
             live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
             if not live_validation_evidence:
                 return _tracker_field_validation_error(
@@ -4351,6 +6220,15 @@ def _handle_update_field(
         "description": _ser_s(note_text),
     }}
 
+    # ENC-TSK-H86 (T5): an EXPLICIT human/agent tracker.set of auto_walk_opt_out records a governed
+    # [ARC-WALKER][OPT-OUT-SET|OPT-OUT-CLEAR] history marker (parallel to the H83 auto-latch entry)
+    # so the read-only arc_walk_metrics probe can count latch/clear events from record history.
+    _optout_explicit: Optional[bool] = None
+    if field == "auto_walk_opt_out":
+        _optout_explicit = _coerce_bool(value)
+        _optout_actor = str(_normalize_write_source(body, claims).get("provider", "")).strip()
+        history_entry = _opt_out_state_history_entry(now, _optout_explicit, _optout_actor)
+
     # Build extra SET clauses for evidence fields (ENC-FTR-022)
     extra_sets = []
     extra_vals = {}
@@ -4375,6 +6253,18 @@ def _handle_update_field(
             me = transition_evidence["merge_evidence"]
             # ENC-ISS-097: merge_evidence may be a dict (checkout service) or a string (direct PATCH)
             extra_vals[":merge_ev"] = {"S": json.dumps(me, separators=(",", ":")) if isinstance(me, dict) else str(me).strip()}
+        if transition_evidence.get("external_deploy_evidence"):
+            extra_sets.append("external_deploy_evidence = :external_deploy_ev")
+            ede = transition_evidence["external_deploy_evidence"]
+            extra_vals[":external_deploy_ev"] = {
+                "S": json.dumps(ede, separators=(",", ":")) if isinstance(ede, dict) else str(ede).strip()
+            }
+        if transition_evidence.get("documentation_evidence"):
+            extra_sets.append("documentation_evidence = :documentation_ev")
+            docs = transition_evidence["documentation_evidence"]
+            extra_vals[":documentation_ev"] = {
+                "S": json.dumps(docs, separators=(",", ":")) if isinstance(docs, list) else str(docs).strip()
+            }
 
     update_expr = (
         "SET #fld = :val, updated_at = :now, last_update_note = :note, "
@@ -4384,6 +6274,24 @@ def _handle_update_field(
     )
     if extra_sets:
         update_expr += ", " + ", ".join(extra_sets)
+
+    # ENC-FTR-111 / ENC-TSK-H83: apply the auto_walk_opt_out latch (set true + Artifact-Genesis
+    # history entry) atomically with the human non-forward transition of an issue/feature/plan.
+    _hentry_list = [history_entry]
+    if _optout_latch is not None:
+        update_expr += ", auto_walk_opt_out = :optout"
+        _hentry_list.append(_opt_out_latch_history_entry(
+            now, _optout_latch["by"], _optout_latch["from"],
+            _optout_latch["to"], _optout_latch["reason"],
+        ))
+
+    # ENC-TSK-M92/M79: stamp version_seq/feed_scope so the write re-surfaces in
+    # the feed-delta projection. The vseq clause is a SET assignment and MUST be
+    # spliced BEFORE any ADD clause — SET assignments appended after
+    # " ADD closed_count :one" are invalid UpdateExpression syntax (ENC-TSK-P49:
+    # every governed task close failed on exactly that ordering).
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
 
     # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment closed_count on
     # every task->closed transition. The ADD action is appended to the same
@@ -4398,27 +6306,107 @@ def _handle_update_field(
         ":val": _ser_value(value), ":now": _ser_s(now),
         ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
         ":zero": {"N": "0"}, ":one": {"N": "1"},
-        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+        ":hentry": {"L": _hentry_list}, ":empty": {"L": []},
     }
+    if _optout_latch is not None:
+        attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
+    attr_values.update(vseq_vals)
+
+    # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
+    # (not just the pre-check above) against a write that landed in between —
+    # mirrors the existing sync_version CAS pattern used by _handle_pwa_action.
+    update_kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE, "Key": key,
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeNames": {"#fld": field},
+        "ExpressionAttributeValues": attr_values,
+    }
+    if _if_match is not None:
+        update_kwargs["ConditionExpression"] = "sync_version = :if_match_expected"
+        attr_values[":if_match_expected"] = {"N": str(_current_rev)}
 
     try:
-        ddb.update_item(
-            TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=update_expr,
-            ExpressionAttributeNames={"#fld": field},
-            ExpressionAttributeValues=attr_values,
-        )
+        ddb.update_item(**update_kwargs)
+    except ClientError as exc:
+        if _is_conditional_check_failed(exc):
+            try:
+                _refreshed_raw = _get_record_raw(project_id, record_type, record_id)
+                _refreshed = _deser_item(_refreshed_raw) if _refreshed_raw else item_data
+            except Exception:  # noqa: BLE001
+                _refreshed = item_data
+            return _error(
+                409,
+                "Record was modified concurrently: If-Match revision is no longer current.",
+                code="REVISION_CONFLICT",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_revision=_if_match,
+                current_revision=_refreshed.get("sync_version"),
+                current=_refreshed,
+            )
+        logger.error("update_item failed: %s", exc)
+        return _error(500, "Database write failed.")
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
 
+    # ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): mirror newly-added related_*_ids onto
+    # each target's reverse field so the primary write's relation is bidirectional.
+    if field in _RELATION_ID_FIELDS:
+        try:
+            _apply_reverse_relation_edges(
+                project_id, record_type, record_id, field,
+                item_data.get(field) or [], value,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-L07] reverse edge propagation failed (non-fatal): %s", exc)
+
+    # ENC-FTR-111 / ENC-TSK-H83: emit the Artifact-Genesis telemetry event after the latch commits.
+    if _optout_latch is not None:
+        _emit_opt_out_latch_event(
+            project_id, record_type, record_id,
+            _optout_latch["from"], _optout_latch["to"], _optout_latch["reason"], _optout_latch["by"],
+        )
+
+    # ENC-TSK-H86 (T5) / ENC-FTR-111 AC-6: emit the opt_out latch-or-clear telemetry event after an
+    # EXPLICIT tracker.set of auto_walk_opt_out commits, so both states reach the ENC-TSK-B66 dashboard.
+    if _optout_explicit is not None:
+        _emit_opt_out_state_event(
+            project_id, record_type, record_id, _optout_explicit,
+            str(_normalize_write_source(body, claims).get("provider", "")).strip(),
+        )
+
     result: Dict[str, Any] = {
         "success": True, "record_id": record_id,
         "field": field, "value": value, "updated_at": now,
+        "sync_version": _current_rev + 1,
     }
     if warnings:
         result["warnings"] = warnings
+
+    # ENC-ISS-441 / ENC-TSK-J96: record reached its final lifecycle state — nudge the
+    # acting session toward retirement (additive-only envelope field).
+    if field == "status" and _is_terminal_transition(record_type, value):
+        result["retirement_prompt"] = RETIREMENT_PROMPT
+
+    # ENC-TSK-H85 / ENC-FTR-111 Phase 1: after a successful FORWARD task status advance, hand off to
+    # the Universal Arc-Walker to walk forward across the mechanical gates in the same invocation
+    # (DOC-078C57FC1BE6 §6.1). Behind its own independent flag; wrapped so a walk failure NEVER
+    # affects the agent's already-committed advance (the walk is a pure optimization on top of it).
+    if (record_type == "task" and field == "status" and not is_revert
+            and _arc_walker_enabled()):
+        try:
+            arc_walk = _arc_walk_after_advance(project_id, record_id, item_data, new_lower)
+            if arc_walk and arc_walk.get("walked"):
+                result["arc_walk"] = arc_walk
+            elif arc_walk:
+                # Surface the halt reason too (observability) without implying any advance happened.
+                result["arc_walk"] = arc_walk
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[H85] arc-walk post-advance hook failed (non-fatal): %s", exc)
+
     return _response(200, result)
 
 
@@ -4474,19 +6462,27 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "sync_version = sync_version + :one, "
                 "#history = list_append(#history, :entry)"
             )
+            # ENC-TSK-M92: stamp version_seq/feed_scope so this gamma-native PWA
+            # write re-surfaces in the feed-delta projection (version-seq-index
+            # GSI) — same idiom as _handle_log (M79) and the generic PATCH path.
+            # The vseq clause MUST stay inside SET, spliced BEFORE any ADD clause.
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            pwa_close_update_expr += _vseq_expr
             if record_type == "task" and closed_status == "closed":
                 pwa_close_update_expr += " ADD closed_count :one"
+            _pwa_close_vals = {
+                ":status": {"S": closed_status}, ":ts": {"S": now},
+                ":note": {"S": description}, ":one": {"N": "1"},
+                ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+            }
+            _pwa_close_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=pwa_close_update_expr,
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
-                ExpressionAttributeValues={
-                    ":status": {"S": closed_status}, ":ts": {"S": now},
-                    ":note": {"S": description}, ":one": {"N": "1"},
-                    ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_pwa_close_vals,
             )
             return _response(200, {
                 "success": True, "action": "close", "record_id": record_id,
@@ -4511,22 +6507,28 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "timestamp": {"S": now}, "status": {"S": "reopened"},
                 "description": {"S": description},
             }}
+            # ENC-TSK-M92: stamp version_seq/feed_scope so the reopen re-surfaces
+            # in the feed-delta projection (version-seq-index GSI).
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _reopen_vals = {
+                ":new_status": {"S": default_status}, ":ts": {"S": now},
+                ":note": {"S": description}, ":one": {"N": "1"},
+                ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+                ":closed_val": {"S": closed_status},
+            }
+            _reopen_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
                     "sync_version = sync_version + :one, "
                     "#history = list_append(#history, :entry)"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected AND #status = :closed_val",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
-                ExpressionAttributeValues={
-                    ":new_status": {"S": default_status}, ":ts": {"S": now},
-                    ":note": {"S": description}, ":one": {"N": "1"},
-                    ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                    ":closed_val": {"S": closed_status},
-                },
+                ExpressionAttributeValues=_reopen_vals,
             )
             _emit_reopen_event(project_id, record_type, record_id, closed_status, default_status, now)
             return _response(200, {
@@ -4542,20 +6544,29 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "timestamp": {"S": now}, "status": {"S": "worklog"},
                 "description": {"S": f"[USER] {note_text}"},
             }}
+            # ENC-TSK-M92: THE load-bearing fix. This is the branch io's L83 note
+            # traversed (the `[USER] ` prefix is produced only here) — it landed
+            # but never published because version_seq/feed_scope were not stamped,
+            # pinning /api/v1/feed/delta at 622. Stamp them so the append surfaces
+            # in the version-seq-index GSI, exactly as _handle_log/M79 does.
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _worklog_vals = {
+                ":note": {"S": note_text}, ":ts": {"S": now},
+                ":one": {"N": "1"}, ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+            }
+            _worklog_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET updated_at = :ts, last_update_note = :note, "
                     "sync_version = sync_version + :one, "
                     "#history = list_append(#history, :entry)"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#history": "history"},
-                ExpressionAttributeValues={
-                    ":note": {"S": note_text}, ":ts": {"S": now},
-                    ":one": {"N": "1"}, ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_worklog_vals,
             )
             return _response(200, {
                 "success": True, "action": "worklog", "record_id": record_id,
@@ -4564,18 +6575,24 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
 
         else:  # note
             now = _now_z()
+            # ENC-TSK-M92: stamp version_seq/feed_scope so a PWA "note" write
+            # re-surfaces in the feed-delta projection (version-seq-index GSI).
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _note_vals = {
+                ":note": {"S": note_text}, ":ts": {"S": now},
+                ":one": {"N": "1"}, ":expected": {"N": str(current_version)},
+            }
+            _note_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET #update = :note, updated_at = :ts, "
                     "sync_version = sync_version + :one"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#update": "update"},
-                ExpressionAttributeValues={
-                    ":note": {"S": note_text}, ":ts": {"S": now},
-                    ":one": {"N": "1"}, ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_note_vals,
             )
             return _response(200, {
                 "success": True, "action": "note", "record_id": record_id,
@@ -4592,6 +6609,67 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
     except Exception as exc:
         logger.error("mutation failed: %s", exc)
         return _error(500, "Database write failed. Please try again.")
+
+
+def _mirror_worklog_to_session(
+    session_id: str,
+    record_type: str,
+    record_id: str,
+    description: str,
+    timestamp: str,
+) -> None:
+    """Mirror a worklog entry onto the acting session's own SES record
+    (ENC-TSK-L35: session detail + worklog mirroring, B67 PWA2.0).
+
+    Whenever a session (write_source.provider is a minted ENC-SES id) appends
+    a worklog entry to ANY record via ``_handle_log`` — the single shared
+    ``/{project}/{type}/{id}/log`` endpoint for every record type (task,
+    issue, feature, lesson, plan, generation) — a copy of that same entry is
+    also appended onto the session's own ``history`` list in
+    AGENT_SESSIONS_TABLE, keyed by ``session_id``. The mirrored description is
+    prefixed with the source record so the SES worklog reads as a session
+    activity feed across every record it touched.
+
+    Best-effort and NON-blocking by contract, matching ``_touch_session_activity``:
+    a missing/retired session, or any DynamoDB error, is logged and swallowed —
+    mirroring must never fail the primary worklog append it rides on. Does NOT
+    depend on the SCI gate outcome (mirroring is opportunistic bookkeeping, not
+    an authorization decision) and applies equally to grandfathered sessions
+    and checkout-service-forwarded requests.
+    """
+    session_id = str(session_id or "").strip()
+    if not _AGENT_SESSION_ID_RE.match(session_id):
+        return
+    mirrored_entry = {"M": {
+        "timestamp": _ser_s(timestamp),
+        "status": _ser_s("worklog"),
+        "description": _ser_s(f"[{record_type}:{record_id}] {description}"),
+        "source_record_type": _ser_s(record_type),
+        "source_record_id": _ser_s(record_id),
+    }}
+    try:
+        _get_ddb().update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": session_id}},
+            UpdateExpression=(
+                "SET history = list_append(if_not_exists(history, :empty), :hentry)"
+            ),
+            ConditionExpression="attribute_exists(session_id)",
+            ExpressionAttributeValues={
+                ":hentry": {"L": [mirrored_entry]},
+                ":empty": {"L": []},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — mirroring is best-effort by contract
+        if _is_conditional_check_failed(exc):
+            logger.info(
+                "[INFO] Worklog mirror skipped for %s (session not found)", session_id,
+            )
+        else:
+            logger.warning(
+                "[ERROR] Worklog mirror to session %s failed (continuing): %s",
+                session_id, exc,
+            )
 
 
 def _handle_log(
@@ -4668,25 +6746,39 @@ def _handle_log(
         "description": _ser_s(description),
     }}
 
+    update_expr = (
+        "SET updated_at = :now, last_update_note = :note, "
+        "write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    attr_values = {
+        ":now": _ser_s(now), ":note": _ser_s(description),
+        ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+    }
+
+    # ENC-TSK-M79: a pure worklog append must also stamp version_seq/feed_scope
+    # so the record re-surfaces in the feed delta projection (version-seq-index
+    # GSI) — mirrors the generic single-field PATCH path's idiom exactly.
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
+    attr_values.update(vseq_vals)
+
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                "SET updated_at = :now, last_update_note = :note, "
-                "write_source = :wsrc, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
-            ExpressionAttributeValues={
-                ":now": _ser_s(now), ":note": _ser_s(description),
-                ":wsrc": _build_write_source(body),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=attr_values,
         )
     except Exception as exc:
         logger.error("update_item (log) failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-L35: mirror this worklog entry onto the acting session's own
+    # SES record (best-effort; never fails the primary append above).
+    _mirror_worklog_to_session(provider, record_type, record_id, description, now)
 
     return _response(200, {"success": True, "record_id": record_id, "updated_at": now})
 
@@ -4772,16 +6864,27 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
         update_parts.append("evidence_chain = list_append(if_not_exists(evidence_chain, :empty), :new_ev)")
         expr_values[":new_ev"] = {"L": [_ser_s(eid.strip()) for eid in new_evidence_ids if eid.strip()]}
 
-    # ENC-FTR-054: Recompute scores if pillar_scores updated
+    # ENC-FTR-054: Recompute scores if pillar_scores updated. ENC-TSK-H47 / B63 Phase 2B: when the
+    # Scoring Service is ON, defer the recomputation to the async service — store the new
+    # pillar_scores and reset scoring_status='pending'; the SNS publish below (after the write
+    # succeeds) re-scores. When OFF (rollback), recompute inline exactly as before.
+    _scoring_deferred = False
     if updated_pillar_scores:
-        new_composite = _compute_lesson_pillar_composite(updated_pillar_scores)
-        new_resonance = _compute_resonance_score(updated_pillar_scores)
         update_parts.append("pillar_scores = :ps")
-        update_parts.append("resonance_score = :rs")
-        update_parts.append("pillar_composite = :pc")
         expr_values[":ps"] = {"M": {k: {"N": str(v)} for k, v in updated_pillar_scores.items()}}
-        expr_values[":rs"] = {"N": str(new_resonance)}
-        expr_values[":pc"] = {"N": str(new_composite)}
+        if _scoring_service_enabled():
+            update_parts.append("scoring_status = :pending")
+            expr_values[":pending"] = {"S": "pending"}
+            _scoring_deferred = True
+        else:
+            new_composite = _compute_lesson_pillar_composite(updated_pillar_scores)
+            new_resonance = _compute_resonance_score(updated_pillar_scores)
+            update_parts.append("resonance_score = :rs")
+            update_parts.append("pillar_composite = :pc")
+            update_parts.append("scoring_status = :scored")
+            expr_values[":rs"] = {"N": str(new_resonance)}
+            expr_values[":pc"] = {"N": str(new_composite)}
+            expr_values[":scored"] = {"S": "scored"}
 
     try:
         ddb.update_item(
@@ -4792,6 +6895,14 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
     except Exception as exc:
         logger.error("update_item (lesson extend) failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-H47 / B63 Phase 2B: if scoring was deferred (flag ON + pillar_scores changed), the
+    # lesson is now scoring_status='pending'; kick off the async Scoring Service. Best-effort —
+    # the write already succeeded and is the source of truth.
+    if _scoring_deferred and updated_pillar_scores:
+        _publish_lesson_scoring_request(
+            project_id, key["record_id"]["S"], record_id.upper(), updated_pillar_scores
+        )
 
     return _response(200, {
         "success": True, "record_id": record_id, "updated_at": now,
@@ -4860,6 +6971,15 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
 
     if item_data.get("record_type") not in ("feature", "task"):
         return _error(400, f"acceptance-evidence only applies to features and tasks. This is a {item_data.get('record_type')}.")
+
+    # ENC-TSK-I07 (Dedup P3): evidence freeze. A superseded record's accepted
+    # acceptance-evidence is preserved-on-B and immutable (DOC-DF651F07D5C2 §7).
+    # This also enforces the evidence-orphan invariant: B cannot gain evidence
+    # after being collapsed into the canonical. Un-supersede first to edit again.
+    if item_data.get("status") == "superseded":
+        return _error(409,
+            f"Record '{record_id}' is superseded (evidence frozen). "
+            "Acceptance evidence is immutable on a superseded record; un-supersede first.")
 
     ac_list = item_data.get("acceptance_criteria", [])
     if not ac_list:
@@ -4981,6 +7101,9 @@ _RELATIONSHIP_TYPES = frozenset({
     "deploys", "deployed-by",
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed", "traversed-by",
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from", "consolidates",
+    "proposed-by", "proposes",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -5016,6 +7139,9 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "deploys": "deployed-by", "deployed-by": "deploys",
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed": "traversed-by", "traversed-by": "pathway-traversed",
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from": "consolidates", "consolidates": "consolidated-from",
+    "proposed-by": "proposes", "proposes": "proposed-by",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
@@ -5057,6 +7183,11 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed":  {"asymmetric": True, "irreflexive": True, "transitive": False},
     "traversed-by":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "consolidates":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "proposed-by":        {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "proposes":           {"asymmetric": True, "irreflexive": True, "transitive": False},
 }
 
 # Domain/range constraints: {relationship_type: {source_types, target_types}}
@@ -5091,8 +7222,13 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     # teaches: any record type -> lesson (inverse).
     "learned-from":       {"source": frozenset({"lesson"}), "target": None},
     "teaches":            {"source": None, "target": frozenset({"lesson"})},
-    "supersedes":         {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
-    "superseded-by":      {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
+    # ENC-TSK-I07 (Dedup P3): generalized from lesson-only to {lesson, issue, task}
+    # so the supersession primitive (DOC-DF651F07D5C2 §7) covers duplicate
+    # issue/issue and task/task collapse. Same-type + same-project is enforced by
+    # the supersede operation guard (_supersede_precheck), not the domain/range
+    # layer, because the OWL constraint only bounds endpoint record types.
+    "supersedes":         {"source": frozenset({"lesson", "issue", "task"}), "target": frozenset({"lesson", "issue", "task"})},
+    "superseded-by":      {"source": frozenset({"lesson", "issue", "task"}), "target": frozenset({"lesson", "issue", "task"})},
     # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships. Targets are document IDs
     # in practice; documents are not a tracker record type so target is unconstrained.
     "hands-off":          {"source": None, "target": None},
@@ -5104,6 +7240,13 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     # can be any governed record type (intent/anchor -> result node), so unconstrained.
     "pathway-traversed":  {"source": None, "target": None},
     "traversed-by":       {"source": None, "target": None},
+    # ENC-TSK-C08 / ENC-FTR-064: HCE provenance edges. Endpoints are document IDs
+    # (candidate / handoff) and the proposer record; documents are not a tracker
+    # record type, so source/target are unconstrained (mirrors hands-off).
+    "consolidated-from":  {"source": None, "target": None},
+    "consolidates":       {"source": None, "target": None},
+    "proposed-by":        {"source": None, "target": None},
+    "proposes":           {"source": None, "target": None},
 }
 
 _TRANSITIVE_TYPES = frozenset(
@@ -5246,6 +7389,20 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
     if err:
         return _error(409, err)
 
+    # ENC-TSK-I07 (Dedup P3): supersession rides on the `superseded-by` edge.
+    # Guard BEFORE creating the tombstone so we never leave a half-applied state
+    # (idempotent re-supersede into the same canonical short-circuits to 200).
+    _supersede_ctx = None
+    if (relationship_type == "superseded-by"
+            and source_type in _SUPERSEDABLE_TYPES
+            and target_type in _SUPERSEDABLE_TYPES):
+        _pre = _supersede_precheck(project_id, source_id, target_id)
+        if "error" in _pre:
+            return _error(_pre["status"], _pre["error"])
+        if _pre.get("idempotent"):
+            return _response(200, _pre["result"])
+        _supersede_ctx = _pre
+
     inverse_type = _INVERSE_PAIRS[relationship_type]
     now = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -5278,23 +7435,12 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Item": forward_item,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Item": inverse_item,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_create_transact_puts(
+                DYNAMODB_TABLE, forward_item, inverse_item
+            )
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
@@ -5306,7 +7452,7 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
             return _error(500, f"Transaction failed: {exc}")
         raise
 
-    return _response(201, {
+    _resp_body = {
         "success": True,
         "forward_edge": forward_sk,
         "inverse_edge": inverse_sk,
@@ -5318,7 +7464,13 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
         "reason": reason,
         "provenance": provenance,
         "created_at": now,
-    })
+    }
+    # ENC-TSK-I07: the `superseded-by` tombstone now exists — apply side-effects
+    # (idempotent edge migration onto the canonical + transition B to `superseded`).
+    if _supersede_ctx is not None:
+        _resp_body["supersession"] = _apply_supersession(
+            project_id, source_id, target_id, _supersede_ctx, body)
+    return _response(201, _resp_body)
 
 
 def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
@@ -5346,35 +7498,16 @@ def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_archive_transact_updates
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Update": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
-                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
-                        "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {
-                            ":archived": _ser_s("archived"),
-                            ":now": _ser_s(now),
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-                {
-                    "Update": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
-                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
-                        "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {
-                            ":archived": _ser_s("archived"),
-                            ":now": _ser_s(now),
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_archive_transact_updates(
+                DYNAMODB_TABLE,
+                project_id_attr=_ser_s(project_id),
+                forward_sk=forward_sk,
+                inverse_sk=inverse_sk,
+                archived_at_attr=_ser_s(now),
+            )
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
@@ -5382,12 +7515,21 @@ def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
                           f"from {source_id} to {target_id}.")
         raise
 
-    return _response(200, {
+    _arch_body = {
         "success": True,
         "archived_forward": forward_sk,
         "archived_inverse": inverse_sk,
         "archived_at": now,
-    })
+    }
+    # ENC-TSK-I07: archiving a `superseded-by` edge un-supersedes the source —
+    # restores its pre-supersession status, retrieval/triage eligibility, and
+    # migrated edges (§7 reversibility).
+    if (relationship_type == "superseded-by"
+            and _record_type_from_id(source_id) in _SUPERSEDABLE_TYPES):
+        _rev = _revert_supersession(project_id, source_id, {})
+        if _rev:
+            _arch_body["unsupersession"] = _rev
+    return _response(200, _arch_body)
 
 
 def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
@@ -5416,26 +7558,29 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         sk_prefix = "rel#"
 
     kwargs: Dict[str, Any] = {
-        "TableName": DYNAMODB_TABLE,
-        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
-        "ExpressionAttributeValues": {
-            ":pid": _ser_s(project_id),
-            ":prefix": _ser_s(sk_prefix),
-        },
         "Limit": page_size,
     }
 
     cursor = query_params.get("cursor", "")
+    exclusive_start_key = None
     if cursor:
         try:
             import base64
-            decoded = json.loads(base64.b64decode(cursor))
-            kwargs["ExclusiveStartKey"] = decoded
+            exclusive_start_key = json.loads(base64.b64decode(cursor))
         except Exception:
             pass
 
-    resp = ddb.query(**kwargs)
-    items = resp.get("Items", [])
+    from enceladus_shared.relationship_store import query_relationship_raw_items
+
+    items, last_key = query_relationship_raw_items(
+        ddb,
+        DYNAMODB_TABLE,
+        project_id,
+        sk_prefix,
+        ser_s=_ser_s,
+        limit=page_size,
+        exclusive_start_key=exclusive_start_key,
+    )
 
     results = []
     for item in items:
@@ -5474,7 +7619,6 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         "count": len(results),
     }
 
-    last_key = resp.get("LastEvaluatedKey")
     if last_key:
         import base64
         response_body["next_cursor"] = base64.b64encode(
@@ -5482,6 +7626,846 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         ).decode()
 
     return _response(200, response_body)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I07 (Dedup P3): Supersession primitive — DOC-DF651F07D5C2 §7
+# ---------------------------------------------------------------------------
+# Soft, reversible, non-destructive collapse of a duplicate record B into a
+# canonical A. The operation rides on the typed `superseded-by` edge: creating
+# B-[superseded-by]->A between two same-type, same-project issue/task records
+# triggers supersession; archiving that edge reverts it. `superseded` is reached
+# ONLY through this operation (never the generic status-PATCH path), which
+# guarantees the tombstone edge + idempotent edge migration + evidence freeze
+# happen atomically with the status transition. Records are preserved for audit
+# (closed-not-deleted semantics); only B's active participation is retired.
+
+_SUPERSEDABLE_TYPES = frozenset({"issue", "task"})
+
+
+def _accepted_evidence_count(item_data: Dict) -> int:
+    """Number of acceptance_criteria entries with evidence_acceptance=true."""
+    n = 0
+    for ac in item_data.get("acceptance_criteria", []) or []:
+        if isinstance(ac, dict) and ac.get("evidence_acceptance"):
+            n += 1
+    return n
+
+
+def _supersede_precheck(project_id: str, b_id: str, a_id: str) -> Dict:
+    """Guard supersession before any write (DOC-DF651F07D5C2 §4.0/§4.3/§7).
+
+    Returns a context dict on success ({_b_data,_a_data,_type,_prev_status}),
+    {"error": msg, "status": code} to reject, or {"idempotent": True, "result": ...}
+    when B is already superseded into the same canonical (no-op success).
+    """
+    b_type = _record_type_from_id(b_id)
+    a_type = _record_type_from_id(a_id)
+    if b_type not in _SUPERSEDABLE_TYPES or a_type not in _SUPERSEDABLE_TYPES:
+        return {"error": f"Supersession applies to issue/task records only (got {b_type} -> {a_type}).", "status": 400}
+    if b_type != a_type:
+        return {"error": f"Supersession requires same record_type (got {b_type} superseded-by {a_type}); cross-type is a category error (§4.0).", "status": 400}
+    b_raw = _get_record_raw(project_id, b_type, b_id)
+    if b_raw is None:
+        return {"error": f"Superseded record not found: {b_id}", "status": 404}
+    a_raw = _get_record_raw(project_id, a_type, a_id)
+    if a_raw is None:
+        return {"error": f"Canonical record not found: {a_id}", "status": 404}
+    b_data = _deser_item(b_raw)
+    a_data = _deser_item(a_raw)
+    if (a_data.get("project_id") or project_id) != (b_data.get("project_id") or project_id):
+        return {"error": "Supersession requires same project (cross-project is a category error, §4.0).", "status": 400}
+    if a_data.get("status") == "superseded":
+        return {"error": f"Canonical {a_id} is itself superseded (into {a_data.get('superseded_by')}); choose the surviving canonical.", "status": 409}
+    cur = b_data.get("status")
+    if cur == "superseded":
+        existing = str(b_data.get("superseded_by") or "").upper()
+        if existing == a_id:
+            return {"idempotent": True, "result": {
+                "success": True, "idempotent": True,
+                "superseded_id": b_id, "canonical_id": a_id,
+                "note": "already superseded into canonical",
+            }}
+        return {"error": f"{b_id} is already superseded into {existing}; un-supersede before re-targeting.", "status": 409}
+    # Evidence-orphan guard (§4.3/§7): B must hold no accepted acceptance-evidence
+    # the canonical lacks. Conservative count proxy; issues carry no
+    # acceptance_criteria so this is a no-op for issue/issue collapse.
+    if _accepted_evidence_count(b_data) > _accepted_evidence_count(a_data):
+        return {"error": (f"Evidence-orphan conflict: {b_id} holds more accepted acceptance-evidence than "
+                          f"canonical {a_id}. Route to human adjudication (T-MID) rather than mechanical "
+                          f"supersession (§4.3)."), "status": 409}
+    return {"_b_data": b_data, "_a_data": a_data, "_type": b_type, "_prev_status": cur or "open"}
+
+
+def _put_relationship_pair_idempotent(project_id: str, source_id: str, target_id: str,
+                                      rel_type: str, reason: str, body: Dict) -> bool:
+    """MERGE-create a forward+inverse typed edge. Returns True if newly created,
+    False if it already existed (idempotent). Skips re-validation: callers pass
+    endpoints already proven valid (same record_type as the migrated-from node)."""
+    inverse_type = _INVERSE_PAIRS.get(rel_type)
+    if not inverse_type:
+        return False
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    forward_sk = f"rel#{source_id}#{rel_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+    ws = body.get("write_source", {}) if body else {}
+
+    def _item(sk: str, rtype: str, src: str, tgt: str, is_inv: bool) -> Dict:
+        return {
+            "project_id": _ser_s(project_id), "record_id": _ser_s(sk),
+            "record_type": _ser_s("relationship"), "relationship_type": _ser_s(rtype),
+            "source_id": _ser_s(src), "target_id": _ser_s(tgt),
+            "weight": {"N": "1.0"}, "confidence": {"N": "1.0"},
+            "reason": _ser_s(reason), "provenance": _ser_s("migration"),
+            "is_inverse": {"BOOL": is_inv}, "canonical_edge_id": _ser_s(forward_sk),
+            "created_at": _ser_s(now), "updated_at": _ser_s(now),
+            "write_source": _ser_value(ws) if ws else _ser_value({}),
+        }
+
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Put": {"TableName": DYNAMODB_TABLE, "Item": _item(forward_sk, rel_type, source_id, target_id, False),
+                     "ConditionExpression": "attribute_not_exists(record_id)"}},
+            {"Put": {"TableName": DYNAMODB_TABLE, "Item": _item(inverse_sk, inverse_type, target_id, source_id, True),
+                     "ConditionExpression": "attribute_not_exists(record_id)"}},
+        ])
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            return False  # already exists -> idempotent no-op
+        raise
+
+
+def _unarchive_relationship_edge(project_id: str, source_id: str, target_id: str, rel_type: str) -> bool:
+    """Reverse _handle_archive_relationship: clear status=archived on forward+inverse
+    so graph_sync re-projects the edge (rel_status != 'archived' -> upsert)."""
+    inverse_type = _INVERSE_PAIRS.get(rel_type)
+    if not inverse_type:
+        return False
+    forward_sk = f"rel#{source_id}#{rel_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Update": {"TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ConditionExpression": "attribute_exists(record_id)"}},
+            {"Update": {"TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ConditionExpression": "attribute_exists(record_id)"}},
+        ])
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            return False
+        raise
+
+
+def _migrate_typed_edges(project_id: str, b_id: str, a_id: str, body: Dict) -> List[Dict]:
+    """Re-point B's typed relationship edges onto canonical A, idempotently (§7).
+
+    Every active typed edge incident to B is stored as an item with SK prefix
+    `rel#{B}#` (B is the source endpoint of that stored item — both the forward
+    edges B originates and the inverse legs of edges that target B). For each,
+    create the A-equivalent (A as source, same rel_type, same other endpoint) if
+    absent, then soft-archive the B edge. Idempotent and order-free. The
+    superseded-by/supersedes tombstone is never migrated; edges whose other
+    endpoint is the canonical are skipped (no self-loop). Returns descriptors for
+    reversibility bookkeeping (stored on B.superseded_migrated_edges)."""
+    ddb = _get_ddb()
+    migrated: List[Dict] = []
+    resp = ddb.query(
+        TableName=DYNAMODB_TABLE,
+        KeyConditionExpression="project_id = :pid AND begins_with(record_id, :pfx)",
+        ExpressionAttributeValues={":pid": _ser_s(project_id), ":pfx": _ser_s(f"rel#{b_id}#")},
+    )
+    for raw in resp.get("Items", []):
+        rec = _deser_item(raw)
+        if rec.get("record_type") != "relationship":
+            continue
+        if rec.get("status") == "archived":
+            continue
+        rtype = rec.get("relationship_type", "")
+        if rtype in ("superseded-by", "supersedes"):
+            continue  # never migrate the tombstone itself
+        other = str(rec.get("target_id", "")).upper()
+        if not other or other == a_id or other == b_id:
+            continue
+        created = _put_relationship_pair_idempotent(
+            project_id, a_id, other, rtype, f"edge migrated from superseded {b_id} (ENC-TSK-I07)", body)
+        _handle_archive_relationship(project_id, {
+            "source_id": b_id, "target_id": other, "relationship_type": rtype})
+        migrated.append({"rel_type": rtype, "other_id": other, "created_on_canonical": created})
+    return migrated
+
+
+def _apply_supersession(project_id: str, b_id: str, a_id: str, ctx: Dict, body: Dict) -> Dict:
+    """Execute supersession side-effects after the `superseded-by` tombstone exists.
+    Migrates B's other typed edges onto A, then transitions B to the terminal
+    `superseded` state with provenance fields for reversibility. Evidence freeze is
+    implicit: _handle_acceptance_evidence rejects writes while status==superseded."""
+    b_type = ctx["_type"]
+    prev_status = ctx["_prev_status"]
+    now = _now_z()
+    migrated = _migrate_typed_edges(project_id, b_id, a_id, body)
+    note = f"Superseded into {a_id}{_write_source_note_suffix(body)}"
+    hist = {"M": {"timestamp": _ser_s(now), "status": _ser_s("superseded"), "description": _ser_s(note)}}
+    _get_ddb().update_item(
+        TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
+        UpdateExpression=(
+            "SET #st = :superseded, superseded_by = :canon, superseded_at = :now, "
+            "pre_supersession_status = if_not_exists(pre_supersession_status, :prev), "
+            "superseded_migrated_edges = :migrated, "
+            "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "sync_version = if_not_exists(sync_version, :zero) + :one, "
+            "history = list_append(if_not_exists(history, :empty), :h)"
+        ),
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":superseded": _ser_s("superseded"), ":canon": _ser_s(a_id), ":now": _ser_s(now),
+            ":prev": _ser_s(prev_status), ":migrated": _ser_value(migrated),
+            ":note": _ser_s(note), ":wsrc": _build_write_source(body),
+            ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []}, ":h": {"L": [hist]},
+        },
+    )
+    return {
+        "superseded_id": b_id, "canonical_id": a_id, "record_type": b_type,
+        "migrated_edges": migrated, "migrated_edge_count": len(migrated),
+        "superseded_at": now, "pre_supersession_status": prev_status, "reversible": True,
+    }
+
+
+def _revert_supersession(project_id: str, b_id: str, body: Dict) -> Optional[Dict]:
+    """Reverse supersession: restore B's eligibility/status (§7 reversibility).
+    Un-archives B's migrated edges (restoring B's neighborhood) and restores B's
+    pre-supersession status. The canonical's gained edges are intentionally left
+    in place (a coherence gain costly to safely un-merge — documented asymmetry,
+    tracked as an I07 follow-on). Returns a summary, or None if B is not superseded."""
+    b_type = _record_type_from_id(b_id)
+    if b_type not in _SUPERSEDABLE_TYPES:
+        return None
+    b_raw = _get_record_raw(project_id, b_type, b_id)
+    if b_raw is None:
+        return None
+    b_data = _deser_item(b_raw)
+    if b_data.get("status") != "superseded":
+        return None
+    prev = b_data.get("pre_supersession_status") or "open"
+    now = _now_z()
+    restored: List[Dict] = []
+    for m in b_data.get("superseded_migrated_edges", []) or []:
+        rtype = m.get("rel_type") if isinstance(m, dict) else None
+        other = m.get("other_id") if isinstance(m, dict) else None
+        if rtype and other and _unarchive_relationship_edge(project_id, b_id, str(other), str(rtype)):
+            restored.append({"rel_type": rtype, "other_id": other})
+
+    # ENC-TSK-I09 (Dedup P5): if THIS supersession was performed by the MECHANICAL
+    # arc-walker (write_source actor == system:arc-walker), an io walk-back of it
+    # is corrective will exercised against an auto-merge. Per DOC-DF651F07D5C2 §6/§8
+    # that PERMANENTLY demotes the record to ATTESTATION: latch auto_walk_opt_out=true
+    # on the restored record (rides the same atomic write) and emit the Artifact-Genesis
+    # latch telemetry. The arc-walker can never clear the latch (ENC-FTR-111 AC-2), so
+    # the record is never auto-merged again. Human-approved (ENC-TSK-I08) supersessions
+    # carry provenance=human / a non-walker provider and are intentionally NOT latched.
+    prior_ws = b_data.get("write_source") or {}
+    auto_merged = ARC_WALKER_ACTOR in (
+        str(prior_ws.get("provider", "")).strip().lower(),
+        str(prior_ws.get("channel", "")).strip().lower(),
+    )
+
+    note = f"Un-superseded (restored to {prev}){_write_source_note_suffix(body)}"
+    hist_entries = [{"M": {"timestamp": _ser_s(now), "status": _ser_s(prev), "description": _ser_s(note)}}]
+    set_clause = (
+        "SET #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+    )
+    eav: Dict[str, Any] = {
+        ":prev": _ser_s(prev), ":now": _ser_s(now), ":note": _ser_s(note),
+        ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []},
+    }
+    latched_by = ""
+    if auto_merged:
+        latched_by = str(_normalize_write_source(body).get("provider", "")).strip() or "io"
+        set_clause += "auto_walk_opt_out = :optout, "
+        eav[":optout"] = {"BOOL": True}
+        hist_entries.append(_opt_out_latch_history_entry(now, latched_by, "superseded", prev, "auto-merge walk-back"))
+    set_clause += "history = list_append(if_not_exists(history, :empty), :h) "
+    set_clause += "REMOVE superseded_by, superseded_at, pre_supersession_status, superseded_migrated_edges"
+    eav[":h"] = {"L": hist_entries}
+
+    _get_ddb().update_item(
+        TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
+        UpdateExpression=set_clause,
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues=eav,
+    )
+    if auto_merged:
+        _emit_opt_out_latch_event(project_id, b_type, b_id, "superseded", prev,
+                                  "auto-merge walk-back", latched_by)
+    return {"unsuperseded_id": b_id, "restored_status": prev, "restored_edges": restored,
+            "unsuperseded_at": now, "auto_walk_opt_out_latched": auto_merged}
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I08 (Dedup P4): io-approval-gated tier-review surface.
+#
+# Promotes the offline I05 detector (clusters) + I06 certainty model (per-pair
+# verdicts) into a LIVE governed approval surface. It PROPOSES; io APPROVES.
+# Two ops on POST /{project}/dedup-review:
+#   op=propose  — pure, mutation-free tier derivation (any authenticated caller).
+#   op=approve  — io-Cognito-only; executes soft supersession by reusing the I07
+#                 `superseded-by` primitive. The agent/internal-key path is
+#                 rejected (never self-authorizes). See DOC-DF651F07D5C2 §5/§7/§8.
+#
+# NO auto-merge here: T-HIGH (certificate-certified) is deferred to ENC-TSK-I09's
+# flag-gated arc-walker and is never actioned by this surface.
+# ---------------------------------------------------------------------------
+
+# Tier ladder boundaries (DOC-DF651F07D5C2 §5). T-MID floor and the review/distinct
+# boundary are parameters; defaults match the design doc and I06's review_prob.
+_DEDUP_TAU_MID = 0.95          # calibrated_prob >= tau_mid (cert not passed) -> T-MID
+_DEDUP_REVIEW_FLOOR = 0.50     # calibrated_prob >= review_floor -> at least T-LOW; below -> distinct
+_DEDUP_TIER_RANK = {"T-LOW": 1, "T-MID": 2, "T-HIGH": 3}
+_DEDUP_ACTIONABLE_TIERS = ("T-HIGH", "T-MID", "T-LOW")
+
+# ENC-TSK-I09 (Dedup P5): the earned-precision floor that licenses MECHANICAL
+# auto-merge (DOC-DF651F07D5C2 §4.3). A T-HIGH pair's certificate is honored by
+# the arc-walker ONLY when its 95% lower confidence bound on precision clears this
+# value. Structural guarantee (per-pair), independent of the operational flag.
+# Callers may RAISE the floor but never lower it below this constant.
+_DEDUP_CERT_PRECISION_LCB_FLOOR = 0.999
+
+
+def _dedup_auto_merge_enabled() -> bool:
+    """ENC-TSK-I09: the operational gate. Auto-merge stays DARK (shadow / propose-only)
+    until io enables this flag — which the design says is turned on ONLY after the
+    certificate precision floor has been empirically certified (DOC-DF651F07D5C2 §4.3/§13)."""
+    return _appconfig_flag("enable_dedup_auto_merge", env_fallback="ENABLE_DEDUP_AUTO_MERGE")
+
+
+def _dedup_auto_merge_kill_switch() -> bool:
+    """ENC-TSK-I09: the global kill switch (DOC-DF651F07D5C2 §8). When truthy the
+    arc-walker auto-merge halts instantly regardless of the enable flag — checked
+    FIRST, before any eligibility evaluation or write."""
+    return _appconfig_flag("dedup_auto_merge_kill_switch", env_fallback="DEDUP_AUTO_MERGE_KILL_SWITCH")
+
+
+def _dedup_auto_merge_cert_holds(verdict: Optional[Dict], lcb_floor: float) -> Tuple[bool, str]:
+    """ENC-TSK-I09: does this verdict carry a passing P2 certificate that licenses a
+    MECHANICAL merge (DOC-DF651F07D5C2 §4.3)? Requires the conjunctive certificate to
+    have PASSED and its 95% precision lower confidence bound to clear the floor. The
+    verdict must be the DIRECT (canonical, member) pair — the caller looks it up by the
+    canonical-anchored pair key, so a (member, neighbor) verdict can never satisfy this
+    (no transitive chain-drag, §4.4). Returns (holds, reason_when_not)."""
+    if not verdict:
+        return False, "no direct certificate against the chosen canonical (no chain-drag, §4.4)"
+    cert = verdict.get("certificate") or {}
+    if cert.get("passed") is not True:
+        return False, "certificate not passed (P2 CERT does not hold)"
+    lcb = cert.get("precision_lcb")
+    try:
+        lcb = float(lcb)
+    except (TypeError, ValueError):
+        return False, "certificate precision_lcb missing or non-numeric"
+    if lcb < lcb_floor:
+        return False, f"certificate precision LCB {lcb} < required floor {lcb_floor}"
+    return True, ""
+
+
+def _dedup_member_opt_out_latched(project_id: str, member_id: str) -> Tuple[bool, Optional[str]]:
+    """ENC-TSK-I09: is the auto_walk_opt_out circuit breaker latched on this member?
+    A latched record is demoted to ATTESTATION and the arc-walker MUST NOT auto-merge
+    it (DOC-DF651F07D5C2 §6; ENC-FTR-111 AC-2). Note: the latch blocks ONLY the
+    mechanical walker — the io-Cognito approval path (ENC-TSK-I08) is unaffected.
+    Returns (latched, error_when_not_readable)."""
+    mtype = _record_type_from_id(member_id)
+    raw = _get_record_raw(project_id, mtype, member_id)
+    if raw is None:
+        return False, f"member record not found: {member_id}"
+    data = _deser_item(raw)
+    return bool(data.get("auto_walk_opt_out")), None
+
+
+def _dedup_pair_key(a: str, b: str) -> Tuple[str, str]:
+    """Orientation-stable pair key (uppercased, a <= b) — matches I05 edges and
+    I06 verdict pair keys so a verdict joins to a cluster's (canonical, member) pair."""
+    a2, b2 = str(a).strip().upper(), str(b).strip().upper()
+    return (a2, b2) if a2 <= b2 else (b2, a2)
+
+
+def _dedup_pair_tier(verdict: Optional[Dict], tau_mid: float, review_floor: float) -> str:
+    """Map one I06 verdict to the design-doc tier ladder (DOC-DF651F07D5C2 §5).
+
+    certificate passed (or I06 tier 'auto-merge')      -> T-HIGH  (I09's domain)
+    calibrated_prob >= tau_mid                          -> T-MID
+    calibrated_prob >= review_floor                     -> T-LOW
+    else / no verdict (I06 is the tiering authority)    -> distinct  (not surfaced)
+    """
+    if not verdict:
+        return "distinct"
+    cert = verdict.get("certificate") or {}
+    if cert.get("passed") is True or verdict.get("tier") == "auto-merge":
+        return "T-HIGH"
+    prob = verdict.get("calibrated_prob")
+    if prob is None:
+        return "distinct"
+    try:
+        prob = float(prob)
+    except (TypeError, ValueError):
+        return "distinct"
+    if prob >= tau_mid:
+        return "T-MID"
+    if prob >= review_floor:
+        return "T-LOW"
+    return "distinct"
+
+
+def _dedup_cluster_tier(duplicate_tiers: Sequence[str]) -> Optional[str]:
+    """Conservative (least-confident) tier across a cluster's surfaced duplicates.
+    Any T-LOW member pulls the whole cluster to T-LOW; all-T-MID-or-better with at
+    least one T-MID -> T-MID; all T-HIGH -> T-HIGH. Returns None if none surfaced."""
+    ranks = [_DEDUP_TIER_RANK[t] for t in duplicate_tiers if t in _DEDUP_TIER_RANK]
+    if not ranks:
+        return None
+    return {1: "T-LOW", 2: "T-MID", 3: "T-HIGH"}[min(ranks)]
+
+
+def _dedup_homogeneous(record_ids: Sequence[str]) -> Tuple[bool, Optional[str]]:
+    """Hard-floor type check (§4.0): all ids must resolve to a single record_type
+    from their ENC-<TYPE>- prefix. Returns (is_homogeneous, the_type_or_None).
+    Same-project is enforced per-pair downstream by _supersede_precheck (needs DDB)."""
+    types = {_record_type_from_id(str(r)) for r in record_ids if str(r).strip()}
+    if len(types) == 1:
+        return True, next(iter(types))
+    return False, None
+
+
+def _dedup_build_proposal(cluster: Dict, verdict_index: Dict[Tuple[str, str], Dict],
+                          tau_mid: float, review_floor: float) -> Dict:
+    """Build one tiered proposal from an I05 cluster + the I06 verdict index.
+
+    Cross-type clusters are never surfaced (hard floor). Per-duplicate tiers are
+    derived from each (canonical, duplicate) verdict; 'distinct' duplicates are
+    dropped. The cluster tier determines the approval granularity offered to io:
+      T-MID  -> 'plan'       (io approves the whole-cluster plan)
+      T-LOW  -> 'per-record' (io approves the whole cluster OR a selected subset)
+      T-HIGH -> 'deferred'   (ENC-TSK-I09 auto-merge; NOT actionable here)
+    """
+    cluster_id = cluster.get("cluster_id")
+    rtype = cluster.get("record_type")
+    project_id = cluster.get("project_id")
+    canonical = str(cluster.get("canonical", "")).strip().upper()
+    members = [str(m).strip().upper() for m in (cluster.get("members") or []) if str(m).strip()]
+
+    if not canonical or canonical not in members:
+        return {"cluster_id": cluster_id, "record_type": rtype, "project_id": project_id,
+                "excluded": True, "reason": "cluster missing a canonical member"}
+
+    homo, htype = _dedup_homogeneous(members)
+    if not homo or htype not in _SUPERSEDABLE_TYPES:
+        # Cross-type, or a type supersession does not apply to: never surfaced (§4.0).
+        return {"cluster_id": cluster_id, "record_type": rtype, "project_id": project_id,
+                "excluded": True,
+                "reason": f"hard-floor excluded (record_type={htype or 'mixed'} not a same-type "
+                          f"supersedable cluster; §4.0)"}
+
+    dup_entries: List[Dict] = []
+    for d in members:
+        if d == canonical:
+            continue
+        v = verdict_index.get(_dedup_pair_key(canonical, d))
+        tier = _dedup_pair_tier(v, tau_mid, review_floor)
+        dup_entries.append({
+            "record_id": d,
+            "tier": tier,
+            "calibrated_prob": (v or {}).get("calibrated_prob"),
+            "cosine": ((v or {}).get("signals") or {}).get("cosine"),
+            "certificate_passed": bool(((v or {}).get("certificate") or {}).get("passed")),
+        })
+
+    surfaced = [e for e in dup_entries if e["tier"] in _DEDUP_ACTIONABLE_TIERS]
+    dropped = [e["record_id"] for e in dup_entries if e["tier"] == "distinct"]
+    cluster_tier = _dedup_cluster_tier([e["tier"] for e in surfaced])
+
+    if cluster_tier == "T-MID":
+        actionable, granularity, defer_to = True, "plan", None
+    elif cluster_tier == "T-LOW":
+        actionable, granularity, defer_to = True, "per-record", None
+    elif cluster_tier == "T-HIGH":
+        actionable, granularity, defer_to = False, "deferred", "ENC-TSK-I09"
+    else:
+        actionable, granularity, defer_to = False, "none", None
+
+    return {
+        "cluster_id": cluster_id,
+        "record_type": rtype,
+        "project_id": project_id,
+        "canonical": canonical,
+        "cluster_tier": cluster_tier,
+        "actionable": actionable,
+        "granularity": granularity,
+        "defer_to": defer_to,
+        "duplicates": surfaced,
+        "dropped_distinct": dropped,
+        "excluded": False,
+    }
+
+
+def _handle_dedup_propose(project_id: str, body: Dict) -> Dict:
+    """op=propose: pure, mutation-free tier derivation over I05 clusters + I06 verdicts."""
+    clusters = body.get("clusters")
+    if not isinstance(clusters, list):
+        return _error(400, "Field 'clusters' (list of I05 cluster objects) is required.")
+    verdicts = body.get("verdicts") or []
+    if not isinstance(verdicts, list):
+        return _error(400, "Field 'verdicts' must be a list of I06 verdict objects.")
+    try:
+        tau_mid = float(body.get("tau_mid", _DEDUP_TAU_MID))
+        review_floor = float(body.get("review_floor", _DEDUP_REVIEW_FLOOR))
+    except (TypeError, ValueError):
+        return _error(400, "tau_mid and review_floor must be numeric.")
+    if not (0.0 <= review_floor <= tau_mid <= 1.0):
+        return _error(400, "Require 0 <= review_floor <= tau_mid <= 1.")
+
+    vindex: Dict[Tuple[str, str], Dict] = {}
+    for v in verdicts:
+        a, b = v.get("a"), v.get("b")
+        if a and b:
+            vindex[_dedup_pair_key(a, b)] = v
+
+    proposals = [_dedup_build_proposal(c, vindex, tau_mid, review_floor) for c in clusters]
+    counts = {"T-MID": 0, "T-LOW": 0, "T-HIGH_deferred": 0, "excluded": 0, "not_actionable": 0}
+    for p in proposals:
+        if p.get("excluded"):
+            counts["excluded"] += 1
+        elif p.get("cluster_tier") == "T-MID":
+            counts["T-MID"] += 1
+        elif p.get("cluster_tier") == "T-LOW":
+            counts["T-LOW"] += 1
+        elif p.get("cluster_tier") == "T-HIGH":
+            counts["T-HIGH_deferred"] += 1
+        else:
+            counts["not_actionable"] += 1
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "tau_mid": tau_mid,
+        "review_floor": review_floor,
+        "proposal_count": len(proposals),
+        "counts": counts,
+        "proposals": proposals,
+        "note": ("Propose-only (mutation-free). Cross-type/cross-project clusters are never "
+                 "surfaced. T-HIGH is deferred to ENC-TSK-I09 auto-merge and not actionable here. "
+                 "Approve T-MID (whole-cluster plan) or T-LOW (whole-or-per-record) via op=approve "
+                 "(io Cognito session only)."),
+    })
+
+
+def _handle_dedup_approve(project_id: str, body: Dict, claims: Optional[Dict]) -> Dict:
+    """op=approve: io-Cognito-gated execution of soft supersession (§7/§8).
+
+    The agent/internal-key path is rejected — this surface records io's approval
+    signal and only then writes. Each approved duplicate is superseded into the
+    canonical by reusing the I07 `superseded-by` primitive (precheck + idempotent
+    edge migration + evidence freeze + reversibility). Per-record failures (e.g.
+    an evidence-orphan 409) are surfaced for human adjudication, never auto-forced.
+    """
+    # io-approval gate — never let the agent/internal-key self-authorize a merge.
+    if not _is_human_request(claims):
+        return _error(403, "Dedup supersession approval requires io Cognito authority (PWA session). "
+                           "The internal-key/agent path cannot self-authorize a merge "
+                           "(ENC-TSK-I08 io-gate; DOC-DF651F07D5C2 §8).")
+
+    canonical_id = str(body.get("canonical_id", "")).strip().upper()
+    superseded_ids = body.get("superseded_ids")
+    tier = str(body.get("tier", "")).strip().upper()
+    cluster_id = str(body.get("cluster_id", "")).strip()
+
+    if not canonical_id:
+        return _error(400, "Field 'canonical_id' is required.")
+    if not isinstance(superseded_ids, list) or not superseded_ids:
+        return _error(400, "Field 'superseded_ids' (non-empty list) is required.")
+    superseded_ids = [str(s).strip().upper() for s in superseded_ids if str(s).strip()]
+    if not superseded_ids:
+        return _error(400, "superseded_ids contained no usable record ids.")
+    if canonical_id in superseded_ids:
+        return _error(400, "canonical_id must not appear in superseded_ids.")
+    if len(set(superseded_ids)) != len(superseded_ids):
+        return _error(400, "superseded_ids must be unique.")
+    # I08 actions only T-MID / T-LOW. T-HIGH auto-merge is ENC-TSK-I09 (flag-gated).
+    if tier not in ("T-MID", "T-LOW"):
+        return _error(400, "Field 'tier' must be 'T-MID' or 'T-LOW'. T-HIGH auto-merge is "
+                           "ENC-TSK-I09's flag-gated arc-walker, not actionable via this surface.")
+    # Hard floor: never act on a cross-type set (§4.0). Same-project is enforced
+    # per-pair by _supersede_precheck (which reads the records).
+    homo, htype = _dedup_homogeneous([canonical_id] + superseded_ids)
+    if not homo:
+        return _error(400, "Cross-type supersession is a category error (§4.0): canonical and every "
+                           "superseded_id must share record_type. Nothing actioned.")
+    if htype not in _SUPERSEDABLE_TYPES:
+        return _error(400, f"Supersession applies to {sorted(_SUPERSEDABLE_TYPES)} records only "
+                           f"(got {htype}).")
+
+    approver = _human_actor(claims)
+    reason_extra = str(body.get("reason", "")).strip()
+    write_source = body.get("write_source", {})
+
+    results: List[Dict] = []
+    superseded_count = 0
+    for b_id in superseded_ids:
+        reason = (f"io-approved dedup supersession (ENC-TSK-I08; tier={tier}"
+                  + (f"; cluster={cluster_id}" if cluster_id else "")
+                  + f"; approver={approver})")
+        if reason_extra:
+            reason = f"{reason}. {reason_extra}"
+        resp = _handle_create_relationship(project_id, {
+            "source_id": b_id,
+            "target_id": canonical_id,
+            "relationship_type": "superseded-by",
+            "reason": reason,
+            "provenance": "human",
+            "write_source": write_source,
+        })
+        status_code = resp.get("statusCode")
+        try:
+            payload = json.loads(resp.get("body") or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        ok = status_code in (200, 201)
+        if ok:
+            superseded_count += 1
+        results.append({
+            "superseded_id": b_id,
+            "status_code": status_code,
+            "ok": ok,
+            "idempotent": bool(payload.get("idempotent") or (payload.get("supersession") or {}).get("idempotent")),
+            "supersession": payload.get("supersession"),
+            "detail": payload.get("error"),
+        })
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "canonical_id": canonical_id,
+        "cluster_id": cluster_id or None,
+        "tier": tier,
+        "approved_by": approver,
+        "requested_count": len(superseded_ids),
+        "superseded_count": superseded_count,
+        "rejected_count": len(superseded_ids) - superseded_count,
+        "results": results,
+        "note": ("Soft, reversible supersession via the ENC-TSK-I07 superseded-by op "
+                 "(idempotent edge migration + evidence freeze). Per-record failures "
+                 "(e.g. evidence-orphan 409) are surfaced for human adjudication, not forced."),
+    })
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I09 (Dedup P5): MECHANICAL arc-walker auto-merge for T-HIGH.
+#
+# The universal arc-walker auto-supersedes certificate-certified T-HIGH duplicate
+# pairs WITHOUT a per-merge io gate — judgment has been proved away by the P2
+# certainty model (DOC-DF651F07D5C2 §4/§8). io sovereignty is preserved in
+# substance by four rails, all wired here:
+#   1. Feature flag   — auto-merge stays DARK (shadow / propose-only) until io
+#                       enables enable_dedup_auto_merge after the precision floor
+#                       is certified. Disabled => evaluate + report, never write.
+#   2. Kill switch    — dedup_auto_merge_kill_switch halts auto-walk INSTANTLY,
+#                       checked before any eligibility evaluation or write.
+#   3. Certificate    — every member must individually hold a passing certificate
+#                       with precision LCB >= 0.999 against the CHOSEN canonical
+#                       (direct pair only — no transitive chain-drag, §4.4).
+#   4. Opt-out latch  — auto_walk_opt_out (ENC-FTR-111/H83) demotes a record to
+#                       ATTESTATION; the walker skips it. An io walk-back of any
+#                       auto-merge latches it (see _revert_supersession).
+# Every executed merge streams to the io-reviewable audit feed (EventBridge
+# record.dedup.auto_merged). Supersession itself is the soft, reversible ENC-TSK-I07
+# primitive — no auto-merge is ever destructive.
+#
+# Invoked via POST /{project}/dedup-review op=auto-merge (tracker:write). The merge
+# is mechanical, NOT io-approved, so — unlike op=approve — it does NOT require an io
+# Cognito session; it is gated by flag + kill switch + per-pair certificate instead.
+# ---------------------------------------------------------------------------
+
+def _dedup_auto_merge_cluster(project_id: str, cluster: Dict,
+                              verdict_index: Dict[Tuple[str, str], Dict],
+                              lcb_floor: float, shadow: bool, body: Dict) -> Dict:
+    """Evaluate (and, unless shadow, execute) the MECHANICAL auto-merge for one
+    I05 cluster. Each duplicate is auto-superseded into the cluster's canonical iff
+    it holds a direct passing certificate (LCB >= floor) AND is not opt-out latched."""
+    cluster_id = cluster.get("cluster_id")
+    canonical = str(cluster.get("canonical", "")).strip().upper()
+    members = [str(m).strip().upper() for m in (cluster.get("members") or []) if str(m).strip()]
+    base = {"cluster_id": cluster_id, "canonical": canonical,
+            "merged_count": 0, "skipped_count": 0, "results": []}
+
+    if not canonical or canonical not in members:
+        return {**base, "excluded": True, "reason": "cluster missing a canonical member"}
+
+    homo, htype = _dedup_homogeneous(members)
+    if not homo or htype not in _SUPERSEDABLE_TYPES:
+        return {**base, "excluded": True,
+                "reason": (f"hard-floor excluded (record_type={htype or 'mixed'} not a same-type "
+                           f"supersedable cluster; §4.0)")}
+
+    results: List[Dict] = []
+    merged = 0
+    skipped = 0
+    for d in members:
+        if d == canonical:
+            continue
+        # Rail 3 — direct certificate against the CHOSEN canonical (no chain-drag, §4.4).
+        v = verdict_index.get(_dedup_pair_key(canonical, d))
+        ok, why = _dedup_auto_merge_cert_holds(v, lcb_floor)
+        if not ok:
+            skipped += 1
+            results.append({"member": d, "action": "skipped", "reason": why})
+            continue
+        # Rail 4 — opt-out circuit breaker: latched => ATTESTATION, walker must skip (§6).
+        latched, latch_err = _dedup_member_opt_out_latched(project_id, d)
+        if latch_err:
+            skipped += 1
+            results.append({"member": d, "action": "skipped", "reason": latch_err})
+            continue
+        if latched:
+            skipped += 1
+            results.append({"member": d, "action": "skipped",
+                            "reason": "auto_walk_opt_out latched — demoted to ATTESTATION (§6)"})
+            continue
+        cosine = ((v or {}).get("signals") or {}).get("cosine")
+        prob = (v or {}).get("calibrated_prob")
+        lcb = ((v or {}).get("certificate") or {}).get("precision_lcb")
+        if shadow:
+            # Rail 1 — flag disabled: report the proposed merge, write nothing.
+            results.append({"member": d, "action": "would-merge",
+                            "cosine": cosine, "calibrated_prob": prob, "precision_lcb": lcb,
+                            "reason": "shadow mode (enable_dedup_auto_merge off): certificate holds; no write"})
+            continue
+        # MECHANICAL merge: soft, reversible supersession via the ENC-TSK-I07 primitive,
+        # stamped with the arc-walker write_source so the audit feed + walk-back latch
+        # detection (in _revert_supersession) are unambiguous.
+        reason = (f"MECHANICAL arc-walker auto-merge (ENC-TSK-I09; T-HIGH certificate-certified, "
+                  f"precision LCB >= {lcb_floor}"
+                  + (f"; cluster={cluster_id}" if cluster_id else "") + ").")
+        resp = _handle_create_relationship(project_id, {
+            "source_id": d,
+            "target_id": canonical,
+            "relationship_type": "superseded-by",
+            "reason": reason,
+            "provenance": "system",
+            "write_source": body.get("write_source", {}),
+        })
+        status_code = resp.get("statusCode")
+        try:
+            payload = json.loads(resp.get("body") or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if status_code in (200, 201):
+            merged += 1
+            _emit_auto_merge_event(project_id, htype, d, canonical, cluster_id, cosine, prob, lcb)
+            results.append({
+                "member": d, "action": "auto-merged", "status_code": status_code,
+                "idempotent": bool(payload.get("idempotent")
+                                   or (payload.get("supersession") or {}).get("idempotent")),
+                "supersession": payload.get("supersession"),
+                "cosine": cosine, "calibrated_prob": prob, "precision_lcb": lcb,
+            })
+        else:
+            # An evidence-orphan 409 (or any per-member failure) is surfaced, never forced.
+            skipped += 1
+            results.append({"member": d, "action": "failed", "status_code": status_code,
+                            "detail": payload.get("error")})
+
+    return {"cluster_id": cluster_id, "canonical": canonical, "record_type": htype,
+            "excluded": False, "merged_count": merged, "skipped_count": skipped, "results": results}
+
+
+def _handle_dedup_auto_merge(project_id: str, body: Dict, claims: Optional[Dict]) -> Dict:
+    """op=auto-merge: the MECHANICAL T-HIGH arc-walker (DOC-DF651F07D5C2 §P5).
+
+    Gated by kill switch (instant halt) + feature flag (dark-until-certified shadow)
+    + per-pair certificate (precision LCB >= 0.999, direct against canonical) +
+    opt-out latch. Soft, reversible supersession; every executed merge streams to the
+    io audit feed. Not io-approved (mechanical), so no Cognito gate — the rails are the
+    governance, not a per-merge keystroke."""
+    # Rail 2 — global kill switch, checked FIRST: halt instantly, evaluate nothing.
+    if _dedup_auto_merge_kill_switch():
+        return _response(200, {
+            "success": True, "project_id": project_id, "halted": True, "kill_switch": True,
+            "enabled": _dedup_auto_merge_enabled(), "merged_count": 0, "skipped_count": 0,
+            "clusters": [],
+            "note": ("Global kill switch (dedup_auto_merge_kill_switch) engaged — arc-walker "
+                     "auto-merge halted instantly (DOC-DF651F07D5C2 §8). No records superseded."),
+        })
+
+    # Earned-precision discipline: the floor may be RAISED but never lowered below 0.999.
+    try:
+        lcb_floor = float(body.get("precision_lcb_floor", _DEDUP_CERT_PRECISION_LCB_FLOOR))
+    except (TypeError, ValueError):
+        return _error(400, "precision_lcb_floor must be numeric.")
+    if lcb_floor < _DEDUP_CERT_PRECISION_LCB_FLOOR:
+        return _error(400, (f"precision_lcb_floor may not be lowered below the earned-precision floor "
+                            f"{_DEDUP_CERT_PRECISION_LCB_FLOOR} (DOC-DF651F07D5C2 §4.3). "
+                            f"Auto-walk is earned by measured precision, not asserted."))
+
+    clusters = body.get("clusters")
+    if not isinstance(clusters, list):
+        return _error(400, "Field 'clusters' (list of I05 cluster objects) is required.")
+    verdicts = body.get("verdicts") or []
+    if not isinstance(verdicts, list):
+        return _error(400, "Field 'verdicts' must be a list of I06 verdict objects (carrying certificates).")
+
+    vindex: Dict[Tuple[str, str], Dict] = {}
+    for v in verdicts:
+        a, b = v.get("a"), v.get("b")
+        if a and b:
+            vindex[_dedup_pair_key(a, b)] = v
+
+    enabled = _dedup_auto_merge_enabled()
+    shadow = not enabled  # Rail 1 — dark until the flag is enabled post-certification.
+
+    # Force arc-walker attribution: the audit feed and the walk-back opt-out latch
+    # (_revert_supersession) key off write_source == system:arc-walker. A caller cannot
+    # spoof a different actor onto a mechanical merge.
+    body["write_source"] = {"channel": ARC_WALKER_ACTOR, "provider": ARC_WALKER_ACTOR}
+
+    cluster_results: List[Dict] = []
+    merged_count = 0
+    skipped_count = 0
+    for cluster in clusters:
+        cres = _dedup_auto_merge_cluster(project_id, cluster, vindex, lcb_floor, shadow, body)
+        cluster_results.append(cres)
+        merged_count += cres.get("merged_count", 0)
+        skipped_count += cres.get("skipped_count", 0)
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "enabled": enabled,
+        "shadow": shadow,
+        "kill_switch": False,
+        "advanced_by": ARC_WALKER_ACTOR,
+        "precision_lcb_floor": lcb_floor,
+        "cluster_count": len(clusters),
+        "merged_count": merged_count,
+        "skipped_count": skipped_count,
+        "clusters": cluster_results,
+        "note": ((("SHADOW (enable_dedup_auto_merge off): proposed merges reported, nothing written. "
+                   if shadow else
+                   "Executed MECHANICAL auto-merges via the soft, reversible ENC-TSK-I07 superseded-by op; "
+                   "each streamed to the io audit feed. "))
+                 + "Every member individually held a passing certificate (precision LCB >= "
+                   f"{lcb_floor}) against the chosen canonical — no transitive chain-drag. "
+                   "Opt-out-latched records were skipped (ATTESTATION). A global kill switch can halt instantly."),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -5696,8 +8680,144 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
     return _response(200, {"success": True, "escalation": _escalation_public(item)})
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q13 (O1.1) — value-based cursor codec for _handle_list_records.
+#
+# Same ENC-ISS-699 idea as the escalation-list cursor above (a boundary built
+# from the last item actually RETURNED, never a raw DynamoDB
+# LastEvaluatedKey), generalized to _handle_list_records' two query shapes:
+#
+#   "base" — KeyConditionExpression on project_id alone (base table; sort
+#            key is record_id).
+#   "gsi"  — KeyConditionExpression on project-type-index (project_id +
+#            record_type); its ExclusiveStartKey must additionally carry the
+#            base table's own primary key (project_id, record_id) per
+#            DynamoDB's GSI-pagination contract, which is why record_type
+#            (`t`) rides along on the gsi branch only.
+#
+# A cursor minted on one branch is meaningless key material on the other
+# (different KeyConditionExpression, different required key attributes), so
+# decoding validates the branch instead of silently reinterpreting it.
+# ---------------------------------------------------------------------------
+
+class ListCursorBranchMismatch(Exception):
+    """A _handle_list_records next_cursor was minted for the other branch.
+
+    ("base" table walk vs "gsi" project-type-index walk.) Raised by
+    _decode_list_cursor; the route maps this to a 400, never a 500 or a
+    silent reinterpretation against the wrong key schema.
+    """
+
+
+def _encode_list_cursor(item: Dict[str, Any], branch: str) -> str:
+    """Encode a _handle_list_records next_cursor from the last RETURNED item.
+
+    `item` is a plain (already-deserialized) record dict carrying at least
+    project_id/record_id, plus record_type when branch == "gsi". Payload:
+    {"b": branch, "p": project_id, "r": record_id, "t": record_type?}
+    """
+    if branch not in ("base", "gsi"):
+        raise ValueError(f"Unknown list cursor branch: {branch!r}")
+    import base64
+    payload: Dict[str, Any] = {
+        "b": branch,
+        "p": item["project_id"],
+        "r": item["record_id"],
+    }
+    if branch == "gsi":
+        payload["t"] = item["record_type"]
+    return base64.urlsafe_b64encode(
+        json.dumps(payload).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_list_cursor(
+    token: str, branch: str, record_type: str = ""
+) -> Dict[str, str]:
+    """Decode + validate a _handle_list_records next_cursor.
+
+    `branch` is the branch the *current* request would query ("base" or
+    "gsi"). Raises ListCursorBranchMismatch when the token was minted on the
+    other branch. Any other malformed-token failure (bad base64, bad JSON,
+    missing keys) propagates as a plain exception — the route maps both
+    cases to 400, never 500.
+
+    ENC-TSK-Q13-0A review fix: `branch` alone ("base" vs "gsi") is not
+    query-shape-granular enough on the gsi branch. Two gsi requests with
+    different `type` filters both compare equal on branch (both "gsi"), so
+    without this check a cursor minted under type=task and replayed under
+    type=issue would decode as a match, then feed a decoded['t']=="task"
+    ExclusiveStartKey.record_type into a Query whose
+    ExpressionAttributeValues[':rtype'] is "issue" -- two different values
+    in the same call, producing a falsely-exhausted, wrong page (or a raw
+    ValidationException from real DynamoDB, masked into an opaque 500 by
+    the route's generic except-Exception handler) instead of the documented
+    400 CURSOR_BRANCH_MISMATCH. `record_type` is the CURRENT request's type
+    filter; passing "" (the default, e.g. from the codec's own round-trip
+    tests) skips this extra check and preserves prior behavior.
+    """
+    import base64
+    cursor_obj = json.loads(
+        base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+    )
+    cursor_branch = cursor_obj["b"]
+    if cursor_branch != branch:
+        raise ListCursorBranchMismatch(
+            f"next_cursor branch '{cursor_branch}' does not match this "
+            f"query's branch '{branch}'"
+        )
+    decoded = {
+        "b": cursor_branch,
+        "p": str(cursor_obj["p"]),
+        "r": str(cursor_obj["r"]),
+    }
+    if cursor_branch == "gsi":
+        decoded["t"] = str(cursor_obj["t"])
+        if record_type and decoded["t"] != record_type:
+            raise ListCursorBranchMismatch(
+                f"next_cursor record_type '{decoded['t']}' does not match "
+                f"this query's record_type '{record_type}'"
+            )
+    return decoded
+
+
+_ESCALATION_LIST_MAX_PAGES = 50  # ENC-ISS-699: bounded exhaustion guard,
+# mirrors the tools/enceladus-mcp-server/server.py _TRACKER_LIST_MAX_EXHAUST_PAGES
+# pattern (never walk LastEvaluatedKey unbounded).
+
+
 def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
-    """GET /{project}/escalation — list with status/target/session filters (§5.4)."""
+    """GET /{project}/escalation — list with status/target/session filters (§5.4).
+
+    ENC-ISS-699: the prior version queried once, kept at most `page_size`
+    items, and returned no cursor at all -- a caller could never see past
+    whatever fit in that single page (observed: total capped at 50 even
+    though prod carries ~105 escalations).
+
+    The cursor is a value-based (created_at, item_id) boundary, not a raw
+    DynamoDB LastEvaluatedKey. Two bugs came from tying the cursor to the raw
+    scan position instead of the returned/sorted page boundary:
+
+      1. Whenever a single query() response already held more than
+         `page_size` matching items *and* was DynamoDB's last page (no
+         LastEvaluatedKey), the old code emitted no cursor at all -- the
+         accumulate-then-truncate-to-page_size step silently dropped every
+         item past the threshold with no way to ever reach it.
+      2. Because results are re-sorted by created_at (globally, across
+         accumulated raw pages) before truncation, a cursor built from the
+         raw LastEvaluatedKey resumed the *unsorted* DynamoDB scan strictly
+         after that key -- which can skip items that were already fetched
+         in this call but sorted below the page_size cutoff, and are not
+         positioned after the raw key in DynamoDB's own key order.
+
+    A cursor built from the boundary values of the last item actually
+    returned sidesteps both: the next call re-filters (`created_at`,
+    `item_id`) strictly "after" that boundary in the same sort order used
+    for truncation, so it can never skip an item regardless of how many raw
+    DynamoDB pages or query() calls sit behind it. The raw-scan walk below is
+    still bounded by _ESCALATION_LIST_MAX_PAGES per call purely to cap
+    per-invocation DynamoDB cost; it is orthogonal to cursor correctness.
+    """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
 
@@ -5714,6 +8834,20 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
         page_size = 50
+    cursor = str(query_params.get("next_cursor") or "").strip()
+
+    after_created_at = None
+    after_id = None
+    if cursor:
+        try:
+            import base64
+            cursor_obj = json.loads(
+                base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+            )
+            after_created_at = str(cursor_obj["after_created_at"])
+            after_id = str(cursor_obj["after_id"])
+        except Exception:
+            return _error(400, "Invalid next_cursor")
 
     ddb = _get_ddb()
     key_values = {
@@ -5732,8 +8866,17 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     if session_filter:
         filter_clauses.append("requested_by.session_id = :session_filter")
         key_values[":session_filter"] = _ser_s(session_filter)
+    if after_created_at is not None:
+        # Sort order is (created_at, item_id) descending -- "after" the
+        # boundary means strictly lower in that order.
+        filter_clauses.append(
+            "(created_at < :after_created_at OR "
+            "(created_at = :after_created_at AND item_id < :after_id))"
+        )
+        key_values[":after_created_at"] = _ser_s(after_created_at)
+        key_values[":after_id"] = _ser_s(after_id)
 
-    kwargs = {
+    kwargs: Dict[str, Any] = {
         "TableName": DYNAMODB_TABLE,
         "KeyConditionExpression": (
             "project_id = :pid AND begins_with(record_id, :esc_prefix)"
@@ -5746,27 +8889,50 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["ExpressionAttributeNames"] = expression_names
 
     escalations = []
+    pages_fetched = 0
+    last_key = None
     try:
         while True:
             resp = ddb.query(**kwargs)
             escalations.extend(
                 _escalation_public(raw) for raw in resp.get("Items", [])
             )
+            pages_fetched += 1
             last_key = resp.get("LastEvaluatedKey")
-            if not last_key or len(escalations) >= page_size:
+            if not last_key:
+                break
+            if len(escalations) >= page_size or pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
                 break
             kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
         logger.error("escalation list query failed: %s", exc)
         return _error(500, "Database query failed.")
 
-    escalations.sort(key=lambda esc: esc.get("created_at", ""), reverse=True)
-    escalations = escalations[:page_size]
-    return _response(200, {
+    escalations.sort(key=lambda esc: (esc.get("created_at", ""), esc.get("item_id", "")), reverse=True)
+    truncated = len(escalations) > page_size
+    visible = escalations[:page_size]
+
+    next_cursor = ""
+    if truncated or last_key:
+        boundary = visible[-1] if visible else None
+        if boundary is not None:
+            import base64
+            cursor_payload = {
+                "after_created_at": boundary.get("created_at", ""),
+                "after_id": boundary.get("item_id", ""),
+            }
+            next_cursor = base64.urlsafe_b64encode(
+                json.dumps(cursor_payload).encode("utf-8")
+            ).decode("ascii")
+
+    payload: Dict[str, Any] = {
         "success": True,
-        "escalations": escalations,
-        "count": len(escalations),
-    })
+        "escalations": visible,
+        "count": len(visible),
+    }
+    if next_cursor:
+        payload["next_cursor"] = next_cursor
+    return _response(200, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -5790,8 +8956,15 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
                                extra_names: Optional[Dict] = None,
                                extra_values: Optional[Dict] = None,
                                extra_sets: Optional[list] = None,
-                               require_not_applied: bool = False) -> bool:
+                               require_not_applied: bool = False,
+                               extra_events: Optional[list] = None) -> bool:
     """Conditionally walk the escalation FSM one edge, appending the §11.2 event.
+
+    `extra_events` (ENC-TSK-P89): additional pre-built event dicts (ddb attribute
+    shape, e.g. from `_escalation_event`) appended to the same `events` list in
+    the same atomic write — used by the failed->applying retry path to record a
+    "retry" history entry alongside the ordinary to_status event, without a
+    second write and without disturbing the prior failure's audit trail.
 
     Returns False (without raising) when the ConditionExpression loses — the
     concurrent-applier no-op path of the §5.5 idempotency contract.
@@ -5806,12 +8979,13 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
     ] + (extra_sets or [])
     names = {"#st": "status", "#ev": "events"}
     names.update(extra_names or {})
+    event_list = [_escalation_event(to_status, actor, detail=detail)] + list(extra_events or [])
     values = {
         ":to_status": _ser_s(to_status),
         ":from_status": _ser_s(from_status),
         ":now": _ser_s(now),
         ":empty": {"L": []},
-        ":event": {"L": [_escalation_event(to_status, actor, detail=detail)]},
+        ":event": {"L": event_list},
     }
     values.update(extra_values or {})
     condition = "#st = :from_status"
@@ -5865,14 +9039,21 @@ def _emit_escalation_applied_event(project_id: str, escalation: Dict,
 def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) -> Dict:
     """POST /{project}/escalation/{id}/apply — applyEscalatedMutation (§5.5).
 
-    Sequence: (1) approved + applied_at-null guard; (2) conditional
-    approved→applying transition (the concurrency gate — a losing racer
-    no-ops); (3) fresh target read; (4) expected_version drift was surfaced
-    at approval time, proceed on io's informed approval; (5) registry handler
-    apply — one atomic UpdateItem on the target; (6) provenance is stamped
-    inside that same write; (7) applying→applied with applied_at + result.
-    On handler exception: applying→failed with the error in result and no
-    partial target write.
+    Sequence: (1) approved-or-failed + applied_at-null guard; (2) conditional
+    approved→applying OR failed→applying transition (the concurrency gate — a
+    losing racer no-ops); (3) fresh target read; (4) expected_version drift was
+    surfaced at approval time, proceed on io's informed approval; (5) registry
+    handler apply — one atomic UpdateItem on the target; (6) provenance is
+    stamped inside that same write; (7) applying→applied with applied_at +
+    result. On handler exception: applying→failed with the error in result and
+    no partial target write.
+
+    ENC-TSK-P89: a prior failed apply is retryable — status='failed' with
+    applied_at still unset re-drives through the same approved-path gate
+    (failed→applying is now a legal FSM edge), incrementing retry_count and
+    appending a 'retry' history event, without erasing the first failure's
+    audit trail (its event + result are appended-to, never overwritten, until
+    a new terminal transition lands).
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
@@ -5902,9 +9083,11 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "status": "applied",
             "reason": "applied_at already set — exactly-once guard (§5.5 step 1)",
         })
-    if status != "approved":
+    is_retry = status == "failed"
+    if status != "approved" and not is_retry:
         return _error(409, (
-            f"Escalation {escalation_id} is '{status}', not 'approved'. "
+            f"Escalation {escalation_id} is '{status}'. Apply "
+            "applies only while status=approved or failed (applied_at unset). "
             "Only the Cognito-human approval flow can authorize application."
         ))
 
@@ -5912,11 +9095,25 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
 
-    # Concurrency gate: exactly one applier wins approved→applying.
+    # Concurrency gate: exactly one applier wins approved→applying (or, for a
+    # re-drive, failed→applying). The conditional write on the CURRENT status
+    # value keeps this exactly-once even when two racing re-drives both fire.
+    transition_kwargs: Dict[str, Any] = {
+        "detail": {"target_record_id": escalation.get("target_record_id")},
+        "require_not_applied": True,
+    }
+    if is_retry:
+        transition_kwargs["extra_sets"] = [
+            "retry_count = if_not_exists(retry_count, :zero) + :one",
+        ]
+        transition_kwargs["extra_values"] = {":zero": {"N": "0"}, ":one": {"N": "1"}}
+        transition_kwargs["extra_events"] = [_escalation_event(
+            "retry", actor,
+            detail={"description": "re-drive after failed apply (ENC-TSK-P89)"},
+        )]
     if not _escalation_fsm_transition(
-        project_id, escalation_id, "approved", "applying", actor,
-        detail={"target_record_id": escalation.get("target_record_id")},
-        require_not_applied=True,
+        project_id, escalation_id, status, "applying", actor,
+        **transition_kwargs,
     ):
         return _response(200, {
             "success": True, "no_op": True, "escalation_id": escalation_id,
@@ -5998,6 +9195,9 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
 
 # Route patterns — order matters (most specific first)
 _RE_PENDING_UPDATES = re.compile(r"^(?:/api/v1/tracker)?/pending-updates$")
+_RE_DEDUP_REVIEW = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
+)
 _RE_ESCALATION = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/escalation"
     r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>apply))?)?$"
@@ -6008,6 +9208,12 @@ _RE_RELATIONSHIP = re.compile(
 _RE_RECORD_SUB = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
+# ENC-TSK-Q10 / ENC-ISS-791: reserved project segment. GET /_/{type}/{id} asks the
+# server to derive the owning project from the record id (projects table), so a
+# client such as ELR needs zero prefix knowledge. Reads only -- every other
+# method on '_' falls through to project validation and its 404.
+PROJECT_SENTINEL = "_"
+
 _RE_RECORD = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)$"
 )
@@ -6037,6 +9243,38 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         if auth_err:
             return auth_err
         return _handle_pending_updates(query_params)
+
+    # --- Route: dedup tier-review surface (ENC-TSK-I08) ---
+    m_dedup = _RE_DEDUP_REVIEW.match(path)
+    if m_dedup:
+        project_id = m_dedup.group("project")
+        if method != "POST":
+            return _error(405, "Method not allowed on /dedup-review. Use POST with op=propose|approve.")
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            return _error(400, "Invalid JSON body.")
+        op = str(body.get("op", "")).strip().lower()
+        # propose is mutation-free (read scope); approve and auto-merge write (write
+        # scope). approve is additionally io-Cognito-gated inside _handle_dedup_approve;
+        # auto-merge (ENC-TSK-I09) is MECHANICAL — gated by flag + kill switch + per-pair
+        # certificate, not by an io session.
+        scopes = ["tracker:write"] if op in ("approve", "auto-merge") else ["tracker:read"]
+        claims, auth_err = _authenticate(event, scopes)
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        _normalize_write_source(body, claims)
+        if op == "propose":
+            return _handle_dedup_propose(project_id, body)
+        elif op == "approve":
+            return _handle_dedup_approve(project_id, body, claims)
+        elif op == "auto-merge":
+            return _handle_dedup_auto_merge(project_id, body, claims)
+        else:
+            return _error(400, "Field 'op' must be 'propose', 'approve', or 'auto-merge'.")
 
     # --- Route: escalations (ENC-FTR-121 Ph1+Ph2 / ENC-TSK-J68, ENC-TSK-J69) ---
     m_escalation = _RE_ESCALATION.match(path)
@@ -6158,6 +9396,19 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         )
         if auth_err:
             return auth_err
+
+        # ENC-TSK-Q10 / ENC-ISS-791: sentinel project -> resolve from the record id.
+        # GET only; writes never get the sentinel (they hit project validation below).
+        if project_id == PROJECT_SENTINEL and method == "GET":
+            resolved_project = _resolve_project_for_record_id(record_id)
+            if not resolved_project:
+                prefix_match = _RECORD_ID_PREFIX_RE.match(record_id)
+                return _error(
+                    404,
+                    f"Record not found: {record_id}",
+                    unknown_prefix=prefix_match.group(1).upper() if prefix_match else "",
+                )
+            return _handle_get_record(resolved_project, record_type, record_id)
 
         project_err = _validate_project_exists(project_id)
         if project_err:

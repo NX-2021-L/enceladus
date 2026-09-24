@@ -112,6 +112,7 @@ __all__ = [
     "_coerce_openai_tools",
     "_count_claude_tokens",
     "_dispatch_claude_api",
+    "_dispatch_claude_batch_api",
     "_dispatch_openai_codex_api",
     "_extract_claude_text_response",
     "_extract_claude_thinking_response",
@@ -1665,6 +1666,203 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "completed_at": completed_at,
         "status": "succeeded",
         "provider_result": provider_result,
+    }
+
+
+def _maybe_attach_deferred_tool_loading(
+    provider_session: Dict[str, Any],
+    request_body: Dict[str, Any],
+    request_headers: Dict[str, str],
+) -> bool:
+    """Attach BM25 tool search + mcp_toolset when provider_session requests defer_loading."""
+    if not provider_session.get("deferred_tool_loading"):
+        return False
+    try:
+        from mcp_integration import _load_tool_defer_loading_module
+
+        policy = _load_tool_defer_loading_module()
+        mcp_server_name = str(
+            provider_session.get("mcp_server_name") or policy.DEFAULT_MCP_SERVER_NAME
+        ).strip()
+        eager_tools = provider_session.get("eager_load_tools")
+        tools = policy.build_anthropic_deferred_tools_array(
+            mcp_server_name=mcp_server_name,
+            eager_tools=eager_tools if isinstance(eager_tools, list) else None,
+        )
+        request_body["tools"] = tools
+        request_headers["anthropic-beta"] = policy.anthropic_beta_headers()
+        return bool(
+            tools and isinstance(tools[-1], dict) and tools[-1].get("cache_control")
+        )
+    except Exception as exc:
+        logger.warning("deferred_tool_loading attach failed: %s", exc)
+        return False
+
+
+def _dispatch_claude_batch_api(
+    request: Dict[str, Any],
+    prompt: Optional[str],
+    dispatch_id: str,
+) -> Dict[str, Any]:
+    """Submit a Claude Messages request via Anthropic Batch API (ENC-TSK-G19)."""
+    from anthropic_batch import NON_INTERACTIVE_WORKLOADS, submit_messages_batch
+
+    provider_session = request.get("provider_session") or {}
+    model = _resolve_claude_model(provider_session)
+    task_complexity = str(provider_session.get("task_complexity") or "standard").strip().lower()
+    workload_type = str(provider_session.get("batch_workload_type") or "").strip()
+    if workload_type and workload_type not in NON_INTERACTIVE_WORKLOADS:
+        logger.warning("Unknown batch_workload_type=%s; proceeding anyway", workload_type)
+
+    resolved_prompt = str(prompt or "").strip()
+    if not resolved_prompt:
+        initiative = str(request.get("initiative_title") or "").strip()
+        outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
+        lines = []
+        if initiative:
+            lines.append(f"Initiative: {initiative}")
+        if outcomes:
+            lines.append("Outcomes:")
+            lines.extend(f"- {item}" for item in outcomes)
+        resolved_prompt = "\n".join(lines).strip()
+    if not resolved_prompt:
+        raise RuntimeError("Missing prompt for claude_agent_sdk batch dispatch")
+    resolved_prompt, governance_context = _build_managed_session_prompt(
+        resolved_prompt,
+        str(request.get("project_id") or ""),
+    )
+
+    max_tokens = _coerce_claude_max_tokens((request.get("constraints") or {}).get("max_tokens"))
+    api_key = _fetch_provider_api_key("anthropic", ANTHROPIC_API_KEY_SECRET_ID)
+    batch_endpoint = f"{ANTHROPIC_API_BASE_URL.rstrip('/')}/v1/messages/batches"
+
+    system_prompt = provider_session.get("system_prompt")
+    system_blocks = None
+    if system_prompt:
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral", "ttl": CLAUDE_PROMPT_CACHE_TTL},
+            }
+        ]
+
+    message_params: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": resolved_prompt}],
+    }
+    if system_blocks:
+        message_params["system"] = system_blocks
+
+    thinking_param = _build_claude_thinking_param(provider_session, model)
+    if thinking_param:
+        message_params["thinking"] = thinking_param
+        budget = thinking_param.get("budget_tokens")
+        if budget is not None and max_tokens <= budget:
+            max_tokens = budget + max(budget, CLAUDE_API_MAX_TOKENS_DEFAULT)
+            message_params["max_tokens"] = max_tokens
+
+    preflight_token_count = _count_claude_tokens(
+        api_key=api_key,
+        model=model,
+        messages=message_params["messages"],
+        system=system_blocks,
+    )
+    context_limit = _CLAUDE_CONTEXT_LIMITS.get(model, _CLAUDE_DEFAULT_CONTEXT_LIMIT)
+    if preflight_token_count is not None and preflight_token_count > context_limit:
+        raise RuntimeError(
+            f"Estimated input tokens ({preflight_token_count}) exceed model context "
+            f"window ({context_limit}) for {model}"
+        )
+
+    anthropic_headers: Dict[str, str] = {}
+    toolset_cache_attached = _maybe_attach_deferred_tool_loading(
+        provider_session, message_params, anthropic_headers
+    )
+
+    started_at = _now_z()
+    started = time.perf_counter()
+    try:
+        batch_payload = submit_messages_batch(
+            api_key=api_key,
+            requests=[{"custom_id": dispatch_id, "params": message_params}],
+            cert_bundle=_CERT_BUNDLE,
+            extra_headers=anthropic_headers or None,
+        )
+    except Exception as exc:
+        _emit_structured_observability(
+            component="coordination_api",
+            event="dispatch_claude_batch_api",
+            request_id=str(request.get("request_id") or ""),
+            dispatch_id=dispatch_id,
+            tool_name="anthropic.messages.batches.create",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_code="batch_submit_failed",
+            extra={"execution_mode": "claude_agent_sdk", "model": model, "reason": str(exc)},
+        )
+        raise
+
+    batch_id = str(batch_payload.get("id") or "").strip()
+    processing_status = str(batch_payload.get("processing_status") or "in_progress").strip().lower()
+    if not batch_id:
+        raise RuntimeError("Anthropic batch API response missing batch id")
+
+    batch_context = dict(request.get("batch_context") or {})
+    batch_context.update(
+        {
+            "batch_eligible": True,
+            "batch_id": batch_id,
+            "batch_submitted_at": started_at,
+            "processing_status": processing_status,
+            "batch_max_timeout_hours": 24,
+            "cost_savings_estimate": "50%",
+            "poll_interval_seconds": 60,
+            "workload_type": workload_type or None,
+            "features_used": {
+                "prompt_caching": bool(system_blocks),
+                "cache_ttl": CLAUDE_PROMPT_CACHE_TTL if system_blocks else None,
+                "toolset_caching": toolset_cache_attached,
+                "toolset_cache_ttl": CLAUDE_PROMPT_CACHE_TTL if toolset_cache_attached else None,
+                "preflight_token_count": preflight_token_count,
+            },
+        }
+    )
+    request["batch_context"] = batch_context
+
+    _emit_structured_observability(
+        component="coordination_api",
+        event="dispatch_claude_batch_api",
+        request_id=str(request.get("request_id") or ""),
+        dispatch_id=dispatch_id,
+        tool_name="anthropic.messages.batches.create",
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        error_code="",
+        extra={
+            "execution_mode": "claude_agent_sdk",
+            "model": model,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "task_complexity": task_complexity,
+            "workload_type": workload_type,
+            "toolset_cache_attached": toolset_cache_attached,
+            "preflight_token_count": preflight_token_count,
+            "governance_loaded": bool(governance_context.get("loaded")),
+        },
+    )
+    return {
+        "dispatch_id": dispatch_id,
+        "execution_id": batch_id,
+        "execution_mode": "claude_agent_sdk",
+        "provider": "claude_agent_sdk",
+        "transport": "anthropic_messages_batches_api",
+        "api_endpoint": batch_endpoint,
+        "project_id": request.get("project_id"),
+        "coordination_request_id": request.get("request_id"),
+        "provider_secret_refs": [ANTHROPIC_API_KEY_SECRET_ID] if ANTHROPIC_API_KEY_SECRET_ID else [],
+        "sent_at": started_at,
+        "status": "running",
+        "batch_context": batch_context,
     }
 
 

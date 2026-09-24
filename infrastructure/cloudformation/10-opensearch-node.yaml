@@ -1,0 +1,352 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ENC-TSK-L39 — gamma-only self-hosted OpenSearch single-node infrastructure (DOC-77D6C714867E §14).
+  Stands up one graviton EC2 (t4g.small, arm64) with gp3 data volume (<=16GB), instance IAM role
+  (SSM Session Manager + CloudWatch Agent; optional manual snapshot bucket access), placed in a
+  public subnet with NO NAT gateway and single-AZ placement.
+
+  Cost posture (AC-3, locked): on-demand <= ~$13/mo (t4g.small + 16GB gp3 + modest egress);
+  1-year Compute Savings Plan / Reserved Instance recommended (~$8/mo). Explicitly excludes NAT
+  gateway, multi-AZ, replica nodes, and OpenSearch Serverless (~$350+/mo floor — rejected ISS-465 class).
+
+  DEPLOY TARGET: gamma (v4) ONLY via cloudformation-opensearch-node-stack-deploy.yml.
+  EscalatedPrereq: CFN deploy role must hold ec2:RunInstances + iam:PassRole for the instance
+  profile (DOC-359655466119) — do not hand-edit live IAM.
+
+Metadata:
+  Enceladus:
+    TaskId: ENC-TSK-L39
+    EscalatedPrereqs:
+      - CFN deploy role needs ec2:RunInstances, ec2:CreateTags, ec2:Describe*, iam:PassRole on OpenSearchNodeInstanceProfile
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["", "-gamma"]
+    Description: Resource suffix; gamma-only stack in Phase 1.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-8ad4a8f2
+    Description: VPC for the OpenSearch node (default VPC on gamma account).
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0a27ee72
+    Description: Public subnet (MapPublicIpOnLaunch=true) — single-AZ, no NAT.
+
+  VpcCidr:
+    Type: String
+    Default: 172.31.0.0/16
+    Description: VPC CIDR allowed to reach OpenSearch :9200 (TLS).
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium]
+    Description: Graviton instance class (AC-1 locks t4g.small).
+
+  VolumeSizeGiB:
+    Type: Number
+    Default: 16
+    MinValue: 8
+    MaxValue: 16
+    Description: gp3 root/data volume size (AC-1 <= 16GB).
+
+  OpenSearchVersion:
+    Type: String
+    Default: "2.19.1"
+    Description: OpenSearch tarball version installed by bootstrap-node.sh.
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0aca5422add5908e3
+    Description: >
+      Amazon Linux 2023 arm64 AMI (t4g). Pin updated manually; avoids SSM dynamic
+      reference which requires ssm:GetParameters on the CFN deploy role at plan time.
+
+  SnapshotBucketName:
+    Type: String
+    Default: ""
+    Description: Optional S3 bucket name for manual snapshot exports (empty disables snapshot IAM).
+
+  AdminCidr:
+    Type: String
+    Default: 172.31.0.0/16
+    Description: >
+      ENC-TSK-L44 AC-3: single CIDR permitted direct admin :9200 access. Defaults to
+      the VPC CIDR (current posture: indexer/query Lambdas reach the node over
+      VPC-private IP per the L41 shipped implementation). NOTE: DOC-77D6C714867E
+      §14.5 assumes non-VPC indexer/query Lambdas reaching over the public internet
+      -- L41 shipped VPC-attached instead, so broadening this to 0.0.0.0/0 was not
+      carried out here to avoid publicly exposing a self-signed-TLS single node
+      with no corresponding functional need. Revisit alongside a deliberate
+      non-VPC Lambda migration, not as a side effect of this task.
+
+Conditions:
+  HasSnapshotBucket: !Not [!Equals [!Ref SnapshotBucketName, ""]]
+
+Resources:
+  OpenSearchNodeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-opensearch-node-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - !If
+          - HasSnapshotBucket
+          - PolicyName: opensearch-manual-snapshot-s3
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: SnapshotObjectRW
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub "arn:aws:s3:::${SnapshotBucketName}"
+                    - !Sub "arn:aws:s3:::${SnapshotBucketName}/*"
+          - !Ref AWS::NoValue
+        - PolicyName: opensearch-security-credentials
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerOpenSearchCredentialSync
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:TagResource
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/opensearch/*"
+
+  OpenSearchNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "enceladus-opensearch-node${EnvironmentSuffix}"
+      Roles:
+        - !Ref OpenSearchNodeRole
+
+  OpenSearchNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "OpenSearch node (TLS :9200 only; ENC-TSK-L44 hardened) ${EnvironmentSuffix}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: !Ref VpcCidr
+          Description: OpenSearch REST (TLS) from VPC -- indexer/query Lambda ENIs
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: !Ref AdminCidr
+          Description: ENC-TSK-L44 AC-3 -- single admin CIDR for direct operator access
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Package downloads + artifact fetch
+      Tags:
+        - Key: enceladus:component
+          Value: opensearch-node
+        - Key: enceladus:task
+          Value: ENC-TSK-L44
+
+  OpenSearchNodeInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref OpenSearchNodeInstanceProfile
+      ImageId: !Ref AmiId
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref OpenSearchNodeSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGiB
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      Tags:
+        - Key: Name
+          Value: !Sub "enceladus-opensearch-node${EnvironmentSuffix}"
+        - Key: enceladus:component
+          Value: opensearch-node
+        - Key: enceladus:task
+          Value: ENC-TSK-L39
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euo pipefail
+            exec > /var/log/opensearch-userdata.log 2>&1
+            export OPENSEARCH_VERSION="${OpenSearchVersion}"
+            export OPENSEARCH_CLUSTER_NAME="enceladus-search${EnvironmentSuffix}"
+            echo "${BootstrapScriptB64}" | base64 -d > /tmp/bootstrap-node.sh
+            chmod +x /tmp/bootstrap-node.sh
+            /tmp/bootstrap-node.sh
+          - OpenSearchVersion: !Ref OpenSearchVersion
+            EnvironmentSuffix: !Ref EnvironmentSuffix
+            BootstrapScriptB64: "IyEvdXNyL2Jpbi9lbnYgYmFzaAojIEVOQy1UU0stTDM5IHNpbmdsZS1ub2RlIE9wZW5TZWFyY2ggYm9vdHN0cmFwIChnYW1tYSwgdDRnLnNtYWxsL2FybTY0KS4gSWRlbXBvdGVudCBleGNlcHQgZmlyc3QgY2x1c3RlciBmb3JtYXRpb24uCnNldCAtZXVvIHBpcGVmYWlsCgpleGVjID4gL3Zhci9sb2cvb3BlbnNlYXJjaC1ib290c3RyYXAubG9nIDI+JjEKCk9QRU5TRUFSQ0hfVkVSU0lPTj0iJHtPUEVOU0VBUkNIX1ZFUlNJT046LTIuMTkuMX0iCk9TSD0iJHtPUEVOU0VBUkNIX0hPTUU6LS91c3Ivc2hhcmUvb3BlbnNlYXJjaH0iCk9TVT0iJHtPUEVOU0VBUkNIX1VTRVI6LW9wZW5zZWFyY2h9IgpDTFVTVEVSX05BTUU9IiR7T1BFTlNFQVJDSF9DTFVTVEVSX05BTUU6LWVuY2VsYWR1cy1zZWFyY2gtZ2FtbWF9IgpOT0RFX05BTUU9IiR7T1BFTlNFQVJDSF9OT0RFX05BTUU6LXNlYXJjaC1ub2RlLTF9IgpBRE1JTl9QQVNTV09SRF9GSUxFPSIke09QRU5TRUFSQ0hfQURNSU5fUEFTU1dPUkRfRklMRTotL3Jvb3QvLm9wZW5zZWFyY2gtYWRtaW4tcGFzc3dvcmR9IgpNQVJLRVI9Ii92YXIvbGliL29wZW5zZWFyY2gvLmJvb3RzdHJhcC1jb21wbGV0ZSIKSlZNX0hFQVA9IiR7T1BFTlNFQVJDSF9KVk1fSEVBUDotMWd9IgoKbG9nKCkgeyBlY2hvICJbJChkYXRlIC11ICslWS0lbS0lZFQlSDolTTolU1opXSAkKiI7IH0KCmlmIFtbIC1mICIke01BUktFUn0iIF1dOyB0aGVuCiAgbG9nICJCb290c3RyYXAgYWxyZWFkeSBjb21wbGV0ZTsgZXhpdGluZy4iCiAgZXhpdCAwCmZpCgpsb2cgIkluc3RhbGxpbmcgcHJlcmVxdWlzaXRlcyIKIyAtLWFsbG93ZXJhc2luZzogQUwyMDIzJ3MgY3VybC1taW5pbWFsIGNvbmZsaWN0cyB3aXRoIHRoZSBmdWxsIGN1cmwgcGFja2FnZS4KZG5mIGluc3RhbGwgLXkgLS1hbGxvd2VyYXNpbmcgamF2YS0xNy1hbWF6b24tY29ycmV0dG8taGVhZGxlc3MgdGFyIGd6aXAgY3VybCBqcSBhbWF6b24tY2xvdWR3YXRjaC1hZ2VudAoKaWYgISBpZCAiJHtPU1V9IiAmPi9kZXYvbnVsbDsgdGhlbgogIHVzZXJhZGQgLS1zeXN0ZW0gLS1ob21lLWRpciAiJHtPU0h9IiAtLXNoZWxsIC9zYmluL25vbG9naW4gIiR7T1NVfSIKZmkKCmluc3RhbGwgLWQgLW0gMDc1NSAiJHtPU0h9IgppbnN0YWxsIC1kIC1tIDA3NTAgLW8gIiR7T1NVfSIgLWcgIiR7T1NVfSIgL3Zhci9saWIvb3BlbnNlYXJjaAppbnN0YWxsIC1kIC1tIDA3NTAgLW8gIiR7T1NVfSIgLWcgIiR7T1NVfSIgL3Zhci9sb2cvb3BlbnNlYXJjaAoKVEFSQkFMTD0ib3BlbnNlYXJjaC0ke09QRU5TRUFSQ0hfVkVSU0lPTn0tbGludXgtYXJtNjQudGFyLmd6IgpVUkw9Imh0dHBzOi8vYXJ0aWZhY3RzLm9wZW5zZWFyY2gub3JnL3JlbGVhc2VzL2J1bmRsZS9vcGVuc2VhcmNoLyR7T1BFTlNFQVJDSF9WRVJTSU9OfS8ke1RBUkJBTEx9IgojIC90bXAgaXMgdG1wZnMgKH45MjRNQiBvbiB0NGcuc21hbGwpLCB0b28gc21hbGwgZm9yIHRoZSA+MUdCIGV4dHJhY3RlZCB0cmVlOyB1c2UgL3Zhci90bXAgKHJlYWwgRUJTKS4KQlVJTERfRElSPSIvdmFyL3RtcC9vcGVuc2VhcmNoLWJ1aWxkIgpUTVA9IiR7QlVJTERfRElSfS8ke1RBUkJBTEx9IgoKaWYgW1sgISAteCAiJHtPU0h9L2Jpbi9vcGVuc2VhcmNoIiBdXTsgdGhlbgogIGxvZyAiRG93bmxvYWRpbmcgT3BlblNlYXJjaCAke09QRU5TRUFSQ0hfVkVSU0lPTn0gKCR7VVJMfSkiCiAgbWtkaXIgLXAgIiR7QlVJTERfRElSfSIKICBjdXJsIC1mc1NMICIke1VSTH0iIC1vICIke1RNUH0iCiAgdGFyIC14emYgIiR7VE1QfSIgLUMgIiR7QlVJTERfRElSfSIKICBybSAtcmYgIiR7T1NIOj99Ii8qCiAgY3AgLWEgIiR7QlVJTERfRElSfS9vcGVuc2VhcmNoLSR7T1BFTlNFQVJDSF9WRVJTSU9OfSIvKiAiJHtPU0h9LyIKICBybSAtcmYgIiR7QlVJTERfRElSfSIKZmkKCmNob3duIC1SICIke09TVX06JHtPU1V9IiAiJHtPU0h9IiAvdmFyL2xpYi9vcGVuc2VhcmNoIC92YXIvbG9nL29wZW5zZWFyY2gKCmlmIFtbICEgLWYgIiR7QURNSU5fUEFTU1dPUkRfRklMRX0iIF1dOyB0aGVuCiAgb3BlbnNzbCByYW5kIC1iYXNlNjQgMjQgPiAiJHtBRE1JTl9QQVNTV09SRF9GSUxFfSIKICBjaG1vZCAwNjAwICIke0FETUlOX1BBU1NXT1JEX0ZJTEV9IgpmaQpBRE1JTl9QQVNTV09SRD0iJCh0ciAtZCAnXG4nIDwgIiR7QURNSU5fUEFTU1dPUkRfRklMRX0iKSIKZXhwb3J0IE9QRU5TRUFSQ0hfSU5JVElBTF9BRE1JTl9QQVNTV09SRD0iJHtBRE1JTl9QQVNTV09SRH0iCgpsb2cgIldyaXRpbmcgb3BlbnNlYXJjaC55bWwiCiMgTm8gcGx1Z2lucy5zZWN1cml0eS4qIGtleSBoZXJlOiBkZW1vIGluc3RhbGxlciAoTDcwKSB0cmVhdHMgaXRzIHByZXNlbmNlIGFzIGFscmVhZHktY29uZmlndXJlZCBhbmQgc2tpcHMgVExTIGNlcnQgZ2VuLgpDRkc9IiR7T1NIfS9jb25maWcvb3BlbnNlYXJjaC55bWwiClRMU19OT0RFX1BFTT0iJHtPU0h9L2NvbmZpZy9lc25vZGUucGVtIgojIFN0cmlwIGFueSBzdGFsZSBwbHVnaW5zLnNlY3VyaXR5LmRpc2FibGVkIHNvIHJldHJpZXMgcmVnZW5lcmF0ZSBUTFMgbWF0ZXJpYWwuCmlmIFtbICEgLWYgIiR7VExTX05PREVfUEVNfSIgXV07IHRoZW4KICBsb2cgIlRMUyBjZXJ0cyBtaXNzaW5nOyBzdHJpcHBpbmcgc3RhbGUgcGx1Z2lucy5zZWN1cml0eS4qIGtleXMgYmVmb3JlIGRlbW8gaW5zdGFsbCIKICBzZWQgLWkgJy9ecGx1Z2luc1wuc2VjdXJpdHlcLi9kJyAiJHtDRkd9IgpmaQppZiAhIGdyZXAgLXEgJ0wzOS1jZmcnICIke0NGR30iOyB0aGVuCiAgY2F0ID4+ICIke0NGR30iIDw8RU9GCgojIEwzOS1jZmcKY2x1c3Rlci5uYW1lOiAke0NMVVNURVJfTkFNRX0Kbm9kZS5uYW1lOiAke05PREVfTkFNRX0KZGlzY292ZXJ5LnR5cGU6IHNpbmdsZS1ub2RlCm5ldHdvcmsuaG9zdDogMC4wLjAuMApwYXRoLmRhdGE6IC92YXIvbGliL29wZW5zZWFyY2gKcGF0aC5sb2dzOiAvdmFyL2xvZy9vcGVuc2VhcmNoCmFjdGlvbi5hdXRvX2NyZWF0ZV9pbmRleDogdHJ1ZQojIGVuZC1MMzktY2ZnCkVPRgplbHNlCiAgbG9nICJMMzkgY2ZnIHByZXNlbnQ7IHNraXAiCmZpCgppbnN0YWxsIC1kIC1tIDA3NTUgIiR7T1NIfS9jb25maWcvanZtLm9wdGlvbnMuZCIKY2F0ID4gIiR7T1NIfS9jb25maWcvanZtLm9wdGlvbnMuZC9oZWFwLm9wdGlvbnMiIDw8RU9GCi1YbXMke0pWTV9IRUFQfQotWG14JHtKVk1fSEVBUH0KRU9GCgpsb2cgIlJ1bm5pbmcgb3BlbnNlYXJjaC10YXItaW5zdGFsbC5zaCAoVExTICsgc2VjdXJpdHkgcGx1Z2luIGRlbW8gY2VydHMpIgpjZCAiJHtPU0h9IgpjaG1vZCAreCAuL29wZW5zZWFyY2gtdGFyLWluc3RhbGwuc2gKIyBSdW5zIGFzIG9wZW5zZWFyY2ggdXNlciAobm8gcm9vdCk7IGV4ZWNzIGludG8gdGhlIHNlcnZlciBpdHNlbGYgb25jZSBjZXJ0cyBhcmUgbWFkZSAoTDcxKSBhbmQgbmV2ZXIgcmV0dXJucyAtLSBiYWNrZ3JvdW5kICsgcG9sbC4KcnVudXNlciAtdSAiJHtPU1V9IiAtLXByZXNlcnZlLWVudmlyb25tZW50IC0tIC4vb3BlbnNlYXJjaC10YXItaW5zdGFsbC5zaCAmCklOU1RBTExFUl9QSUQ9JCEKZm9yIGkgaW4gJChzZXEgMSA2MCk7IGRvCiAgaWYgW1sgLWYgIiR7VExTX05PREVfUEVNfSIgXV07IHRoZW4KICAgIGJyZWFrCiAgZmkKICBzbGVlcCA1CmRvbmUKa2lsbCAiJHtJTlNUQUxMRVJfUElEfSIgMj4vZGV2L251bGwgfHwgdHJ1ZQpwa2lsbCAtdSAiJHtPU1V9IiB8fCB0cnVlCnNsZWVwIDIKaWYgW1sgISAtZiAiJHtUTFNfTk9ERV9QRU19IiBdXTsgdGhlbgogIGxvZyAiRVJST1I6IGRlbW8gaW5zdGFsbGVyIGRpZCBub3QgZ2VuZXJhdGUgVExTIGNlcnRzICgke1RMU19OT0RFX1BFTX0gbWlzc2luZykiCiAgZXhpdCAxCmZpCgpsb2cgIkluc3RhbGxpbmcgc3lzdGVtZCB1bml0IgpjYXQgPiAvZXRjL3N5c3RlbWQvc3lzdGVtL29wZW5zZWFyY2guc2VydmljZSA8PEVPRgpbVW5pdF0KRGVzY3JpcHRpb249T3BlblNlYXJjaCAoRU5DLVRTSy1MMzkgc2luZ2xlIG5vZGUpCkFmdGVyPW5ldHdvcmstb25saW5lLnRhcmdldApXYW50cz1uZXR3b3JrLW9ubGluZS50YXJnZXQKCltTZXJ2aWNlXQpUeXBlPXNpbXBsZQpVc2VyPSR7T1NVfQpHcm91cD0ke09TVX0KRW52aXJvbm1lbnQ9T1BFTlNFQVJDSF9IT01FPSR7T1NIfQpFbnZpcm9ubWVudD1PUEVOU0VBUkNIX1BBVEhfQ09ORj0ke09TSH0vY29uZmlnCkVudmlyb25tZW50PU9QRU5TRUFSQ0hfSkFWQV9IT01FPSR7T1NIfS9qZGsKV29ya2luZ0RpcmVjdG9yeT0ke09TSH0KRXhlY1N0YXJ0PSR7T1NIfS9iaW4vb3BlbnNlYXJjaApSZXN0YXJ0PW9uLWZhaWx1cmUKTGltaXROT0ZJTEU9NjU1MzYKTGltaXRNRU1MT0NLPWluZmluaXR5CgpbSW5zdGFsbF0KV2FudGVkQnk9bXVsdGktdXNlci50YXJnZXQKRU9GCgpzeXN0ZW1jdGwgZGFlbW9uLXJlbG9hZApzeXN0ZW1jdGwgZW5hYmxlIG9wZW5zZWFyY2gKc3lzdGVtY3RsIHJlc3RhcnQgb3BlbnNlYXJjaAoKX3dhaXRfZ3JlZW4oKSB7CiAgbG9nICJXYWl0aW5nIGZvciBjbHVzdGVyIGhlYWx0aCBHUkVFTiIKICBmb3IgaSBpbiAkKHNlcSAxIDYwKTsgZG8KICAgIGN1cmwgLWtzIC11ICJhZG1pbjoke0FETUlOX1BBU1NXT1JEfSIgImh0dHBzOi8vMTI3LjAuMC4xOjkyMDAvX2NsdXN0ZXIvaGVhbHRoIiB8IGpxIC1lICcuc3RhdHVzPT0iZ3JlZW4iIG9yIC5zdGF0dXM9PSJ5ZWxsb3ciJyA+L2Rldi9udWxsIDI+JjEgJiYgYnJlYWsKICAgIHNsZWVwIDUKICBkb25lCn0KX3dhaXRfZ3JlZW4KY3VybCAta3MgLXUgImFkbWluOiR7QURNSU5fUEFTU1dPUkR9IiAiaHR0cHM6Ly8xMjcuMC4wLjE6OTIwMC9fY2x1c3Rlci9oZWFsdGg/d2FpdF9mb3Jfc3RhdHVzPWdyZWVuJnRpbWVvdXQ9MTIwcyIgfCB0ZWUgL3Zhci9sb2cvb3BlbnNlYXJjaC1jbHVzdGVyLWhlYWx0aC5qc29uCgpsb2cgIkFwcGx5aW5nIGRlZmF1bHQgaW5kZXggdGVtcGxhdGUgKG51bWJlcl9vZl9yZXBsaWNhczogMCkiCmN1cmwgLWtzIC11ICJhZG1pbjoke0FETUlOX1BBU1NXT1JEfSIgLVggUFVUICJodHRwczovLzEyNy4wLjAuMTo5MjAwL19pbmRleF90ZW1wbGF0ZS9lbmNlbGFkdXMtZGVmYXVsdC1yZXBsaWNhcy16ZXJvIiBcCiAgLUggJ0NvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vanNvbicgXAogIC1kICd7ImluZGV4X3BhdHRlcm5zIjpbImVuY2VsYWR1cy0qIl0sInRlbXBsYXRlIjp7InNldHRpbmdzIjp7Im51bWJlcl9vZl9zaGFyZHMiOjEsIm51bWJlcl9vZl9yZXBsaWNhcyI6MH19fScKCiMgRU5DLVRTSy1MNDQgYXVkaXQgbG9nZ2luZyB2aWEgb3BlbnNlYXJjaC55bWwgcG9zdC1ib290c3RyYXAgKEw3MCBndWFyZCBhYm92ZSk7IG5lZWRzIGEgcmVzdGFydC4KaWYgISBncmVwIC1xICdMNDQtYXVkaXQnICIke0NGR30iOyB0aGVuCiAgbG9nICJFbmFibGluZyBzZWN1cml0eS1wbHVnaW4gYXVkaXQgbG9nZ2luZyIKICBjYXQgPj4gIiR7Q0ZHfSIgPDxFT0YKCiMgTDQ0LWF1ZGl0CnBsdWdpbnMuc2VjdXJpdHkuYXVkaXQudHlwZTogaW50ZXJuYWxfb3BlbnNlYXJjaApwbHVnaW5zLnNlY3VyaXR5LmF1ZGl0LmNvbmZpZy5kaXNhYmxlZF9yZXN0X2NhdGVnb3JpZXM6IE5PTkUKcGx1Z2lucy5zZWN1cml0eS5hdWRpdC5jb25maWcuZGlzYWJsZWRfdHJhbnNwb3J0X2NhdGVnb3JpZXM6IE5PTkUKIyBlbmQtTDQ0LWF1ZGl0CkVPRgogIHN5c3RlbWN0bCByZXN0YXJ0IG9wZW5zZWFyY2gKICBfd2FpdF9ncmVlbgplbHNlCiAgbG9nICJFTkMtVFNLLUw0NCBhdWRpdCBjb25maWcgYWxyZWFkeSBwcmVzZW50OyBza2lwcGluZyByZXN0YXJ0IgpmaQoKIyBFTkMtVFNLLUw0NCBmaW5lLWdyYWluZWQgcm9sZXMgKyBTZWNyZXRzIE1hbmFnZXIgcm90YXRpb247IGlkZW1wb3RlbnQgcmUtcnVuLgpsb2cgIlByb3Zpc2lvbmluZyBmaW5lLWdyYWluZWQgc2VjdXJpdHkgcm9sZXMgKyBTZWNyZXRzIE1hbmFnZXIgY3JlZGVudGlhbHMiCgpSR049IiR7QVdTX1JFR0lPTjotJChjdXJsIC1mc1MgLW0gMiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvcGxhY2VtZW50L3JlZ2lvbiAyPi9kZXYvbnVsbCB8fCBlY2hvIHVzLXdlc3QtMil9IgpTRUNQRlg9IiR7T1BFTlNFQVJDSF9TRUNSRVRfUFJFRklYOi1lbmNlbGFkdXMvb3BlbnNlYXJjaH0iClNFQ0VOVj0iJHtPUEVOU0VBUkNIX1NFQ1JFVF9FTlY6LWdhbW1hfSIKCmlmICEgY29tbWFuZCAtdiBhd3MgJj4vZGV2L251bGw7IHRoZW4KICBkbmYgaW5zdGFsbCAteSBhd3NjbGkgfHwgcGlwMyBpbnN0YWxsIC0tcXVpZXQgYXdzY2xpCmZpCgpfcHV0X3NlY3JldCgpIHsKICBsb2NhbCB1c2VybmFtZT0iJDEiIHBhc3N3b3JkPSIkMiIKICBsb2NhbCBzZWNyZXRfaWQ9IiR7U0VDUEZYfS8ke1NFQ0VOVn0tJHt1c2VybmFtZX0iCiAgbG9jYWwgcGF5bG9hZAogIHBheWxvYWQ9IiQoanEgLW4gLS1hcmcgdSAiJHt1c2VybmFtZX0iIC0tYXJnIHAgIiR7cGFzc3dvcmR9IiAne3VzZXJuYW1lOiR1LCBwYXNzd29yZDokcH0nKSIKICBpZiBhd3Mgc2VjcmV0c21hbmFnZXIgZGVzY3JpYmUtc2VjcmV0IC0tc2VjcmV0LWlkICIke3NlY3JldF9pZH0iIC0tcmVnaW9uICIke1JHTn0iID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgYXdzIHNlY3JldHNtYW5hZ2VyIHB1dC1zZWNyZXQtdmFsdWUgLS1zZWNyZXQtaWQgIiR7c2VjcmV0X2lkfSIgLS1zZWNyZXQtc3RyaW5nICIke3BheWxvYWR9IiAtLXJlZ2lvbiAiJHtSR059IiA+L2Rldi9udWxsCiAgZWxzZQogICAgYXdzIHNlY3JldHNtYW5hZ2VyIGNyZWF0ZS1zZWNyZXQgLS1uYW1lICIke3NlY3JldF9pZH0iIC0tc2VjcmV0LXN0cmluZyAiJHtwYXlsb2FkfSIgLS1yZWdpb24gIiR7UkdOfSIgPi9kZXYvbnVsbAogIGZpCiAgbG9nICJTZWNyZXRzIE1hbmFnZXI6IHN5bmNlZCAke3NlY3JldF9pZH0iCn0KCl9wdXRfc2VjcmV0ICJhZG1pbiIgIiR7QURNSU5fUEFTU1dPUkR9IgoKSVBXRj0iL3Jvb3QvLm9wZW5zZWFyY2gtaW5kZXhlci1wYXNzd29yZCIKUVBXRj0iL3Jvb3QvLm9wZW5zZWFyY2gtcXVlcnktcGFzc3dvcmQiCmlmIFtbICEgLWYgIiR7SVBXRn0iIF1dOyB0aGVuCiAgb3BlbnNzbCByYW5kIC1iYXNlNjQgMjQgPiAiJHtJUFdGfSIKICBjaG1vZCAwNjAwICIke0lQV0Z9IgpmaQppZiBbWyAhIC1mICIke1FQV0Z9IiBdXTsgdGhlbgogIG9wZW5zc2wgcmFuZCAtYmFzZTY0IDI0ID4gIiR7UVBXRn0iCiAgY2htb2QgMDYwMCAiJHtRUFdGfSIKZmkKSU5ERVhFUl9QQVNTV09SRD0iJCh0ciAtZCAnXG4nIDwgIiR7SVBXRn0iKSIKUVVFUllfUEFTU1dPUkQ9IiQodHIgLWQgJ1xuJyA8ICIke1FQV0Z9IikiCgpfcHV0X3NlY3JldCAiaW5kZXhlciIgIiR7SU5ERVhFUl9QQVNTV09SRH0iCl9wdXRfc2VjcmV0ICJxdWVyeSIgIiR7UVVFUllfUEFTU1dPUkR9IgoKbG9nICJBcHBseWluZyBpbmRleGVyX3JvbGUgLyBxdWVyeV9yb2xlIHZpYSBTZWN1cml0eSBSRVNUIEFQSSIKU0VDPSJodHRwczovLzEyNy4wLjAuMTo5MjAwL19wbHVnaW5zL19zZWN1cml0eS9hcGkiCl9zZWNfcHV0KCkgeyBjdXJsIC1rcyAtdSAiYWRtaW46JHtBRE1JTl9QQVNTV09SRH0iIC1YIFBVVCAiJHtTRUN9LyQxIiAtSCAnQ29udGVudC1UeXBlOiBhcHBsaWNhdGlvbi9qc29uJyAtZCAiJDIiOyB9Cl9zZWNfcHV0ICJyb2xlcy9pbmRleGVyX3JvbGUiICd7ImNsdXN0ZXJfcGVybWlzc2lvbnMiOlsiY2x1c3Rlcl9jb21wb3NpdGVfb3BzIiwiY2x1c3Rlcjptb25pdG9yLyoiXSwiaW5kZXhfcGVybWlzc2lvbnMiOlt7ImluZGV4X3BhdHRlcm5zIjpbInJlY29yZHNfd3JpdGUiLCJyZWNvcmRzX3YqIl0sImFsbG93ZWRfYWN0aW9ucyI6WyJpbmRpY2VzOmRhdGEvd3JpdGUvKiIsImluZGljZXM6YWRtaW4vY3JlYXRlIiwiaW5kaWNlczphZG1pbi9tYXBwaW5nL3B1dCIsImluZGljZXM6YWRtaW4vYWxpYXNlcyIsImluZGljZXM6bW9uaXRvci8qIl19XX0nCl9zZWNfcHV0ICJyb2xlcy9xdWVyeV9yb2xlIiAneyJjbHVzdGVyX3Blcm1pc3Npb25zIjpbImNsdXN0ZXI6bW9uaXRvci8qIl0sImluZGV4X3Blcm1pc3Npb25zIjpbeyJpbmRleF9wYXR0ZXJucyI6WyJyZWNvcmRzX3JlYWQiLCJyZWNvcmRzX3YqIl0sImFsbG93ZWRfYWN0aW9ucyI6WyJpbmRpY2VzOmRhdGEvcmVhZC8qIiwiaW5kaWNlczptb25pdG9yLyoiXX1dfScKX3NlY19wdXQgImludGVybmFsdXNlcnMvaW5kZXhlciIgIiQoanEgLW4gLS1hcmcgcCAiJHtJTkRFWEVSX1BBU1NXT1JEfSIgJ3twYXNzd29yZDokcCwgYmFja2VuZF9yb2xlczpbImluZGV4ZXJfYmFja2VuZCJdLCBkZXNjcmlwdGlvbjoiTDQ0IHdyaXRlLW9ubHkifScpIgpfc2VjX3B1dCAiaW50ZXJuYWx1c2Vycy9xdWVyeSIgIiQoanEgLW4gLS1hcmcgcCAiJHtRVUVSWV9QQVNTV09SRH0iICd7cGFzc3dvcmQ6JHAsIGJhY2tlbmRfcm9sZXM6WyJxdWVyeV9iYWNrZW5kIl0sIGRlc2NyaXB0aW9uOiJMNDQgcmVhZC1vbmx5In0nKSIKX3NlY19wdXQgInJvbGVzbWFwcGluZy9pbmRleGVyX3JvbGUiICd7ImJhY2tlbmRfcm9sZXMiOlsiaW5kZXhlcl9iYWNrZW5kIl0sInVzZXJzIjpbImluZGV4ZXIiXX0nCl9zZWNfcHV0ICJyb2xlc21hcHBpbmcvcXVlcnlfcm9sZSIgJ3siYmFja2VuZF9yb2xlcyI6WyJxdWVyeV9iYWNrZW5kIl0sInVzZXJzIjpbInF1ZXJ5Il19JwoKIyBFTkMtVFNLLUw0NSBtb25pdG9yaW5nIChBQy0xKTogZGlzayB2aWEgQ1cgQWdlbnQ7IEpWTSBoZWFwIGhhcyBubyBuYXRpdmUKIyBtZXRyaWMsIHB1c2hlZCBieSBhIGNyb24gcG9sbGluZyBPcGVuU2VhcmNoJ3Mgb3duIHN0YXRzIEFQSSBpbnN0ZWFkLgpsb2cgIkNvbmZpZ3VyaW5nIENsb3VkV2F0Y2ggQWdlbnQgKyBKVk0gaGVhcCBoZWFydGJlYXQgY3JvbiIKQ1dfTkFNRVNQQUNFPSJFbmNlbGFkdXMvT3BlblNlYXJjaCIKbWtkaXIgLXAgL29wdC9hd3MvYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQvZXRjCmNhdCA+IC9vcHQvYXdzL2FtYXpvbi1jbG91ZHdhdGNoLWFnZW50L2V0Yy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC5qc29uIDw8RU9GCnsibWV0cmljcyI6eyJuYW1lc3BhY2UiOiIke0NXX05BTUVTUEFDRX0iLCJhcHBlbmRfZGltZW5zaW9ucyI6eyJJbnN0YW5jZUlkIjoiXCR7YXdzOkluc3RhbmNlSWR9In0sImFnZ3JlZ2F0aW9uX2RpbWVuc2lvbnMiOltbIkluc3RhbmNlSWQiLCJwYXRoIl0sWyJJbnN0YW5jZUlkIl1dLCJtZXRyaWNzX2NvbGxlY3RlZCI6eyJkaXNrIjp7Im1lYXN1cmVtZW50IjpbInVzZWRfcGVyY2VudCJdLCJyZXNvdXJjZXMiOlsiLyJdLCJpZ25vcmVfZmlsZV9zeXN0ZW1fdHlwZXMiOlsic3lzZnMiLCJkZXZ0bXBmcyIsInRtcGZzIl0sImRyb3BfZGV2aWNlIjp0cnVlfSwibWVtIjp7Im1lYXN1cmVtZW50IjpbIm1lbV91c2VkX3BlcmNlbnQiXX0sInByb2NzdGF0IjpbeyJwYXR0ZXJuIjoib3BlbnNlYXJjaCIsIm1lYXN1cmVtZW50IjpbImNwdV91c2FnZSIsIm1lbW9yeV9yc3MiXX1dfX19CkVPRgovb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9iaW4vYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQtY3RsIC1hIGZldGNoLWNvbmZpZyAtbSBlYzIgLXMgLWMgZmlsZTovb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9ldGMvYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQuanNvbgoKY2F0ID4gL3Vzci9sb2NhbC9iaW4vb3BlbnNlYXJjaC1qdm0taGVhcnRiZWF0LnNoIDw8J0hFQVJUQkVBVCcKIyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLWV1byBwaXBlZmFpbApBRE1JTl9QQVNTV09SRF9GSUxFPSIke09QRU5TRUFSQ0hfQURNSU5fUEFTU1dPUkRfRklMRTotL3Jvb3QvLm9wZW5zZWFyY2gtYWRtaW4tcGFzc3dvcmR9IgpOQU1FU1BBQ0U9IiR7Q1dfTkFNRVNQQUNFOi1FbmNlbGFkdXMvT3BlblNlYXJjaH0iClJFR0lPTj0iJChjdXJsIC1mc1MgLW0gMiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvcGxhY2VtZW50L3JlZ2lvbiAyPi9kZXYvbnVsbCB8fCBlY2hvIHVzLXdlc3QtMikiCklJRD0iJChjdXJsIC1mc1MgLW0gMiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvaW5zdGFuY2UtaWQgMj4vZGV2L251bGwgfHwgZWNobyB1bmtub3duKSIKUFc9IiQodHIgLWQgJ1xuJyA8ICIke0FETUlOX1BBU1NXT1JEX0ZJTEV9IiAyPi9kZXYvbnVsbCB8fCB0cnVlKSIKW1sgLXogIiR7UFd9IiBdXSAmJiBleGl0IDAKU1RBVFM9IiQoY3VybCAta3MgLW0gNSAtdSAiYWRtaW46JHtQV30iICJodHRwczovLzEyNy4wLjAuMTo5MjAwL19ub2Rlcy9zdGF0cy9qdm0iIDI+L2Rldi9udWxsIHx8IHRydWUpIgppZiBbWyAteiAiJHtTVEFUU30iIF1dOyB0aGVuCiAgIyB1bnJlYWNoYWJsZTogcHVzaCBOb2RlVXA9MCAobm90IGEgSlZNSGVhcFBlcmNlbnQgcG9pbnQgLS0gbWlzc2luZyBkYXRhLCBub3QgYSBmYWxzZSB6ZXJvKQogIGF3cyBjbG91ZHdhdGNoIHB1dC1tZXRyaWMtZGF0YSAtLXJlZ2lvbiAiJHtSRUdJT059IiAtLW5hbWVzcGFjZSAiJHtOQU1FU1BBQ0V9IiAtLW1ldHJpYy1kYXRhICJNZXRyaWNOYW1lPU5vZGVVcCxWYWx1ZT0wLFVuaXQ9Q291bnQsRGltZW5zaW9ucz1be05hbWU9SW5zdGFuY2VJZCxWYWx1ZT0ke0lJRH19XSIKICBleGl0IDAKZmkKSEVBUD0iJChlY2hvICIke1NUQVRTfSIgfCBqcSAtciAnLm5vZGVzIHwgdG9fZW50cmllc1swXS52YWx1ZS5qdm0ubWVtLmhlYXBfdXNlZF9wZXJjZW50IC8vIGVtcHR5JykiCmF3cyBjbG91ZHdhdGNoIHB1dC1tZXRyaWMtZGF0YSAtLXJlZ2lvbiAiJHtSRUdJT059IiAtLW5hbWVzcGFjZSAiJHtOQU1FU1BBQ0V9IiAtLW1ldHJpYy1kYXRhICJNZXRyaWNOYW1lPU5vZGVVcCxWYWx1ZT0xLFVuaXQ9Q291bnQsRGltZW5zaW9ucz1be05hbWU9SW5zdGFuY2VJZCxWYWx1ZT0ke0lJRH19XSIKW1sgLW4gIiR7SEVBUH0iIF1dICYmIGF3cyBjbG91ZHdhdGNoIHB1dC1tZXRyaWMtZGF0YSAtLXJlZ2lvbiAiJHtSRUdJT059IiAtLW5hbWVzcGFjZSAiJHtOQU1FU1BBQ0V9IiAtLW1ldHJpYy1kYXRhICJNZXRyaWNOYW1lPUpWTUhlYXBQZXJjZW50LFZhbHVlPSR7SEVBUH0sVW5pdD1QZXJjZW50LERpbWVuc2lvbnM9W3tOYW1lPUluc3RhbmNlSWQsVmFsdWU9JHtJSUR9fV0iCkhFQVJUQkVBVApjaG1vZCAreCAvdXNyL2xvY2FsL2Jpbi9vcGVuc2VhcmNoLWp2bS1oZWFydGJlYXQuc2gKCmNhdCA+IC9ldGMvY3Jvbi5kL29wZW5zZWFyY2gtanZtLWhlYXJ0YmVhdCA8PEVPRgoqICogKiAqICogcm9vdCBDV19OQU1FU1BBQ0U9IiR7Q1dfTkFNRVNQQUNFfSIgL3Vzci9sb2NhbC9iaW4vb3BlbnNlYXJjaC1qdm0taGVhcnRiZWF0LnNoID4+IC92YXIvbG9nL29wZW5zZWFyY2gtanZtLWhlYXJ0YmVhdC5sb2cgMj4mMQpFT0YKY2htb2QgMDY0NCAvZXRjL2Nyb24uZC9vcGVuc2VhcmNoLWp2bS1oZWFydGJlYXQKCnRvdWNoICIke01BUktFUn0iCmxvZyAiQm9vdHN0cmFwIGNvbXBsZXRlIgo="
+
+  # ENC-TSK-L45 -- monitoring (AC-1). SNS sink for alarm actions; io can subscribe
+  # an email/Slack endpoint later without a template change.
+  OpenSearchAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "enceladus-opensearch-alerts${EnvironmentSuffix}"
+      Tags:
+        - Key: enceladus:component
+          Value: opensearch-node
+        - Key: enceladus:task
+          Value: ENC-TSK-L45
+
+  OpenSearchCpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-opensearch-cpu-high${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-L45 AC-1: EC2 CPUUtilization > 80% for 15 minutes."
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenSearchNodeInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpenSearchAlarmTopic
+
+  OpenSearchDiskHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-opensearch-disk-high${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-L45 AC-1: root volume used_percent > 80% for 15 minutes (CloudWatch Agent, disk metric)."
+      Namespace: Enceladus/OpenSearch
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenSearchNodeInstance
+        - Name: path
+          Value: "/"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpenSearchAlarmTopic
+
+  OpenSearchJvmHeapHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-opensearch-jvm-heap-high${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-L45 AC-1: OpenSearch JVM heap_used_percent > 75% for 5 minutes (custom metric, opensearch-jvm-heartbeat.sh cron)."
+      Namespace: Enceladus/OpenSearch
+      MetricName: JVMHeapPercent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenSearchNodeInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 75
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref OpenSearchAlarmTopic
+
+  OpenSearchNodeDownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-opensearch-node-down${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-L45 AC-1: EC2 instance status check failed (hard instance-level down signal; complements the OpenSearch-process NodeUp heartbeat)."
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenSearchNodeInstance
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref OpenSearchAlarmTopic
+
+  OpenSearchProcessDownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-opensearch-process-down${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-L45 AC-1: OpenSearch process unreachable per opensearch-jvm-heartbeat.sh (NodeUp=0) or the cron itself stopped running (missing data)."
+      Namespace: Enceladus/OpenSearch
+      MetricName: NodeUp
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenSearchNodeInstance
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref OpenSearchAlarmTopic
+
+Outputs:
+  OpenSearchInstanceId:
+    Description: EC2 instance id for the gamma OpenSearch node
+    Value: !Ref OpenSearchNodeInstance
+    Export:
+      Name: !Sub "enceladus-opensearch-node-instance-id${EnvironmentSuffix}"
+
+  OpenSearchPrivateIp:
+    Description: Private IPv4 for in-VPC clients (https://<ip>:9200)
+    Value: !GetAtt OpenSearchNodeInstance.PrivateIp
+    Export:
+      Name: !Sub "enceladus-opensearch-node-private-ip${EnvironmentSuffix}"
+
+  OpenSearchHttpsEndpoint:
+    Description: TLS REST endpoint inside the VPC (demo/self-signed certs from bootstrap)
+    Value: !Sub
+      - "https://${Ip}:9200"
+      - Ip: !GetAtt OpenSearchNodeInstance.PrivateIp
+    Export:
+      Name: !Sub "enceladus-opensearch-node-endpoint${EnvironmentSuffix}"
+
+  OpenSearchNodeRoleArn:
+    Description: Instance role ARN (SSM + CloudWatch; optional snapshot bucket)
+    Value: !GetAtt OpenSearchNodeRole.Arn
+
+  OpenSearchAlarmTopicArn:
+    Description: ENC-TSK-L45 SNS topic all monitoring alarms publish to; subscribe an email/Slack endpoint here.
+    Value: !Ref OpenSearchAlarmTopic
+    Export:
+      Name: !Sub "enceladus-opensearch-alarm-topic-arn${EnvironmentSuffix}"

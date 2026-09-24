@@ -1,0 +1,18 @@
+# ENC-TSK-G43: cross-Lambda module sharing manifest.
+# Each non-comment line is a repo-relative path to a single file; the build
+# step copies it to the function root so the Lambda can `import` it normally.
+# Honored by .github/workflows/_build.yml.
+#
+# ENC-ISS-566 / ENC-TSK-O35: titan_embedding_backfill's lambda_function.py does
+# `from embedding import (build_embedding_text, hash_embedding_text,
+# invoke_titan_v2)` -- the canonical graph_sync helper (ENC-TSK-B94). The
+# tombstoned per-Lambda deploy.sh used to copy this file in (see the module
+# docstring's "Parity with ENC-TSK-B94" note); the matrix-build migration
+# (ENC-TSK-F60 / PLN-041 Stage 2) dropped that step and no .build_extras
+# manifest was added to replace it, so `import embedding` began failing at
+# import time on every invocation (Runtime.ImportModuleError: No module named
+# 'embedding', devops-titan-embedding-backfill-gamma, arm64/py3.12). This is
+# the same class of regression already fixed for graph_query_api under
+# ENC-ISS-304 / ENC-TSK-G94 -- that sibling Lambda's .build_extras entry was
+# the template for this one. Declaring it here restores packaging.
+backend/lambda/graph_sync/embedding.py

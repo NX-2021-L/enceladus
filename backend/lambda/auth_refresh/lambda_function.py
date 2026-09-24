@@ -38,21 +38,16 @@ import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-try:
-    import jwt
-    _JWT_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    import logging as _enc_lsn_020_logging
-    _enc_lsn_020_logging.getLogger(__name__).exception(
-        "PyJWT import failed at module load — github-token vending will be disabled "
-        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
-    )
-    _JWT_AVAILABLE = False
+from enceladus_shared.github_app_auth import (
+    GitHubAppConfig,
+    generate_app_jwt as _shared_generate_app_jwt,
+    get_installation_token as _shared_get_installation_token,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -66,6 +61,23 @@ LAMBDA_REGION = os.environ.get("AWS_REGION", "us-west-2")
 CORS_ORIGIN = "https://jreese.net"
 ID_TOKEN_MAX_AGE = 3600       # 1 hour
 SESSION_COOKIE_MAX_AGE = 3600  # 1 hour
+REFRESH_TOKEN_MAX_AGE = 2592000  # 30 days
+
+# ENC-TSK-K95 — gamma cockpit OAuth2 authorization-code callback (GET
+# /api/v1/auth/callback). Mirrors the prod auth_edge Lambda@Edge exchange, but
+# same-origin behind the gamma API so the v4 cockpit (frontend/ui-v2) can log
+# in without a Lambda@Edge. Public app client (no secret). The redirect_uri is
+# a FIXED registered Cognito callback (the durable vanity URL); the post-login
+# 302 uses a relative Location so the browser returns to whatever host it is
+# on. Prod is untouched (it keeps its own edge + jreese.net callback).
+COGNITO_HOSTED_UI_DOMAIN = os.environ.get(
+    "COGNITO_HOSTED_UI_DOMAIN",
+    "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com",
+)
+WEBUI_OAUTH_REDIRECT_URI = os.environ.get(
+    "WEBUI_OAUTH_REDIRECT_URI",
+    "https://enceladus-gamma.jreese.net/api/v1/auth/callback",
+)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
 GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
 GITHUB_PRIVATE_KEY_SECRET = os.environ.get("GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key")
@@ -83,7 +95,6 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 _cognito = None
-_secretsmanager = None
 
 
 def _get_cognito():
@@ -91,13 +102,6 @@ def _get_cognito():
     if _cognito is None:
         _cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
     return _cognito
-
-
-def _get_secretsmanager():
-    global _secretsmanager
-    if _secretsmanager is None:
-        _secretsmanager = boto3.client("secretsmanager", region_name=LAMBDA_REGION)
-    return _secretsmanager
 
 
 # ---------------------------------------------------------------------------
@@ -169,55 +173,24 @@ def _error(status_code: int, message: str) -> Dict:
 # GitHub App token vending
 # ---------------------------------------------------------------------------
 
-_private_key_cache: Optional[str] = None
-_private_key_fetched_at: float = 0.0
-_PRIVATE_KEY_TTL: float = 3600.0
-
-
-def _get_github_private_key() -> str:
-    global _private_key_cache, _private_key_fetched_at
-    now = time.time()
-    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
-        return _private_key_cache
-    sm = _get_secretsmanager()
-    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
-    _private_key_cache = resp["SecretString"]
-    _private_key_fetched_at = now
-    return _private_key_cache
+# ENC-TSK-O07 (ENC-ISS-621 C4): minting/caching/retry hardening now lives in
+# enceladus_shared.github_app_auth. These wrappers keep the local call
+# signatures call sites already use.
+_GITHUB_APP_CONFIG = GitHubAppConfig(
+    app_id=GITHUB_APP_ID,
+    installation_id=GITHUB_INSTALLATION_ID,
+    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
+    region=LAMBDA_REGION,
+    api_base=GITHUB_API_BASE,
+)
 
 
 def _generate_app_jwt() -> str:
-    if not _JWT_AVAILABLE:
-        raise ValueError("PyJWT library not available in Lambda package")
-    if not GITHUB_APP_ID:
-        raise ValueError("GITHUB_APP_ID not configured")
-    now = int(time.time())
-    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
-    return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
+    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
 
 
 def _get_installation_token() -> str:
-    if not GITHUB_INSTALLATION_ID:
-        raise ValueError("GITHUB_INSTALLATION_ID not configured")
-    app_jwt = _generate_app_jwt()
-    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {app_jwt}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data["token"]
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error("GitHub token exchange failed: %s %s", exc.code, body)
-        raise ValueError(f"GitHub token exchange failed ({exc.code})") from exc
+    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
 
 
 def _extract_id_token(event: Dict) -> Optional[str]:
@@ -283,6 +256,120 @@ def _handle_github_token(event: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# OAuth2 authorization-code callback (ENC-TSK-K95)
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402  (grouped with the callback feature)
+
+
+def _b64url_decode_path(state: str) -> str:
+    """Decode the base64url `state` param (the pre-login path) set by the SPA.
+
+    Falls back to '/' on any decode error or a non-local/callback-looping value
+    so a crafted state can never open-redirect off-site.
+    """
+    if not state:
+        return "/"
+    try:
+        pad = "=" * ((4 - len(state) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(state + pad).decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return "/"
+    # Only same-origin absolute paths are allowed (no scheme/host, no protocol-
+    # relative //host), and never bounce back into the callback.
+    if not decoded.startswith("/") or decoded.startswith("//"):
+        return "/"
+    if decoded.startswith("/api/v1/auth/callback"):
+        return "/"
+    return decoded
+
+
+def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
+    """POST the authorization code to Cognito's /oauth2/token endpoint.
+
+    Public client (no secret) — grant_type=authorization_code with
+    client_id + code + the fixed registered redirect_uri. Raises ValueError on
+    any non-200 or missing id_token.
+    """
+    body = urlencode({
+        "grant_type": "authorization_code",
+        "client_id": COGNITO_CLIENT_ID,
+        "code": code,
+        "redirect_uri": WEBUI_OAUTH_REDIRECT_URI,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COGNITO_HOSTED_UI_DOMAIN}/oauth2/token",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.warning("oauth token exchange failed: %s %s", exc.code, detail)
+        raise ValueError("token_exchange_failed") from exc
+    except urllib.error.URLError as exc:
+        logger.error("oauth token endpoint unreachable: %s", exc)
+        raise ValueError("token_endpoint_unreachable") from exc
+
+    id_token = data.get("id_token")
+    if not id_token:
+        raise ValueError("no_id_token")
+    return {"id_token": id_token, "refresh_token": data.get("refresh_token")}
+
+
+def _handle_oauth_callback(event: Dict) -> Dict:
+    """GET /api/v1/auth/callback — Cognito Hosted-UI redirect lands here.
+
+    Exchanges ?code for tokens, sets the session cookies (host-scoped, matching
+    the prod auth_edge format), and 302-redirects to the ?state path.
+    """
+    params = event.get("queryStringParameters") or {}
+    code = params.get("code")
+    state = params.get("state") or ""
+
+    # Cognito surfaces auth errors as ?error=...; send the user back to sign in.
+    if params.get("error"):
+        logger.info("oauth callback error param: %s", params.get("error"))
+        return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
+    if not code:
+        return _error(400, "Missing authorization code.")
+
+    try:
+        tokens = _exchange_code_for_tokens(code)
+    except ValueError as exc:
+        logger.warning("oauth callback exchange failed: %s", exc)
+        # Bounce to the app root rather than showing a raw error; the SPA will
+        # re-prompt sign-in if still unauthenticated.
+        return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
+
+    target = _b64url_decode_path(state)
+    now_ms = str(int(time.time() * 1000))
+
+    cookies = [
+        f"enceladus_id_token={tokens['id_token']}; "
+        f"Path=/; Secure; HttpOnly; SameSite=None; Max-Age={ID_TOKEN_MAX_AGE}",
+        f"enceladus_session_at={now_ms}; "
+        f"Path=/enceladus; Secure; SameSite=None; Max-Age={SESSION_COOKIE_MAX_AGE}",
+    ]
+    if tokens.get("refresh_token"):
+        cookies.append(
+            f"enceladus_refresh_token={tokens['refresh_token']}; "
+            f"Path=/; Secure; HttpOnly; SameSite=None; Max-Age={REFRESH_TOKEN_MAX_AGE}"
+        )
+
+    logger.info("oauth callback succeeded; redirecting to %s", target)
+    return {
+        "statusCode": 302,
+        "headers": {"Location": target, "Cache-Control": "no-store"},
+        "cookies": cookies,
+        "body": "",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -307,6 +394,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     if method == "GET" and path.rstrip("/").endswith("/github-token"):
         return _handle_github_token(event)
+
+    # ENC-TSK-K95: Cognito Hosted-UI authorization-code callback for the v4
+    # cockpit (same-origin login, no Lambda@Edge).
+    if method == "GET" and path.rstrip("/").endswith("/auth/callback"):
+        return _handle_oauth_callback(event)
 
     if method != "POST":
         return _error(405, "Method not allowed.")

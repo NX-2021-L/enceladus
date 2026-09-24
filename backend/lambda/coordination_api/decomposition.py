@@ -128,6 +128,10 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "thinking",
         "stream",
         "batch_eligible",
+        "batch_workload_type",
+        "deferred_tool_loading",
+        "mcp_server_name",
+        "eager_load_tools",
     }
     unknown = sorted(k for k in raw.keys() if k not in allowed)
     if unknown:
@@ -322,6 +326,15 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         if not isinstance(batch_eligible, bool):
             raise ValueError("'provider_preferences.batch_eligible' must be a boolean")
         out["batch_eligible"] = batch_eligible
+
+    batch_workload_type = raw.get("batch_workload_type")
+    if batch_workload_type not in (None, ""):
+        if not isinstance(batch_workload_type, str):
+            raise ValueError("'provider_preferences.batch_workload_type' must be a string")
+        workload = batch_workload_type.strip()
+        if len(workload) > 128:
+            raise ValueError("'provider_preferences.batch_workload_type' exceeds max length (128)")
+        out["batch_workload_type"] = workload
 
     return out
 

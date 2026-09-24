@@ -1,7 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Enceladus Monitoring Stack — Production health probes, CodeSize sentinel,
-  error rate alarms, and SNS alerting. ENC-TSK-D20 / ENC-PLN-020 Phase 4.
+  error rate alarms, SNS alerting, and the v4-architecture CloudWatch
+  dashboard. ENC-TSK-D20 / ENC-PLN-020 Phase 4; ENC-TSK-K46 / B66 Ph5 AC-2/
+  AC-6/AC-7 added the EnceladusV4Dashboard resource surfacing Lambda health,
+  arc-walk telemetry (H86), CEE (K41), Fiedler lambda2 (K43), and the K44
+  health-monitor metrics.
 
 Parameters:
   EnvironmentSuffix:
@@ -22,18 +26,64 @@ Conditions:
 
 Resources:
 
+  # ENC-TSK-O04 / ENC-ISS-621: surface checkout-service GitHub commit/PR
+  # validation failures, which previously returned 400 to the caller and logged
+  # nothing server-side. Matches the [ISS-621] github_validation_fail line
+  # emitted by backend/lambda/checkout_service/lambda_function.py (ENC-TSK-O03).
+  # The quoted filter pattern is required: an unquoted [ ... ] is CloudWatch's
+  # space-delimited pattern syntax, not a literal bracket. Verified with
+  # `aws logs test-metric-filter` against the real emitted lines - it matches the
+  # failure line and NOT the github_token_minted line, which shares the marker.
+  GitHubValidationFailMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-checkout-service${EnvironmentSuffix}"
+      FilterPattern: '"[ISS-621] github_validation_fail"'
+      MetricTransformations:
+        - MetricNamespace: Enceladus/Prod
+          MetricName: GitHubValidationFail
+          MetricValue: "1"
+          # DefaultValue 0 publishes a real datapoint when nothing matches, so the
+          # alarm always has data. This deliberately avoids the trap that leaves
+          # CodeSizeMinimumAlarm permanently in ALARM (breaching-on-missing against
+          # an unpublished metric) - see ENC-ISS-623.
+          DefaultValue: 0
+
+  # Fires when committed-gate GitHub validation fails repeatedly - the ENC-ISS-621
+  # signature. 3-in-15min sits above a single transient 403 but well inside the
+  # ~35-minute fleet-wide windows observed on 2026-08-17.
+  GitHubValidationFailAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-github-validation-fail${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-ISS-621: checkout-service GitHub commit/PR validation failed 3 or more
+        times in 15 minutes, blocking committed-gate advances. Check
+        githubstatus.com FIRST (a platform incident presents as a permission bug),
+        then the [ISS-621] github_token_minted permission keys in
+        /aws/lambda/enceladus-checkout-service. See ENC-LSN-074.
+      Namespace: Enceladus/Prod
+      MetricName: GitHubValidationFail
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
   # ---------------------------------------------------------------------------
-  # Health Probe Lambda — ENC-TSK-P32 cross-stack move.
-  # The health monitor Lambda (AWS::Lambda::Function) + its execution role now
-  # live in infrastructure/cloudformation/02-compute.yaml so the Lambda Workflow
-  # Coverage Guard (which only parses that template) recognizes the function,
-  # and so enceladus-compute stops colliding with them at the ENC-PLN-082
-  # cutover apply (ENC-ISS-651 / ENC-ISS-676).
+  # Health Probe Lambda — ENC-TSK-K44 / ENC-FTR-071: the Lambda function
+  # (AWS::Lambda::Function) + its execution role now live in
+  # infrastructure/cloudformation/02-compute.yaml so the Lambda Workflow
+  # Coverage Guard (which only parses that template) recognizes the function.
   # This template keeps the pieces that reference it by name: the EventBridge
   # 15-min schedule + invoke permission, and the CloudWatch Alarms. Mirrors
   # the existing cross-stack-by-ARN pattern already used below for
-  # devops-deploy-parity-validator / devops-env-drift-auditor, and matches
-  # origin/v4/main, which already carries this exact shape.
+  # devops-deploy-parity-validator / devops-env-drift-auditor.
   # ---------------------------------------------------------------------------
   ProdHealthMonitorInvokePermission:
     Type: AWS::Lambda::Permission
@@ -56,6 +106,41 @@ Resources:
       Targets:
         - Id: ProdHealthMonitorTarget
           Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K43 (B66 Ph5) — Fiedler lambda-2 GraphHealth metric schedule
+  # ---------------------------------------------------------------------------
+  # Gamma re-delivery of ENC-TSK-C10 (v3, closed). Triggers the existing
+  # devops-graph-query-api Lambda every 15 minutes (same cadence as
+  # HealthProbeScheduleRule above) with action='publish_graph_health', which
+  # computes the graph's Fiedler value (lambda2, algebraic connectivity) via
+  # the FTR-088 CSR/Fiedler _query_laplacian path (ISS-465-compliant: no GDS
+  # projection) and publishes it to the Enceladus/GraphHealth CloudWatch
+  # namespace. No new Lambda function — targets the existing graph_query_api
+  # function by ARN + Input, mirroring the ParityDriftDailyScheduleRule
+  # precedent immediately below of pointing a schedule's Input at an existing
+  # multi-action Lambda rather than minting a dedicated one.
+  GraphHealthScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-graph-health-schedule${EnvironmentSuffix}"
+      Description: >
+        Triggers graph_query_api publish_graph_health (Fiedler lambda2 ->
+        Enceladus/GraphHealth) every 15 minutes (ENC-TSK-K43)
+      ScheduleExpression: "rate(15 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: GraphHealthMetricTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+          Input: '{"action": "publish_graph_health"}'
+
+  GraphHealthScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GraphHealthScheduleRule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
@@ -169,54 +254,661 @@ Resources:
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
 
-  # ENC-TSK-O04 / ENC-ISS-621: surface checkout-service GitHub commit/PR
-  # validation failures, which previously returned 400 to the caller and logged
-  # nothing server-side. Matches the [ISS-621] github_validation_fail line
-  # emitted by backend/lambda/checkout_service/lambda_function.py (ENC-TSK-O03).
-  # The quoted filter pattern is required: an unquoted [ ... ] is CloudWatch's
-  # space-delimited pattern syntax, not a literal bracket. Verified with
-  # `aws logs test-metric-filter` against the real emitted lines - it matches the
-  # failure line and NOT the github_token_minted line, which shares the marker.
-  GitHubValidationFailMetricFilter:
-    Type: AWS::Logs::MetricFilter
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/enceladus-checkout-service${EnvironmentSuffix}"
-      FilterPattern: '"[ISS-621] github_validation_fail"'
-      MetricTransformations:
-        - MetricNamespace: Enceladus/Prod
-          MetricName: GitHubValidationFail
-          MetricValue: "1"
-          # DefaultValue 0 publishes a real datapoint when nothing matches, so the
-          # alarm always has data. This deliberately avoids the trap that leaves
-          # CodeSizeMinimumAlarm permanently in ALARM (breaching-on-missing against
-          # an unpublished metric) - see ENC-ISS-623.
-          DefaultValue: 0
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K44 / ENC-FTR-071 — B66 Ph5 dashboard data-source alarms.
+  # Thresholds documented alongside the metric publishers in
+  # backend/lambda/prod_health_monitor/lambda_function.py (keep in sync).
+  # ---------------------------------------------------------------------------
 
-  # Fires when committed-gate GitHub validation fails repeatedly - the ENC-ISS-621
-  # signature. 3-in-15min sits above a single transient 403 but well inside the
-  # ~35-minute fleet-wide windows observed on 2026-08-17.
-  GitHubValidationFailAlarm:
+  # DynamoDB throttle — any throttled request against the tracker table in a
+  # 15-minute health-probe window pages (dashboard: DynamoDB-throttle panel).
+  DynamoDBThrottleAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "enceladus-prod-github-validation-fail${EnvironmentSuffix}"
+      AlarmName: !Sub "enceladus-prod-dynamodb-throttle${EnvironmentSuffix}"
       AlarmDescription: >
-        ENC-ISS-621: checkout-service GitHub commit/PR validation failed 3 or more
-        times in 15 minutes, blocking committed-gate advances. Check
-        githubstatus.com FIRST (a platform incident presents as a permission bug),
-        then the [ISS-621] github_token_minted permission keys in
-        /aws/lambda/enceladus-checkout-service. See ENC-LSN-074.
+        Triggers when the production health monitor observes a DynamoDB
+        throttle signal against the tracker table.
       Namespace: Enceladus/Prod
-      MetricName: GitHubValidationFail
-      Statistic: Sum
+      MetricName: DynamoDBThrottle
+      Dimensions:
+        - Name: TableName
+          Value: !Sub "devops-project-tracker${EnvironmentSuffix}"
+      Statistic: Maximum
       Period: 900
       EvaluationPeriods: 1
-      Threshold: 3
+      Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: !If
         - HasSnsTopic
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
+
+  # graph_sync queue backlog — dashboard: graph_sync-lag panel.
+  GraphSyncLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-graph-sync-lag${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when the devops-graph-sync-queue backlog exceeds 100
+        messages, indicating graph projection is falling behind DynamoDB
+        writes.
+      Namespace: Enceladus/Prod
+      MetricName: GraphSyncLag
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-graph-sync-queue${EnvironmentSuffix}.fifo"
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # MCP cold-start baseline — dashboard: MCP-cold-start panel.
+  MCPColdStartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-mcp-cold-start${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when the production health monitor's Lambda cold-start
+        baseline sample reports an unhealthy (non-Active/non-Successful)
+        function state.
+      Namespace: Enceladus/Prod
+      MetricName: MCPColdStart
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K78 / ENC-PLN-067 — Gamma MCP edge synthetic monitor.
+  # Self-contained synthetic canary that periodically probes the gamma MCP
+  # edge (https://mcp-gamma.jreese.net) from outside the Lambda service mesh
+  # and publishes health to the Enceladus/Synthetic namespace so a silent
+  # break of the gamma edge (the 2026-07-02 outage class) is caught in
+  # minutes. Unlike the ProdHealthMonitor above (function lives in
+  # 02-compute.yaml), this canary is intentionally self-contained here: its
+  # Lambda + role + schedule + alarm are all in this template so the whole
+  # probe can ship/rollback as one unit. The probe targets a FIXED gamma
+  # hostname, so it renders identically on all environments — it always
+  # checks the gamma URL regardless of ${EnvironmentSuffix}; the suffix only
+  # namespaces the AWS resource identifiers to avoid prod/gamma collisions.
+  # ---------------------------------------------------------------------------
+  McpGammaSyntheticRole:
+    Condition: IsGamma
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-mcp-gamma-synthetic${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: mcp-gamma-synthetic-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Enceladus/Synthetic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Task
+          Value: ENC-TSK-K78
+
+  McpGammaSyntheticFunction:
+    Condition: IsGamma
+    Type: AWS::Lambda::Function
+    Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
+      FunctionName: !Sub "enceladus-mcp-gamma-synthetic${EnvironmentSuffix}"
+      Description: >
+        Synthetic canary probing the gamma MCP edge
+        (https://mcp-gamma.jreese.net) every 5 minutes; publishes
+        Enceladus/Synthetic MCPGammaHealth + MCPGammaTransportStatus
+        (ENC-TSK-K78 / ENC-PLN-067).
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 15
+      Role: !GetAtt McpGammaSyntheticRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.error
+          import boto3
+
+          BASE = "https://mcp-gamma.jreese.net"
+          ENDPOINT = "mcp-gamma.jreese.net"
+          NAMESPACE = "Enceladus/Synthetic"
+          BROKEN_STATUSES = (403, 500, 502, 503, 504)
+
+
+          def _check_issuer():
+              url = BASE + "/.well-known/oauth-authorization-server"
+              req = urllib.request.Request(url, method="GET")
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  body = resp.read().decode("utf-8")
+              doc = json.loads(body)
+              return doc.get("issuer") == BASE
+
+
+          def _check_transport():
+              payload = json.dumps(
+                  {"jsonrpc": "2.0", "method": "initialize", "id": 1}
+              ).encode("utf-8")
+              req = urllib.request.Request(
+                  BASE + "/",
+                  data=payload,
+                  method="POST",
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as e:
+                  # A healthy edge that requires auth raises HTTPError (e.g. 401).
+                  return e.code
+
+
+          def _publish(cw, name, value):
+              cw.put_metric_data(
+                  Namespace=NAMESPACE,
+                  MetricData=[
+                      {
+                          "MetricName": name,
+                          "Dimensions": [
+                              {"Name": "Endpoint", "Value": ENDPOINT}
+                          ],
+                          "Value": float(value),
+                      }
+                  ],
+              )
+
+
+          def handler(event, context):
+              cw = boto3.client("cloudwatch")
+              try:
+                  issuer_ok = _check_issuer()
+                  status = _check_transport()
+                  transport_ok = status not in BROKEN_STATUSES
+                  health = 1.0 if (transport_ok and issuer_ok) else 0.0
+                  _publish(cw, "MCPGammaHealth", health)
+                  _publish(cw, "MCPGammaTransportStatus", float(status))
+                  return {
+                      "healthy": health == 1.0,
+                      "issuer_ok": issuer_ok,
+                      "transport_ok": transport_ok,
+                      "status": status,
+                  }
+              except Exception as exc:  # noqa: BLE001 - canary must never page on its own error
+                  try:
+                      _publish(cw, "MCPGammaHealth", 0.0)
+                  except Exception:
+                      pass
+                  return {"healthy": False, "error": str(exc)}
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Task
+          Value: ENC-TSK-K78
+
+  McpGammaSyntheticSchedule:
+    Condition: IsGamma
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-mcp-gamma-synthetic-schedule${EnvironmentSuffix}"
+      Description: >
+        Triggers the gamma MCP edge synthetic canary every 5 minutes
+        (ENC-TSK-K78 / ENC-PLN-067)
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: McpGammaSyntheticTarget
+          Arn: !GetAtt McpGammaSyntheticFunction.Arn
+
+  McpGammaSyntheticInvokePermission:
+    Condition: IsGamma
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref McpGammaSyntheticFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt McpGammaSyntheticSchedule.Arn
+
+  McpGammaHealthAlarm:
+    Condition: IsGamma
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-mcp-gamma-health${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-K78 — gamma MCP edge (mcp-gamma.jreese.net) health. Fires when
+        the synthetic canary reports the edge unhealthy (issuer mismatch or
+        broken transport status) across 2 consecutive 5-minute windows, so a
+        silent break of the gamma MCP edge (2026-07-02 outage class) is caught
+        in minutes. Missing data is treated as breaching — the canary going
+        dark is itself a regression.
+      Namespace: Enceladus/Synthetic
+      MetricName: MCPGammaHealth
+      Dimensions:
+        - Name: Endpoint
+          Value: mcp-gamma.jreese.net
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-P84 AC-3 — T-E3 readiness gate. Fires when Enceladus/Docstore
+  # LegacyWriteUnguarded (ENC-TSK-P70 AC-4, emitted by document_api on every
+  # put/patch/append that proceeds without a client-supplied precondition) is
+  # non-zero, summed across the four governed write surfaces, over a rolling
+  # 14-day window (Period 86400 x EvaluationPeriods 14, DatapointsToAlarm 1 —
+  # a single non-zero day anywhere in the trailing 14 days keeps this in
+  # ALARM). "unknown" is deliberately excluded from the sum: it is the
+  # surface-classification-failed bucket (see _derive_write_surface), not
+  # itself a write surface T-E3 needs cleared. TreatMissingData notBreaching:
+  # no LegacyWriteUnguarded datapoints at all (the good outcome, once T-E3
+  # ships) must not itself alarm.
+  # ---------------------------------------------------------------------------
+  DocstoreLegacyUnguardedWritesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-docstore-legacy-unguarded-writes${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-P84 AC-3: Enceladus/Docstore LegacyWriteUnguarded is non-zero
+        for ProjectId=enceladus, summed across Surface in
+        {mcp, elr, pwa, lambda}, over the trailing 14 days. Gates T-E3
+        (hard enforcement of the precondition requirement) — must be clear
+        before that cutover proceeds.
+# ENC-TSK-P94: CloudWatch caps EvaluationPeriods * Period at 604800s (one week) for
+# period >= 3600; the 14-day T-E3 gate is two consecutive clean weeks (ENC-PLN-092).
+      EvaluationPeriods: 7
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: mcpUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: mcp
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: elrUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: elr
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: pwaUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: pwa
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: lambdaUnguarded
+          MetricStat:
+            Metric:
+              Namespace: Enceladus/Docstore
+              MetricName: LegacyWriteUnguarded
+              Dimensions:
+                - Name: ProjectId
+                  Value: enceladus
+                - Name: Surface
+                  Value: lambda
+            Period: 86400
+            Stat: Sum
+          ReturnData: false
+        - Id: totalUnguarded
+          Expression: "mcpUnguarded + elrUnguarded + pwaUnguarded + lambdaUnguarded"
+          Label: "LegacyWriteUnguarded (mcp+elr+pwa+lambda)"
+          Period: 86400
+          ReturnData: true
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K46 (B66 Ph5 AC-2/AC-6/AC-7) — v4 architecture CloudWatch dashboard.
+  # Binds live panels for every metric source Wave A (K41/K43/K44/K45) and the
+  # already-shipped H86 arc-walk telemetry Lambda publish to. No new metric
+  # emission here — this resource only reads existing namespaces/metric names,
+  # verified against each Lambda's merged source before authoring:
+  #   - Enceladus/ArcWalk   (backend/lambda/arc_walk_metrics/lambda_function.py,
+  #     ENC-TSK-H86): ConvergenceBacklog, ConvergenceGatesShort,
+  #     OptOutLatchedRecords, OptOutLatchEvents, OptOutClearEvents,
+  #     ArcWalkAutoAdvances (dim GateClass). Dim ProjectId=enceladus on all.
+  #   - Enceladus/CEE       (backend/lambda/corpus_entropy_engine/
+  #     corpus_entropy_core.py, ENC-TSK-K41): EntropyFindingCount (dims
+  #     FunctionName, Category). CEE_HARD_DISABLED="1" pending an io decision
+  #     as of this task — panel will show "No data" until cleared or the
+  #     05:00 UTC nightly cron fires after clearing; this is expected, not a
+  #     defect in this dashboard wiring.
+  #   - Enceladus/GraphHealth (backend/lambda/graph_health_metrics/
+  #     lambda_function.py, ENC-TSK-K43): FiedlerValue. Confirmed live with
+  #     real datapoints (15-min EventBridge schedule, 05-monitoring.yaml
+  #     GraphHealthScheduleRule above).
+  #   - Enceladus/Prod      (backend/lambda/prod_health_monitor/
+  #     lambda_function.py, ENC-TSK-K44): DynamoDBThrottle (dim TableName),
+  #     GraphSyncLag (dim QueueName), MCPColdStart (dim FunctionName),
+  #     ServiceHealthCheck (dim Service). Env vars DYNAMODB_TABLE_NAME /
+  #     NEO4J_SECRET_NAME / etc. ARE present on ProdHealthMonitorFunction in
+  #     02-compute.yaml (K44 moved the function there) — K44 flagged a
+  #     residual post-CFN-import reconciliation quirk in AWS itself, not a
+  #     template gap. Panel wired to the real metric names regardless.
+  #   - AWS/Lambda (standard namespace): Errors, Duration, per-function, for
+  #     the Lambda error rate / cold start panel.
+  #   - "Embedding coverage %": NO CloudWatch metric or emission mechanism
+  #     exists for this anywhere in the repo (confirmed by grep across
+  #     backend/lambda and tools/enceladus-mcp-server for embedding_coverage*
+  #     — the only hits are the graph_query_api hybrid-search response field
+  #     embedding_coverage_sample, which is a per-request API payload value,
+  #     not a published metric). Rather than fabricate a metric source, this
+  #     panel is a text placeholder documenting the gap honestly; a follow-up
+  #     task should add a CloudWatch emission (e.g. from titan_embedding_backfill
+  #     count_embedding_coverage(), see backend/lambda/titan_embedding_backfill/
+  #     lambda_function.py) before this panel can show real data.
+  # ---------------------------------------------------------------------------
+  EnceladusV4Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "enceladus-v4-architecture${EnvironmentSuffix}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0, "y": 0, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "# Enceladus v4 Architecture — B66 Ph5 (ENC-TSK-K46)\nLambda health · arc-walk telemetry (H86) · CEE (K41) · Fiedler λ2 (K43) · health monitor (K44). Environment: ${EnvironmentSuffix}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 1, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Error Rates (per function)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "enceladus-prod-health-monitor${EnvironmentSuffix}", { "stat": "Sum", "label": "prod-health-monitor" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "devops-graph-query-api${EnvironmentSuffix}", { "stat": "Sum", "label": "graph-query-api" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "enceladus-corpus-entropy-engine${EnvironmentSuffix}", { "stat": "Sum", "label": "corpus-entropy-engine" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "enceladus-arc-walk-metrics${EnvironmentSuffix}", { "stat": "Sum", "label": "arc-walk-metrics" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "devops-coordination-api${EnvironmentSuffix}", { "stat": "Sum", "label": "coordination-api" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "devops-tracker-mutation-api${EnvironmentSuffix}", { "stat": "Sum", "label": "tracker-mutation-api" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 1, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Cold Starts / Duration (p99, per function)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "enceladus-prod-health-monitor${EnvironmentSuffix}", { "stat": "p99", "label": "prod-health-monitor p99" } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "devops-graph-query-api${EnvironmentSuffix}", { "stat": "p99", "label": "graph-query-api p99" } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "devops-coordination-api${EnvironmentSuffix}", { "stat": "p99", "label": "coordination-api p99" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "MCP Cold Start (Enceladus/Prod, K44)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/Prod", "MCPColdStart", { "stat": "Maximum", "label": "MCPColdStart (max, any function)" } ]
+                ],
+                "period": 900
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "DynamoDB Throttle (Enceladus/Prod, K44)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/Prod", "DynamoDBThrottle", "TableName", "devops-project-tracker${EnvironmentSuffix}", { "stat": "Maximum", "label": "tracker table throttle" } ]
+                ],
+                "period": 900
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "graph_sync Lag (Enceladus/Prod, K44)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/Prod", "GraphSyncLag", "QueueName", "devops-graph-sync-queue${EnvironmentSuffix}.fifo", { "stat": "Maximum", "label": "graph-sync-queue depth" } ]
+                ],
+                "period": 900
+              }
+            },
+            {
+              "type": "text",
+              "x": 0, "y": 13, "width": 8, "height": 6,
+              "properties": {
+                "markdown": "### Embedding Coverage %\n**Gap (documented, not fabricated):** no CloudWatch metric or emission mechanism exists yet for embedding coverage. `graph_query_api`'s hybrid-search response includes an `embedding_coverage_sample` field (covered/total_ranked) but it is a per-request API payload value, not a published metric — nothing PutMetricData's it. `titan_embedding_backfill.count_embedding_coverage()` computes per-label coverage at backfill time but does not emit to CloudWatch either.\n\nFollow-up task needed to wire a coverage metric before this panel can show data."
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 13, "width": 8, "height": 6,
+              "properties": {
+                "title": "GraphHealth — Fiedler λ2 + IsolatedNodeRatio (K43 / ISS-555)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/GraphHealth", "FiedlerValue", { "stat": "Average", "label": "Fiedler lambda2" } ],
+                  [ "Enceladus/GraphHealth", "IsolatedNodeRatio", "ProjectId", "enceladus", { "stat": "Average", "label": "IsolatedNodeRatio (zero-degree nodes)" } ]
+                ],
+                "period": 900
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 13, "width": 8, "height": 6,
+              "properties": {
+                "title": "CEE Per-Category Entropy Counts — lineage_unanchored ≠ isolated (Enceladus/CEE, K41)",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/CEE,Category,FunctionName} MetricName=\"EntropyFindingCount\"', 'Sum', 3600)", "label": "EntropyFindingCount by Category", "id": "e1" } ]
+                ],
+                "period": 3600
+              }
+            },
+            {
+              "type": "text",
+              "x": 0, "y": 19, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "## Arc-Walk Telemetry (Enceladus/ArcWalk, ENC-TSK-H86 / FTR-111 AC-6, B66 AC-7)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 20, "width": 8, "height": 6,
+              "properties": {
+                "title": "Auto-Advance Counts by Gate Class",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/ArcWalk,GateClass,ProjectId} MetricName=\"ArcWalkAutoAdvances\"', 'Sum', 3600)", "label": "ArcWalkAutoAdvances by GateClass", "id": "e2" } ]
+                ],
+                "period": 3600
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 20, "width": 8, "height": 6,
+              "properties": {
+                "title": "Opt-Out Latch / Clear Events",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/ArcWalk", "OptOutLatchEvents", "ProjectId", "enceladus", { "stat": "Sum", "label": "Opt-Out Latch Events" } ],
+                  [ "Enceladus/ArcWalk", "OptOutClearEvents", "ProjectId", "enceladus", { "stat": "Sum", "label": "Opt-Out Clear Events" } ],
+                  [ "Enceladus/ArcWalk", "OptOutLatchedRecords", "ProjectId", "enceladus", { "stat": "Maximum", "label": "Currently Latched Records" } ]
+                ],
+                "period": 3600
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 20, "width": 8, "height": 6,
+              "properties": {
+                "title": "Convergence-Probe Backlog",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "Enceladus/ArcWalk", "ConvergenceBacklog", "ProjectId", "enceladus", { "stat": "Maximum", "label": "Backlog Records (gates short > 0)" } ],
+                  [ "Enceladus/ArcWalk", "ConvergenceGatesShort", "ProjectId", "enceladus", { "stat": "Maximum", "label": "Total Gates Short" } ]
+                ],
+                "period": 3600
+              }
+            },
+            {
+              "type": "text",
+              "x": 0, "y": 26, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "## Docstore Patch/Metrics (Enceladus/Docstore, ENC-TSK-P84 AC-1/AC-2, T-D3 / FR-B6-1..2)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "Patch Outcomes — Accepted vs Rejected",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionAccepted\"', 'Sum', 300)", "label": "PatchSectionAccepted", "id": "e3" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionRejected412\"', 'Sum', 300)", "label": "PatchSectionRejected412 (CONTENT_HASH_MISMATCH)", "id": "e4" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"PatchSectionRejected409\"', 'Sum', 300)", "label": "PatchSectionRejected409 (ANCHOR_AMBIGUOUS)", "id": "e5" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"AnchorNotFound\"', 'Sum', 300)", "label": "AnchorNotFound (404)", "id": "e6" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "EditCostRatio p50/p90/p99 (patch_bytes / document_bytes)",
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p50', 300)", "label": "EditCostRatio p50", "id": "e7" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p90', 300)", "label": "EditCostRatio p90", "id": "e8" } ],
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"EditCostRatio\"', 'p99', 300)", "label": "EditCostRatio p99", "id": "e9" } ]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 27, "width": 8, "height": 6,
+              "properties": {
+                "title": "LegacyWriteUnguarded over time (T-E3 gate, ENC-TSK-P70/P84 AC-3)",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ { "expression": "SEARCH('{Enceladus/Docstore,ProjectId,Surface} MetricName=\"LegacyWriteUnguarded\"', 'Sum', 300)", "label": "LegacyWriteUnguarded by Surface", "id": "e10" } ]
+                ],
+                "period": 300
+              }
+            }
+          ]
+        }
 
 Outputs:
   ProdHealthMonitorFunctionArn:
@@ -230,3 +922,17 @@ Outputs:
   ParityDriftDailyScheduleRuleArn:
     Description: ARN of the daily parity+drift EventBridge schedule (ENC-TSK-F64 / AC-20)
     Value: !GetAtt ParityDriftDailyScheduleRule.Arn
+
+  GraphHealthScheduleRuleArn:
+    Description: ARN of the Fiedler lambda2 GraphHealth EventBridge schedule (ENC-TSK-K43)
+    Value: !GetAtt GraphHealthScheduleRule.Arn
+
+  EnceladusV4DashboardName:
+    Description: >
+      Name of the v4-architecture CloudWatch dashboard (ENC-TSK-K46 / B66
+      Ph5 AC-2/AC-6/AC-7).
+    Value: !Ref EnceladusV4Dashboard
+
+  EnceladusV4DashboardUrl:
+    Description: Console URL for the v4-architecture CloudWatch dashboard (ENC-TSK-K46)
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=enceladus-v4-architecture${EnvironmentSuffix}"

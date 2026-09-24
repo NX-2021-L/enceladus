@@ -1,0 +1,35 @@
+{
+  "name": "ambiguous_heading_path_no_ordinal",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Alpha"
+      ]
+    },
+    "op": "replace",
+    "body": "x"
+  },
+  "error": {
+    "status": 409,
+    "code": "ANCHOR_AMBIGUOUS",
+    "details_keys": [
+      "candidates"
+    ],
+    "candidates": [
+      {
+        "heading_path": [
+          "Alpha"
+        ],
+        "ordinal": 1,
+        "block_id": null
+      },
+      {
+        "heading_path": [
+          "Alpha"
+        ],
+        "ordinal": 2,
+        "block_id": null
+      }
+    ]
+  }
+}

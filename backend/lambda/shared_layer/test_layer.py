@@ -7,6 +7,7 @@ Run from shared_layer directory:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from decimal import Decimal
@@ -23,6 +24,16 @@ from enceladus_shared.auth import (
 from enceladus_shared.aws_clients import _get_ddb, _get_s3, _get_sqs
 from enceladus_shared.http_utils import _error, _parse_body, _path_method, _response
 from enceladus_shared.serialization import _deserialize, _now_z, _serialize, _unix_now
+from enceladus_shared.record_extensions import (
+    attach_record_extensions,
+    compute_freshness,
+    compute_max_degree,
+    compute_structural_importance,
+)
+from enceladus_shared.relationship_store import (
+    build_create_transact_puts,
+    write_target_tables,
+)
 
 
 class AuthTests(unittest.TestCase):
@@ -184,6 +195,74 @@ class AwsClientTests(unittest.TestCase):
         mock_boto3.client.assert_called_once()
 
         clients._ddb = None  # Clean up
+
+
+class RecordExtensionsTests(unittest.TestCase):
+    def test_structural_importance_absolute_degree(self):
+        edges = {
+            "A": [{"target_id": "B"}, {"target_id": "C"}],
+            "B": [{"target_id": "A"}],
+        }
+        max_degree = compute_max_degree(edges)
+        self.assertEqual(compute_structural_importance("A", edges, max_degree), 1.0)
+        self.assertEqual(compute_structural_importance("C", edges, max_degree), 1 / 3)
+
+    def test_attach_record_extensions_sets_context_node(self):
+        edges = {"ENC-TSK-001": [{"relationship_type": "relates-to", "target_id": "ENC-TSK-002"}]}
+        record = {
+            "task_id": "ENC-TSK-001",
+            "title": "Example",
+            "description": "x" * 100,
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        attach_record_extensions([record], "task_id", "task", edges, max_degree=2)
+        self.assertEqual(len(record["typed_relationships"]), 1)
+        ctx = record["context_node"]
+        self.assertIn("freshness_score", ctx)
+        self.assertGreater(ctx["structural_importance"], 0)
+        self.assertGreater(ctx["information_density"], 0)
+
+    def test_attach_record_extensions_requires_typed_id_key(self):
+        """Tracker GET deserializes item_id only; handler must promote to plan_id first."""
+        record = {"item_id": "ENC-PLN-006", "title": "Plan", "updated_at": "2026-07-01T00:00:00Z"}
+        attach_record_extensions([record], "plan_id", "plan", {}, max_degree=1)
+        self.assertNotIn("context_node", record)
+        record["plan_id"] = record["item_id"]
+        attach_record_extensions([record], "plan_id", "plan", {}, max_degree=1)
+        self.assertIn("context_node", record)
+
+    def test_compute_freshness_missing_timestamp_defaults(self):
+        self.assertEqual(compute_freshness(None, "task"), 0.5)
+
+
+class RelationshipStoreTests(unittest.TestCase):
+    def test_write_target_tables_dual_write(self):
+        with patch.dict(
+            os.environ,
+            {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"},
+            clear=False,
+        ):
+            targets = write_target_tables("devops-project-tracker-gamma")
+        self.assertEqual(
+            targets,
+            ["enceladus-relationships-gamma", "devops-project-tracker-gamma"],
+        )
+
+    def test_build_create_transact_puts_dual_write(self):
+        forward = {"project_id": {"S": "enceladus"}, "record_id": {"S": "rel#A#relates-to#B"}}
+        inverse = {"project_id": {"S": "enceladus"}, "record_id": {"S": "rel#B#related-to#A"}}
+        with patch.dict(
+            os.environ,
+            {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"},
+            clear=False,
+        ):
+            items = build_create_transact_puts("devops-project-tracker-gamma", forward, inverse)
+        self.assertEqual(len(items), 4)
+        tables = {item["Put"]["TableName"] for item in items}
+        self.assertEqual(
+            tables,
+            {"enceladus-relationships-gamma", "devops-project-tracker-gamma"},
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,72 @@
+name: IAM Coordination API Gamma — governance-version DDB Read Grant
+
+# ENC-FTR-116 / ENC-TSK-I29: grant devops-coordination-api-lambda-role-gamma
+# GetItem access to governance-version-gamma (the canonical governance hash record
+# created by ENC-TSK-I27 / devops-recompute-governance).
+#
+# Run ONCE after the table exists (created by 01-data CFN update in I27) and before
+# coordination_api + enceladus-mcp-code-gamma code deploys that read from it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this grant is being applied"
+        type: string
+        required: false
+        default: "ENC-TSK-I29: allow coordination_api + MCP server to read canonical governance-version-gamma record"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  grant:
+    name: Grant governance-version-gamma GetItem to coordination-api-gamma role
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy
+        run: |
+          set -euo pipefail
+          cat > /tmp/gov-version-read-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "GovernanceVersionTableRead",
+                "Effect": "Allow",
+                "Action": [
+                  "dynamodb:GetItem"
+                ],
+                "Resource": [
+                  "arn:aws:dynamodb:us-west-2:356364570033:table/governance-version-gamma"
+                ]
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "devops-coordination-api-lambda-role-gamma" \
+            --policy-name "enceladus-coordination-api-gamma-govversion-read-v1" \
+            --policy-document "file:///tmp/gov-version-read-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          set -euo pipefail
+          aws iam get-role-policy \
+            --role-name "devops-coordination-api-lambda-role-gamma" \
+            --policy-name "enceladus-coordination-api-gamma-govversion-read-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table

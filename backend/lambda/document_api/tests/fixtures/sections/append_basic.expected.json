@@ -1,0 +1,22 @@
+{
+  "name": "append_basic",
+  "request": {
+    "anchor": {
+      "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "op": "append",
+    "body": "Appended line.",
+    "rebase_headings": true
+  },
+  "ok": true,
+  "bytes_changed": 17,
+  "stamped": false,
+  "block_id_was_none_before": false,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

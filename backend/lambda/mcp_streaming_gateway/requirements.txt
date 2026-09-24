@@ -1,0 +1,5 @@
+mcp==1.26.0
+anyio>=4.4.0
+certifi>=2024.2.2
+starlette>=0.37.0
+uvicorn>=0.30.0

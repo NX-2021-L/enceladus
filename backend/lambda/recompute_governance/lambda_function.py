@@ -212,17 +212,63 @@ def _cas_write(
 
 
 # ---------------------------------------------------------------------------
+# Event normalization
+# ---------------------------------------------------------------------------
+
+def _extract_s3_record(event: dict) -> dict | None:
+    """Return the first S3 notification record, unwrapping an SNS envelope if present.
+
+    governance/live/* events are delivered S3 -> SNS relay (cross-region us-west-1
+    topic -> us-west-2 Lambda) because S3 cannot invoke a Lambda in another region.
+    Lambda-protocol SNS subscriptions cannot use raw message delivery (AWS rejects
+    SetSubscriptionAttributes RawMessageDelivery=true for protocol=lambda), so the
+    event arrives as an SNS Notification whose Message body is the S3 event JSON.
+
+    Direct S3 -> Lambda delivery (a raw S3 event) is also supported for
+    forward/back compatibility and for direct-invoke validation. SNS subscription
+    confirmations and s3:TestEvent payloads carry no S3 Records and are skipped.
+    """
+    records = event.get("Records", [])
+    if not records:
+        return None
+    first = records[0]
+
+    is_sns = (
+        "Sns" in first
+        or first.get("EventSource") == "aws:sns"
+        or first.get("eventSource") == "aws:sns"
+    )
+    if is_sns:
+        message = first.get("Sns", {}).get("Message", "")
+        try:
+            inner = json.loads(message)
+        except (TypeError, ValueError):
+            logger.error("SNS Message is not valid JSON; cannot unwrap; skipping")
+            return None
+        inner_records = inner.get("Records", [])
+        if not inner_records:
+            # s3:TestEvent or a non-S3 notification — nothing to recompute.
+            logger.info("SNS Message has no S3 Records (e.g. s3:TestEvent); skipping")
+            return None
+        return inner_records[0]
+
+    return first
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
 def handler(event: dict, context: Any) -> None:
-    """S3 ObjectCreated event handler."""
-    records = event.get("Records", [])
-    if not records:
-        logger.info("No records; nothing to do")
+    """S3 ObjectCreated event handler (accepts raw S3 or SNS-wrapped delivery)."""
+    record = _extract_s3_record(event)
+    if record is None:
+        logger.info("No actionable S3 record; nothing to do")
+        return
+    if "s3" not in record:
+        logger.info("Record carries no s3 payload; skipping")
         return
 
-    record = records[0]
     s3_obj = record["s3"]["object"]
     trigger_key: str = s3_obj["key"]
     trigger_version_id: str = s3_obj.get("versionId", "")

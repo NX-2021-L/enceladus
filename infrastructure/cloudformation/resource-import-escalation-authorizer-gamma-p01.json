@@ -1,0 +1,10 @@
+[
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Authorizer",
+    "LogicalResourceId": "EscalationDecisionAuthorizer",
+    "ResourceIdentifier": {
+      "ApiId": "hi0dzmvqrc",
+      "AuthorizerId": "0hoka1"
+    }
+  }
+]

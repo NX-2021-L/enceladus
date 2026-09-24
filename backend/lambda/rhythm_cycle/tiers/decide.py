@@ -1,0 +1,242 @@
+"""Decide beat — ADE evaluation + escalations (ENC-TSK-K83/K84/K85)."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+import boto3
+
+from artifact_store import read_latest, write_artifact
+from config import (
+    COORDINATION_API_BASE,
+    PROJECT_ID,
+    SNS_TOPIC_ARN,
+    TRACKER_API_BASE,
+    pre_approved_scopes,
+)
+from http_client import get_json, post_json
+from identity import resolve_identity
+from metrics import publish_lyapunov
+
+logger = logging.getLogger(__name__)
+_sns = boto3.client("sns")
+
+def _open_leaf_tasks() -> Dict[str, Any]:
+    """Open task backlog ids via the tracker's census route (ENC-PLN-093 O5.3).
+
+    ENC-TSK-N20 / BRD §4.4 (C4): the prior implementation (ENC-ISS-542) issued
+    a single page_size=100 request with no cursor follow-through and filtered
+    leaves using the legacy `orphan` flag heuristic — silently truncating the
+    backlog on any project with more than 100 open tasks, and undercounting
+    whenever the orphan flag lagged reality. A follow-up fix paged until the
+    tracker API's cursor (`next_cursor`) was exhausted, or a defensive
+    `_MAX_PAGES` guard was hit, and defined a leaf as a record with no
+    `parent` field set at all. This version instead issues a single
+    `mode=census` request: when the open-task count is within the census
+    route's inline cap, the ids come back directly on that one call; above
+    the cap, this walks the census route's own `pages` list, replaying each
+    page's cursor against the plain (non-census) route to fetch that page's
+    records. Either way the tracker API's own server-side walk is doing the
+    heavy lifting, not a locally bounded loop.
+
+    Returns a dict: {leaves, page_count, cursor_terminus, truncated}. leaves
+    is a flat list of item id strings (e.g. "ENC-TSK-L80"). page_count is 1
+    for the inline-ids path, or the number of census pages walked otherwise.
+    cursor_terminus is always None under this contract (kept for return-shape
+    compatibility with existing callers). truncated mirrors the census
+    route's own `count_truncated` — this is what makes the metric's
+    completeness auditable from the decide artifact (BRD §4.4).
+    """
+    if not TRACKER_API_BASE:
+        return {"leaves": [], "page_count": 0, "cursor_terminus": None, "truncated": False}
+
+    # ENC-ISS-553: N28's /records?project_id=... shape (#1016) live-probed a
+    # 200 response but never checked the payload -- tracker_mutation's
+    # _RE_PROJECT regex matches the literal "records" segment as {projectId},
+    # so it silently queried a nonexistent project and always returned
+    # {"records": [], "count": 0}, exhausting the cursor after one empty
+    # page. The real route is {TRACKER_API_BASE}/{PROJECT_ID} with query
+    # param "type" (the handler reads "type", not "record_type" -- confirmed
+    # live).
+    base_url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
+    census = get_json(base_url, {"status": "open", "type": "task", "mode": "census", "page_size": 100})
+    count = int(census.get("count") or 0)
+    truncated = bool(census.get("count_truncated"))
+    cap = int(census.get("ids_inline_cap") or 500)
+
+    if count <= cap:
+        # Small backlog: the census payload already inlines every id, so no
+        # further calls are needed.
+        ids: List[str] = list(census.get("ids") or [])
+        page_count = 1
+    else:
+        # Large backlog: the census payload has no inline ids, only a
+        # per-page cursor. Replay each cursor against the plain route (no
+        # mode param) to pull that page's records.
+        ids = []
+        pages = census.get("pages") or []
+        for p in pages:
+            params: Dict[str, Any] = {"status": "open", "type": "task", "page_size": 100}
+            cur = p.get("cursor")
+            if cur:
+                params["next_cursor"] = cur
+            pg = get_json(base_url, params)
+            for r in pg.get("records") or []:
+                rid = r.get("item_id") or r.get("id") or str(r.get("record_id") or "").split("#")[-1]
+                if rid:
+                    ids.append(rid)
+        page_count = len(pages)
+
+    return {
+        "leaves": ids,
+        "page_count": page_count,
+        "cursor_terminus": None,
+        "truncated": truncated,
+    }
+
+
+def _dispatch_plan_dry_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not COORDINATION_API_BASE:
+        return {"dry_run": True, "dispatches": [], "reason": "coordination_api_unconfigured"}
+    # ENC-TSK-N28: COORDINATION_API_BASE already ends in /api/v1 — do not re-prefix.
+    url = f"{COORDINATION_API_BASE}/coordination/dispatch-plan/dry-run"
+    try:
+        return post_json(url, {"project_id": PROJECT_ID, "sense_snapshot": snapshot})
+    except Exception as exc:
+        logger.warning("dispatch dry-run failed: %s", exc)
+        return {"dry_run": True, "error": str(exc), "dispatches": []}
+
+
+def _in_preapproved_scope(record_id: str, scopes: List[str]) -> bool:
+    rid = (record_id or "").strip()
+    for scope in scopes:
+        if rid == scope or rid.startswith(scope):
+            return True
+    return False
+
+
+# ENC-TSK-N29: the mutation_type='deploy_arc_change' handler
+# (tracker_mutation._validate_deploy_arc_change_payload) requires
+# payload.new_deploy_arc_type to be a member of VALID_TRANSITION_TYPES. The
+# decide beat's dispatch proposals carry no specific target arc, so
+# out-of-scope escalations default to the strictest common transition type —
+# these escalations exist precisely because io review is required before
+# dispatch proceeds.
+_ESCALATION_DEFAULT_ARC_TYPE = "github_pr_deploy"
+
+
+def _create_escalation(target_record_id: str, summary: str) -> Dict[str, Any]:
+    # TODO(ENC-TSK-N28 follow-up): escalation route shape unverified on gamma APIGW.
+    # tracker_mutation's _RE_ESCALATION accepts /{project}/escalation (optional
+    # /api/v1/tracker prefix), but no explicit RouteKey exists in
+    # infrastructure/cloudformation — orchestrator ENC-SES-09B to confirm live shape.
+    url = f"{TRACKER_API_BASE}/{PROJECT_ID}/escalation"
+
+    # ENC-TSK-N21 / BRD §4.3: the prior hardcoded requested_by_session=
+    # "rhythm-decide-beat" never resolved to a real governed session and could
+    # never carry a Session Claim ID (sci) — any beat-originated escalation
+    # would fail closed once the FTR-122 SCI gate tightens past its
+    # grandfather window. identity.resolve_identity() resolves-or-mints (and
+    # caches across beats) a real ENC-SES session + sci for the rhythm's own
+    # identity; tracker_mutation's escalation.request handler reads the
+    # session id from requested_by.session_id (falling back to
+    # write_source.provider) and records requested_by.sci_present. When
+    # identity resolution is degraded (RHYTHM_AGENT_TYPE_ID unset or the
+    # coordination API unreachable) this falls back to the exact pre-N21
+    # pseudo-identity string, preserving prior behavior rather than raising.
+    identity = resolve_identity()
+    session_id = str(identity.get("session_id") or "") or "rhythm-decide-beat"
+    # ENC-TSK-N29 / BRD §4.3: tracker_mutation._handle_escalation_request
+    # requires a non-empty 'payload' dict and a non-empty 'justification'
+    # string — the prior bare 'summary' field satisfied neither and every
+    # beat-originated escalation POST failed 400 before reaching io's queue.
+    body: Dict[str, Any] = {
+        "target_record_id": target_record_id,
+        "mutation_type": "deploy_arc_change",
+        "payload": {
+            "new_deploy_arc_type": _ESCALATION_DEFAULT_ARC_TYPE,
+            "proposal_summary": summary,
+        },
+        "justification": summary,
+        "requested_by_session": session_id,
+        "requested_by": {
+            "session_id": session_id,
+            "agent_type_id": str(identity.get("agent_type_id") or ""),
+            "sci_present": bool(identity.get("sci")),
+        },
+    }
+    if identity.get("sci"):
+        body["sci"] = identity["sci"]
+    return post_json(url, body)
+
+
+def _notify_beat(proposals: List[Dict[str, Any]], escalations: List[str]) -> None:
+    if not SNS_TOPIC_ARN:
+        return
+    body = {
+        "beat": "decide",
+        "pending_escalations": escalations,
+        "proposal_count": len(proposals),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    _sns.publish(TopicArn=SNS_TOPIC_ARN, Subject="Rhythm Decide beat summary", Message=json.dumps(body))
+
+
+def run_decide() -> Dict[str, Any]:
+    sense = read_latest("sense") or {}
+    prior_decide = read_latest("decide") or {}
+    prior_leaves = int(prior_decide.get("backlog_open_leaves") or 0)
+
+    backlog = _open_leaf_tasks()
+    leaves = backlog["leaves"]
+    leaf_count = len(leaves)
+    delta = leaf_count - prior_leaves
+    grooming = bool(os.environ.get("RHYTHM_GROOMING_EVENT", "").lower() in ("1", "true", "yes"))
+
+    publish_lyapunov(leaf_count, delta, grooming=grooming)
+
+    plan = _dispatch_plan_dry_run(sense)
+    proposals = plan.get("dispatches") or plan.get("proposals") or []
+    scopes = pre_approved_scopes()
+
+    dispatched: List[str] = []
+    escalated: List[str] = []
+    for prop in proposals:
+        rid = str(prop.get("record_id") or prop.get("target_record_id") or "")
+        if not rid:
+            continue
+        if _in_preapproved_scope(rid, scopes):
+            dispatched.append(rid)
+        else:
+            try:
+                esc = _create_escalation(rid, f"Rhythm decide beat proposal for {rid}")
+                escalated.append(str(esc.get("escalation_id") or esc.get("item_id") or rid))
+            except Exception as exc:
+                logger.warning("escalation create failed for %s: %s", rid, exc)
+                escalated.append(rid)
+
+    artifact = {
+        "beat_type": "decide",
+        "sense_snapshot_key": sense.get("latest_key"),
+        "dispatch_plan": plan,
+        "pre_approved_scopes": scopes,
+        "dispatched_in_scope": dispatched,
+        "escalation_ids": escalated,
+        "backlog_open_leaves": leaf_count,
+        "backlog_open_leaves_delta": delta,
+        # ENC-TSK-N20 / BRD §4.4: page count + cursor terminus make the
+        # completeness of the Lyapunov read auditable from the artifact
+        # itself, rather than assumed.
+        "backlog_page_count": backlog["page_count"],
+        "backlog_cursor_terminus": backlog["cursor_terminus"],
+        "backlog_pagination_truncated": backlog["truncated"],
+        "grooming": grooming,
+    }
+    keys = write_artifact("decide", artifact, datetime.now(timezone.utc))
+    artifact.update(keys)
+    _notify_beat(proposals, escalated)
+    return artifact

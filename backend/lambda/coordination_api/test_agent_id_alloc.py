@@ -21,6 +21,30 @@ import config  # noqa: E402
 import agent_id_alloc as alloc  # noqa: E402
 
 
+def _create_simple_table(ddb, table, key):
+    ddb.create_table(
+        TableName=table,
+        AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+        KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
+def _create_tracker_table(ddb):
+    ddb.create_table(
+        TableName=config.TRACKER_TABLE,
+        AttributeDefinitions=[
+            {"AttributeName": "project_id", "AttributeType": "S"},
+            {"AttributeName": "record_id", "AttributeType": "S"},
+        ],
+        KeySchema=[
+            {"AttributeName": "project_id", "KeyType": "HASH"},
+            {"AttributeName": "record_id", "KeyType": "RANGE"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
 class EncodeSeqTest(unittest.TestCase):
     def test_encoding_is_min_width_3_and_unbounded(self):
         self.assertEqual(alloc.encode_seq(1), "001")
@@ -56,12 +80,8 @@ class MintingTest(unittest.TestCase):
             (config.AGENT_SESSIONS_TABLE, "session_id"),
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -178,12 +198,8 @@ class AgentMutationTest(unittest.TestCase):
             (config.AGENT_SESSIONS_TABLE, "session_id"),
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -371,6 +387,7 @@ class IdleSweepTest(unittest.TestCase):
                 KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
                 BillingMode="PAY_PER_REQUEST",
             )
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -507,6 +524,193 @@ class IdleSweepTest(unittest.TestCase):
                 alloc.sweep_idle_sessions(idle_threshold_seconds=bad, now=self._future)
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle + revoke cascade
+# ---------------------------------------------------------------------------
+
+@mock_aws
+class CredentialLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+            (config.AGENT_CREDENTIALS_TABLE, "credential_id"),
+        ):
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # -- id format + shape --------------------------------------------------
+    def test_mint_credential_id_format_and_server_only(self):
+        cid = alloc.mint_credential_id()
+        self.assertTrue(cid.startswith("CRED-"))
+        self.assertEqual(len(cid), len("CRED-") + 32)  # uuid4().hex is 32 chars
+        with self.assertRaises(alloc.CallerSuppliedIdError):
+            alloc.mint_credential_id(caller_payload={"credential_id": "CRED-x"})
+
+    def test_issue_credential_shape_and_value_identity(self):
+        item = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        expected_keys = {"credential_id", *alloc.CREDENTIAL_NODE_PROPERTIES}
+        self.assertEqual(set(item.keys()), expected_keys)
+        self.assertEqual(item["status"], "active")
+        self.assertEqual(item["agent_identity_id"], "ENC-AGT-001")
+        self.assertEqual(item["rotated_from"], "")
+
+    def test_issue_rejects_bad_identity(self):
+        with self.assertRaises(ValueError):
+            alloc.issue_credential(agent_identity_id="")
+        with self.assertRaises(ValueError):
+            alloc.issue_credential(agent_identity_id="ENC-SES-001")  # wrong prefix
+
+    def test_issue_rejects_caller_supplied_id(self):
+        with self.assertRaises(alloc.CallerSuppliedIdError):
+            alloc.issue_credential(
+                agent_identity_id="ENC-AGT-001",
+                caller_payload={"credential_id": "CRED-forbidden"},
+            )
+
+    # -- rotation -----------------------------------------------------------
+    def test_rotate_issues_successor_and_revokes_parent(self):
+        parent = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        result = alloc.rotate_credential(parent["credential_id"])
+        new_cred = result["new_credential"]
+        self.assertEqual(new_cred["rotated_from"], parent["credential_id"])
+        self.assertEqual(new_cred["status"], "active")
+        reloaded_parent = alloc.get_credential(parent["credential_id"])
+        self.assertEqual(reloaded_parent["status"], "revoked")
+        self.assertEqual(reloaded_parent["revoked_reason"], "rotated")
+
+    def test_rotate_rejects_non_active(self):
+        parent = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        alloc.revoke_credential(parent["credential_id"])
+        with self.assertRaises(ValueError):
+            alloc.rotate_credential(parent["credential_id"])
+
+    def test_rotate_rejects_missing(self):
+        with self.assertRaises(ValueError):
+            alloc.rotate_credential("CRED-doesnotexist")
+
+    # -- revoke + cascade ---------------------------------------------------
+    def test_revoke_simple(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        summary = alloc.revoke_credential(cred["credential_id"], "compromised")
+        self.assertIn(cred["credential_id"], summary["revoked_credentials"])
+        self.assertEqual(alloc.get_credential(cred["credential_id"])["status"], "revoked")
+        self.assertEqual(alloc.get_credential(cred["credential_id"])["revoked_reason"], "compromised")
+
+    def test_revoke_is_idempotent(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        alloc.revoke_credential(cred["credential_id"])
+        # second revoke must not raise and the reason should be preserved from the first.
+        summary = alloc.revoke_credential(cred["credential_id"], "second")
+        self.assertIn(cred["credential_id"], summary["revoked_credentials"])
+        self.assertEqual(alloc.get_credential(cred["credential_id"])["revoked_reason"], "revoked")
+
+    def test_revoke_cascades_to_rotated_child_and_session(self):
+        # root credential, a rotated child, and a live session bound to the root.
+        root = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        child = alloc.issue_credential(
+            agent_identity_id="ENC-AGT-001", rotated_from=root["credential_id"]
+        )
+        sess = alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+            status="claimed", credential_id=root["credential_id"],
+        )
+
+        summary = alloc.revoke_credential(root["credential_id"], "root-compromise")
+
+        # (a) root + (c) child credential both revoked
+        self.assertEqual(alloc.get_credential(root["credential_id"])["status"], "revoked")
+        self.assertEqual(alloc.get_credential(child["credential_id"])["status"], "revoked")
+        self.assertIn(child["credential_id"], summary["revoked_credentials"])
+        # child revoke reason is stamped as a cascade of the root
+        self.assertEqual(
+            alloc.get_credential(child["credential_id"])["revoked_reason"],
+            f"cascade:{root['credential_id']}",
+        )
+        # (b) the bound session is retired
+        self.assertEqual(alloc.get_session(sess["session_id"])["status"], "retired")
+        self.assertIn(sess["session_id"], summary["retired_sessions"])
+
+    def test_revoke_cascade_is_cycle_safe(self):
+        # Construct a malformed rotation cycle: A.rotated_from=B and B.rotated_from=A.
+        a = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        b = alloc.issue_credential(
+            agent_identity_id="ENC-AGT-001", rotated_from=a["credential_id"]
+        )
+        # Point A back at B to create a cycle (bypassing the normal issue path).
+        self.ddb.update_item(
+            TableName=config.AGENT_CREDENTIALS_TABLE,
+            Key={"credential_id": {"S": a["credential_id"]}},
+            UpdateExpression="SET rotated_from = :b",
+            ExpressionAttributeValues={":b": {"S": b["credential_id"]}},
+        )
+        # Must terminate (visited guard) and revoke both without infinite recursion.
+        summary = alloc.revoke_credential(a["credential_id"])
+        self.assertEqual(alloc.get_credential(a["credential_id"])["status"], "revoked")
+        self.assertEqual(alloc.get_credential(b["credential_id"])["status"], "revoked")
+        self.assertLessEqual(len(summary["revoked_credentials"]), 2)
+
+    # -- ENC-TSK-J43: mint_session_id credential_id binding + validation ------
+    def test_mint_session_with_valid_credential_binds_field(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        item = alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+            status="claimed", credential_id=cred["credential_id"],
+        )
+        # The binding field is written under the exact name the revoke cascade reads.
+        self.assertEqual(item["credential_id"], cred["credential_id"])
+        persisted = alloc.get_session(item["session_id"])
+        self.assertEqual(persisted["credential_id"], cred["credential_id"])
+
+    def test_mint_session_with_missing_credential_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.mint_session_id(
+                agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+                credential_id="CRED-doesnotexist",
+            )
+
+    def test_mint_session_with_revoked_credential_raises(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        alloc.revoke_credential(cred["credential_id"])
+        with self.assertRaises(ValueError):
+            alloc.mint_session_id(
+                agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+                credential_id=cred["credential_id"],
+            )
+
+    def test_credential_less_session_omits_binding_field(self):
+        # Backward-compat: no credential_id => the frozen value-identity shape is preserved
+        # (credential_id is NOT written), matching SESSION_NODE_PROPERTIES exactly.
+        item = alloc.mint_session_id(agent_type_id="ENC-AGT-001", runtime="cc-desktop")
+        self.assertNotIn("credential_id", item)
+        self.assertEqual(set(item.keys()), {"session_id", *alloc.SESSION_NODE_PROPERTIES})
+
+    def test_revoke_cascade_finds_session_by_credential_id_field(self):
+        # Confirms the cascade reaps a live session bound via the SAME field name
+        # (`credential_id`) that mint_session_id writes.
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        sess = alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+            status="claimed", credential_id=cred["credential_id"],
+        )
+        summary = alloc.revoke_credential(cred["credential_id"], "compromised")
+        self.assertIn(sess["session_id"], summary["retired_sessions"])
+        self.assertEqual(alloc.get_session(sess["session_id"])["status"], "retired")
+
+    def test_list_credentials_filters(self):
+        c1 = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        alloc.issue_credential(agent_identity_id="ENC-AGT-002")
+        alloc.revoke_credential(c1["credential_id"])
+        active = alloc.list_credentials(status="active")
+        self.assertEqual({c["agent_identity_id"] for c in active}, {"ENC-AGT-002"})
+        by_identity = alloc.list_credentials(agent_identity_id="ENC-AGT-001")
+        self.assertEqual(len(by_identity), 1)
+
+
 @mock_aws
 class SciTokenTest(unittest.TestCase):
     """ENC-ISS-441 / ENC-TSK-J92: Session Claim ID mint-on-claim + revoke-on-retire."""
@@ -518,12 +722,8 @@ class SciTokenTest(unittest.TestCase):
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
             (config.CHECKOUT_TOKENS_TABLE, "pk"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -614,6 +814,195 @@ class SciTokenTest(unittest.TestCase):
     def test_revoke_missing_session_raises(self):
         with self.assertRaises(ValueError):
             alloc.revoke_sci_for_session("ENC-SES-404")
+
+
+@mock_aws
+class UnclaimAndRevocationSweepTest(unittest.TestCase):
+    """ENC-ISS-441 / ENC-TSK-J94: unclaim TTL sweep + sweep->SCI revocation bridging."""
+
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+            (config.CHECKOUT_TOKENS_TABLE, "pk"),
+        ):
+            self.ddb.create_table(
+                TableName=table,
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        _create_tracker_table(self.ddb)
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+
+    def _mint(self, status="allocated"):
+        return alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="test", status=status
+        )
+
+    def _get_token(self, token_id):
+        resp = self.ddb.get_item(
+            TableName=config.CHECKOUT_TOKENS_TABLE, Key={"pk": {"S": token_id}}
+        )
+        return resp.get("Item")
+
+    def _put_checked_out_task(self, task_id, session_id):
+        self.ddb.put_item(
+            TableName=config.TRACKER_TABLE,
+            Item={
+                "project_id": {"S": "enceladus"},
+                "record_id": {"S": f"task#{task_id}"},
+                "item_id": {"S": task_id},
+                "record_type": {"S": "task"},
+                "status": {"S": "in-progress"},
+                "active_agent_session": {"BOOL": True},
+                "active_agent_session_id": {"S": session_id},
+                "active_agent_session_parent": {"BOOL": False},
+                "checkout_state": {"S": "checked_out"},
+                "history": {"L": []},
+            },
+        )
+
+    def _get_task(self, task_id):
+        resp = self.ddb.get_item(
+            TableName=config.TRACKER_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": f"task#{task_id}"}},
+        )
+        return resp.get("Item")
+
+    def _put_retired_session(self, session_id):
+        self.ddb.put_item(
+            TableName=config.AGENT_SESSIONS_TABLE,
+            Item={
+                "session_id": {"S": session_id},
+                "agent_type_id": {"S": "ENC-AGT-001"},
+                "parent_session_id": {"S": "root"},
+                "runtime": {"S": "dead-test-session"},
+                "created_at": {"S": "2026-07-01T00:00:00Z"},
+                "claimed_at": {"S": "2026-07-01T00:00:01Z"},
+                "status": {"S": "retired"},
+            },
+        )
+
+    # -- config defaults per the io design decision on ENC-ISS-441 -----------
+    def test_defaults_are_two_hours_and_ten_minutes(self):
+        self.assertEqual(config.AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS, 7200)
+        self.assertEqual(config.AGENT_SESSIONS_UNCLAIM_TTL_MINUTES, 10)
+
+    # -- unclaim candidate selection ------------------------------------------
+    def test_unclaim_sweep_retires_stale_allocated_session(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertIn(sid, summary["retired"])
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    def test_unclaim_sweep_ignores_claimed_sessions(self):
+        minted = self._mint(status="allocated")
+        alloc.claim_session(minted["session_id"])
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(alloc.get_session(minted["session_id"])["status"], "claimed")
+
+    def test_unclaim_sweep_leaves_fresh_allocated_sessions(self):
+        sid = self._mint(status="allocated")["session_id"]
+        # now() ~ mint time; a 10-minute TTL means the session is not yet a ghost.
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "allocated")
+
+    def test_unclaim_sweep_dry_run_mutates_nothing(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_unclaimed_sessions(
+            unclaim_ttl_minutes=10, now=self._future, dry_run=True
+        )
+        self.assertEqual(summary["candidate_count"], 1)
+        self.assertEqual(summary["retired_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "allocated")
+
+    def test_unclaim_sweep_validates_ttl(self):
+        for bad in (True, -1, "10"):
+            with self.assertRaises(ValueError):
+                alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=bad)  # type: ignore[arg-type]
+
+    # -- sweep -> SCI revocation bridging --------------------------------------
+    def test_idle_sweep_revokes_sci_of_swept_session(self):
+        minted = self._mint(status="allocated")
+        session = alloc.claim_session(minted["session_id"])
+        sci = alloc.mint_sci(session)
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertIn(minted["session_id"], summary["retired"])
+        self.assertEqual(summary["revoked_sci_count"], 1)
+        self.assertIn(sci["token_id"], summary["revoked_scis"])
+        item = self._get_token(sci["token_id"])
+        self.assertTrue(item["revoked"]["BOOL"])
+        self.assertEqual(item["revocation_reason"]["S"], "idle_ttl_exceeded")
+
+    def test_idle_sweep_releases_checked_out_task_in_same_pass(self):
+        minted = self._mint(status="allocated")
+        session = alloc.claim_session(minted["session_id"])
+        sci = alloc.mint_sci(session)
+        self._put_checked_out_task("ENC-TSK-IDLE", session["session_id"])
+
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["revoked_sci_count"], 1)
+        self.assertIn(sci["token_id"], summary["revoked_scis"])
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertIn("ENC-TSK-IDLE", summary["released_tasks"])
+        task = self._get_task("ENC-TSK-IDLE")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
+
+    def test_unclaim_sweep_without_sci_reports_zero_revocations(self):
+        self._mint(status="allocated")
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["revoked_sci_count"], 0)
+        self.assertEqual(summary["revoked_scis"], [])
+
+    def test_unclaim_sweep_releases_checked_out_task(self):
+        minted = self._mint(status="allocated")
+        self._put_checked_out_task("ENC-TSK-UNCLAIM", minted["session_id"])
+
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertIn("ENC-TSK-UNCLAIM", summary["released_tasks"])
+        task = self._get_task("ENC-TSK-UNCLAIM")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
+
+    def test_backfill_releases_l06_from_already_retired_session(self):
+        self._put_retired_session("ENC-SES-057")
+        self._put_checked_out_task("ENC-TSK-L06", "ENC-SES-057")
+
+        summary = alloc.release_checkouts_for_retired_sessions()
+
+        self.assertEqual(summary["candidate_session_count"], 1)
+        self.assertEqual(summary["candidate_task_count"], 1)
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertEqual(summary["released_by_session"], {"ENC-SES-057": ["ENC-TSK-L06"]})
+        task = self._get_task("ENC-TSK-L06")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
+
+    def test_unclaim_sweep_is_idempotent_on_rerun(self):
+        self._mint(status="allocated")
+        first = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        second = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(first["retired_count"], 1)
+        self.assertEqual(second["candidate_count"], 0)
+        self.assertEqual(second["retired_count"], 0)
 
 
 if __name__ == "__main__":

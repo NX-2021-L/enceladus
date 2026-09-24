@@ -1,0 +1,19 @@
+<!-- @dsCard group="v2 · Charts" viewport="560x260" name="MixedChart" subtitle="Teal bars + overlaid amber line · mono axes" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}.w{max-width:480px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { MixedChart } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e('div',{className:'w'},e(MixedChart,{title:'Throughput vs. composite',subtitle:'closed records + mean pillar score',
+    xDomain:['Feb','Mar','Apr','May','Jun','Jul'],
+    bars:{title:'Closed records',data:[18,24,21,30,27,33]},
+    line:{title:'Composite ×40',data:[28,30,29,31,32,33]}}))
+);
+</script>
+</body></html>

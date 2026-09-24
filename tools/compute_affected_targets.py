@@ -4,19 +4,26 @@
 Diffs the merge being deployed against the last successfully-deployed SHA for
 the target environment (via the GitHub Deployments API, the existing deploy-
 state store per _deploy.yml's AC-2), and maps changed files to affected
-Lambda function directories under backend/lambda/.
+Lambda functions. Mapping covers backend/lambda/<dir>/ (via LAMBDA_DIR_RE)
+plus the declared out-of-tree sources in EXTRA_SOURCE_MAP -- functions whose
+source lives outside backend/lambda/<dir>/ entirely (ENC-ISS-778: the
+mcp_code Lambda's source lives in tools/enceladus-mcp-server/, with
+backend/lambda/mcp_code/ holding only requirements/config, so a change there
+was invisible to LAMBDA_DIR_RE alone).
 
 Safety contract (AC-3, "ambiguity widens, never narrows"):
   - Any failure to resolve a base SHA, run git diff, or parse output ->
     full_scope=true (deploy everything, current behavior).
   - Any changed path matching a cross-cutting pattern (shared layer source,
     04-github-roles.yaml IAM, envs/*.yaml CFN parameter files, the deploy
-    workflow files themselves, or the build manifest) -> full_scope=true.
+    workflow files themselves, the build manifest, or this scoping script
+    itself -- ENC-ISS-778) -> full_scope=true.
   - Otherwise: affected_functions = the set of backend/lambda/<dir> whose
-    directory appears in the diff. Empty diff-under-backend/lambda with no
-    cross-cutting hit -> affected_functions=[] (a real no-op deploy, e.g. a
-    docs-only merge) -- callers must treat this as "skip", not "deploy none
-    of everything" (distinct from full_scope).
+    directory appears in the diff, unioned with any EXTRA_SOURCE_MAP matches.
+    Empty diff-under-backend/lambda with no cross-cutting hit ->
+    affected_functions=[] (a real no-op deploy, e.g. a docs-only merge) --
+    callers must treat this as "skip", not "deploy none of everything"
+    (distinct from full_scope).
 
 Output: a single JSON object on stdout, and (if GITHUB_OUTPUT is set) the
 same fields written as step outputs.
@@ -42,9 +49,47 @@ CROSS_CUTTING_PATTERNS = [
     re.compile(r"^\.github/workflows/_build\.yml$"),
     re.compile(r"^\.github/workflows/_deploy\.yml$"),
     re.compile(r"^infrastructure/lambda_workflow_manifest\.json$"),
+    # ENC-ISS-663 / ENC-TSK-P03: the compute template DECLARES the Lambda
+    # functions, and CloudFormation creates each one carrying a placeholder
+    # body ("# managed outside CloudFormation") that only deploy.sh replaces.
+    # So a template-only change can CREATE a function while touching no
+    # backend/lambda/ directory at all -- which yields affected_functions=[]
+    # and a deploy that logs "nothing to deploy" and exits GREEN, leaving the
+    # new function permanently stuck on the placeholder.
+    #
+    # That is not hypothetical: PR #1140 (ENC-TSK-O95) changed ONLY
+    # 02-compute.yaml, and CloudFormation created
+    # devops-governance-mart-gamma, enceladus-convergence-telemetry-gamma and
+    # escalation-decision-authorizer-gamma at 2026-08-23T04:50:05-07Z with
+    # 164-byte placeholder bodies. All three returned
+    # Runtime.ImportModuleError on every invocation for the next 90 minutes,
+    # with CloudFormation reporting UPDATE_COMPLETE and every CI guard green.
+    #
+    # A change to the file that declares the fleet is cross-cutting for the
+    # fleet's deploy by definition. This honours the module's own contract:
+    # "ambiguity widens, never narrows".
+    re.compile(r"^infrastructure/cloudformation/02-compute\.yaml$"),
+    # ENC-ISS-778: this script IS the scoping logic that narrows a deploy.
+    # Without this entry, a change to the very code that decides
+    # full_scope/affected_functions could narrow its own deploy -- e.g. a bug
+    # fix here could ship un-full-scoped and never get exercised against the
+    # fleet it's meant to protect. The module's contract is "ambiguity
+    # widens, never narrows"; a change to the arbiter of that contract is the
+    # textbook ambiguous case.
+    re.compile(r"^tools/compute_affected_targets\.py$"),
 ]
 
 LAMBDA_DIR_RE = re.compile(r"^backend/lambda/([^/]+)/")
+
+# ENC-ISS-778: out-of-tree Lambda sources that LAMBDA_DIR_RE cannot see
+# because the function's actual code does not live under
+# backend/lambda/<dir>/. Keyed by a path pattern, valued by the affected
+# function name. backend/lambda/mcp_code/ still works via LAMBDA_DIR_RE
+# above (it holds requirements/config for the function); this table is
+# additive, not a replacement.
+EXTRA_SOURCE_MAP = {
+    re.compile(r"^tools/enceladus-mcp-server/"): "mcp_code",
+}
 
 # ENC-ISS-519: discriminator for GitHub Deployment records that actually came
 # from THIS workflow's own Lambda code-deploy (see the "Create GitHub
@@ -125,6 +170,43 @@ def diff_changed_files(base_sha: str, head_sha: str) -> Optional[List[str]]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def compute_from_changed_files(changed: List[str]) -> dict:
+    """Pure function (no git/gh/subprocess seam): given a list of changed
+    file paths, determine full_scope and affected_functions. Used both by
+    `compute()` (after it resolves `changed` via git diff) and directly by
+    tests, so test fixtures don't have to fake the subprocess layer to cover
+    the mapping/cross-cutting logic in isolation.
+
+    Returns a dict with "full_scope", "reason", and "affected_functions"
+    (base_sha/head_sha are not this function's concern -- `compute()` adds
+    them to its own result).
+    """
+    for path in changed:
+        for pattern in CROSS_CUTTING_PATTERNS:
+            if pattern.match(path):
+                return {
+                    "full_scope": True,
+                    "reason": f"cross-cutting path changed: {path}",
+                    "affected_functions": [],
+                }
+
+    affected = set()
+    for path in changed:
+        m = LAMBDA_DIR_RE.match(path)
+        if m:
+            affected.add(m.group(1))
+            continue
+        for pattern, function_name in EXTRA_SOURCE_MAP.items():
+            if pattern.match(path):
+                affected.add(function_name)
+
+    return {
+        "full_scope": False,
+        "reason": f"{len(changed)} file(s) changed, {len(affected)} lambda dir(s) affected",
+        "affected_functions": sorted(affected),
+    }
+
+
 def compute(environment: str, repo: str, head_sha: str, base_sha_override: Optional[str] = None) -> dict:
     base_sha = base_sha_override or resolve_last_deployed_sha(environment, repo)
     if not base_sha:
@@ -155,30 +237,10 @@ def compute(environment: str, repo: str, head_sha: str, base_sha_override: Optio
             "affected_functions": [],
         }
 
-    for path in changed:
-        for pattern in CROSS_CUTTING_PATTERNS:
-            if pattern.match(path):
-                return {
-                    "full_scope": True,
-                    "reason": f"cross-cutting path changed: {path}",
-                    "base_sha": base_sha,
-                    "head_sha": head_sha,
-                    "affected_functions": [],
-                }
-
-    affected = set()
-    for path in changed:
-        m = LAMBDA_DIR_RE.match(path)
-        if m:
-            affected.add(m.group(1))
-
-    return {
-        "full_scope": False,
-        "reason": f"{len(changed)} file(s) changed, {len(affected)} lambda dir(s) affected",
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "affected_functions": sorted(affected),
-    }
+    result = compute_from_changed_files(changed)
+    result["base_sha"] = base_sha
+    result["head_sha"] = head_sha
+    return result
 
 
 def main():

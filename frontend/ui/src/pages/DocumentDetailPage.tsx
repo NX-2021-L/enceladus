@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import { useParams, Link, Navigate } from 'react-router-dom'
 import { useRecordFallback } from '../hooks/useRecordFallback'
+import { useDocumentOutline } from '../hooks/useDocumentOutline'
 import { StatusChip } from '../components/shared/StatusChip'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { CodeBlock, detectLanguageFromFilename } from '../components/shared/CodeBlock'
@@ -8,6 +10,10 @@ import { RecordNotFound } from '../components/shared/RecordNotFound'
 import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
+import { DownloadMarkdownButton } from '../components/shared/DownloadMarkdownButton'
+import { DocumentOutlineTree } from '../components/documents/DocumentOutlineTree'
+import { DocumentSection } from '../components/documents/DocumentSection'
+import { SectionEditor } from '../components/documents/SectionEditor'
 import { formatDate, timeAgo } from '../lib/formatters'
 import { HANDOFF_STATUS_COLORS, HANDOFF_STATUS_LABELS } from '../lib/constants'
 import { ProjectPrimaryDocumentsPage } from './ProjectPrimaryDocumentsPage'
@@ -55,6 +61,26 @@ export function DocumentDetailPage() {
     feedError: false,
   })
 
+  // ENC-TSK-P80 (AC-1/AC-4): loads documents.manifest (outline + content_hash)
+  // independently of the body above, and wires the K29 live-update channel.
+  // Hooks must run unconditionally before the early returns below, same
+  // constraint as useRecordFallback — `doc` may still be undefined here.
+  const outline = useDocumentOutline(isDocumentId ? normalizedId : undefined, doc?.content, {
+    onLiveMutation: refetch,
+  })
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+
+  // Deep-link scroll: sections render asynchronously (after manifest+body
+  // both resolve), so the browser's native "scroll to #hash on load" can
+  // fire before the target element exists. Retry once sections are present.
+  useEffect(() => {
+    if (outline.sections.length === 0) return
+    const hash = window.location.hash?.slice(1)
+    if (!hash) return
+    const el = document.getElementById(hash)
+    if (el) el.scrollIntoView({ block: 'start' })
+  }, [outline.sections.length])
+
   if (normalizedId.length === 0) return <ErrorState message="Document not found" />
   if (!isDocumentId) {
     // Keep /documents/{project} behavior introduced for primary reference docs.
@@ -89,7 +115,11 @@ export function DocumentDetailPage() {
         >
           {doc.project_id}
         </Link>
-        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">{doc.document_id}<CopyButton text={doc.document_id} /></span>
+        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">
+          {doc.document_id}
+          <CopyButton text={doc.document_id} />
+          <DownloadMarkdownButton document={doc} />
+        </span>
         <h1 className="text-lg font-semibold text-slate-100 mb-2">{doc.title}</h1>
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={doc.status} />
@@ -258,6 +288,47 @@ export function DocumentDetailPage() {
         const ext = doc.file_name?.split('.').pop()?.toLowerCase() ?? 'md'
         const isMarkdown = MARKDOWN_EXTS.has(ext)
         const detectedLang = !isMarkdown ? detectLanguageFromFilename(doc.file_name ?? '') : undefined
+
+        // ENC-TSK-P80 (AC-1): once the manifest has produced a non-empty
+        // outline for a markdown document, render the navigable outline +
+        // per-section editing UI instead of the single content blob. Non-
+        // markdown documents, and markdown documents with no headings (or
+        // whose manifest hasn't loaded / errored), keep the original
+        // whole-body rendering unchanged.
+        if (isMarkdown && outline.sections.length > 0) {
+          const editingSection = outline.sections.find((s) => s.key === editingKey) ?? null
+          return (
+            <>
+              <DocumentOutlineTree sections={outline.sections} changedKeys={outline.changedKeys} />
+              <div className="space-y-4">
+                {outline.sections.map((section) => (
+                  <DocumentSection
+                    key={section.key}
+                    section={section}
+                    changed={outline.changedKeys.has(section.key)}
+                    onEdit={() => setEditingKey(section.key)}
+                    onAcknowledgeChange={() => outline.clearChanged(section.key)}
+                  />
+                ))}
+              </div>
+              {editingSection && outline.manifest && (
+                <SectionEditor
+                  documentId={doc.document_id}
+                  projectId={doc.project_id}
+                  section={editingSection}
+                  ifMatch={outline.manifest.content_hash}
+                  liveChanged={outline.changedKeys.has(editingSection.key)}
+                  onClose={() => setEditingKey(null)}
+                  onSaved={() => {
+                    setEditingKey(null)
+                    outline.refetchManifest()
+                    refetch()
+                  }}
+                />
+              )}
+            </>
+          )
+        }
 
         return (
           <div className="bg-slate-800 rounded-lg p-4">

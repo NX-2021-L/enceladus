@@ -1,0 +1,20 @@
+<!-- @dsCard group="v2 · Forms" viewport="720x180" name="Slider" subtitle="Teal fill + glow thumb · mono readout" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}.w{max-width:420px;display:flex;flex-direction:column;gap:26px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { Slider } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+function Demo(){
+  const [a,setA]=React.useState(0.8),[b,setB]=React.useState(60);
+  return e('div',{className:'w'},
+    e(Slider,{value:a,min:0,max:1,step:0.01,valueFormatter:(v)=>v.toFixed(2),ticks:['0.00','pillar threshold','1.00'],onChange:(ev)=>setA(ev.detail.value),ariaLabel:'threshold'}),
+    e(Slider,{value:b,min:0,max:300,step:5,valueFormatter:(v)=>v+'s',ticks:['0s','TTL','300s'],onChange:(ev)=>setB(ev.detail.value),ariaLabel:'ttl'}));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

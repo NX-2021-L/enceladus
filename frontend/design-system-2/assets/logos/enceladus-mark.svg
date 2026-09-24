@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" fill="none"><defs><radialGradient id="tg" cx="50%" cy="52%" r="58%"><stop offset="0%" stop-color="#8A8CB5" stop-opacity="0.5"></stop><stop offset="100%" stop-color="#8A8CB5" stop-opacity="0"></stop></radialGradient></defs>
+ <ellipse cx="120" cy="120" rx="116" ry="50" transform="rotate(-22 120 120)" stroke="#3D9BA8" stroke-width="3.5" opacity="0.55" fill="none"></ellipse>
+ <circle cx="120" cy="120" r="92" fill="url(#tg)"></circle>
+ <circle cx="120" cy="120" r="92" stroke="#3D9BA8" stroke-width="7" fill="none"></circle>
+ <g stroke="#3D9BA8" stroke-width="9" stroke-linecap="round">
+ <line x1="174.67" y1="50.41" x2="141.63" y2="205.81"></line><line x1="150.92" y1="37.07" x2="114.52" y2="208.33"></line>
+ <line x1="125.48" y1="31.67" x2="89.08" y2="202.93"></line><line x1="98.37" y1="34.19" x2="65.33" y2="189.59"></line></g></svg>

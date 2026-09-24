@@ -1,0 +1,83 @@
+name: IAM V4Gamma Deploy Role — Lambda Lifecycle Patch
+
+# ENC-TSK-N80 / ENC-ISS-591: GitHubActions-V4Gamma-DeployRole lacked
+# lambda:UpdateFunctionConfiguration and lambda:DeleteFunction, leaving the
+# _deploy.yml SnapStart heal + version prune inert (run 30974760724: 3,939
+# denied deletions). Durable fix in 04-github-roles.yaml (Sids
+# V4GammaLambdaLifecycle / V4GammaLambdaVersionPrune); this one-off dispatch
+# applies the grant live ahead of the next github-roles stack deploy, mirroring
+# the iam-cfn-deploy-role-*-patch precedent.
+#
+# Scope guarantee: DeleteFunction is granted on VERSION-QUALIFIED gamma ARNs
+# only (function:*-gamma:*) — the role can delete stale published versions but
+# is structurally unable to delete a whole function.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "ENC-TSK-N80 — grant lambda lifecycle verbs to V4Gamma deploy role for SnapStart heal + version prune (ENC-ISS-591)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch V4Gamma deploy role with lambda lifecycle verbs
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — Lambda lifecycle (heal + prune)
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          cat > /tmp/v4gamma-deploy-role-lambda-lifecycle.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "V4GammaLambdaLifecycle",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:UpdateFunctionConfiguration"
+                ],
+                "Resource": "arn:aws:lambda:us-west-2:${ACCOUNT_ID}:function:*-gamma"
+              },
+              {
+                "Sid": "V4GammaLambdaVersionPrune",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:DeleteFunction"
+                ],
+                "Resource": "arn:aws:lambda:us-west-2:${ACCOUNT_ID}:function:*-gamma:*"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "GitHubActions-V4Gamma-DeployRole" \
+            --policy-name "enceladus-v4gamma-deploy-lambda-lifecycle-v1" \
+            --policy-document "file:///tmp/v4gamma-deploy-role-lambda-lifecycle.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "GitHubActions-V4Gamma-DeployRole" \
+            --policy-name "enceladus-v4gamma-deploy-lambda-lifecycle-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table

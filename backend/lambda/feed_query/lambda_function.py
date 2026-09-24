@@ -4,6 +4,8 @@ Lambda API for Enceladus feed read and subscription lifecycle.
 
 Routes (via API Gateway proxy):
     GET     /api/v1/feed
+    GET     /api/v1/feed/corpus
+    GET     /api/v1/feed/delta
     POST    /api/v1/feed/refresh
     POST    /api/v1/feed/subscriptions
     GET     /api/v1/feed/subscriptions/{subscriptionId}
@@ -22,10 +24,16 @@ Environment variables:
     COORDINATION_TABLE        default: coordination-requests
     DYNAMODB_REGION           default: us-west-2
     PROJECTS_TABLE            default: projects
+    DOCUMENTS_TABLE           default: documents
+    GRAPH_QUERY_API_FUNCTION  default: "" (unset disables the OpenSearch tier,
+                              ENC-TSK-M39 -- full refresh falls back to the DDB
+                              fan-out unconditionally, e.g. on v3-prod where
+                              graph_query_api has no OpenSearch/VPC access)
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import json
 import logging
@@ -39,6 +47,10 @@ import urllib.request
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+
+import corpus as feed_corpus
+import delta as feed_delta
+import feed_page
 
 try:
     import jwt
@@ -68,9 +80,15 @@ SUBSCRIPTIONS_TABLE = os.environ.get("SUBSCRIPTIONS_TABLE", "feed-subscriptions"
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 FEED_PUBLISHER_FUNCTION = os.environ.get("FEED_PUBLISHER_FUNCTION", "devops-feed-publisher")
+# ENC-TSK-M39: graph_query_api is already VPC-attached with OpenSearch access;
+# feed_query invokes it as a selection-tier proxy instead of joining the VPC
+# itself. Empty/unset means the OpenSearch tier is unavailable (e.g. v3-prod).
+GRAPH_QUERY_API_FUNCTION = os.environ.get("GRAPH_QUERY_API_FUNCTION", "")
+OPENSEARCH_TIER_INVOKE_TIMEOUT_S = 5
 CORS_ORIGIN = "https://jreese.net"
 FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
 INCREMENTAL_LOOKBACK_SECONDS = 10
@@ -112,6 +130,10 @@ _project_cache: Optional[List[Dict[str, str]]] = None
 _project_cache_at: float = 0.0
 _PROJECT_CACHE_TTL = 300.0
 
+_corpus_cache_entries: Optional[List[Dict[str, Any]]] = None
+_corpus_cache_at: float = 0.0
+_CORPUS_CACHE_TTL = 30.0
+
 _ddb = None
 
 
@@ -121,7 +143,16 @@ def _get_ddb():
         _ddb = boto3.client(
             "dynamodb",
             region_name=DYNAMODB_REGION,
-            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+            # ENC-TSK-M36: botocore's default max_pool_connections is 10 --
+            # with _fan_out_by_project running _MAX_PROJECT_FANOUT_WORKERS
+            # (24) threads against this SAME shared client, anything beyond
+            # 10 concurrent Query calls would silently queue for a free
+            # pooled connection, capping real concurrency at 10 regardless of
+            # thread count. Sized to stay >= the fan-out width.
+            config=Config(
+                retries={"max_attempts": 3, "mode": "standard"},
+                max_pool_connections=32,
+            ),
         )
     return _ddb
 
@@ -364,6 +395,25 @@ def _ddb_bool(item: Dict[str, Any], key: str, default: bool = False) -> bool:
     return default
 
 
+def _ddb_str_list_lenient(item: Dict[str, Any], key: str) -> List[str]:
+    """ENC-TSK-P60 (ENC-ISS-714): read a list attribute, tolerating the
+    string-typed anomaly. A DynamoDB S value is coerced to a one-element list
+    and logged with the item id so the offending record is identifiable."""
+    attr = _ddb_attr(item, key)
+    if "S" in attr:
+        raw = str(attr.get("S") or "").strip()
+        if raw:
+            logger.warning(
+                "feed_query: item %s field %s stored as DynamoDB S (%r) — coerced to one-element list (ENC-ISS-714)",
+                _ddb_str(item, "item_id"),
+                key,
+                raw,
+            )
+            return [raw]
+        return []
+    return _ddb_str_set(item, key)
+
+
 def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     attr = _ddb_attr(item, key)
     ss = attr.get("SS")
@@ -388,15 +438,33 @@ MAX_HISTORY_ENTRIES = 10
 # Lambda 6 MB sync response limit. With history entries populated per-record
 # (ENC-TSK-C01), the pre-cap response exceeded that limit and produced the
 # opaque {"message":"Internal Server Error"} that broke PWA plan + lesson
-# rendering. These caps hold the total to at most 140 records: 100 tasks +
-# 10 each of issues/features/lessons/plans. The frontend already caps the
-# visible feed list at 100 items (FeedPage.tsx useInfiniteList(items, 20, 100))
-# so these backend caps align with the existing UI contract.
+# rendering. The rows this cap applies to are the minimal 5-field snapshot
+# projection (_handle_snapshot._rows), not full record bodies, so headroom
+# under the 6 MB limit is large.
+#
+# ENC-TSK-M36: these caps are applied PER ACTIVE PROJECT (see
+# _query_all_records), not globally across every project sharing this table
+# -- a global cap meant one recently-active project could crowd out another
+# project's entire issue/feature/lesson/plan representation in the snapshot.
+# Worst case with N active projects is now N x (100 + 10*4) rows; at ~150
+# bytes/row that's comfortably inside the 6 MB limit even for a few dozen
+# projects, and the frontend already caps the visible feed list at 50 items
+# post-fetch (frontend/ui-v2/src/api/feeds.ts::fetchFeedSnapshot).
 MAX_TASKS_FULL_REFRESH = 100
 MAX_ISSUES_FULL_REFRESH = 10
 MAX_FEATURES_FULL_REFRESH = 10
 MAX_LESSONS_FULL_REFRESH = 10
 MAX_PLANS_FULL_REFRESH = 10
+
+# ENC-TSK-M74: global cap on the bare GET /api/v1/feed full-refresh page. The
+# per-type caps above are applied PER ACTIVE PROJECT, so the merged page still
+# grew to ~919 records across projects -- the measured dominant term in feed p95
+# (hydration + multi-MB serialization on a 256MB Lambda). This caps the merged
+# page to the N most-recently-updated records TOTAL and returns a continuation
+# cursor (feed_page.apply_page_cap) reusing the corpus next_cursor contract. No
+# consumer reads 919 records in a feed view; full corpus stays available via the
+# already-paginated /api/v1/feed/corpus SWR path.
+MAX_FEED_PAGE_RECORDS = 75
 
 
 def _cap_by_updated_at(records: List[Dict[str, Any]], cap: int) -> List[Dict[str, Any]]:
@@ -1000,6 +1068,9 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         # Plan tree fields (ENC-ISS-139 / ENC-TSK-A57)
         "subtask_ids": _ddb_str_set(item, "subtask_ids"),
         "transition_type": _ddb_str(item, "transition_type") or None,
+        # ENC-TSK-P60: component chips ride the corpus; lenient reader coerces
+        # the string-typed anomaly instead of hiding it (ENC-ISS-714).
+        "components": _ddb_str_list_lenient(item, "components"),
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -1153,8 +1224,355 @@ _TRANSFORM = {
 }
 
 
-def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+# ENC-TSK-M36: bound how many active projects are fanned out to concurrently.
+# A plain constant rather than "len(projects)" unbounded, so an unexpectedly
+# large projects table can't spawn hundreds of simultaneous DynamoDB queries
+# from a single Lambda invocation.
+#
+# Verified live against gamma post-deploy: with max_workers=8 the measured
+# /api/v1/feed/tasks.json Lambda execution `Duration` (CloudWatch REPORT
+# lines, not network/API-Gateway overhead) stayed ~19-24s -- essentially
+# unchanged from the pre-fix serial baseline. Each per-project Query is
+# I/O-bound (network + DynamoDB service time, no CPU work), so raising the
+# thread count costs nothing but connection-pool headroom; 8 was too narrow
+# relative to the number of active projects sharing project-type-index for
+# concurrency to move the wall-clock number. Raised to 24 -- still cheap for
+# a 256 MB Lambda making read-only Query calls.
+_MAX_PROJECT_FANOUT_WORKERS = 24
+
+
+def _query_project_tracker_records(
+    pid: str, cutoff: dt.datetime
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Query every tracker record for ONE project via project-type-index.
+
+    Factored out of what were two near-identical copies of this loop
+    (_query_all_records / _query_corpus_tracker_records, ENC-TSK-L23) so the
+    per-project fetch happens in exactly one place. Called concurrently, one
+    call per active project (ENC-TSK-M36) -- previously each caller ran this
+    same paginated query SEQUENTIALLY across every active project, which is
+    the confirmed root cause of the ~20s feed/tasks.json and feed/corpus
+    cold-cache latency (ENC-TSK-M36): N projects x paginated GSI query, one
+    at a time, no concurrency.
+    """
     ddb = _get_ddb()
+    tasks: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    features: List[Dict[str, Any]] = []
+    lessons: List[Dict[str, Any]] = []
+    plans: List[Dict[str, Any]] = []
+
+    paginator = ddb.get_paginator("query")
+    try:
+        for page in paginator.paginate(
+            TableName=DYNAMODB_TABLE,
+            IndexName="project-type-index",
+            KeyConditionExpression="project_id = :pid",
+            ExpressionAttributeValues={":pid": {"S": pid}},
+        ):
+            for raw_item in page.get("Items", []):
+                record_type = _ddb_str(raw_item, "record_type")
+                if record_type not in _TRANSFORM:
+                    continue
+                # Per-record isolation: a single malformed record must not
+                # take down the entire feed response (ENC-TSK-C31).
+                try:
+                    if _is_stale_closed(raw_item, cutoff):
+                        continue
+                    transformed = _TRANSFORM[record_type](raw_item, pid)
+                except Exception as rec_exc:  # noqa: BLE001
+                    logger.error(
+                        "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
+                        record_type,
+                        _ddb_str(raw_item, "item_id") or "?",
+                        pid,
+                        rec_exc,
+                    )
+                    continue
+                if record_type == "task":
+                    tasks.append(transformed)
+                elif record_type == "issue":
+                    issues.append(transformed)
+                elif record_type == "feature":
+                    features.append(transformed)
+                elif record_type == "lesson":
+                    lessons.append(transformed)
+                elif record_type == "plan":
+                    plans.append(transformed)
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("DynamoDB query failed for project %s: %s", pid, exc)
+
+    return tasks, issues, features, lessons, plans
+
+
+def _fan_out_by_project(
+    projects: List[Dict[str, str]], cutoff: dt.datetime
+) -> List[Tuple[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]]]:
+    """Run `_query_project_tracker_records` for every project concurrently.
+
+    Returns `[(project_id, (tasks, issues, features, lessons, plans)), ...]`
+    in the SAME project order as the input list (order is restored after the
+    executor map so both callers stay deterministic) -- a raised per-project
+    exception is already caught and logged inside `_query_project_tracker_records`
+    itself, so this never needs to handle executor-side failures specially.
+    """
+    if not projects:
+        return []
+    max_workers = min(_MAX_PROJECT_FANOUT_WORKERS, len(projects))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(
+            pool.map(lambda proj: _query_project_tracker_records(proj["project_id"], cutoff), projects)
+        )
+    return [(proj["project_id"], result) for proj, result in zip(projects, results)]
+
+
+_FEED_RECORD_TYPE_CAPS = {
+    "task": MAX_TASKS_FULL_REFRESH,
+    "issue": MAX_ISSUES_FULL_REFRESH,
+    "feature": MAX_FEATURES_FULL_REFRESH,
+    "lesson": MAX_LESSONS_FULL_REFRESH,
+    "plan": MAX_PLANS_FULL_REFRESH,
+}
+
+_graph_query_lambda_client = None
+
+# Set right before _query_all_records() returns; read immediately afterward by
+# the two callers (ENC-TSK-M39, live AC verification). Safe as module state --
+# a single Lambda execution environment processes one invocation at a time.
+_last_feed_query_source = "ddb_fanout"
+
+
+def _get_graph_query_lambda_client():
+    global _graph_query_lambda_client
+    if _graph_query_lambda_client is None:
+        _graph_query_lambda_client = boto3.client(
+            "lambda",
+            region_name=DYNAMODB_REGION,
+            # ENC-TSK-M39: bound the circuit-breaker's worst case. Without an
+            # explicit read_timeout this would inherit botocore's 60s default,
+            # which would make an OpenSearch-tier hang far slower than just
+            # falling straight back to the DDB fan-out this replaces.
+            config=Config(connect_timeout=2, read_timeout=OPENSEARCH_TIER_INVOKE_TIMEOUT_S, retries={"max_attempts": 1}),
+        )
+    return _graph_query_lambda_client
+
+
+def _query_all_records_via_opensearch(
+    projects: List[Dict[str, str]],
+    cutoff: dt.datetime,
+    page_size: Optional[int] = None,
+    cursor: Optional[str] = None,
+) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]]:
+    """OpenSearch-tier fast path for the full feed refresh (ENC-TSK-M39).
+
+    feed_query is not VPC-attached and the OpenSearch domain is only reachable
+    from inside the VPC graph_query_api already runs in -- rather than adding a
+    new VPC attachment to this Lambda, this invokes graph_query_api (action=
+    "feed_selection") as a selection-tier proxy: it asks the records_read
+    OpenSearch alias (CDC-fresh, ENC-TSK-L41-L44) for the top-N most-recently-
+    updated record keys per (project, record_type), then hydrates full record
+    bodies with a bounded DynamoDB BatchGetItem via the same helper the
+    incremental/delta path already uses -- replacing N sequential/concurrent
+    paginated GSI Query calls (one per project, unbounded result size) with a
+    single OpenSearch selection round-trip plus a handful of BatchGetItem
+    calls bounded by the existing per-type caps.
+
+    Returns None on ANY failure (invoke error, timeout, malformed response, or
+    an explicit ok=False) so the caller falls back to the DDB fan-out -- this
+    IS the circuit breaker; there is no retry or trip-state, matching the only
+    other fallback pattern in this codebase (graph_query_api's OpenSearch ->
+    Neo4j keyword-rank fallback).
+    """
+    if not GRAPH_QUERY_API_FUNCTION:
+        return None
+
+    project_ids = [p["project_id"] for p in projects if p.get("project_id")]
+    if not project_ids:
+        return [], [], [], [], []
+
+    # ENC-TSK-M76: upstream page-cap mode. When page_size is provided, ask the
+    # selection tier for page_size+1 candidates per (project,type) WITH their
+    # updated_at (plus an updated_at<=before cursor bound for deep pages),
+    # merge them into one global (updated_at DESC, record_key ASC) order --
+    # the exact ordering feed_page.apply_page_cap uses -- keep only the window
+    # strictly after the request cursor, and hydrate ONLY that <=page_size+1
+    # page instead of the whole corpus. Absent page_size this is the legacy
+    # ENC-TSK-M39 full-selection path, byte-identical.
+    page_mode = page_size is not None
+    cursor_sort: Optional[str] = None
+    cursor_key: Optional[str] = None
+    if page_mode and cursor:
+        decoded = feed_corpus.decode_cursor(cursor)
+        if decoded is not None:
+            cursor_sort, cursor_key = decoded
+
+    payload: Dict[str, Any] = {
+        "action": "feed_selection",
+        "project_ids": project_ids,
+        "caps": _FEED_RECORD_TYPE_CAPS,
+    }
+    if page_mode:
+        payload["page_size"] = int(page_size)
+        if cursor_sort:
+            payload["before"] = cursor_sort
+    try:
+        response = _get_graph_query_lambda_client().invoke(
+            FunctionName=GRAPH_QUERY_API_FUNCTION,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        result = json.loads(response["Payload"].read())
+    except (BotoCoreError, ClientError, ValueError, KeyError) as exc:
+        logger.warning(
+            "feed_query: OpenSearch-tier selection invoke failed, falling back to DDB fan-out: %s", exc
+        )
+        return None
+
+    if response.get("FunctionError") or not isinstance(result, dict) or not result.get("ok"):
+        logger.warning(
+            "feed_query: OpenSearch-tier selection returned an error, falling back to DDB fan-out: %s", result
+        )
+        return None
+
+    selection = result.get("selection") or {}
+
+    if not page_mode:
+        changed_keys: List[Dict[str, Dict[str, str]]] = []
+        for pid in project_ids:
+            for rtype in _FEED_RECORD_TYPE_CAPS:
+                for bare_id in selection.get(f"{pid}#{rtype}", []) or []:
+                    changed_keys.append({
+                        "project_id": {"S": pid},
+                        "record_id": {"S": f"{rtype}#{bare_id}"},
+                    })
+        if not changed_keys:
+            return [], [], [], [], []
+        tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(changed_keys, cutoff)
+        return tasks, issues, features, lessons, plans
+
+    # --- page-cap mode: global merge -> strict-after-cursor -> cap -> hydrate only the page ---
+    candidates: List[Tuple[str, str, Dict[str, Dict[str, str]]]] = []
+    for pid in project_ids:
+        for rtype in _FEED_RECORD_TYPE_CAPS:
+            for entry in selection.get(f"{pid}#{rtype}", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                bare_id = str(entry.get("id") or "")
+                if not bare_id:
+                    continue
+                updated_at = str(entry.get("updated_at") or "")
+                record_key = feed_corpus.tracker_record_key(pid, bare_id)
+                ddb_key = {"project_id": {"S": pid}, "record_id": {"S": f"{rtype}#{bare_id}"}}
+                candidates.append((updated_at, record_key, ddb_key))
+
+    # Global order (updated_at DESC, record_key ASC) -- matches feed_page._flatten_ordered.
+    candidates.sort(key=lambda c: c[1])
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    if cursor_sort is not None and cursor_key is not None:
+        def _strictly_after(cand: Tuple[str, str, Dict[str, Dict[str, str]]]) -> bool:
+            updated_at, record_key, _ = cand
+            if updated_at != cursor_sort:
+                return updated_at < cursor_sort  # older == later in DESC order
+            return record_key > cursor_key       # same updated_at: larger key is later
+        candidates = [c for c in candidates if _strictly_after(c)]
+
+    page_keys = [c[2] for c in candidates[: int(page_size) + 1]]
+    logger.info(
+        "feed_query: opensearch upstream page-cap hydrating keys=%d (page_size=%s, candidates=%d)",
+        len(page_keys), page_size, len(candidates),
+    )
+    if not page_keys:
+        return [], [], [], [], []
+    tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(page_keys, cutoff)
+    return tasks, issues, features, lessons, plans
+
+
+def _query_all_records(
+    cursor: Optional[str] = None, page_size: Optional[int] = None
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    global _last_feed_query_source
+    projects = _get_active_projects()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+
+    try:
+        opensearch_result = _query_all_records_via_opensearch(
+            projects, cutoff, page_size=page_size, cursor=cursor
+        )
+    except Exception as exc:  # noqa: BLE001 — never let the fast path take the feed down
+        logger.warning("feed_query: OpenSearch-tier path raised unexpectedly, falling back to DDB fan-out: %s", exc)
+        opensearch_result = None
+
+    if opensearch_result is not None:
+        _last_feed_query_source = "opensearch"
+        return opensearch_result
+
+    _last_feed_query_source = "ddb_fanout"
+    ddb_result = _query_all_records_via_ddb(projects, cutoff)
+    if page_size is not None:
+        # ENC-TSK-M76: cap the DDB fallback to the SAME page window so both
+        # sources return the identical <=page_size+1 set from _query_all_records
+        # (the handler's retained apply_page_cap then trims both to the final
+        # page identically). The DDB fan-out is still bounded upstream by its
+        # existing per-type/per-project caps.
+        t, i, f, l, p, _nc = feed_page.apply_page_cap(
+            *ddb_result, cursor=cursor, cap=int(page_size) + 1
+        )
+        return t, i, f, l, p
+    return ddb_result
+
+
+def _query_all_records_via_ddb(
+    projects: List[Dict[str, str]], cutoff: dt.datetime
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    all_tasks: List[Dict[str, Any]] = []
+    all_issues: List[Dict[str, Any]] = []
+    all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
+
+    # ENC-TSK-M36 (feed data-truth): the per-type caps below used to apply
+    # to the GLOBAL cross-project pool (all projects' lessons merged, THEN
+    # capped to 10 total). tasks.json/project-type-index is shared by every
+    # governed project in this table (enceladus, plus several others) -- a
+    # global cap meant any project's issue/feature/lesson/plan representation
+    # in the cold-start snapshot could be crowded out entirely by a more
+    # recently active sibling project, even though that project's own data
+    # was never actually missing from DynamoDB (confirmed via /feed/corpus,
+    # which has no caps and returns the full per-project set). Capping PER
+    # PROJECT before merging guarantees every active project keeps its own
+    # fair slice of the snapshot regardless of what other tenants are doing.
+    for _pid, (tasks, issues, features, lessons, plans) in _fan_out_by_project(projects, cutoff):
+        all_tasks.extend(_cap_by_updated_at(tasks, MAX_TASKS_FULL_REFRESH))
+        all_issues.extend(_cap_by_updated_at(issues, MAX_ISSUES_FULL_REFRESH))
+        all_features.extend(_cap_by_updated_at(features, MAX_FEATURES_FULL_REFRESH))
+        all_lessons.extend(_cap_by_updated_at(lessons, MAX_LESSONS_FULL_REFRESH))
+        all_plans.extend(_cap_by_updated_at(plans, MAX_PLANS_FULL_REFRESH))
+
+    all_tasks.sort(key=lambda x: x.get("task_id", ""))
+    all_issues.sort(key=lambda x: x.get("issue_id", ""))
+    all_features.sort(key=lambda x: x.get("feature_id", ""))
+    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
+    all_plans.sort(key=lambda x: x.get("plan_id", ""))
+
+    return all_tasks, all_issues, all_features, all_lessons, all_plans
+
+
+def _query_corpus_tracker_records() -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+]:
+    """Load the full tracker corpus without per-type refresh caps (ENC-TSK-L23).
+
+    ENC-TSK-M36: shares `_query_project_tracker_records` / `_fan_out_by_project`
+    with `_query_all_records` -- this used to be its own near-identical copy of
+    the per-project query loop, run sequentially. Same concurrency fix applies
+    here since this is the function `seedCacheFromCorpus` (warm IndexedDB
+    cache) and the Home dashboard's count tiles ultimately depend on.
+    """
     projects = _get_active_projects()
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
 
@@ -1164,66 +1582,71 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_lessons: List[Dict[str, Any]] = []
     all_plans: List[Dict[str, Any]] = []
 
-    for proj in projects:
-        pid = proj["project_id"]
-        paginator = ddb.get_paginator("query")
-        try:
-            for page in paginator.paginate(
-                TableName=DYNAMODB_TABLE,
-                IndexName="project-type-index",
-                KeyConditionExpression="project_id = :pid",
-                ExpressionAttributeValues={":pid": {"S": pid}},
-            ):
-                for raw_item in page.get("Items", []):
-                    record_type = _ddb_str(raw_item, "record_type")
-                    if record_type not in _TRANSFORM:
-                        continue
-                    # Per-record isolation: a single malformed record must not
-                    # take down the entire feed response (ENC-TSK-C31).
-                    try:
-                        if _is_stale_closed(raw_item, cutoff):
-                            continue
-                        transformed = _TRANSFORM[record_type](raw_item, pid)
-                    except Exception as rec_exc:  # noqa: BLE001
-                        logger.error(
-                            "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
-                            record_type,
-                            _ddb_str(raw_item, "item_id") or "?",
-                            pid,
-                            rec_exc,
-                        )
-                        continue
-                    if record_type == "task":
-                        all_tasks.append(transformed)
-                    elif record_type == "issue":
-                        all_issues.append(transformed)
-                    elif record_type == "feature":
-                        all_features.append(transformed)
-                    elif record_type == "lesson":
-                        all_lessons.append(transformed)
-                    elif record_type == "plan":
-                        all_plans.append(transformed)
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("DynamoDB query failed for project %s: %s", pid, exc)
-            continue
-
-    # Per-type caps (ENC-TSK-C34): keep only the most-recently-updated
-    # N records of each type so the total sync response stays under the
-    # Lambda 6 MB limit. Apply the cap BEFORE the deterministic id sort
-    # so the truncation window is chosen by recency, not alphabetically.
-    all_tasks = _cap_by_updated_at(all_tasks, MAX_TASKS_FULL_REFRESH)
-    all_issues = _cap_by_updated_at(all_issues, MAX_ISSUES_FULL_REFRESH)
-    all_features = _cap_by_updated_at(all_features, MAX_FEATURES_FULL_REFRESH)
-    all_lessons = _cap_by_updated_at(all_lessons, MAX_LESSONS_FULL_REFRESH)
-    all_plans = _cap_by_updated_at(all_plans, MAX_PLANS_FULL_REFRESH)
-
-    all_tasks.sort(key=lambda x: x.get("task_id", ""))
-    all_issues.sort(key=lambda x: x.get("issue_id", ""))
-    all_features.sort(key=lambda x: x.get("feature_id", ""))
-    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
-    all_plans.sort(key=lambda x: x.get("plan_id", ""))
+    for _pid, (tasks, issues, features, lessons, plans) in _fan_out_by_project(projects, cutoff):
+        all_tasks.extend(tasks)
+        all_issues.extend(issues)
+        all_features.extend(features)
+        all_lessons.extend(lessons)
+        all_plans.extend(plans)
 
     return all_tasks, all_issues, all_features, all_lessons, all_plans
+
+
+def _deserialize_document_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "document_id": _ddb_str(item, "document_id"),
+        "project_id": _ddb_str(item, "project_id"),
+        "title": _ddb_str(item, "title"),
+        "status": _ddb_str(item, "status") or "active",
+        "updated_at": _ddb_str(item, "updated_at") or None,
+        "created_at": _ddb_str(item, "created_at") or None,
+        "document_subtype": _ddb_str(item, "document_subtype") or "general",
+        "subtypepattern": _ddb_str(item, "subtypepattern") or "",
+        "keywords": _ddb_str_set(item, "keywords"),
+    }
+
+
+def _scan_documents_for_corpus() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    items: List[Dict[str, Any]] = []
+    scan_params: Dict[str, Any] = {"TableName": DOCUMENTS_TABLE}
+    try:
+        while True:
+            resp = ddb.scan(**scan_params)
+            for raw_item in resp.get("Items", []):
+                try:
+                    items.append(_deserialize_document_item(raw_item))
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("feed_query corpus: skipping document item: %s", exc)
+            last_key = resp.get("LastEvaluatedKey")
+            if not isinstance(last_key, dict) or not last_key:
+                break
+            scan_params["ExclusiveStartKey"] = last_key
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("Corpus documents scan failed: %s", exc)
+    return items
+
+
+def _get_corpus_entries() -> List[Dict[str, Any]]:
+    global _corpus_cache_entries, _corpus_cache_at
+    now = time.time()
+    if _corpus_cache_entries is not None and now - _corpus_cache_at < _CORPUS_CACHE_TTL:
+        return _corpus_cache_entries
+
+    tasks, issues, features, lessons, plans = _query_corpus_tracker_records()
+    tracker_entries = feed_corpus.build_tracker_entries_from_records(
+        tasks, issues, features, lessons, plans
+    )
+    document_entries = [
+        entry
+        for entry in (
+            feed_corpus.build_document_entry(doc) for doc in _scan_documents_for_corpus()
+        )
+        if entry
+    ]
+    _corpus_cache_entries = tracker_entries + document_entries
+    _corpus_cache_at = now
+    return _corpus_cache_entries
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1716,147 @@ def _attach_typed_relationships(
             record["typed_relationships"] = edges
 
 
+# ENC-TSK-M48: batches fan out concurrently (see _hydrate_records_via_batch_get)
+# with the same reasoning/sizing as _MAX_PROJECT_FANOUT_WORKERS (ENC-TSK-M36) --
+# each BatchGetItem call is I/O-bound, and the shared DDB client's
+# max_pool_connections=32 (also M36) already has headroom for this.
+_MAX_BATCH_GET_WORKERS = 24
+
+
+def _fetch_and_transform_batch(
+    batch: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[str],
+]:
+    """BatchGetItem + ``_TRANSFORM`` for a single <=100-key chunk."""
+    ddb = _get_ddb()
+    tasks: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    features: List[Dict[str, Any]] = []
+    lessons: List[Dict[str, Any]] = []
+    plans: List[Dict[str, Any]] = []
+    closed_ids: List[str] = []
+
+    try:
+        resp = ddb.batch_get_item(
+            RequestItems={DYNAMODB_TABLE: {"Keys": batch, "ConsistentRead": False}}
+        )
+        items_to_process = resp.get("Responses", {}).get(DYNAMODB_TABLE, [])
+
+        # One retry for unprocessed keys (DynamoDB throughput back-off).
+        unprocessed = (
+            resp.get("UnprocessedKeys", {}).get(DYNAMODB_TABLE, {}).get("Keys", [])
+        )
+        if unprocessed:
+            resp2 = ddb.batch_get_item(
+                RequestItems={DYNAMODB_TABLE: {"Keys": unprocessed, "ConsistentRead": False}}
+            )
+            items_to_process.extend(resp2.get("Responses", {}).get(DYNAMODB_TABLE, []))
+
+        for raw_item in items_to_process:
+            record_type = _ddb_str(raw_item, "record_type")
+            pid = _ddb_str(raw_item, "project_id")
+            if record_type not in _TRANSFORM:
+                continue
+
+            item_id = _ddb_str(raw_item, "item_id")
+            # Per-record isolation: a single malformed record must not
+            # take down the entire delta response (ENC-TSK-C31).
+            try:
+                if _is_stale_closed(raw_item, cutoff):
+                    if item_id:
+                        closed_ids.append(item_id)
+                    continue
+                transformed = _TRANSFORM[record_type](raw_item, pid)
+            except Exception as rec_exc:  # noqa: BLE001
+                logger.error(
+                    "feed_query hydrate: skipping record_type=%s item_id=%s project=%s: %s",
+                    record_type,
+                    item_id or "?",
+                    pid,
+                    rec_exc,
+                )
+                continue
+            if record_type == "task":
+                tasks.append(transformed)
+            elif record_type == "issue":
+                issues.append(transformed)
+            elif record_type == "feature":
+                features.append(transformed)
+            elif record_type == "lesson":
+                lessons.append(transformed)
+            elif record_type == "plan":
+                plans.append(transformed)
+
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("BatchGetItem failed: %s", exc)
+
+    return tasks, issues, features, lessons, plans, closed_ids
+
+
+def _hydrate_records_via_batch_get(
+    changed_keys: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[str],
+]:
+    """BatchGetItem + ``_TRANSFORM`` hydration for a list of (project_id, record_id) keys.
+
+    Factored out of ``_query_incremental`` (ENC-TSK-M39) so the OpenSearch-tier
+    selection path can reuse the exact same bounded-fetch/transform/sort logic
+    instead of re-deriving it -- the two callers differ only in how they arrive
+    at ``changed_keys`` (a GSI query here, an OpenSearch msearch selection for
+    the full-refresh path). Returns (tasks, issues, features, lessons, plans,
+    closed_ids), sorted the same way both callers already expect.
+
+    ENC-TSK-M48: chunks fan out concurrently instead of one BatchGetItem call
+    at a time -- fine for the incremental path's small per-poll delta, but the
+    OpenSearch-tier full-refresh path can hand this thousands of keys across
+    20+ active projects, and sequential chunking was the actual live-latency
+    bottleneck (graph_query_api's own selection round trip is already fast).
+    """
+    if not changed_keys:
+        return [], [], [], [], [], []
+
+    batches = [changed_keys[i : i + 100] for i in range(0, len(changed_keys), 100)]
+    max_workers = min(_MAX_BATCH_GET_WORKERS, len(batches))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        batch_results = list(
+            pool.map(lambda batch: _fetch_and_transform_batch(batch, cutoff), batches)
+        )
+
+    all_tasks: List[Dict[str, Any]] = []
+    all_issues: List[Dict[str, Any]] = []
+    all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
+    closed_ids: List[str] = []
+    for tasks, issues, features, lessons, plans, batch_closed_ids in batch_results:
+        all_tasks.extend(tasks)
+        all_issues.extend(issues)
+        all_features.extend(features)
+        all_lessons.extend(lessons)
+        all_plans.extend(plans)
+        closed_ids.extend(batch_closed_ids)
+
+    all_tasks.sort(key=lambda x: x.get("task_id", ""))
+    all_issues.sort(key=lambda x: x.get("issue_id", ""))
+    all_features.sort(key=lambda x: x.get("feature_id", ""))
+    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
+    all_plans.sort(key=lambda x: x.get("plan_id", ""))
+
+    return all_tasks, all_issues, all_features, all_lessons, all_plans, closed_ids
+
+
 def _query_incremental(
     since_iso: str,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
@@ -1313,7 +1877,6 @@ def _query_incremental(
     # Step 1: Collect keys of recently changed records from the GSI.
     # Table keys (project_id, record_id) are always projected into any GSI.
     changed_keys: List[Dict[str, Dict[str, str]]] = []
-    key_to_type: Dict[str, str] = {}  # "project_id#record_id" -> record_type
 
     for rtype in ("task", "issue", "feature", "lesson", "plan"):
         try:
@@ -1336,92 +1899,14 @@ def _query_incremental(
                             "project_id": {"S": pid},
                             "record_id": {"S": rid},
                         })
-                        key_to_type[f"{pid}#{rid}"] = rtype
         except (BotoCoreError, ClientError) as exc:
             logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
 
     if not changed_keys:
         return [], [], [], [], [], []
 
-    # Step 2: BatchGetItem for full records (max 100 per request).
-    all_tasks: List[Dict[str, Any]] = []
-    all_issues: List[Dict[str, Any]] = []
-    all_features: List[Dict[str, Any]] = []
-    all_lessons: List[Dict[str, Any]] = []
-    all_plans: List[Dict[str, Any]] = []
-    closed_ids: List[str] = []
-
-    for batch_start in range(0, len(changed_keys), 100):
-        batch = changed_keys[batch_start : batch_start + 100]
-        try:
-            resp = ddb.batch_get_item(
-                RequestItems={
-                    DYNAMODB_TABLE: {"Keys": batch, "ConsistentRead": False}
-                }
-            )
-            items_to_process = resp.get("Responses", {}).get(DYNAMODB_TABLE, [])
-
-            # One retry for unprocessed keys (DynamoDB throughput back-off).
-            unprocessed = (
-                resp.get("UnprocessedKeys", {})
-                .get(DYNAMODB_TABLE, {})
-                .get("Keys", [])
-            )
-            if unprocessed:
-                resp2 = ddb.batch_get_item(
-                    RequestItems={
-                        DYNAMODB_TABLE: {"Keys": unprocessed, "ConsistentRead": False}
-                    }
-                )
-                items_to_process.extend(
-                    resp2.get("Responses", {}).get(DYNAMODB_TABLE, [])
-                )
-
-            for raw_item in items_to_process:
-                record_type = _ddb_str(raw_item, "record_type")
-                pid = _ddb_str(raw_item, "project_id")
-                if record_type not in _TRANSFORM:
-                    continue
-
-                item_id = _ddb_str(raw_item, "item_id")
-                # Per-record isolation: a single malformed record must not
-                # take down the entire delta response (ENC-TSK-C31).
-                try:
-                    if _is_stale_closed(raw_item, cutoff):
-                        if item_id:
-                            closed_ids.append(item_id)
-                        continue
-                    transformed = _TRANSFORM[record_type](raw_item, pid)
-                except Exception as rec_exc:  # noqa: BLE001
-                    logger.error(
-                        "feed_query incremental: skipping record_type=%s item_id=%s project=%s: %s",
-                        record_type,
-                        item_id or "?",
-                        pid,
-                        rec_exc,
-                    )
-                    continue
-                if record_type == "task":
-                    all_tasks.append(transformed)
-                elif record_type == "issue":
-                    all_issues.append(transformed)
-                elif record_type == "feature":
-                    all_features.append(transformed)
-                elif record_type == "lesson":
-                    all_lessons.append(transformed)
-                elif record_type == "plan":
-                    all_plans.append(transformed)
-
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("BatchGetItem failed: %s", exc)
-
-    all_tasks.sort(key=lambda x: x.get("task_id", ""))
-    all_issues.sort(key=lambda x: x.get("issue_id", ""))
-    all_features.sort(key=lambda x: x.get("feature_id", ""))
-    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
-    all_plans.sort(key=lambda x: x.get("plan_id", ""))
-
-    return all_tasks, all_issues, all_features, all_lessons, all_plans, closed_ids
+    # Step 2: BatchGetItem + transform (shared with the OpenSearch-tier path).
+    return _hydrate_records_via_batch_get(changed_keys, cutoff)
 
 
 # ---------------------------------------------------------------------------
@@ -1472,6 +1957,166 @@ def _handle_feed_refresh() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _handle_snapshot() -> Dict[str, Any]:
+    """
+    ENC-TSK-K98 — authenticated cold-start snapshot (GET /api/v1/feed/tasks.json).
+
+    Replaces the previously PUBLIC S3 object at /mobile/v1/tasks.json. The whole
+    handler is JWT-gated (see lambda_handler: token is extracted + verified
+    before any dispatch), so an unauthenticated request 401s here instead of
+    reading a public file. Returns only the minimal fields the ui-v2 cockpit
+    needs to seed its feed before the realtime WSS connects
+    ({item_id, title, status, record_type, updated_at}) across all record types.
+    The minimal projection also shrinks the payload from ~7.7MB of full records
+    to a few KB and stops leaking descriptions / session / worklog data.
+    """
+    try:
+        tasks, issues, features, lessons, plans = _query_all_records()
+    except Exception as exc:  # noqa: BLE001 — surface a structured 500, not opaque
+        logger.error("snapshot query failed: %s", exc)
+        return _error(500, "Failed to query snapshot. Please try again.")
+
+    def _rows(records: List[Dict[str, Any]], id_key: str, record_type: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in records:
+            rid = r.get(id_key) or r.get("item_id")
+            if not rid:
+                continue
+            out.append(
+                {
+                    "item_id": rid,
+                    "title": r.get("title") or rid,
+                    "status": r.get("status") or "open",
+                    "record_type": record_type,
+                    "updated_at": r.get("updated_at") or None,
+                    # ENC-TSK-P60: governed priority rides the snapshot so the
+                    # client event path stops rendering metadata-less cards.
+                    "priority": r.get("priority") or None,
+                }
+            )
+        return out
+
+    rows = (
+        _rows(tasks, "task_id", "task")
+        + _rows(issues, "issue_id", "issue")
+        + _rows(features, "feature_id", "feature")
+        + _rows(lessons, "lesson_id", "lesson")
+        + _rows(plans, "plan_id", "plan")
+    )
+
+    body = {"generated_at": _now_z(), "tasks": rows, "feed_source": _last_feed_query_source}
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
+def _delta_corpus_entry(raw_item: Dict[str, Any], project_id: str) -> Optional[Dict[str, Any]]:
+    record_type = _ddb_str(raw_item, "record_type")
+    if record_type not in _TRANSFORM:
+        return None
+    transformed = _TRANSFORM[record_type](raw_item, project_id)
+    item_id = _ddb_str(raw_item, "item_id") or transformed.get(f"{record_type}_id", "")
+    attrs: Dict[str, Any] = {}
+    for key in ("status", "priority", "category", "severity"):
+        value = transformed.get(key)
+        if value:
+            attrs[key] = value
+    # ENC-TSK-P60: keep delta entries attr-parity with the corpus builder.
+    components = feed_corpus.normalize_str_list(
+        transformed.get("components"), str(item_id), "components"
+    )
+    if components:
+        attrs["components"] = components
+    if transformed.get("checkout_state"):
+        attrs["checkout_state"] = transformed["checkout_state"]
+    return feed_corpus.build_tracker_entry(
+        record_type,
+        str(item_id),
+        project_id,
+        str(transformed.get("title") or item_id),
+        transformed.get("updated_at"),
+        attrs,
+    )
+
+
+def _handle_delta(qs: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/feed/delta?since=<version_seq> — version-ordered incremental sync (ENC-TSK-L27)."""
+    since = feed_delta.parse_since_version((qs or {}).get("since"))
+    if since is None:
+        return _error(400, "'since' must be a non-negative integer version_seq")
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+    try:
+        items, tombstones, latest = feed_delta.query_version_delta(
+            _get_ddb(),
+            DYNAMODB_TABLE,
+            since,
+            is_stale_closed=_is_stale_closed,
+            transform_record=_delta_corpus_entry,
+            cutoff=cutoff,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed delta query failed: %s", exc)
+        return _error(500, "Failed to query feed delta. Please try again.")
+
+    body = {
+        "success": True,
+        "generated_at": _now_z(),
+        "since": since,
+        "latest_version_seq": latest,
+        "items": items,
+        "tombstones": tombstones,
+    }
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
+def _handle_corpus(qs: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/feed/corpus — cursor-paginated multi-table feed corpus (ENC-TSK-L23)."""
+    query = feed_corpus.parse_corpus_query(qs or {})
+    if query["sort"] not in feed_corpus.VALID_SORTS:
+        return _error(400, f"Invalid sort '{query['sort']}'")
+
+    if query["cursor"] and feed_corpus.decode_cursor(query["cursor"]) is None:
+        return _error(400, "Invalid cursor")
+
+    try:
+        entries = _get_corpus_entries()
+        page = feed_corpus.paginate_corpus(entries, query)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed corpus query failed: %s", exc)
+        return _error(500, "Failed to query feed corpus. Please try again.")
+
+    body = {
+        "success": True,
+        "generated_at": _now_z(),
+        "version": "1.0",
+        **page,
+    }
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
@@ -1483,13 +2128,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
 
     token = _extract_token(event)
-    if not token:
+    headers = event.get("headers") or {}
+    internal_key = headers.get("x-coordination-internal-key") or headers.get("X-Coordination-Internal-Key")
+    internal_ok = False
+    if internal_key:
+        expected = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+        previous = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+        valid = {k for k in (expected, previous) if k}
+        internal_ok = internal_key in valid
+
+    if not token and not internal_ok:
         return _error(401, "Authentication required. Please sign in.")
 
-    try:
-        claims = _verify_token(token)
-    except ValueError as exc:
-        return _error(401, str(exc))
+    claims: Dict[str, Any] = {"internal_service": True} if internal_ok and not token else {}
+    if token:
+        try:
+            claims = _verify_token(token)
+        except ValueError as exc:
+            return _error(401, str(exc))
 
     if method == "POST" and re.search(r"/api/v1/feed/refresh/?$", path):
         return _handle_feed_refresh()
@@ -1535,6 +2191,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _error(404, f"Subscription '{subscription_id}' not found")
 
         return _response(200, {"success": True, "subscription": _subscription_public(sub)})
+
+    # ENC-TSK-K98 — authenticated cold-start snapshot; replaces the public
+    # /mobile/v1/tasks.json S3 object. JWT already enforced above.
+    if method == "GET" and re.search(r"/api/v1/feed/tasks\.json/?$", path):
+        return _handle_snapshot()
+
+    if method == "GET" and re.search(r"/api/v1/feed/corpus/?$", path):
+        return _handle_corpus(event.get("queryStringParameters") or {})
+
+    if method == "GET" and re.search(r"/api/v1/feed/delta/?$", path):
+        return _handle_delta(event.get("queryStringParameters") or {})
 
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")
@@ -1586,25 +2253,67 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # exception class + message instead of escaping the handler and letting
     # Lambda runtime return the opaque {"message":"Internal Server Error"}
     # that made the live 500 impossible to diagnose from the client side.
+    # ENC-TSK-M74: continuation cursor for the server-side page cap. Validate
+    # up front so a malformed cursor 400s before any query work, matching the
+    # /feed/corpus contract (opaque base64; same encode/decode as corpus.py).
+    feed_cursor = str(qs.get("cursor") or "").strip()
+    if feed_cursor and feed_corpus.decode_cursor(feed_cursor) is None:
+        return _error(400, "Invalid cursor")
+
     try:
         try:
-            tasks, issues, features, lessons, plans = _query_all_records()
+            # ENC-TSK-M76: push the page cap UPSTREAM into the selection tier --
+            # _query_all_records now hydrates only the page window (<=cap+1
+            # records after the cursor) instead of the whole ~919-record corpus.
+            # The retained apply_page_cap below stays the final cap + cursor +
+            # next_cursor authority (M74 safety net); because the returned window
+            # is already strictly-after-cursor, it re-caps to the identical page.
+            tasks, issues, features, lessons, plans = _query_all_records(
+                cursor=feed_cursor or None, page_size=MAX_FEED_PAGE_RECORDS
+            )
         except Exception as exc:
             logger.error("feed query failed: %s", exc)
             return _error(500, "Failed to query feed data. Please try again.")
 
-        # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
+        # --- ENC-TSK-M74 server-side page cap + continuation cursor (retained safety net) ---
+        # Cap the merged page to MAX_FEED_PAGE_RECORDS most-recently-updated
+        # records BEFORE the (edge attach + serialization) tail so those costs
+        # only ever process the capped window -- this collapses the feed p95
+        # term. next_cursor is computed on the pre-scope window so continuation
+        # is stable regardless of any subscription scope applied below.
+        tasks, issues, features, lessons, plans, feed_next_cursor = feed_page.apply_page_cap(
+            tasks,
+            issues,
+            features,
+            lessons,
+            plans,
+            cursor=feed_cursor or None,
+            cap=MAX_FEED_PAGE_RECORDS,
+        )
+
+        # --- Attach typed relationship edges + context node scores (ENC-TSK-A57/K26) ---
         try:
             project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
             if project_ids:
-                edges_by_source = _query_typed_relationships(project_ids)
-                _attach_typed_relationships(tasks, "task_id", edges_by_source)
-                _attach_typed_relationships(issues, "issue_id", edges_by_source)
-                _attach_typed_relationships(features, "feature_id", edges_by_source)
-                _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
-                _attach_typed_relationships(plans, "plan_id", edges_by_source)
+                from record_extensions import (
+                    attach_record_extensions,
+                    query_typed_relationships_for_projects,
+                )
+
+                edges_by_source = query_typed_relationships_for_projects(
+                    _get_ddb(),
+                    DYNAMODB_TABLE,
+                    project_ids,
+                    ddb_str=_ddb_str,
+                    ddb_float=_ddb_float,
+                )
+                attach_record_extensions(tasks, "task_id", "task", edges_by_source)
+                attach_record_extensions(issues, "issue_id", "issue", edges_by_source)
+                attach_record_extensions(features, "feature_id", "feature", edges_by_source)
+                attach_record_extensions(lessons, "lesson_id", "lesson", edges_by_source)
+                attach_record_extensions(plans, "plan_id", "plan", edges_by_source)
         except Exception as exc:
-            logger.warning("Failed to attach typed relationships: %s", exc)
+            logger.warning("Failed to attach record extensions: %s", exc)
 
         subscription_meta = {
             "subscription_id": None,
@@ -1659,6 +2368,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "lessons": lessons,
                 "plans": plans,
                 "subscription": subscription_meta,
+                "feed_source": _last_feed_query_source,
+                "next_cursor": feed_next_cursor,
             },
         )
     except Exception as outer_exc:  # noqa: BLE001

@@ -41,6 +41,7 @@ Environment variables:
     CORS_ORIGIN                   default: https://jreese.net
     TOKEN_TTL_DAYS                token expiry in days (default: 90)
     COMPONENTS_TABLE              component registry DynamoDB table (default: component-registry)
+    DOCUMENT_API_BASE             document API base URL (defaults from TRACKER_API_BASE sibling)
     CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
     COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
 
@@ -55,11 +56,12 @@ identically to before.
 ENC-FTR-041: Added component registry enforcement. Tasks must declare ``components``
 (list of component_ids from component-registry table) before agent-initiated advances.
 The checkout service enforces that task.transition_type is at least as strict as the
-most restrictive component's transition_type (STRICTNESS_RANK ordering). Added
-``lambda_deploy`` transition_type arc (same as web_deploy but uses lambda_deploy_evidence
-at deploy-success). Added checkout-service-assistant inline auto-remediation: after 3
-consecutive deploy-success failures, the assistant infers the intended deploy method and
-loosens component registration if safe to do so.
+most restrictive component's artifact policy. Legacy component policy values are
+normalized to the v3 enum code|external_deploy|documentation at read time. Added
+``lambda_deploy`` task transition_type arc (same as web_deploy but uses
+lambda_deploy_evidence at deploy-success). Added checkout-service-assistant inline
+auto-remediation: after 3 consecutive deploy-success failures, the assistant infers
+the intended component policy if safe to do so.
 
 ENC-ISS-106: Added subtask lifecycle gate. Parent tasks (those with non-empty
 subtask_ids) cannot advance from coding-complete onward unless all direct children
@@ -86,12 +88,20 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
+import urllib.parse
 import urllib.request
 import urllib.error
 from urllib.parse import unquote
 
 import boto3
 from botocore.exceptions import ClientError
+
+from enceladus_shared.github_app_auth import (
+    GitHubAppConfig,
+    generate_app_jwt as _shared_generate_app_jwt,
+    get_installation_token as _shared_get_installation_token,
+    github_request as _shared_github_request,
+)
 
 from transition_type_matrix import (
     MATRIX_VERSION,
@@ -156,6 +166,10 @@ CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 COORDINATION_API_BASE = os.environ.get(
     "COORDINATION_API_BASE", "https://jreese.net/api/v1/coordination"
 )
+DOCUMENT_API_BASE = os.environ.get(
+    "DOCUMENT_API_BASE",
+    TRACKER_API_BASE.rsplit("/", 1)[0] + "/documents",
+).rstrip("/")
 # ENC-ISS-441 / ENC-TSK-J93: agent-sessions store (ENC-FTR-117 / ENC-TSK-I37)
 # read by the SCI enforcement gate for the grandfather-epoch check and the
 # last_activity_at heartbeat touch (J83 pattern).
@@ -206,20 +220,18 @@ _ddb = boto3.client("dynamodb", region_name=CHECKOUT_TOKENS_REGION)
 # ---------------------------------------------------------------------------
 # GitHub App installation token (ENC-TSK-B26)
 # Replaces static GITHUB_TOKEN PAT with runtime token generation from
-# GitHub App private key stored in Secrets Manager.
+# GitHub App private key stored in Secrets Manager. Minting/caching/retry
+# hardening lives in enceladus_shared.github_app_auth as of ENC-TSK-O07
+# (ENC-ISS-621 C4) — this module only carries its own config + thin
+# delegating wrappers so existing call sites and tests keep working.
 # ---------------------------------------------------------------------------
-_sm_client = None
-_private_key_cache: Optional[str] = None
-_private_key_fetched_at: float = 0.0
-_PRIVATE_KEY_TTL: float = 3600.0  # re-fetch private key from SM every hour
-
-_installation_token_cache: Optional[str] = None
-_installation_token_expires_at: float = 0.0
-# ENC-ISS-621: wall-clock time (time.time()) the currently cached token was
-# minted. Used both to age-gate the re-mint-on-401/403 retry in
-# _github_request (below) and to annotate the structured validation-failure
-# log line with token_age_s.
-_installation_token_minted_at: float = 0.0
+_GITHUB_APP_CONFIG = GitHubAppConfig(
+    app_id=GITHUB_APP_ID,
+    installation_id=GITHUB_INSTALLATION_ID,
+    private_key_secret=GITHUB_PRIVATE_KEY_SECRET,
+    region=CHECKOUT_TOKENS_REGION,
+    api_base=GITHUB_API_BASE,
+)
 
 # ENC-TSK-C68 / ENC-ISS-183: cached set of 'owner/repo' full names accessible to
 # the GitHub App installation. Used by _validate_commit to self-diagnose
@@ -231,99 +243,14 @@ _installation_repos_expires_at: float = 0.0
 _INSTALLATION_REPOS_TTL: float = 300.0
 
 
-def _get_secretsmanager():
-    global _sm_client
-    if _sm_client is None:
-        _sm_client = boto3.client("secretsmanager", region_name=CHECKOUT_TOKENS_REGION)
-    return _sm_client
-
-
-def _get_github_private_key() -> str:
-    """Fetch GitHub App private key from Secrets Manager (cached with TTL)."""
-    global _private_key_cache, _private_key_fetched_at
-    now = time.time()
-    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
-        return _private_key_cache
-    sm = _get_secretsmanager()
-    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
-    _private_key_cache = resp["SecretString"]
-    _private_key_fetched_at = now
-    return _private_key_cache
-
-
 def _generate_app_jwt() -> str:
     """Generate a short-lived RS256 JWT for the GitHub App."""
-    if not _JWT_AVAILABLE:
-        raise ValueError("PyJWT library not available — cannot generate GitHub App JWT")
-    if not GITHUB_APP_ID:
-        raise ValueError("GITHUB_APP_ID environment variable not set")
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + (9 * 60),
-        "iss": str(GITHUB_APP_ID),
-    }
-    private_key = _get_github_private_key()
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    return _shared_generate_app_jwt(_GITHUB_APP_CONFIG)
 
 
 def _get_installation_token() -> str:
     """Get a cached GitHub App installation token, refreshing when near expiry."""
-    global _installation_token_cache, _installation_token_expires_at, _installation_token_minted_at
-    now = time.time()
-    # Refresh with 5-minute buffer before the 1-hour expiry
-    if _installation_token_cache and now < (_installation_token_expires_at - 300):
-        return _installation_token_cache
-
-    if not GITHUB_INSTALLATION_ID:
-        raise ValueError("GITHUB_INSTALLATION_ID environment variable not set")
-
-    app_jwt = _generate_app_jwt()
-    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {app_jwt}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            _installation_token_cache = data["token"]
-            _installation_token_minted_at = now
-            # ENC-ISS-621: honor GitHub's own expires_at (ISO-8601) when present
-            # instead of assuming the documented 1-hour lifetime always holds.
-            # Falls back to now+3600 if the field is absent or unparseable.
-            expires_at_raw = data.get("expires_at")
-            expires_epoch = None
-            if expires_at_raw:
-                try:
-                    expires_epoch = datetime.fromisoformat(
-                        str(expires_at_raw).replace("Z", "+00:00")
-                    ).timestamp()
-                except (ValueError, TypeError):
-                    expires_epoch = None
-            _installation_token_expires_at = (
-                expires_epoch if expires_epoch is not None else now + 3600
-            )
-            # ENC-ISS-621: decisive diagnostic for the recurring 403-on-fresh-
-            # token incident — log expires_at and the *keys* (never values) of
-            # the permissions object GitHub actually granted this token. A
-            # mint missing 'contents' confirms a scope problem at source.
-            permission_keys = sorted((data.get("permissions") or {}).keys())
-            logger.info(
-                "[ISS-621] github_token_minted expires_at=%s permissions=%s",
-                expires_at_raw or "-",
-                ",".join(permission_keys) if permission_keys else "-",
-            )
-            return _installation_token_cache
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error("GitHub installation token exchange failed: %s %s", exc.code, body)
-        raise ValueError(f"GitHub token exchange failed ({exc.code}): {body}") from exc
+    return _shared_get_installation_token(_GITHUB_APP_CONFIG)
 
 
 def _get_github_token() -> Optional[str]:
@@ -451,6 +378,8 @@ def _error(
             code = "NOT_FOUND"
         elif status == 409:
             code = "CONFLICT"
+        elif status == 422:
+            code = "INVALID_INPUT"
         elif status >= 500:
             code = "INTERNAL_ERROR"
         else:
@@ -587,6 +516,29 @@ def _tracker_request(
         return 503, {"error": f"Tracker API unavailable: {exc}"}
 
 
+def _document_api_request(method: str, path: str) -> Tuple[int, dict]:
+    """Make a read-only request to document API using the coordination internal key."""
+    url = f"{DOCUMENT_API_BASE}{path}"
+    headers: dict = {
+        "Content-Type": "application/json",
+        "X-Coordination-Internal-Key": _PRIMARY_INTERNAL_KEY,
+    }
+    req = urllib.request.Request(url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+            return resp.status, body
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode())
+        except Exception:
+            body = {"error": str(exc)}
+        return exc.code, body
+    except Exception as exc:
+        logger.error("Document API request failed (%s %s): %s", method, path, exc)
+        return 503, {"error": f"Document API unavailable: {exc}"}
+
+
 def _get_task(project_id: str, task_id: str) -> Tuple[int, dict]:
     status, body = _tracker_request("GET", f"/{project_id}/task/{task_id}")
     # tracker_mutation GET now returns {"success": true, "record": {...}}.
@@ -623,8 +575,17 @@ def _checkout_task(project_id: str, task_id: str, provider: str) -> Tuple[int, d
     )
 
 
-def _release_task(project_id: str, task_id: str) -> Tuple[int, dict]:
-    return _tracker_request("DELETE", f"/{project_id}/task/{task_id}/checkout", {})
+def _release_task(
+    project_id: str, task_id: str, provider: Optional[str] = None
+) -> Tuple[int, dict]:
+    """DELETE .../checkout. ``provider`` (ENC-TSK-O37) is optional and, when
+    given, is forwarded so tracker_mutation's release path attributes
+    checked_in_by to the ACTING caller rather than falling back to the prior
+    holder's active_agent_session_id — needed for an accurate audit trail on
+    third-party stale-holder recovery. Omitted, this preserves the pre-O37
+    self-release payload exactly (empty body)."""
+    payload: dict = {"provider": provider} if provider else {}
+    return _tracker_request("DELETE", f"/{project_id}/task/{task_id}/checkout", payload)
 
 
 def _log_task(
@@ -703,95 +664,44 @@ def _log_plan(
 # GitHub API helpers
 # ---------------------------------------------------------------------------
 
-# ENC-ISS-621: patterns used to classify _github_request paths for the
-# structured validation-failure log line. Only commit and PR lookups are
-# covered — those are the only two callers of _github_request today.
-_GITHUB_COMMIT_PATH_RE = re.compile(r'^/repos/([^/]+)/([^/]+)/commits/([0-9a-fA-F]+)$')
-_GITHUB_PULLS_PATH_RE = re.compile(r'^/repos/([^/]+)/([^/]+)/pulls/(\d+)$')
+def _github_request(
+    path: str, *, repo: Optional[str] = None, sha: Optional[str] = None
+) -> Tuple[int, dict]:
+    """GET the GitHub REST API, authenticated when the App is configured.
 
-
-def _installation_token_age() -> Optional[float]:
-    """Age in seconds of the currently cached installation token, or None if
-    no token has ever been minted this Lambda lifetime."""
-    if not _installation_token_minted_at:
-        return None
-    return time.time() - _installation_token_minted_at
-
-
-def _log_github_validation_failure(path: str, status: int, body: dict) -> None:
-    """ENC-ISS-621: emit exactly one structured line for a commit/PR
-    validation failure so a GitHub-side scope/token issue is diagnosable from
-    a single CloudWatch line instead of correlating several. No-op for paths
-    that are not a commit or PR lookup."""
-    m = _GITHUB_COMMIT_PATH_RE.match(path)
-    if m:
-        endpoint, owner, repo, sha = "commits", m.group(1), m.group(2), m.group(3)
-    else:
-        m = _GITHUB_PULLS_PATH_RE.match(path)
-        if not m:
-            return
-        endpoint, owner, repo, sha = "pulls", m.group(1), m.group(2), "-"
-
-    msg = body.get("message", "-") if isinstance(body, dict) else "-"
-    token_age = _installation_token_age()
-    token_age_s = f"{token_age:.0f}" if token_age is not None else "-"
-    logger.warning(
-        "[ISS-621] github_validation_fail endpoint=%s status=%s msg=%s "
-        "token_age_s=%s repo=%s sha=%s",
-        endpoint, status, msg, token_age_s, f"{owner}/{repo}", sha,
-    )
-
-
-def _do_github_get(url: str, headers: dict) -> Tuple[int, dict]:
-    """Single GET against the GitHub API. Split out of _github_request so the
-    ENC-ISS-621 re-mint retry can issue a second attempt without duplicating
-    the request/error-handling logic."""
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
+    ENC-TSK-O07 (ENC-ISS-621 C4): the authenticated path now runs through
+    enceladus_shared.github_app_auth.github_request(), which re-mints and
+    retries once on a 401/403 past the 60s token-age floor. When the App
+    isn't configured, preserves the pre-existing unauthenticated fallback
+    (no token to mint, so no hardening applies).
+    """
+    if not GITHUB_APP_ID or not GITHUB_INSTALLATION_ID:
+        logger.warning("GitHub App not configured — API calls will be unauthenticated")
+        url = f"{GITHUB_API_BASE}{path}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
+        )
         try:
-            body = json.loads(exc.read().decode())
-        except Exception:
-            body = {"error": str(exc)}
-        return exc.code, body
-    except Exception as exc:
-        return 503, {"error": str(exc)}
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read().decode())
+            except Exception:
+                body = {"error": str(exc)}
+            return exc.code, body
+        except Exception as exc:
+            return 503, {"error": str(exc)}
 
-
-def _github_request(path: str) -> Tuple[int, dict]:
-    global _installation_token_cache
-
-    url = f"{GITHUB_API_BASE}{path}"
-    headers = {"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
-    token = _get_github_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    status, body = _do_github_get(url, headers)
-
-    # ENC-ISS-621: GitHub has been observed 401/403-ing installation tokens
-    # well inside their advertised lifetime. Re-mint and retry EXACTLY ONCE —
-    # never loop. The 60s token-age floor prevents a mint storm when GitHub is
-    # 403-ing even brand-new tokens (a scope/outage problem a re-mint cannot
-    # fix); in that case we just return this failure.
-    if status in (401, 403):
-        token_age = _installation_token_age()
-        if token_age is not None and token_age > 60:
-            _installation_token_cache = None
-            new_token = _get_github_token()
-            retry_headers = dict(headers)
-            if new_token:
-                retry_headers["Authorization"] = f"Bearer {new_token}"
-            else:
-                retry_headers.pop("Authorization", None)
-            status, body = _do_github_get(url, retry_headers)
-
-    if status != 200:
-        _log_github_validation_failure(path, status, body)
-
-    return status, body
+    return _shared_github_request(
+        _GITHUB_APP_CONFIG,
+        "GET",
+        path,
+        timeout=8,
+        extra_headers={"User-Agent": "checkout-service/1.0"},
+        repo=repo,
+        sha=sha,
+    )
 
 
 def _list_installation_repos() -> set:
@@ -873,7 +783,9 @@ def _validate_commit(owner: str, repo: str, commit_sha: str) -> Tuple[bool, str]
     devops-project task stalled at coding-complete with the ambiguous
     "Commit <sha> not found in NX-2021-L/devops" message.
     """
-    status, body = _github_request(f"/repos/{owner}/{repo}/commits/{commit_sha}")
+    status, body = _github_request(
+        f"/repos/{owner}/{repo}/commits/{commit_sha}", repo=f"{owner}/{repo}", sha=commit_sha
+    )
     if status == 200:
         return True, ""
     if status == 404:
@@ -900,7 +812,7 @@ def _validate_pr_merged(
     owner: str, repo: str, pr_id: int, merged_at: str
 ) -> Tuple[bool, str]:
     """Verify PR is merged and merged_at matches. Returns (valid, reason)."""
-    status, body = _github_request(f"/repos/{owner}/{repo}/pulls/{pr_id}")
+    status, body = _github_request(f"/repos/{owner}/{repo}/pulls/{pr_id}", repo=f"{owner}/{repo}")
     if status == 404:
         return False, f"PR #{pr_id} not found in {owner}/{repo}"
     if status != 200:
@@ -938,6 +850,49 @@ def _parse_github_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _normalize_owner_repo(
+    owner: Optional[str], repo: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Strip a redundant leading '<owner>/' from repo.
+
+    ENC-TSK-O34 / ENC-ISS-603: every owner/repo resolution surface (task-level
+    override, project-config fallback) is funneled through here as a final
+    normalization step so f"{owner}/{repo}" can never double the owner when
+    repo already carries an owner-qualified value (e.g. owner='NX-2021-L',
+    repo='NX-2021-L/enceladus' -> repo='enceladus'). A no-op when repo is
+    already bare.
+    """
+    if owner and repo:
+        prefix = f"{owner}/"
+        if repo.startswith(prefix):
+            repo = repo[len(prefix):] or None
+    return owner, repo
+
+
+def _split_owner_repo(value: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse an owner/repo pair from either a full GitHub URL
+    (https://github.com/OWNER/REPO) or a plain 'OWNER/REPO' string.
+
+    ENC-TSK-O34 / ENC-ISS-603: single shared parsing path for every
+    github_repo resolution surface so a value is split into owner/repo
+    exactly once, then passed through _normalize_owner_repo, rather than
+    each call site re-implementing its own partition/parse logic that can
+    drift out of sync with the others.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None, None
+    if value.startswith("http://") or value.startswith("https://"):
+        owner, repo = _parse_github_url(value)
+    else:
+        owner, _, repo = value.partition("/")
+        owner = owner.strip() or None
+        repo = repo.strip() or None
+        if not repo:
+            return None, None
+    return _normalize_owner_repo(owner, repo)
+
+
 def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the GitHub owner/repo for a project from the projects table.
 
@@ -958,7 +913,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
 
         repo_url = item.get("repo", {}).get("S", "")
         if repo_url:
-            return _parse_github_url(repo_url)
+            return _split_owner_repo(repo_url)
 
         # Walk up to parent (one level)
         parent_id = item.get("parent", {}).get("S", "")
@@ -973,7 +928,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
                 if item2:
                     repo_url2 = item2.get("repo", {}).get("S", "")
                     if repo_url2:
-                        return _parse_github_url(repo_url2)
+                        return _split_owner_repo(repo_url2)
             except Exception as exc:
                 logger.warning("Failed to look up parent project '%s': %s", parent_id, exc)
 
@@ -989,7 +944,7 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
             for child in scan_resp.get("Items", []):
                 child_repo = child.get("repo", {}).get("S", "")
                 if child_repo:
-                    return _parse_github_url(child_repo)
+                    return _split_owner_repo(child_repo)
         except Exception as exc:
             logger.warning("Failed to scan child projects for '%s': %s", project_id, exc)
 
@@ -999,33 +954,31 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
         return None, None
 
 
-def _resolve_task_github_repo(task: dict, project_id: str) -> Tuple[Optional[str], Optional[str]]:
+def _resolve_task_github_repo(
+    task: dict, project_id: str
+) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the GitHub owner/repo to validate a task's commit/PR/merge against.
 
-    ENC-FTR-119: satellite repos (e.g. enceladus-support) host code for tasks
-    that still live under the primary project's project_id, so the
-    project-level ``repo`` field alone (``_resolve_github_repo``) cannot
-    express "this one task's code is in a different repo than its siblings."
-    Previously the only way to correct that per-call was for the caller to
-    remember to pass ``transition_evidence.owner``/``repo`` at every single
-    advance (committed, pr, merged-main, closed) -- forgetting any one of them
-    silently fell back to the project default and produced a confusing GitHub
-    404/422 far from the real cause.
+    ENC-FTR-119: satellite repos host code for tasks that still live under the
+    primary project's project_id, so the project-level ``repo`` field alone
+    (``_resolve_github_repo``) cannot express "this one task's code is in a
+    different repo than its siblings." A task-level ``github_repo`` field (a
+    plain "owner/repo" string or a full https://github.com/owner/repo URL,
+    settable via the ordinary tracker.set field-update path) is checked first
+    and, once set, durably overrides the project default for every
+    subsequent advance on that task. Falls back to ``_resolve_github_repo``
+    when the task has no override.
 
-    A task-level ``github_repo`` field (a plain "owner/repo" string or a full
-    https://github.com/owner/repo URL, settable via the ordinary tracker.set
-    field-update path) is now checked first and, once set, durably overrides
-    the project default for every subsequent advance on that task -- no
-    per-call evidence required. Falls back to ``_resolve_github_repo`` when
-    the task has no override, so ordinary same-repo tasks are unaffected.
+    ENC-TSK-O34 / ENC-ISS-603: both the override and project-fallback paths
+    are funneled through the shared ``_split_owner_repo`` / normalization
+    helpers so a plain-form or already-qualified repo value can never double
+    the owner when concatenated downstream (previously only the full-URL
+    override form worked reliably; the plain form and the project-config
+    fallback were the doubling-prone paths).
     """
     task_repo = (task.get("github_repo") or "").strip()
     if task_repo:
-        if task_repo.startswith("http"):
-            owner, repo = _parse_github_url(task_repo)
-        else:
-            owner, _, repo = task_repo.partition("/")
-            owner, repo = (owner or None), (repo or None)
+        owner, repo = _split_owner_repo(task_repo)
         if owner and repo:
             return owner, repo
         logger.warning(
@@ -1102,33 +1055,6 @@ def _delete_token(token_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ENC-TSK-I40: Agent session ID validation — stamping integration point
-# ---------------------------------------------------------------------------
-
-_SES_ID_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
-
-
-def _resolve_agent_session_id(raw_id: Any) -> Tuple[Optional[str], Optional[str]]:
-    """Validate and return the server-minted agent session ID.
-
-    ENC-TSK-I40 stamping integration point. V4 rebind: replace this function
-    body to add an existence check against the v4 identity service without
-    reshaping any caller. The caller reads only (session_id, error).
-
-    Returns (session_id, None) on success, (None, error_message) on failure.
-    """
-    ses_id = (str(raw_id) if raw_id else "").strip()
-    if not ses_id:
-        return None, "active_agent_session_id is required in request body"
-    if not _SES_ID_RE.match(ses_id):
-        return None, (
-            f"active_agent_session_id must be a server-minted ENC-SES-NNN "
-            f"(obtained via agent.register); got: {ses_id!r}"
-        )
-    return ses_id, None
-
-
-# ---------------------------------------------------------------------------
 # SCI enforcement gate (ENC-ISS-441 Phase 3 / ENC-TSK-J93)
 #
 # Agent-origin mutations — requests presenting a minted ENC-SES-NNN id as the
@@ -1145,10 +1071,43 @@ def _resolve_agent_session_id(raw_id: Any) -> Tuple[Optional[str], Optional[str]
 # deploys (PLN-047 / ENC-LSN-053 Sev1 class).
 SCI_ENFORCEMENT_EPOCH = "2026-07-02T12:00:00Z"
 
+# ENC-ISS-441 / ENC-TSK-J96: terminal-state retirement nudge (part 3 of the io-designed
+# session retirement lifecycle). Injected verbatim into terminal-state success envelopes;
+# the acting agent either retires its session autonomously (scope exhausted) or surfaces
+# the prompt to io. Exact io-specified text from the ENC-ISS-441 worklog.
+RETIREMENT_PROMPT = (
+    "Prompt the user if this session can now be retired, or retire the session if it "
+    "is certain that the full scope of the current session assignment is complete."
+)
+
+
+def _with_retirement_prompt(envelope: dict, new_status: str, terminal_statuses=("closed",)) -> dict:
+    """Inject the ENC-TSK-J96 retirement nudge when a record lands in a final state."""
+    if new_status in terminal_statuses:
+        envelope["retirement_prompt"] = RETIREMENT_PROMPT
+    return envelope
+
 # J92 token shape: pk = "SCI-{uuid4_hex}"
 _SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
 # I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
 _AGENT_SESSION_ID_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
+
+
+def _touch_if_agent_session(provider: Any) -> None:
+    """ENC-TSK-L35: best-effort session heartbeat/updated_at bump for a
+    session-requiring call whose provider is a minted ENC-SES id.
+
+    Unlike ``_validate_sci_gate`` this performs NO enforcement — it never
+    rejects the request and never validates an SCI. It exists so that plan
+    checkout/advance/log (which do not run the SCI enforcement gate today)
+    still bump the acting session's own updated_at, matching the AC that a
+    session record's updated-time bumps on every session-requiring call. Task
+    handlers do not need this helper: their SCI gate call already performs the
+    (now gate-entry-ordered) touch.
+    """
+    provider_id = str(provider or "").strip()
+    if _AGENT_SESSION_ID_RE.match(provider_id):
+        _touch_session_activity(provider_id)
 
 _SCI_REMEDIATION = (
     "Obtain a Session Claim ID via coordination agent.claim (register->claim "
@@ -1205,7 +1164,12 @@ def _lookup_sci(sci_id: str) -> Optional[dict]:
 
 
 def _get_agent_session(session_id: str) -> Optional[dict]:
-    """Fetch an agent-session record (ENC-FTR-117 store; key session_id)."""
+    """Fetch an agent-session record (ENC-FTR-117 store; key session_id).
+
+    ENC-TSK-O37: also surfaces ``last_activity_at`` / ``claimed_at`` so callers
+    can compute an idle-reference timestamp (mirrors agent_id_alloc._idle_reference's
+    last_activity_at > claimed_at > created_at precedence) without a second read.
+    """
     try:
         resp = _ddb.get_item(
             TableName=AGENT_SESSIONS_TABLE,
@@ -1220,12 +1184,17 @@ def _get_agent_session(session_id: str) -> Optional[dict]:
     return {
         "session_id": item.get("session_id", {}).get("S", ""),
         "created_at": item.get("created_at", {}).get("S", ""),
+        "claimed_at": item.get("claimed_at", {}).get("S", ""),
+        "last_activity_at": item.get("last_activity_at", {}).get("S", ""),
         "status": item.get("status", {}).get("S", ""),
     }
 
 
 def _touch_session_activity(session_id: str) -> None:
-    """Refresh the session's last_activity_at heartbeat (J83 pattern).
+    """Refresh the session's last_activity_at + updated_at heartbeat (J83 pattern,
+    extended by ENC-TSK-L35 to also stamp ``updated_at`` so the SES record's
+    updated-time bumps on every session-requiring call, matching the
+    updated_at convention every other tracker record type already exposes).
 
     Conditional on the session still being live (allocated/claimed); a retired
     or vanished session is a silent no-op — the touch must NEVER fail the
@@ -1236,7 +1205,7 @@ def _touch_session_activity(session_id: str) -> None:
         _ddb.update_item(
             TableName=AGENT_SESSIONS_TABLE,
             Key={"session_id": {"S": session_id}},
-            UpdateExpression="SET last_activity_at = :now",
+            UpdateExpression="SET last_activity_at = :now, updated_at = :now",
             ConditionExpression=(
                 "attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)"
             ),
@@ -1270,8 +1239,13 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
 
     Callers invoke this only when ``session_id`` matches _AGENT_SESSION_ID_RE.
     Returns None when the mutation may proceed (grandfathered session or valid
-    SCI, in which case last_activity_at is touched), else the 403 rejection
-    response naming the specific failure mode.
+    SCI), else the 403 rejection response naming the specific failure mode.
+
+    ENC-TSK-L35: the session heartbeat (last_activity_at / updated_at) is
+    touched unconditionally for every call that reaches this gate — BEFORE the
+    grandfather-epoch short-circuit below — so the SES record's updated-time
+    bumps on every session-requiring call, not only post-epoch SCI-validated
+    ones. (Previously grandfathered sessions were never touched here.)
     """
     # Step 1: the session must exist — a fabricated ENC-SES id must not bypass
     # the gate (fail closed).
@@ -1282,6 +1256,11 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
             f"Agent session '{session_id}' is not a registered session; "
             "mutation rejected (fail-closed).",
         )
+
+    # ENC-TSK-L35: bump the session's own heartbeat/updated_at now, before any
+    # further gating, so every session-requiring call is reflected on the SES
+    # record regardless of SCI outcome below.
+    _touch_session_activity(session_id)
 
     # Step 2: grandfather epoch gate — sessions created before the Phase 3
     # ship instant pass without an SCI (skip token validation entirely).
@@ -1335,9 +1314,74 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
             f"'{token.get('session_id')}', not '{session_id}'.",
         )
 
-    # Valid SCI — refresh the session heartbeat (never fails the mutation).
-    _touch_session_activity(session_id)
+    # Valid SCI. The heartbeat/updated_at touch already ran at gate entry
+    # (ENC-TSK-L35), so no further touch is needed here.
     return None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O37 / ENC-ISS-597: stale-holder checkout recovery
+# ---------------------------------------------------------------------------
+
+# Mirrors coordination_api/agent_id_alloc.SCI_TTL_SECONDS (86400 = 24h). The two
+# lambdas ship as separate packages, so this is a deliberately duplicated literal
+# rather than a cross-package import; keep in sync if the mint_sci TTL changes.
+_HOLDER_SCI_TTL_SECONDS = 86400
+
+_LIVE_SESSION_STATUSES = frozenset({"allocated", "claimed"})
+
+
+def _session_idle_reference(session: dict) -> str:
+    """Best-known last-activity timestamp for a session.
+
+    Mirrors agent_id_alloc._idle_reference's precedence (last_activity_at >
+    claimed_at > created_at) so a stale-holder determination here agrees with
+    what the scheduled idle-sweep would eventually conclude.
+    """
+    return str(
+        session.get("last_activity_at")
+        or session.get("claimed_at")
+        or session.get("created_at")
+        or ""
+    )
+
+
+def _session_terminal_state(session: Optional[dict]) -> Tuple[bool, str]:
+    """Determine whether a checkout holder's agent session is TERMINAL.
+
+    A session is terminal (ENC-ISS-597) when any of:
+      * the session record is absent (never existed, or hard-deleted) — ``absent``.
+      * its status is not live (``allocated``/``claimed``), i.e. already flipped to
+        ``retired`` by the idle-sweep or unclaim-sweep — ``retired``.
+      * its idle-reference timestamp (last_activity_at > claimed_at > created_at,
+        matching agent_id_alloc._idle_reference) is older than the SCI TTL
+        (86400s) — the session's bound SCI must have expired even though no
+        sweep has run yet to flip status — ``sci_ttl_elapsed``.
+
+    Returns (is_terminal, reason). reason is one of "absent", "retired",
+    "sci_ttl_elapsed", or "live" (not terminal).
+    """
+    if session is None:
+        return True, "absent"
+
+    status = str(session.get("status") or "").strip()
+    if status not in _LIVE_SESSION_STATUSES:
+        return True, "retired"
+
+    reference = _session_idle_reference(session)
+    if reference:
+        try:
+            ref_dt = datetime.strptime(reference, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            ref_dt = None
+        if ref_dt is not None:
+            elapsed = (datetime.now(timezone.utc) - ref_dt).total_seconds()
+            if elapsed >= _HOLDER_SCI_TTL_SECONDS:
+                return True, "sci_ttl_elapsed"
+
+    return False, "live"
 
 
 # ---------------------------------------------------------------------------
@@ -1361,11 +1405,11 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     treat checkout_count as read-only. It feeds the FTR-076 v2 IMPLEMENTS edge
     immutability gate (designed->development requires checkout_count >= 1).
     """
-    provider, ses_err = _resolve_agent_session_id(body.get("active_agent_session_id"))
-    if ses_err:
+    provider = (body.get("active_agent_session_id") or "").strip()
+    if not provider:
         return _validation_error(
             400,
-            ses_err,
+            "active_agent_session_id is required in request body",
             task_id=task_id,
             target_status="in-progress",
             required_fields=["active_agent_session_id"],
@@ -1428,8 +1472,8 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
             return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(pre_transition_type, 99)
-            required_rank = STRICTNESS_RANK.get(required_type, 0)
-            if task_rank > required_rank:
+            required_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(required_type, -1)
+            if not _task_transition_satisfies_component_requirement(pre_transition_type, required_type):
                 # Identify the specific conflicting component for the error message.
                 # F50/AC-3: read required_transition_type, not the legacy transition_type.
                 conflicting_component = None
@@ -1442,15 +1486,15 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         item = resp.get("Item")
                         if not item:
                             continue
-                        comp_type = (
+                        raw_comp_type = (
                             item.get("required_transition_type", {}).get("S") or ""
                         ).strip()
-                        if not comp_type:
+                        if not raw_comp_type:
                             # Should be unreachable after _get_required_transition_type
                             # succeeded for this component; skip defensively.
                             continue
-                        comp_rank = STRICTNESS_RANK.get(comp_type, 0)
-                        if comp_rank < task_rank:
+                        comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+                        if not _task_transition_satisfies_component_requirement(pre_transition_type, comp_type):
                             conflicting_component = cid
                             break
                     except Exception:
@@ -1458,10 +1502,11 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                 return _validation_error(
                     400,
                     (
-                        f"Task transition_type '{pre_transition_type}' (rank {task_rank}) is less strict "
-                        f"than required '{required_type}' (rank {required_rank}) enforced by component "
-                        f"'{conflicting_component or pre_components[0]}'. Update task.transition_type "
-                        f"to at least '{required_type}' before checking out."
+                        f"Task transition_type '{pre_transition_type}' (rank {task_rank}) cannot satisfy "
+                        f"component required_transition_type '{required_type}' (max task rank {required_rank}) "
+                        f"enforced by component '{conflicting_component or pre_components[0]}'. Update "
+                        "task.transition_type to a lifecycle arc that produces the required artifact class "
+                        "before checking out."
                     ),
                     task_id=task_id,
                     target_status="in-progress",
@@ -1478,7 +1523,7 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         "arguments": {
                             "record_id": task_id,
                             "field": "transition_type",
-                            "value": required_type,
+                            "value": _recommended_task_transition_for_component_policy(required_type),
                             "governance_hash": "<governance_hash>",
                         },
                     },
@@ -1553,6 +1598,127 @@ def _handle_release(project_id: str, task_id: str, body: dict) -> dict:
     if status not in (200, 201):
         return _error(status, result.get("error", f"Release failed (HTTP {status})"))
     return _response(200, {"success": True, "task_id": task_id})
+
+
+def _handle_release_recover(project_id: str, task_id: str, body: dict) -> dict:
+    """POST .../checkout/recover — ENC-TSK-O37 / ENC-ISS-597.
+
+    Governed recovery for a checkout wedged behind a dead agent session.
+    Unlike DELETE .../checkout (unconditional release — no ownership check
+    today), this endpoint authorizes a THIRD PARTY to clear someone else's
+    checkout ONLY when the current holder's agent session is server-verified
+    TERMINAL (see _session_terminal_state): the session record is absent,
+    already flipped to 'retired' (idle-sweep / unclaim-sweep), or its
+    idle-reference timestamp is already past the SCI TTL even though no sweep
+    has run yet. A LIVE holder's checkout is never touched by a third party —
+    this is a narrow recovery path, not a blanket force-release. Every
+    successful third-party recovery writes an audit worklog on the task naming
+    the prior holder and the terminality evidence BEFORE the checkout clears.
+
+    Body: {"provider": "<caller's own ENC-SES id>", "sci": "<caller's SCI>",
+    "governance_hash": "<optional>"}.
+    """
+    caller = (body.get("provider") or "").strip()
+    if not caller:
+        return _error(
+            400,
+            "provider (the recovering agent session's own ENC-SES id) is required",
+            code="INVALID_INPUT",
+            details={"task_id": task_id, "required_fields": ["provider"]},
+        )
+
+    # Recovery is an agent-origin governed mutation like advance/log, not an
+    # anonymous/system action — the caller must authenticate as a live agent
+    # session with a valid SCI before anything else is read or written.
+    if not _AGENT_SESSION_ID_RE.match(caller):
+        return _error(
+            403,
+            "checkout recovery requires an authenticated agent-session provider "
+            f"(ENC-SES-... id); got '{caller}'.",
+            code="PERMISSION_DENIED",
+        )
+    sci_err = _validate_sci_gate(caller, body.get("sci"))
+    if sci_err:
+        return sci_err
+
+    status, task = _get_task(project_id, task_id)
+    if status != 200:
+        return _error(status, task.get("error", f"Task not found: {task_id}"))
+
+    if not task.get("active_agent_session", False):
+        return _error(
+            400,
+            f"Task {task_id} is not currently checked out; nothing to recover.",
+            code="INVALID_INPUT",
+            details={"task_id": task_id},
+        )
+    holder = str(task.get("active_agent_session_id") or "").strip()
+
+    # Self-recovery: the caller already holds the checkout — this is an
+    # ordinary release, not a stale-holder takeover. No terminality check.
+    if holder == caller:
+        rel_status, rel_result = _release_task(project_id, task_id, provider=caller)
+        if rel_status not in (200, 201):
+            return _error(
+                rel_status,
+                rel_result.get("error", f"Release failed (HTTP {rel_status})"),
+            )
+        return _response(200, {
+            "success": True, "task_id": task_id,
+            "recovered": False, "reason": "self_release",
+        })
+
+    if not _AGENT_SESSION_ID_RE.match(holder):
+        # Non-agent holders (github, coordination_dispatch, PWA users, ...) are
+        # out of scope — "dead session" recovery only applies to minted
+        # ENC-SES holders (ENC-ISS-597). Reject rather than silently no-op.
+        return _error(
+            409,
+            f"Task {task_id} is held by a non-agent-session provider '{holder}'; "
+            "stale-session recovery does not apply.",
+            code="CONFLICT",
+            details={"holder": holder},
+        )
+
+    holder_session = _get_agent_session(holder)
+    is_terminal, reason = _session_terminal_state(holder_session)
+    if not is_terminal:
+        return _error(
+            409,
+            f"Task {task_id} is held by an active session '{holder}'; "
+            "third-party recovery denied. Ask the holder to release, or wait "
+            "for the session to become terminal.",
+            code="CONFLICT",
+            details={"holder": holder, "holder_state": reason},
+        )
+
+    # Terminal holder confirmed — write the audit worklog BEFORE clearing the
+    # checkout, so the record's history always carries the recovery evidence
+    # even if the release call below fails and must be retried.
+    audit_note = (
+        f"[RECOVERY] checkout.recover (ENC-TSK-O37/ENC-ISS-597): prior holder "
+        f"'{holder}' verified TERMINAL (reason={reason}); checkout cleared by "
+        f"'{caller}'."
+    )
+    _log_task(
+        project_id, task_id, audit_note,
+        provider=caller, governance_hash=body.get("governance_hash"),
+    )
+
+    rel_status, rel_result = _release_task(project_id, task_id, provider=caller)
+    if rel_status not in (200, 201):
+        return _error(
+            rel_status,
+            rel_result.get("error", f"Recovery release failed (HTTP {rel_status})"),
+        )
+    logger.info(
+        "[SUCCESS] checkout.recover project=%s task=%s prior_holder=%s reason=%s by=%s",
+        project_id, task_id, holder, reason, caller,
+    )
+    return _response(200, {
+        "success": True, "task_id": task_id,
+        "recovered": True, "prior_holder": holder, "reason": reason,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1759,19 +1925,27 @@ _LIVE_VALIDATION_EVIDENCE_SCHEMA: Dict[str, Any] = {
 _CODE_ON_MAIN_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required_fields": {
-        "commit_sha": {
+        "transition_evidence.code_on_main_evidence.commit_sha": {
             "type": "string",
             "format": "40-char lowercase or uppercase hex SHA",
             "description": "Commit that must already be reachable from main.",
         },
     },
-    "example": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+    "accepted_shapes": [
+        "an object {commit_sha: <40-hex sha on main>}",
+        "a bare 40-hex sha string",
+        "a note string, provided alongside a top-level transition_evidence.commit_sha "
+        "that is itself a 40-hex sha",
+    ],
+    "example": {
+        "code_on_main_evidence": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+    },
 }
 
 _NO_CODE_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required_fields": {
-        "no_code_evidence": {
+        "transition_evidence.no_code_evidence": {
             "type": "string",
             "format": "non-empty string",
             "description": "Human-readable audit note describing what changed and how it was verified.",
@@ -1780,6 +1954,45 @@ _NO_CODE_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "example": {
         "no_code_evidence": "Updated governance metadata and confirmed the new rules are visible to agents.",
     },
+}
+
+_EXTERNAL_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "comp_external_id": {
+            "type": "string",
+            "format": "non-empty string",
+            "description": "Stable identifier retrieved from the external system for the live component resource.",
+        },
+        "retrieval_steps": {
+            "type": "string",
+            "format": "non-empty string, minimum 20 characters",
+            "description": "Concrete steps a future operator can follow to re-retrieve comp_external_id.",
+        },
+    },
+    "example": {
+        "external_deploy_evidence": {
+            "comp_external_id": "90df28c1",
+            "retrieval_steps": "Open the external console, select the production resource, and copy its instance identifier from the details panel.",
+        }
+    },
+}
+
+_DOCUMENTATION_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "documentation_evidence": {
+            "type": "array[string]",
+            "format": "non-empty DOC-* identifiers",
+            "description": "At least one DOC id must resolve to an extant document and be novel or fresh at close.",
+        },
+    },
+    "close_gate": {
+        "fresh_window_minutes": 15,
+        "novel": "not referenced by another closed task's documentation_evidence",
+        "fresh": "document.updated_at is within 15 minutes of the close attempt",
+    },
+    "example": {"documentation_evidence": ["DOC-EDEFF7CD0BD5"]},
 }
 
 
@@ -1934,6 +2147,11 @@ STATUS_RANK: dict = {
     "deploy-init": 6,
     "deploy-success": 7,
     "closed": 8,
+    # ENC-TSK-I07 (Dedup P3): `superseded` is an alternate terminal state (soft
+    # duplicate collapse, DOC-DF651F07D5C2 §7). Same rank as `closed` so a
+    # superseded child satisfies any subtask gate and a superseded task is
+    # treated as furthest-along/terminal (non-advanceable).
+    "superseded": 8,
 }
 
 #: ENC-ISS-106: Minimum status rank at which the subtask gate activates.
@@ -2073,12 +2291,19 @@ def _validate_lambda_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
 
 
 def _validate_code_on_main_evidence(
-    owner: str, repo: str, evidence: dict
+    owner: str, repo: str, evidence: dict, base_branch: str = "main"
 ) -> Tuple[bool, str]:
     """Validate code_on_main_evidence for closed (code_only arc, ENC-ISS-092).
 
-    Calls GitHub compare API to verify commit_sha is an ancestor of main.
+    Calls GitHub compare API to verify commit_sha is an ancestor of base_branch.
     Sets evidence["github_verified"] = True on success.
+
+    ENC-TSK-O34 / ENC-ISS-630: base_branch defaults to 'main' (unchanged
+    behavior) but is overridable per-task -- see the closed-gate call site,
+    which reads an optional task-level 'github_base_branch' field (the same
+    override pattern as _resolve_task_github_repo's 'github_repo') -- so
+    pre-cutover v4/main-only work can close a code_only task without a commit
+    landing on 'main' itself.
     """
     commit_sha = (evidence.get("commit_sha") or "").strip()
     if not commit_sha:
@@ -2089,15 +2314,17 @@ def _validate_code_on_main_evidence(
             f"got: '{commit_sha}'"
         )
 
-    # Call GitHub compare API: {sha}...main (base=sha, head=main)
-    # ENC-ISS-161: status "ahead" means main has commits sha doesn't = sha is an ancestor.
-    # status "identical" means sha IS main HEAD. Both are valid.
-    compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...main"
-    status, body = _github_request(compare_path)
+    base_branch = (base_branch or "main").strip() or "main"
+
+    # Call GitHub compare API: {sha}...{base_branch} (base=sha, head=base_branch)
+    # ENC-ISS-161: status "ahead" means base_branch has commits sha doesn't = sha is an ancestor.
+    # status "identical" means sha IS base_branch HEAD. Both are valid.
+    compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...{base_branch}"
+    status, body = _github_request(compare_path, repo=f"{owner}/{repo}", sha=commit_sha)
     if status == 404:
         return False, (
             f"GitHub compare returned 404 — commit '{commit_sha}' or repo "
-            f"'{owner}/{repo}' not found"
+            f"'{owner}/{repo}' (base branch '{base_branch}') not found"
         )
     if status != 200:
         return False, (
@@ -2108,14 +2335,280 @@ def _validate_code_on_main_evidence(
     compare_status = body.get("status", "")
     if compare_status not in ("ahead", "identical"):
         return False, (
-            f"Commit '{commit_sha}' is not on main "
+            f"Commit '{commit_sha}' is not on {base_branch} "
             f"(GitHub compare status: '{compare_status}'). "
-            "Commit must be an ancestor of main (status 'ahead' or 'identical')."
+            f"Commit must be an ancestor of {base_branch} (status 'ahead' or 'identical')."
         )
 
     # Stamp verification flag for audit trail
     evidence["github_verified"] = True
     return True, ""
+
+
+_CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG = (
+    "transition_evidence.code_on_main_evidence must be an object "
+    "{commit_sha: <40-hex sha on main>}; a 40-hex string, or a note string "
+    "alongside transition_evidence.commit_sha, is also accepted; got "
+)
+
+
+def _normalize_code_on_main_evidence(
+    raw: Any, transition_evidence: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize the accepted input shapes for the code_only closed gate (ENC-ISS-777).
+
+    The closed gate for transition_type=code_only historically required
+    ``transition_evidence.code_on_main_evidence`` to already be a non-empty
+    dict, rejecting a bare 40-hex commit sha string even though that is the
+    only field the schema (``_CODE_ON_MAIN_EVIDENCE_SCHEMA``) actually
+    requires. This helper widens the accepted shapes without touching
+    ``_validate_code_on_main_evidence`` (the GitHub compare validator), which
+    still receives a normalized dict.
+
+    Accepted shapes for ``raw`` (the value read from
+    ``transition_evidence.code_on_main_evidence`` / ``body.code_on_main_evidence``):
+      (a) a non-empty dict — used as-is; if it lacks ``commit_sha`` and
+          ``transition_evidence.commit_sha`` is itself a 40-hex sha, that sha
+          is copied in.
+      (b) a 40-hex string (case-insensitive, surrounding whitespace stripped)
+          -> ``{"commit_sha": <lowercased sha>}``.
+      (c) any other non-empty string, when ``transition_evidence.commit_sha``
+          is a 40-hex string -> ``{"commit_sha": <that sha>, "note": <the string>}``.
+      (d) anything else (empty, wrong type, or a string without a usable sha
+          and no usable top-level commit_sha) is rejected.
+
+    Returns ``(normalized_dict, None)`` on success or ``(None, reason)`` on
+    failure, where ``reason`` names the accepted shapes per ENC-ISS-777.
+    """
+    top_level_sha_raw = transition_evidence.get("commit_sha")
+    top_level_sha_valid = (
+        isinstance(top_level_sha_raw, str)
+        and bool(re.match(r"^[0-9a-f]{40}$", top_level_sha_raw.strip().lower()))
+    )
+    top_level_sha = top_level_sha_raw.strip().lower() if top_level_sha_valid else None
+
+    if isinstance(raw, dict):
+        if not raw:
+            return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + "an empty object"
+        normalized = dict(raw)
+        if not normalized.get("commit_sha") and top_level_sha:
+            normalized["commit_sha"] = top_level_sha
+        existing_sha = normalized.get("commit_sha")
+        if existing_sha is not None:
+            if not isinstance(existing_sha, str):
+                return None, (
+                    _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG
+                    + f"an object whose commit_sha is type {type(existing_sha).__name__}, not a string"
+                )
+            stripped = existing_sha.strip()
+            if re.match(r"^[0-9a-f]{40}$", stripped.lower()):
+                # Normalize to the same canonical (stripped, lowercased) form
+                # the bare-string and note-string shapes produce, so the
+                # persisted evidence is consistent regardless of which
+                # accepted shape the caller used (ENC-ISS-777 review).
+                normalized["commit_sha"] = stripped.lower()
+        return normalized, None
+
+    if isinstance(raw, str):
+        candidate = raw.strip()
+        if re.match(r"^[0-9a-f]{40}$", candidate.lower()):
+            return {"commit_sha": candidate.lower()}, None
+        if candidate and top_level_sha:
+            return {"commit_sha": top_level_sha, "note": candidate}, None
+        if not candidate:
+            got = "an empty string"
+        elif top_level_sha_raw is not None:
+            got = (
+                f"a string without a usable sha ({candidate!r}) and "
+                "transition_evidence.commit_sha is not a valid 40-hex sha"
+            )
+        else:
+            got = (
+                f"a string without a usable sha ({candidate!r}) and no "
+                "transition_evidence.commit_sha was provided"
+            )
+        return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + got
+
+    got = "None" if raw is None else f"type {type(raw).__name__}"
+    return None, _CODE_ON_MAIN_EVIDENCE_ACCEPTED_SHAPES_MSG + got
+
+
+def _validate_external_deploy_evidence(evidence: Any) -> Tuple[bool, str]:
+    if not evidence or not isinstance(evidence, dict):
+        return False, "transition_evidence.external_deploy_evidence must be a JSON object"
+    comp_external_id = evidence.get("comp_external_id")
+    if not isinstance(comp_external_id, str) or not comp_external_id.strip():
+        return False, "external_deploy_evidence.comp_external_id is required and must be a non-empty string"
+    retrieval_steps = evidence.get("retrieval_steps")
+    if not isinstance(retrieval_steps, str) or not retrieval_steps.strip():
+        return False, "external_deploy_evidence.retrieval_steps is required and must be a non-empty string"
+    if len(retrieval_steps.strip()) < 20:
+        return False, "external_deploy_evidence.retrieval_steps must be at least 20 characters"
+    evidence["comp_external_id"] = comp_external_id.strip()
+    evidence["retrieval_steps"] = retrieval_steps.strip()
+    return True, ""
+
+
+_DOC_ID_RE = re.compile(r"^DOC-[0-9A-F]+$")
+_DOCUMENTATION_FRESH_WINDOW_SECONDS = 15 * 60
+
+
+def _parse_documentation_evidence(raw: Any) -> Tuple[list[str], Optional[str]]:
+    if not isinstance(raw, list) or not raw:
+        return [], "documentation_evidence must be a non-empty array of DOC-* strings"
+    doc_ids: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            return [], "documentation_evidence entries must be non-empty strings"
+        doc_id = value.strip().upper()
+        if not _DOC_ID_RE.match(doc_id):
+            return [], f"documentation_evidence entry '{value}' must match DOC-*"
+        doc_ids.append(doc_id)
+    return doc_ids, None
+
+
+def _parse_jsonish_evidence(raw: Any) -> Any:
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+    return raw
+
+
+def _extract_documentation_evidence_doc_ids(record: Dict[str, Any]) -> set[str]:
+    doc_ids: set[str] = set()
+    candidates = [
+        record.get("documentation_evidence"),
+        record.get("transition_evidence"),
+    ]
+    for candidate in candidates:
+        parsed = _parse_jsonish_evidence(candidate)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("documentation_evidence")
+        if isinstance(parsed, list):
+            ids, err = _parse_documentation_evidence(parsed)
+            if not err:
+                doc_ids.update(ids)
+    return doc_ids
+
+
+def _closed_documentation_evidence_doc_ids(project_id: str, current_task_id: str) -> set[str]:
+    used: set[str] = set()
+    cursor = ""
+    for _ in range(25):
+        path = f"/{project_id}?type=task&status=closed&page_size=200"
+        if cursor:
+            path += "&next_cursor=" + urllib.parse.quote(cursor, safe="")
+        status, body = _tracker_request("GET", path)
+        if status != 200:
+            raise RuntimeError(body.get("error", f"tracker list failed with HTTP {status}"))
+        for record in body.get("records") or body.get("items") or []:
+            if not isinstance(record, dict):
+                continue
+            rid = str(record.get("id") or record.get("record_id") or record.get("task_id") or "").strip()
+            if rid == current_task_id:
+                continue
+            used.update(_extract_documentation_evidence_doc_ids(record))
+        cursor = str(body.get("next_cursor") or "").strip()
+        if not cursor:
+            break
+    return used
+
+
+def _get_document_metadata(doc_id: str) -> Tuple[int, Dict[str, Any]]:
+    status, body = _document_api_request("GET", f"/{doc_id}")
+    if status != 200:
+        return status, body
+    if isinstance(body.get("document"), dict):
+        return status, body["document"]
+    return status, body if isinstance(body, dict) else {}
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_documentation_close_evidence(
+    *,
+    project_id: str,
+    task_id: str,
+    evidence: Any,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, str, Dict[str, Any], list[str]]:
+    doc_ids, err = _parse_documentation_evidence(evidence)
+    if err:
+        return False, err, {"required_evidence_schema": _DOCUMENTATION_EVIDENCE_SCHEMA}, []
+
+    now_dt = now or datetime.now(timezone.utc)
+    try:
+        previously_used = _closed_documentation_evidence_doc_ids(project_id, task_id)
+    except Exception as exc:
+        return (
+            False,
+            f"documentation_evidence novelty check failed: {exc}",
+            {"policy": "P7 novelty-or-freshness close gate"},
+            doc_ids,
+        )
+
+    details: Dict[str, Any] = {
+        "policy": "P7 documentation close gate: at least one DOC id must be novel or fresh.",
+        "fresh_window_minutes": 15,
+        "doc_results": [],
+    }
+    qualifying: list[str] = []
+    non_qualifying: list[str] = []
+    for doc_id in doc_ids:
+        status, doc = _get_document_metadata(doc_id)
+        if status != 200:
+            details["doc_results"].append({
+                "document_id": doc_id,
+                "qualifies": False,
+                "reason": f"document lookup returned HTTP {status}",
+            })
+            non_qualifying.append(doc_id)
+            continue
+        updated_at = _parse_iso_datetime(doc.get("updated_at"))
+        is_fresh = (
+            updated_at is not None
+            and 0 <= (now_dt - updated_at).total_seconds() <= _DOCUMENTATION_FRESH_WINDOW_SECONDS
+        )
+        is_novel = doc_id not in previously_used
+        qualifies = is_novel or is_fresh
+        if qualifies:
+            qualifying.append(doc_id)
+        else:
+            non_qualifying.append(doc_id)
+        details["doc_results"].append({
+            "document_id": doc_id,
+            "qualifies": qualifies,
+            "novel": is_novel,
+            "fresh": is_fresh,
+            "updated_at": doc.get("updated_at", ""),
+        })
+
+    details["qualifying_doc_ids"] = qualifying
+    details["non_qualifying_doc_ids"] = non_qualifying
+    if not qualifying:
+        return (
+            False,
+            "documentation_evidence close gate failed: at least one DOC id must be novel or fresh.",
+            details,
+            doc_ids,
+        )
+    return True, "", details, doc_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2208,13 +2701,79 @@ def _validate_subtask_gate(
 
 # ---------------------------------------------------------------------------
 # ENC-FTR-041: Component registry enforcement helpers
-# ENC-TSK-F50 / ENC-ISS-270: required_transition_type is now the governed
-# enforcement field (see DOC-240A67973B13). The legacy `transition_type`
-# field on component records is NOT read here post-F50 — it is retained on
-# the record for back-compat and deploy-style documentation only. A missing
-# or invalid `required_transition_type` is an invariant violation and fails
-# loud with COMPONENT_MISCONFIGURED; no silent default remains.
+# DOC-157A790F9E8B v3: component.required_transition_type is now the component
+# policy enum {code, external_deploy, documentation}. Task.transition_type keeps
+# the existing lifecycle-arc enum in transition_type_matrix.py. This layer maps
+# legacy component rows at read time, then checks whether the task arc can
+# produce the artifact class required by the component policy.
 # ---------------------------------------------------------------------------
+
+_COMPONENT_REQUIRED_TRANSITION_TYPES = frozenset({
+    "code",
+    "external_deploy",
+    "documentation",
+})
+_LEGACY_COMPONENT_REQUIRED_TRANSITION_TYPE_MAP = {
+    "github_pr_deploy": "code",
+    "lambda_deploy": "code",
+    "web_deploy": "code",
+    "code_only": "code",
+    "data_only": "code",
+}
+_COMPONENT_POLICY_TASK_MAX_RANK = {
+    # Code components may use any code-producing lifecycle arc, including
+    # code_only. no_code remains too weak because it produces no repo artifact.
+    "code": STRICTNESS_RANK["code_only"],
+    # External deploy components need a deploy-success stage for P6 evidence.
+    "external_deploy": STRICTNESS_RANK["web_deploy"],
+    # Documentation components are satisfied by any task arc, but receive the
+    # P7 doc-evidence close gate below when the policy is present.
+    "documentation": STRICTNESS_RANK["no_code"],
+}
+_COMPONENT_POLICY_ORDER = {
+    name: rank for name, rank in sorted(
+        _COMPONENT_POLICY_TASK_MAX_RANK.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+}
+
+
+def _component_looks_documentation_authored(item: Dict[str, Any]) -> bool:
+    address_class = (item.get("component_address_class", {}).get("S") or "").strip().lower()
+    component_class = (item.get("component_class", {}).get("S") or "").strip().lower()
+    address = (item.get("component_address", {}).get("S") or "").strip().lower()
+    repo_dir = (item.get("component_repo_dir", {}).get("S") or "").strip().lower()
+    return (
+        address_class == "meta"
+        or component_class == "meta"
+        or address.startswith("meta:")
+        or repo_dir.startswith("meta:")
+    )
+
+
+def _normalize_component_required_transition_type(raw_value: str, item: Optional[Dict[str, Any]] = None) -> str:
+    value = (raw_value or "").strip().lower()
+    if value in _COMPONENT_REQUIRED_TRANSITION_TYPES:
+        return value
+    if value == "no_code":
+        return "documentation" if _component_looks_documentation_authored(item or {}) else "code"
+    return _LEGACY_COMPONENT_REQUIRED_TRANSITION_TYPE_MAP.get(value, "")
+
+
+def _task_transition_satisfies_component_requirement(
+    task_transition_type: str,
+    required_policy: str,
+) -> bool:
+    task_rank = STRICTNESS_RANK.get(task_transition_type, 99)
+    return task_rank <= _COMPONENT_POLICY_TASK_MAX_RANK.get(required_policy, -1)
+
+
+def _recommended_task_transition_for_component_policy(required_policy: str) -> str:
+    if required_policy == "external_deploy":
+        return "github_pr_deploy"
+    if required_policy == "documentation":
+        return "no_code"
+    return "code_only"
 
 
 class ComponentMisconfiguredError(Exception):
@@ -2242,7 +2801,8 @@ class ComponentMisconfiguredError(Exception):
         if reason == "invalid_value":
             message = (
                 f"Component '{component_id}' has invalid required_transition_type="
-                f"'{bad_value}'; this is an invariant violation. Contact platform admin."
+                f"'{bad_value}'; expected one of code|external_deploy|documentation "
+                "or a recognized legacy value for read-time migration. Contact platform admin."
             )
         else:
             message = (
@@ -2268,12 +2828,12 @@ def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
         "remediation_guidance": (
             "Set the component's `required_transition_type` in the registry "
             "(DynamoDB enceladus-component-registry) via the PWA /components "
-            "edit surface or via a product-lead terminal update-item. Valid "
-            "values: github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code. "
+            "edit surface or via a product-lead terminal update-item. V3 valid "
+            "values: code|external_deploy|documentation. "
             "After the field is populated, retry the checkout."
         ),
         "rule_citation": (
-            "ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13 (AC-1 review document)"
+            "ENC-TSK-L77 / DOC-157A790F9E8B (v3 component hardening)"
         ),
     }
     if exc.bad_value is not None:
@@ -2293,14 +2853,12 @@ _BLOCKED_LIFECYCLE_STATUSES = frozenset({"proposed", "deprecated"})
 
 
 def _get_required_transition_type(component_ids: list) -> Optional[str]:
-    """Return the most restrictive ``required_transition_type`` across the
-    given component IDs.
+    """Return the most restrictive v3 component policy across component IDs.
 
-    F50/AC-3: reads the governed ``required_transition_type`` field on each
-    component registry record — NOT the legacy ``transition_type`` field.
-    If a component record exists but has no ``required_transition_type``
-    attribute, or the value is not a valid member of STRICTNESS_RANK,
-    raises :class:`ComponentMisconfiguredError` (no silent default).
+    DOC-157A790F9E8B / ENC-TSK-L77: reads the governed
+    ``required_transition_type`` field and normalizes legacy component enum
+    values at read time. Missing values still fail loud; the compatibility path
+    is for existing populated rows, not silent fallback.
 
     Missing components (component_id absent from the registry entirely)
     continue to fail-open with a WARNING log, preserving the ENC-FTR-041
@@ -2326,24 +2884,25 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
                 )
                 continue
             required_attr = item.get("required_transition_type") or {}
-            comp_type = (required_attr.get("S") or "").strip()
-            if not comp_type:
+            raw_comp_type = (required_attr.get("S") or "").strip()
+            if not raw_comp_type:
                 logger.error(
                     "[F50/AC-3] Component '%s' is missing required_transition_type "
-                    "in the registry (see DOC-240A67973B13 for governance contract)",
+                    "in the registry (see DOC-157A790F9E8B for governance contract)",
                     cid,
                 )
                 raise ComponentMisconfiguredError(cid, reason="missing")
-            if comp_type not in STRICTNESS_RANK:
+            comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+            if comp_type not in _COMPONENT_REQUIRED_TRANSITION_TYPES:
                 logger.error(
                     "[F50/AC-3] Component '%s' has invalid required_transition_type='%s' "
-                    "(not in STRICTNESS_RANK)",
-                    cid, comp_type,
+                    "(not in v3 enum and not a recognized legacy value)",
+                    cid, raw_comp_type,
                 )
                 raise ComponentMisconfiguredError(
-                    cid, reason="invalid_value", bad_value=comp_type
+                    cid, reason="invalid_value", bad_value=raw_comp_type
                 )
-            rank = STRICTNESS_RANK[comp_type]
+            rank = _COMPONENT_POLICY_TASK_MAX_RANK[comp_type]
             if rank < min_rank:
                 min_rank = rank
                 required = comp_type
@@ -2352,6 +2911,37 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
         except Exception as exc:
             logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
     return required
+
+
+def _get_component_required_transition_types(component_ids: list) -> set[str]:
+    """Return all normalized v3 component policies present on the task."""
+    policies: set[str] = set()
+    if not component_ids:
+        return policies
+    for cid in component_ids:
+        try:
+            resp = _ddb.get_item(
+                TableName=COMPONENTS_TABLE,
+                Key={"component_id": {"S": str(cid)}},
+            )
+            item = resp.get("Item")
+            if not item:
+                continue
+            required_attr = item.get("required_transition_type") or {}
+            raw_comp_type = (required_attr.get("S") or "").strip()
+            if not raw_comp_type:
+                raise ComponentMisconfiguredError(cid, reason="missing")
+            comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+            if comp_type not in _COMPONENT_REQUIRED_TRANSITION_TYPES:
+                raise ComponentMisconfiguredError(
+                    cid, reason="invalid_value", bad_value=raw_comp_type
+                )
+            policies.add(comp_type)
+        except ComponentMisconfiguredError:
+            raise
+        except Exception as exc:
+            logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
+    return policies
 
 
 def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
@@ -2392,17 +2982,22 @@ def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
 
 
 def _get_component_transition_type(component_id: str) -> str:
-    """Fetch current transition_type for a component from registry. Defaults to github_pr_deploy."""
+    """Fetch the current v3 component policy for assistant compatibility."""
     try:
         resp = _ddb.get_item(
             TableName=COMPONENTS_TABLE,
             Key={"component_id": {"S": str(component_id)}},
         )
         item = resp.get("Item") or {}
-        return item.get("transition_type", {}).get("S", "github_pr_deploy")
+        raw = (
+            item.get("required_transition_type", {}).get("S")
+            or item.get("transition_type", {}).get("S")
+            or "code"
+        )
+        return _normalize_component_required_transition_type(raw, item) or "code"
     except Exception as exc:
         logger.error("[ASSISTANT] Failed to fetch component '%s': %s", component_id, exc)
-        return "github_pr_deploy"
+        return "code"
 
 
 def _update_component_transition_type_via_api(
@@ -2412,6 +3007,7 @@ def _update_component_transition_type_via_api(
     url = f"{COORDINATION_API_BASE.rstrip('/')}/components/{component_id}"
     payload = json.dumps({
         "transition_type": new_type,
+        "required_transition_type": new_type,
         "assistant_reason": reason,
     }).encode()
     req = urllib.request.Request(
@@ -2486,19 +3082,14 @@ def _invoke_assistant(
         )
         return
 
-    inferred_type = (
-        "github_pr_deploy" if has_gha else
-        "web_deploy" if has_web else
-        "lambda_deploy" if has_lambda else
-        None
-    )
+    inferred_type = "code" if (has_gha or has_web or has_lambda) else None
     if not inferred_type:
         return
 
     for cid in components:
         current = _get_component_transition_type(cid)
-        current_rank = STRICTNESS_RANK.get(current, 0)
-        inferred_rank = STRICTNESS_RANK.get(inferred_type, 0)
+        current_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(current, 0)
+        inferred_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(inferred_type, 0)
         if inferred_rank >= current_rank:
             logger.info(
                 "[ASSISTANT] NOT loosening component '%s' (inferred=%s rank=%d >= current=%s rank=%d)",
@@ -2634,6 +3225,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     # Human operators via the PWA UI (user_initiated=true) bypass this check to allow
     # closing legacy tasks that pre-date the component registry.
     components = task.get("components") or []
+    component_required_policies: set[str] = set()
     is_user_initiated = bool(body.get("user_initiated", False))
     if not components and not is_user_initiated:
         return _validation_error(
@@ -2726,16 +3318,18 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         except ComponentMisconfiguredError as exc:
             return _component_misconfigured_response(exc)
         if required_type is not None:
+            component_required_policies = {required_type}
             task_rank = STRICTNESS_RANK.get(transition_type, 99)
-            required_rank = STRICTNESS_RANK.get(required_type, 0)
-            if task_rank > required_rank:
+            required_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(required_type, -1)
+            if not _task_transition_satisfies_component_requirement(transition_type, required_type):
                 return _validation_error(
                     400,
                     (
-                        f"Task transition_type '{transition_type}' (rank {task_rank}) is less strict "
-                        f"than required '{required_type}' (rank {required_rank}) enforced by the "
-                        f"component registry (ENC-FTR-041). Update task.transition_type to at least "
-                        f"'{required_type}', or fix the component registration."
+                        f"Task transition_type '{transition_type}' (rank {task_rank}) cannot satisfy "
+                        f"component required_transition_type '{required_type}' (max task rank {required_rank}) "
+                        "enforced by the component registry (ENC-FTR-041). Update task.transition_type "
+                        "to a lifecycle arc that produces the required artifact class, or fix the "
+                        "component registration."
                     ),
                     task_id=task_id,
                     current_status=current_status,
@@ -2750,7 +3344,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             "arguments": {
                                 "record_id": task_id,
                                 "field": "transition_type",
-                                "value": required_type,
+                                "value": _recommended_task_transition_for_component_policy(required_type),
                                 "governance_hash": "<governance_hash>",
                             },
                         },
@@ -2758,7 +3352,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             task_id,
                             target_status,
                             provider or session_id or "<provider>",
-                            required_type,
+                            _recommended_task_transition_for_component_policy(required_type),
                         ),
                     ],
                 )
@@ -3051,6 +3645,40 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     required_fields=[ev_label],
                 )
         transition_evidence[ev_key] = evidence_obj
+        if components:
+            try:
+                component_required_policies = (
+                    _get_component_required_transition_types(components)
+                    or component_required_policies
+                )
+            except ComponentMisconfiguredError as exc:
+                return _component_misconfigured_response(exc)
+        if "external_deploy" in component_required_policies:
+            external_evidence = (
+                transition_evidence.get("external_deploy_evidence")
+                or body.get("external_deploy_evidence")
+            )
+            valid, reason = _validate_external_deploy_evidence(external_evidence)
+            if not valid:
+                return _error(
+                    422,
+                    f"external_deploy_evidence validation failed: {reason}",
+                    code="INVALID_INPUT",
+                    retryable=False,
+                    details={
+                        "task_id": task_id,
+                        "current_status": current_status,
+                        "target_status": target_status,
+                        "transition_type": transition_type,
+                        "component_required_transition_types": sorted(component_required_policies),
+                        "required_fields": [
+                            "transition_evidence.external_deploy_evidence.comp_external_id",
+                            "transition_evidence.external_deploy_evidence.retrieval_steps",
+                        ],
+                        "required_evidence_schema": _EXTERNAL_DEPLOY_EVIDENCE_SCHEMA,
+                    },
+                )
+            transition_evidence["external_deploy_evidence"] = external_evidence
         logger.info(
             "deploy-success gate passed for %s (type=%s, matrix_version=%d)",
             task_id, transition_type, MATRIX_VERSION,
@@ -3069,15 +3697,32 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
 
             if ev_type == "object":
                 # Object evidence (e.g. code_on_main_evidence)
-                evidence_obj = transition_evidence.get(ev_key) or body.get(ev_key)
-                if not evidence_obj or not isinstance(evidence_obj, dict):
-                    return _validation_error(
-                        400,
-                        f"{ev_label} is required for closed on {transition_type} tasks.",
-                        task_id=task_id, current_status=current_status, target_status=target_status,
-                        transition_type=transition_type, provider=provider or session_id,
-                        required_fields=[ev_label],
+                raw_evidence = transition_evidence.get(ev_key) or body.get(ev_key)
+                if validator_id == "code_on_main":
+                    # ENC-ISS-777: widen accepted input shapes (object, bare 40-hex
+                    # sha string, or note string + top-level commit_sha) while
+                    # keeping the GitHub compare validator's input a plain dict.
+                    evidence_obj, normalize_reason = _normalize_code_on_main_evidence(
+                        raw_evidence, transition_evidence
                     )
+                    if evidence_obj is None:
+                        return _validation_error(
+                            400,
+                            normalize_reason,
+                            task_id=task_id, current_status=current_status, target_status=target_status,
+                            transition_type=transition_type, provider=provider or session_id,
+                            required_fields=["transition_evidence.code_on_main_evidence.commit_sha"],
+                        )
+                else:
+                    evidence_obj = raw_evidence
+                    if not evidence_obj or not isinstance(evidence_obj, dict):
+                        return _validation_error(
+                            400,
+                            f"{ev_label} is required for closed on {transition_type} tasks.",
+                            task_id=task_id, current_status=current_status, target_status=target_status,
+                            transition_type=transition_type, provider=provider or session_id,
+                            required_fields=[ev_label],
+                        )
                 if validator_id == "code_on_main":
                     # code_on_main requires GitHub compare API validation
                     owner = transition_evidence.get("owner")
@@ -3099,13 +3744,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             provider=provider or session_id,
                             required_fields=["transition_evidence.owner", "transition_evidence.repo"],
                         )
-                    valid, reason = _validate_code_on_main_evidence(owner, repo, evidence_obj)
+                    base_branch = (task.get("github_base_branch") or "main").strip() or "main"
+                    valid, reason = _validate_code_on_main_evidence(
+                        owner, repo, evidence_obj, base_branch=base_branch
+                    )
                     if not valid:
                         return _validation_error(
                             400, f"{ev_key} validation failed: {reason}",
                             task_id=task_id, current_status=current_status,
                             target_status=target_status, transition_type=transition_type,
-                            provider=provider or session_id, required_fields=[ev_label],
+                            provider=provider or session_id,
+                            required_fields=["transition_evidence.code_on_main_evidence.commit_sha"],
                         )
                 transition_evidence[ev_key] = evidence_obj
             else:
@@ -3126,6 +3775,43 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 "closed gate passed for %s (type=%s, matrix_version=%d)",
                 task_id, transition_type, MATRIX_VERSION,
             )
+
+        if components:
+            try:
+                component_required_policies = (
+                    _get_component_required_transition_types(components)
+                    or component_required_policies
+                )
+            except ComponentMisconfiguredError as exc:
+                return _component_misconfigured_response(exc)
+        if "documentation" in component_required_policies:
+            documentation_evidence = (
+                transition_evidence.get("documentation_evidence")
+                or body.get("documentation_evidence")
+            )
+            valid, reason, details, doc_ids = _validate_documentation_close_evidence(
+                project_id=project_id,
+                task_id=task_id,
+                evidence=documentation_evidence,
+            )
+            if not valid:
+                return _error(
+                    422,
+                    reason,
+                    code="INVALID_INPUT",
+                    retryable=False,
+                    details={
+                        "task_id": task_id,
+                        "current_status": current_status,
+                        "target_status": target_status,
+                        "transition_type": transition_type,
+                        "component_required_transition_types": sorted(component_required_policies),
+                        "required_fields": ["transition_evidence.documentation_evidence"],
+                        "required_evidence_schema": _DOCUMENTATION_EVIDENCE_SCHEMA,
+                        **details,
+                    },
+                )
+            transition_evidence["documentation_evidence"] = doc_ids
 
         # ENC-FTR-048: Gate task closure on structured acceptance criteria evidence.
         # Only applies when the task has structured AC (object form with evidence_acceptance).
@@ -3203,14 +3889,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         "advance OK: %s %s->%s (type=%s, matrix_version=%d)",
         task_id, current_status, target_status, transition_type, MATRIX_VERSION,
     )
-    return _response(200, {
+    advance_envelope = {
         "success": True,
         "task": updated_task,
         "previous_status": current_status,
         "new_status": target_status,
         "matrix_version": MATRIX_VERSION,
         **response_extras,
-    })
+    }
+    # ENC-ISS-441 / ENC-TSK-J96: task reached its final lifecycle state — nudge the
+    # acting session toward retirement (additive-only envelope field).
+    return _response(200, _with_retirement_prompt(advance_envelope, target_status))
 
 
 def _handle_log(project_id: str, task_id: str, body: dict) -> dict:
@@ -3373,15 +4062,19 @@ def _plan_validation_error(
 
 def _handle_plan_checkout(project_id: str, plan_id: str, body: dict) -> dict:
     """POST .../checkout — Check out a plan and advance drafted→started."""
-    provider, ses_err = _resolve_agent_session_id(body.get("active_agent_session_id"))
-    if ses_err:
+    provider = (body.get("active_agent_session_id") or "").strip()
+    if not provider:
         return _plan_validation_error(
             400,
-            ses_err,
+            "active_agent_session_id is required in request body",
             plan_id=plan_id,
             required_fields=["active_agent_session_id"],
             example_fix=_example_plan_checkout_fix(plan_id),
         )
+
+    # ENC-TSK-L35: plan checkout is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change).
+    _touch_if_agent_session(provider)
 
     status, result = _checkout_plan(project_id, plan_id, provider)
     if status not in (200, 201):
@@ -3445,6 +4138,48 @@ def _handle_plan_release(project_id: str, plan_id: str, body: dict) -> dict:
     return _response(200, {"success": True, "plan_id": plan_id})
 
 
+_PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
+_PREFIX_MAP_CACHE_AT: float = 0.0
+
+
+def _project_for_record_id(record_id: str, default_project: str) -> str:
+    """ENC-ISS-417: resolve a record's owning project from its ID prefix.
+
+    Objective IDs encode their project (e.g. ``INT-TSK-071`` -> ``intelligence``,
+    ``ENC-TSK-A89`` -> ``enceladus``). The plan completion gate (ENC-TSK-A89) must
+    resolve cross-project objective statuses in their OWN project partition, with
+    parity to plan.objectives_status — otherwise a cross-project objective resolves
+    as not_found in the plan's own partition and the plan can never complete.
+
+    Mirrors tracker_mutation._get_prefix_map_cached (projects table scan, 300s cache).
+    Falls back to ``default_project`` when the prefix is unmapped or the scan fails.
+    """
+    global _PREFIX_MAP_CACHE, _PREFIX_MAP_CACHE_AT
+    prefix = str(record_id or "").split("-", 1)[0].strip().upper()
+    if not prefix:
+        return default_project
+    now = time.time()
+    if _PREFIX_MAP_CACHE is None or (now - _PREFIX_MAP_CACHE_AT) >= 300.0:
+        try:
+            resp = _ddb.scan(
+                TableName=PROJECTS_TABLE,
+                ProjectionExpression="project_id, prefix",
+            )
+            mapping: Dict[str, str] = {}
+            for item in resp.get("Items", []):
+                pid = item.get("project_id", {}).get("S", "")
+                pfx = item.get("prefix", {}).get("S", "")
+                if pid and pfx:
+                    mapping[pfx.upper()] = pid
+            _PREFIX_MAP_CACHE = mapping
+            _PREFIX_MAP_CACHE_AT = now
+        except Exception as exc:
+            logger.warning("ENC-ISS-417: projects prefix-map scan failed: %s", exc)
+            if _PREFIX_MAP_CACHE is None:
+                return default_project
+    return (_PREFIX_MAP_CACHE or {}).get(prefix, default_project)
+
+
 def _validate_plan_objectives_complete(
     project_id: str,
     plan: dict,
@@ -3463,11 +4198,15 @@ def _validate_plan_objectives_complete(
         obj_id = str(obj_id).strip()
         if not obj_id:
             continue
-        obj_status_code, obj_record = _get_task(project_id, obj_id)
+        # ENC-ISS-417: resolve each objective in its OWN project partition (derived
+        # from the ID prefix) so cross-project objectives are validated correctly
+        # instead of resolving as not_found in the plan's own project.
+        obj_project = _project_for_record_id(obj_id, project_id)
+        obj_status_code, obj_record = _get_task(obj_project, obj_id)
         if obj_status_code != 200:
             for rtype in ("feature", "issue", "plan"):
                 obj_status_code, obj_record = _tracker_request(
-                    "GET", f"/{project_id}/{rtype}/{obj_id}",
+                    "GET", f"/{obj_project}/{rtype}/{obj_id}",
                 )
                 if obj_status_code == 200:
                     if isinstance(obj_record, dict) and isinstance(obj_record.get("record"), dict):
@@ -3520,6 +4259,10 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
             required_fields=["provider"],
             example_fix=_example_plan_advance_fix(plan_id, target_status),
         )
+
+    # ENC-TSK-L35: plan advance is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change).
+    _touch_if_agent_session(provider)
 
     status, plan = _get_plan(project_id, plan_id)
     if status != 200:
@@ -3582,12 +4325,16 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
         _release_plan(project_id, plan_id)
 
     _, updated_plan = _get_plan(project_id, plan_id)
-    return _response(200, {
+    plan_envelope = {
         "success": True,
         "plan": updated_plan,
         "previous_status": current_status,
         "new_status": target_status,
-    })
+    }
+    # ENC-ISS-441 / ENC-TSK-J96: plan reached its final lifecycle state — retirement nudge.
+    return _response(
+        200, _with_retirement_prompt(plan_envelope, target_status, terminal_statuses=("complete",))
+    )
 
 
 def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
@@ -3603,6 +4350,13 @@ def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
         )
     provider = body.get("provider")
     governance_hash = body.get("governance_hash")
+
+    # ENC-TSK-L35: plan worklog append is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change). Worklog
+    # mirroring onto the session's own history happens centrally in
+    # tracker_mutation._handle_log (the shared /log endpoint for every record
+    # type), not here.
+    _touch_if_agent_session(provider)
 
     status, plan = _get_plan(project_id, plan_id)
     if status != 200:
@@ -3719,6 +4473,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
             elif method == "DELETE":
                 return _handle_release(project_id, task_id, body)
             return _error(405, f"Method {method} not allowed for checkout")
+
+        if action == "recover":
+            # ENC-TSK-O37 / ENC-ISS-597: governed stale-holder recovery.
+            if method == "POST":
+                return _handle_release_recover(project_id, task_id, body)
+            return _error(405, f"Method {method} not allowed for recover")
 
         if action == "advance":
             if method == "POST":

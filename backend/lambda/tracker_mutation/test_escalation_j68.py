@@ -369,6 +369,43 @@ class TestEscalationList(unittest.TestCase):
         body = json.loads(resp["body"])
         self.assertEqual(2, body["count"])
 
+    def test_pagination_walks_past_a_single_page_ENC_ISS_699(self):
+        """Regression: the pre-fix handler returned no cursor at all, so a
+        caller could never see escalations beyond whatever fit in one page
+        (observed: total capped at ENC-ESC-050 with ~105 present)."""
+        page1_items = [self._item(f"ENC-ESC-{i:03d}", f"2026-07-02T00:{i:02d}:00Z")
+                       for i in range(1, 26)]
+        page2_items = [self._item(f"ENC-ESC-{i:03d}", f"2026-07-02T00:{i:02d}:00Z")
+                       for i in range(26, 51)]
+        fake = mock.MagicMock()
+        fake.query.side_effect = [
+            {"Items": page1_items, "LastEvaluatedKey": {"record_id": {"S": "escalation#ENC-ESC-025"}}},
+            {"Items": page2_items},
+        ]
+        with mock.patch.object(self.lf, "_get_ddb", return_value=fake):
+            resp1 = self.lf._handle_escalation_list("enceladus", {"page_size": "25"})
+        self.assertEqual(200, resp1["statusCode"])
+        body1 = json.loads(resp1["body"])
+        self.assertEqual(25, body1["count"])
+        self.assertIn("next_cursor", body1)
+
+        with mock.patch.object(self.lf, "_get_ddb", return_value=fake):
+            resp2 = self.lf._handle_escalation_list(
+                "enceladus", {"page_size": "25", "next_cursor": body1["next_cursor"]})
+        self.assertEqual(200, resp2["statusCode"])
+        body2 = json.loads(resp2["body"])
+        self.assertEqual(25, body2["count"])
+        self.assertNotIn("next_cursor", body2)
+        seen_ids = {esc["item_id"] for esc in body1["escalations"]} | {
+            esc["item_id"] for esc in body2["escalations"]}
+        self.assertIn("ENC-ESC-050", seen_ids)
+        self.assertEqual(50, len(seen_ids))
+
+    def test_invalid_cursor_rejected(self):
+        resp, fake = self._run({"next_cursor": "!!!not-base64!!!"}, [])
+        self.assertEqual(400, resp["statusCode"])
+        fake.query.assert_not_called()
+
 
 class TestEscalationRoute(unittest.TestCase):
     def setUp(self):

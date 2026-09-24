@@ -22,6 +22,11 @@ Environment variables:
   COGNITO_CLIENT_ID           Cognito client ID
   CORS_ORIGIN                 CORS allowed origin (default: https://jreese.net)
   COORDINATION_INTERNAL_API_KEY  Internal API key for service-to-service auth
+  OPENSEARCH_ENDPOINT            Gamma OpenSearch HTTPS URL (ENC-TSK-L43)
+  OPENSEARCH_READ_ALIAS          Read alias (records_read)
+  OPENSEARCH_SECRET_NAME         Secrets Manager secret for query user
+  OPENSEARCH_USERNAME            OpenSearch security-plugin username (query)
+  FEED_API_BASE                  Base URL for feed/corpus facet fallback
   BEDROCK_REGION              AWS region for Bedrock (default: us-west-2)
 """
 
@@ -37,8 +42,23 @@ import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
+import corroboration
+import dedup_convergence
+import energy_function
+import opensearch_keyword
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# ENC-FTR-095 / ENC-TSK-I90: sheaf Laplacian H1 inconsistency detection. The
+# module is co-located in this Lambda package (no .build_extras entry needed) and
+# is pure-Python (no numpy/scipy), so the import is unconditional but guarded so a
+# packaging slip degrades the one search_type rather than the whole function.
+try:  # pragma: no cover - import guard
+    import sheaf_cohomology as _sheaf_cohomology
+except Exception:  # pragma: no cover - import guard
+    _sheaf_cohomology = None
+    logger.warning("[WARNING] sheaf_cohomology module unavailable — sheaf_cohomology search_type disabled")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -54,7 +74,49 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid", "vector_read"}
+VALID_SEARCH_TYPES = {"adjacency", "dedup_convergence", "hybrid", "keyword", "laplacian", "neighbors", "path", "sheaf_cohomology", "traversal"}
+
+# ENC-TSK-I88 (ENC-FTR-085 comp-percolation-monitor): bounded page sizes for the
+# read-only adjacency export consumed by the nightly percolation Lambda. Mirrors
+# the vector_read pagination discipline — large corpora stream across several
+# calls so a single response never exceeds the API Gateway payload cap.
+ADJACENCY_DEFAULT_LIMIT = 5000
+ADJACENCY_MAX_LIMIT = 20000
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-089 / ENC-TSK-I89 — tracker.embeddings_for raw-embedding egress
+# ---------------------------------------------------------------------------
+# Research-only egress of the stored Amazon Titan Text Embeddings V2 vectors
+# (256-dim, L2-normalized) that graph_sync/embedding.py writes onto record
+# nodes under the `embedding` property. This is an IAM-scoped read: it exposes
+# raw model vectors, so it is gated to the internal service key and admin-tier
+# (io-dev-admin) Cognito tokens only — standard/elevated/observe agent tokens
+# are rejected with 403. It introduces NO new edge types or graph nodes and
+# does not touch graph_sync (OGTM AC-4): it reads the existing Titan V2
+# vectors in place. Callers stack the returned vectors into an (N x 256)
+# matrix and compute np.mean(matrix, axis=0) as a demand-centroid / Fréchet
+# barycenter approximation (FTR-084 / FTR-087).
+EMBEDDING_EGRESS_SEARCH_TYPE = "embeddings_for"
+EMBEDDING_EGRESS_DIMENSIONS = 256
+EMBEDDING_EGRESS_MODEL_ID = "amazon.titan-embed-text-v2:0"
+MAX_EMBEDDING_EGRESS_RECORD_IDS = 100
+
+# Admin-tier authorization tokens. `enc:agent_tier` is the governed claim the
+# ENC-FTR-074 pre-token Lambda stamps onto M2M access tokens (admin > elevated
+# > standard > observe); `io-dev-admin` is the product-lead Cognito group on
+# human/admin identities. Either one (or the internal service key) authorizes
+# raw-embedding egress.
+_EGRESS_ADMIN_AGENT_TIER = "admin"
+_EGRESS_ADMIN_COGNITO_GROUP = "io-dev-admin"
+
+# ENC-TSK-I81 / ENC-FTR-088: graph_laplacian read action bounds.
+# A vertex-set query resolves an induced subgraph whose (sparse) Laplacian
+# spectrum is computed via scipy.sparse.linalg.eigsh. Cap the vertex count so a
+# pathological query can never build an O(n^2) dense fallback large enough to
+# blow the 180s SLO / Lambda memory; eigsh on the CSR operator stays cheap well
+# past this bound but the dense small-n fallback must not.
+LAPLACIAN_MAX_VERTICES = 500
+LAPLACIAN_DEFAULT_K = 3
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1 hybrid retrieval constants
@@ -157,6 +219,11 @@ _GDS_HARD_DISABLED = os.environ.get("GDS_HARD_DISABLED", "").strip().lower() in 
 _GDS_SESSION_MEMORY = os.environ.get("GDS_SESSION_MEMORY", "2GB").strip() or "2GB"
 _GDS_WEIGHT_PROPERTY = os.environ.get("GDS_WEIGHT_PROPERTY", "weight").strip() or "weight"
 _GDS_FLOW_WEIGHT_PROPERTY = "flow_weight"
+# ENC-TSK-J03: PPR/PageRank reads flow_weight (not static type weight) when set.
+_GDS_PPR_WEIGHT_PROPERTY = (
+    os.environ.get("GDS_PPR_WEIGHT_PROPERTY", _GDS_FLOW_WEIGHT_PROPERTY).strip()
+    or _GDS_FLOW_WEIGHT_PROPERTY
+)
 _GDS_PROJECTION_META_LABEL = "GdsProjectionMeta"
 try:
     _GDS_PROJECTION_MAX_AGE_S = int(os.environ.get("GDS_PROJECTION_MAX_AGE_S", "3600"))
@@ -183,35 +250,18 @@ try:
 except (TypeError, ValueError):
     _PATHWAY_EDGE_DEADLINE_S = 2.0
 
-# ENC-TSK-H89 (ENC-FTR-082 AC-12): governed bulk vector-read path config. A
-# dedicated, strip-EXEMPT pagination over the n.embedding corpus for downstream
-# correlation analysis (ENC-TSK-H34 AC-1). Latency-bounded by its own wall-clock
-# deadline + server-side SKIP/LIMIT so a large page can never extend or perturb
-# the hybrid retrieval request path. The hybrid path keeps stripping embeddings
-# (_query_hybrid); ONLY this path returns the raw vector.
-try:
-    _VECTOR_READ_DEADLINE_S = float(os.environ.get("VECTOR_READ_DEADLINE_S", "10.0"))
-except (TypeError, ValueError):
-    _VECTOR_READ_DEADLINE_S = 10.0
-_VECTOR_READ_DEFAULT_LIMIT = 200
-_VECTOR_READ_MAX_LIMIT = 1000
+# ENC-FTR-087 Phase 1 — wave-close drift telemetry sink. When DRIFT_TELEMETRY_TABLE
+# is set (01-data.yaml provisions the table; 02-compute.yaml grants PutItem + injects
+# the env var) each wave-close event writes one d_centroid_L2 + d_spectral record to
+# the per-project DynamoDB time series (queryable via the project-timestamp-index GSI).
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 
-# ENC-TSK-H92 (ENC-FTR-082 AC-2): flag-gated correlation-aware (pseudoinverse-
-# style) encoding. OFF by default => byte-identical hybrid retrieval. When
-# CORRELATION_ENCODING_ENABLED is truthy AND a transform artifact is configured,
-# the offline-fit de-correlating transform W (tools/fit_encoding_h92.py, fit from
-# the ENC-TSK-H91 high-correlation pairs) at CORRELATION_ENCODING_TRANSFORM_URI
-# (local path or s3://) is applied to the query embedding before the HNSW vector
-# search, suppressing the shared directions of near-duplicate pairs (reduced
-# Hebbian crosstalk). No numpy in-Lambda — a pure-Python matrix-vector product.
-_CORRELATION_ENCODING_ENABLED = (
-    os.environ.get("CORRELATION_ENCODING_ENABLED", "").strip().lower()
-    in ("1", "true", "yes", "on")
-)
-_CORRELATION_ENCODING_TRANSFORM_URI = os.environ.get("CORRELATION_ENCODING_TRANSFORM_URI", "").strip()
-_correlation_transform_cache: Dict[str, Any] = {"loaded": False, "W": None, "dim": None}
+# ENC-FTR-109 / ENC-TSK-K05 — stigmergic exploration trace sink (telemetry-only).
+STIGMERGIC_TRACE_TABLE = os.environ.get("STIGMERGIC_TRACE_TABLE", "").strip()
 
 _s3 = None
+_dynamodb = None
+_cloudwatch = None
 
 
 def _get_secretsmanager():
@@ -245,6 +295,87 @@ def _get_s3():
             ),
         )
     return _s3
+
+
+def _get_dynamodb():
+    """Lazy low-level DynamoDB client for the ENC-FTR-087 wave-close drift sink."""
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3
+        from botocore.config import Config
+        _dynamodb = boto3.client(
+            "dynamodb",
+            region_name=SECRETS_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _dynamodb
+
+
+def _get_cloudwatch():
+    """Lazy CloudWatch client for the ENC-TSK-K43 GraphHealth lambda2 metric
+    publisher (mirrors _get_dynamodb / _get_s3 lazy-singleton convention)."""
+    global _cloudwatch
+    if _cloudwatch is None:
+        import boto3
+        from botocore.config import Config
+        _cloudwatch = boto3.client(
+            "cloudwatch",
+            region_name=SECRETS_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _cloudwatch
+
+
+_SPURIOUS_ATTRACTOR_RECENT_LIMIT = 5
+
+
+def _recent_spurious_attractor_rate(project_id: str) -> Optional[float]:
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7) — best-effort mean of the most recent
+    non-null spurious_attractor_rate values for a project.
+
+    Read-only Query against the project-timestamp-index GSI on the existing
+    enceladus-drift-telemetry table — the same IAM grant ENC-TSK-I85 already
+    provisioned for the wave-close write path (DriftTelemetryTableAccess /
+    dynamodb:Query), so this adds no new infrastructure. Surfaced on the
+    adjacency search_type (ENC-FTR-085 / ENC-TSK-I88) so the nightly
+    percolation-monitor Lambda — which reads the graph exclusively through this
+    endpoint — can fold a recent spurious_attractor_rate aggregate into its own
+    telemetry without gaining a new DynamoDB grant of its own.
+
+    Returns None (rather than raising) on any failure, missing table config, or
+    when no recent record carries a non-null rate, so this enrichment can never
+    break the adjacency page it rides along on.
+    """
+    if not DRIFT_TELEMETRY_TABLE:
+        return None
+    try:
+        resp = _get_dynamodb().query(
+            TableName=DRIFT_TELEMETRY_TABLE,
+            IndexName="project-timestamp-index",
+            KeyConditionExpression="project_id = :pid",
+            ExpressionAttributeValues={":pid": {"S": project_id}},
+            ScanIndexForward=False,
+            Limit=_SPURIOUS_ATTRACTOR_RECENT_LIMIT,
+        )
+    except Exception:  # noqa: BLE001 — enrichment must never break adjacency reads
+        logger.warning(
+            "[WARNING] recent spurious_attractor_rate lookup failed project_id=%s",
+            project_id, exc_info=True,
+        )
+        return None
+
+    values: List[float] = []
+    for item in resp.get("Items", []):
+        n = item.get("spurious_attractor_rate", {}).get("N")
+        if n is None:
+            continue
+        try:
+            values.append(float(n))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _get_neo4j_credentials() -> Dict[str, str]:
@@ -366,6 +497,27 @@ def _error(status_code: int, message: str, **extra) -> Dict[str, Any]:
 # Authentication
 # ---------------------------------------------------------------------------
 
+def _has_enceladus_id_token(event: Dict) -> bool:
+    """True when the request carries an enceladus_id_token cookie (header or APIGW v2 array)."""
+    headers = event.get("headers") or {}
+    cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    cookie_parts = [
+        part.strip()
+        for part in cookie_header.split(";")
+        if isinstance(part, str) and part.strip()
+    ]
+    event_cookies = event.get("cookies") or []
+    if isinstance(event_cookies, list):
+        cookie_parts.extend(
+            part.strip()
+            for part in event_cookies
+            if isinstance(part, str) and part.strip()
+        )
+    elif isinstance(event_cookies, str) and event_cookies.strip():
+        cookie_parts.append(event_cookies.strip())
+    return any(part.startswith("enceladus_id_token=") for part in cookie_parts)
+
+
 def _authenticate(event: Dict) -> Optional[str]:
     """Validate auth. Returns error message or None if authenticated."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
@@ -379,9 +531,8 @@ def _authenticate(event: Dict) -> Optional[str]:
         if internal_key.strip() in valid_keys:
             return None
 
-    # Check Cognito JWT cookie (simplified -- real validation done by API GW or in-Lambda)
-    cookies = headers.get("cookie", "")
-    if "enceladus_id_token=" in cookies:
+    # Cognito session cookie — APIGW HTTP API v2 may pass cookies via event.cookies[].
+    if _has_enceladus_id_token(event):
         return None
 
     # Check Authorization header
@@ -457,7 +608,24 @@ _ALLOWED_EDGE_TYPES = frozenset({
     # graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL; labels must stay byte-identical
     # across both lambdas (ENC-ISS-178).
     "PATHWAY_TRAVERSED",
+    # ENC-TSK-C08 / ENC-FTR-064 (OGTM): Handoff Consolidation Engine provenance
+    # edges. CONSOLIDATED_FROM: Lesson-candidate Document -> source Handoff
+    # Documents. PROPOSED_BY: candidate -> proposer (the HCE feature/agent).
+    # Field-projected by graph_sync from the candidate's consolidated_from /
+    # proposed_by fields; labels must stay byte-identical across both lambdas.
+    "CONSOLIDATED_FROM", "CONSOLIDATES",
+    "PROPOSED_BY", "PROPOSES",
     "TRAVERSED_BY",
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential lifecycle edges.
+    # Projected by graph_sync from the agent-store streams (_reconcile_agent_edges /
+    # _project_mutated_edge). Registered here so tracker.graphsearch edge_types=[...]
+    # queries traverse them; labels are byte-identical to graph_sync
+    # RELATIONSHIP_TYPE_TO_EDGE_LABEL values (ENC-ISS-178 drift guard).
+    "AUTHENTICATED_AS",   # AgentSession -> AgentIdentity
+    "OWNED_BY",           # AgentCredential -> AgentIdentity
+    "DERIVED_FROM",       # AgentCredential -> parent AgentCredential (rotation lineage)
+    "TRIGGERED_BY",       # AgentSession -> triggering session/routine
+    "MUTATED",            # AgentSession -> any record it wrote (write_source.provider)
 })
 
 
@@ -540,13 +708,45 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     if min_weight:
         weight_filter = f"AND ALL(rel IN r WHERE COALESCE(rel.weight, 1.0) >= {float(min_weight)}) "
 
+    # ENC-TSK-L87: neighbor.project_id was previously required to equal the
+    # caller's project_id, but MENTIONS (and other) edges are legitimately
+    # cross-project -- graph_sync's own write path (_reconcile_mentions_edges)
+    # MERGEs edges by record_id only, with no project_id restriction, so a
+    # devops task mentioning an enceladus feature in prose gets a real
+    # cross-project edge in Neo4j. This read-side filter silently hid every
+    # such edge from every "neighbors" consumer (not just the audit), making
+    # correctly-written edges permanently unverifiable. Only the START node
+    # is scoped to project_id (that's the caller's actual query intent);
+    # neighbors may belong to any project.
+    # ENC-TSK-P61 (ENC-ISS-715): return EVERY relationship on each path, not
+    # just the last hop, and include the START node so the caller never has
+    # to fabricate an unlabeled stub for the record the graph is centred on.
+    #
+    # Verification fix (same task): LIMIT must bound NEIGHBORS, not path
+    # rows. The DISTINCT-row form emitted one row per (neighbor, path
+    # variant); on a dense 2-hop neighborhood the path variants of a few
+    # near neighbors exhausted the LIMIT before other neighbors emitted any
+    # row at all — which silently dropped the viewed plan's own first-hop
+    # PLAN_CONTAINS edges even though they exist in Neo4j. Paths are now
+    # collected per neighbor (capped at 8 variants each) and LIMIT applies
+    # to the per-neighbor rows.
+    #
+    # ENC-TSK-P66 (ENC-ISS-730): the cap must fill NEAREST-FIRST. Without an
+    # ORDER BY, Neo4j hands back an arbitrary MAX_RESULTS-sized subset of a
+    # dense 2-hop neighborhood, so distance-1 neighbors — the viewed record's
+    # own membership ring, the subject of the query — can lose cap slots to
+    # distance-2 context (live: 10 of ENC-PLN-082's 15 PLAN_CONTAINS edges).
+    # min(size(r)) is the shortest path length per neighbor; ordering on it
+    # guarantees every distance-1 neighbor precedes any distance-2 one.
     cypher = (
         f"MATCH (start)-{edge_pattern}-(neighbor) "
         f"WHERE start.record_id = $record_id AND start.project_id = $project_id "
-        f"AND neighbor.project_id = $project_id "
         f"{weight_filter}"
-        "RETURN DISTINCT neighbor, "
-        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}][-1] AS edge_info "
+        "WITH start, neighbor, collect("
+        "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}]"
+        ")[..8] AS path_lists, min(size(r)) AS dist "
+        "ORDER BY dist ASC "
+        "RETURN neighbor, start, path_lists "
         "LIMIT $limit"
     )
 
@@ -557,19 +757,26 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     with driver.session() as session:
         result = session.run(cypher, record_id=record_id, project_id=project_id, limit=MAX_RESULTS)
         for rec in result:
+            start_node = rec.get("start")
+            if start_node is not None:
+                snd = _node_to_dict(start_node)
+                srid = snd.get("record_id", "")
+                if srid and srid not in seen_ids:
+                    nodes.append(snd)
+                    seen_ids.add(srid)
             nd = _node_to_dict(rec["neighbor"])
             rid = nd.get("record_id", "")
             if rid and rid not in seen_ids:
                 nodes.append(nd)
                 seen_ids.add(rid)
-            edge = rec.get("edge_info")
-            if edge:
-                e = dict(edge)
-                s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
-                canon = (min(s, t), max(s, t), tp)
-                if canon not in seen_edges:
-                    edges.append(e)
-                    seen_edges.add(canon)
+            for path_edges in rec.get("path_lists") or []:
+                for edge in path_edges or []:
+                    e = dict(edge)
+                    s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
+                    canon = (min(s, t), max(s, t), tp)
+                    if canon not in seen_edges:
+                        edges.append(e)
+                        seen_edges.add(canon)
 
     return {
         "nodes": nodes,
@@ -691,6 +898,273 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-I81 / ENC-FTR-088: graph Laplacian read action
+# ---------------------------------------------------------------------------
+# Resolves a vertex set (keyword query or explicit record_ids), materializes the
+# induced subgraph adjacency over EXISTING typed edges (no new edge types — OGTM
+# N/A, AC-4), and computes the smallest-k Laplacian eigenpairs via
+# scipy.sparse.linalg.eigsh (AC-2). Returns a CSR adjacency (base64 float32 data
+# + base64 int32 indices/indptr), the Fiedler vector, the k smallest eigenvalues,
+# the degree vector, and an index->record_id vertex_map. From adjacency_csr +
+# degrees a client reconstructs L = D - A (combinatorial) or the symmetric
+# normalized Laplacian L_sym = I - D^{-1/2} A D^{-1/2} — the spectral object the
+# Wave-Close Drift Telemetry d_spectral measurement consumes (ENC-FTR-087, AC-3).
+#
+# The DEFAULT normalization is combinatorial (L = D - A): its smallest eigenvalue
+# is identically 0 for ANY graph (the constant vector is always in the null
+# space), so eigenvalues[0] < 0.001 holds even for an edge-sparse / disconnected
+# 10-node subgraph (AC-5). normalization='normalized' is offered as an opt-in for
+# scale-invariant spectral comparison.
+
+
+def _b64_array(arr, np_dtype: str) -> str:
+    """Base64-encode a numpy array's raw little-endian bytes for compact, lossless
+    transport of CSR components (AC-1 adjacency_csr 'base64 float32' contract)."""
+    import base64
+    import numpy as np
+    return base64.b64encode(
+        np.ascontiguousarray(arr, dtype=np_dtype).tobytes()
+    ).decode("ascii")
+
+
+def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
+    """Resolve the ordered vertex set for the induced subgraph.
+
+    Selection precedence: explicit record_ids (comma list) -> keyword
+    vertex_set_query (title/record_id CONTAINS) -> all project nodes. Placeholder
+    nodes (ENC-TSK-E06 is_placeholder) are excluded so edge-target stubs never
+    enter the spectrum. Returns {ids, query_cypher} or {error}.
+    """
+    try:
+        limit = int(params.get("limit", LAPLACIAN_MAX_VERTICES) or LAPLACIAN_MAX_VERTICES)
+    except (TypeError, ValueError):
+        return {"error": "limit must be an integer"}
+    limit = max(2, min(limit, LAPLACIAN_MAX_VERTICES))
+
+    record_ids_param = params.get("record_ids", "")
+    vertex_set_query = (params.get("vertex_set_query", "") or "").strip()
+
+    explicit_ids: List[str] = []
+    if record_ids_param:
+        if isinstance(record_ids_param, list):
+            explicit_ids = [str(x).strip() for x in record_ids_param if str(x).strip()]
+        else:
+            explicit_ids = [x.strip() for x in str(record_ids_param).split(",") if x.strip()]
+
+    if explicit_ids:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id AND n.record_id IN $ids "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "ids": explicit_ids, "limit": limit}
+    elif vertex_set_query:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "AND (toLower(coalesce(n.title, '')) CONTAINS toLower($q) "
+            "OR n.record_id CONTAINS toUpper($q)) "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "q": vertex_set_query, "limit": limit}
+    else:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "limit": limit}
+
+    with driver.session() as session:
+        result = session.run(cypher, **run_params)
+        ids = [rec["rid"] for rec in result if rec.get("rid")]
+    return {"ids": ids, "query_cypher": cypher}
+
+
+def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
+    """Compute the induced-subgraph Laplacian spectrum (ENC-FTR-088).
+
+    Params: vertex_set_query | record_ids (selection), edge_type_filter
+    (restrict adjacency to existing edge types), k (smallest eigenpairs,
+    default 3), limit, normalization ('combinatorial' default | 'normalized').
+    """
+    # --- parameters ---
+    try:
+        k = int(params.get("k", LAPLACIAN_DEFAULT_K) or LAPLACIAN_DEFAULT_K)
+    except (TypeError, ValueError):
+        return {"error": "k must be an integer"}
+    if k < 1:
+        return {"error": "k must be >= 1"}
+
+    normalization = (params.get("normalization", "combinatorial") or "combinatorial").strip().lower()
+    if normalization not in {"combinatorial", "normalized"}:
+        return {"error": "normalization must be 'combinatorial' or 'normalized'"}
+
+    edge_type_filter = params.get("edge_type_filter", "")
+    etypes: List[str] = []
+    if edge_type_filter:
+        if isinstance(edge_type_filter, list):
+            etypes = [t.strip().upper() for t in edge_type_filter if str(t).strip()]
+        else:
+            etypes = [t.strip().upper() for t in str(edge_type_filter).split(",") if t.strip()]
+        invalid = [t for t in etypes if t not in _ALLOWED_EDGE_TYPES]
+        if invalid:
+            return {"error": f"Invalid edge_type_filter: {invalid}. Allowed: {sorted(_ALLOWED_EDGE_TYPES)}"}
+
+    # --- vertex set ---
+    selection = _laplacian_select_vertices(driver, project_id, params)
+    if "error" in selection:
+        return selection
+    ids: List[str] = selection["ids"]
+    n = len(ids)
+    if n < 2:
+        return {
+            "error": (
+                f"Laplacian requires at least 2 vertices; vertex set resolved {n}. "
+                "Broaden vertex_set_query, pass more record_ids, or raise limit."
+            )
+        }
+    idx = {rid: i for i, rid in enumerate(ids)}
+
+    # --- induced-subgraph edges over EXISTING edge types (no new edge types) ---
+    if etypes:
+        edge_cypher = (
+            "MATCH (a)-[r]-(b) "
+            "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+            "AND a.record_id IN $ids AND b.record_id IN $ids AND type(r) IN $etypes "
+            "RETURN DISTINCT a.record_id AS s, b.record_id AS t"
+        )
+        edge_run = {"project_id": project_id, "ids": ids, "etypes": etypes}
+    else:
+        edge_cypher = (
+            "MATCH (a)-[r]-(b) "
+            "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+            "AND a.record_id IN $ids AND b.record_id IN $ids "
+            "RETURN DISTINCT a.record_id AS s, b.record_id AS t"
+        )
+        edge_run = {"project_id": project_id, "ids": ids}
+
+    pairs: set = set()  # unordered {(i, j) : i < j} — binary, undirected adjacency
+    with driver.session() as session:
+        result = session.run(edge_cypher, **edge_run)
+        for rec in result:
+            s, t = rec.get("s"), rec.get("t")
+            if s is None or t is None or s == t:
+                continue
+            i, j = idx.get(s), idx.get(t)
+            if i is None or j is None:
+                continue
+            pairs.add((min(i, j), max(i, j)))
+
+    # --- sparse Laplacian + smallest-k eigenpairs via scipy.sparse.linalg.eigsh ---
+    import numpy as np
+    from scipy.sparse import csr_matrix, diags
+    from scipy.sparse.linalg import eigsh
+
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
+    for (i, j) in pairs:
+        rows.extend((i, j))
+        cols.extend((j, i))
+        data.extend((1.0, 1.0))
+    adjacency = csr_matrix((data, (rows, cols)), shape=(n, n), dtype="float64")
+    adjacency.sum_duplicates()
+    adjacency.sort_indices()
+
+    degrees = np.asarray(adjacency.sum(axis=1)).ravel()
+
+    if normalization == "normalized":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d_inv_sqrt = 1.0 / np.sqrt(degrees)
+        d_inv_sqrt[~np.isfinite(d_inv_sqrt)] = 0.0  # isolated vertices -> 0
+        d_mat = diags(d_inv_sqrt)
+        laplacian = (diags(np.ones(n)) - (d_mat @ adjacency @ d_mat)).tocsr()
+        formula = "L_sym = I - D^(-1/2) A D^(-1/2)"
+    else:
+        laplacian = (diags(degrees) - adjacency).tocsr()
+        formula = "L = D - A"
+
+    k_req = min(k, n)
+    want = min(max(k_req, 2), n)  # at least 2 so the Fiedler vector (index 1) exists
+
+    # eigsh (ARPACK) requires 0 < want < n and is unstable for tiny / near-full
+    # spectra; it also rejects an all-zero operator ("Starting vector is zero"),
+    # which is exactly the edgeless-subgraph case (L = 0). Fall back to dense eigh
+    # for those, and on any convergence failure. The mandated
+    # scipy.sparse.linalg.eigsh drives the normal path (e.g. the AC-5 10-node
+    # subgraph). A deterministic start vector keeps repeated calls reproducible.
+    if n <= 3 or want >= n or laplacian.nnz == 0:
+        evals, evecs = np.linalg.eigh(laplacian.toarray())
+        eig_method = "dense_eigh"
+    else:
+        try:
+            v0 = np.random.default_rng(0).standard_normal(n)
+            evals, evecs = eigsh(laplacian, k=want, which="SA", v0=v0)
+            eig_method = "eigsh_SA"
+        except Exception:
+            logger.warning("[WARNING] eigsh failed; dense eigh fallback", exc_info=True)
+            evals, evecs = np.linalg.eigh(laplacian.toarray())
+            eig_method = "dense_eigh_fallback"
+
+    order = np.argsort(evals)
+    evals = evals[order]
+    evecs = evecs[:, order]
+
+    eigenvalues = [float(x) for x in evals[:k_req]]
+    fiedler = np.asarray(evecs[:, 1]).ravel()
+    fiedler_vector = [float(x) for x in fiedler]
+
+    adjacency_csr = {
+        "encoding": "base64",
+        "byte_order": "little",
+        "dtype": {"data": "float32", "indices": "int32", "indptr": "int32"},
+        "shape": [n, n],
+        "nnz": int(adjacency.nnz),
+        "data_b64": _b64_array(adjacency.data, "<f4"),
+        "indices_b64": _b64_array(adjacency.indices, "<i4"),
+        "indptr_b64": _b64_array(adjacency.indptr, "<i4"),
+    }
+
+    lambda0 = eigenvalues[0] if eigenvalues else float("nan")
+    return {
+        "nodes": [],
+        "edges": [],
+        "paths": [],
+        "vertex_map": ids,
+        "adjacency_csr": adjacency_csr,
+        "degrees": [float(x) for x in degrees],
+        "eigenvalues": eigenvalues,
+        "fiedler_vector": fiedler_vector,
+        "laplacian": {
+            "n": n,
+            "k": k_req,
+            "edge_count": len(pairs),
+            "normalization": normalization,
+            "formula": formula,
+            "weighted": False,
+            "eig_method": eig_method,
+            "edge_type_filter": etypes or None,
+            "reconstruct": (
+                "A = scipy.sparse.csr_matrix((b64decode(data_b64,float32), "
+                "b64decode(indices_b64,int32), b64decode(indptr_b64,int32)), shape); "
+                "D = diag(A.sum(axis=1)); combinatorial L = D - A; "
+                "normalized L_sym = D^(-1/2) (D - A) D^(-1/2)."
+            ),
+        },
+        "summary": (
+            f"Laplacian ({normalization}) over {n} vertices, {len(pairs)} edges; "
+            f"{len(eigenvalues)} smallest eigenvalues (lambda0={lambda0:.6g}), "
+            f"Fiedler dim {len(fiedler_vector)} via {eig_method}"
+        ),
+        "query_cypher": f"{selection['query_cypher']} ;; {edge_cypher}",
+    }
+
+
+# ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1: Three-signal hybrid retrieval
 # ---------------------------------------------------------------------------
 # Implements vector (HNSW cosine) + graph (PPR or Cypher fallback) + keyword
@@ -764,23 +1238,7 @@ def _hybrid_vector_ranks(
     Returns a list of {record_id, score, label, rank} dicts sorted by score
     desc. Each label contributes up to k_per_label candidates; duplicates
     (same record_id across labels) are kept by highest score.
-
-    ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): when the correlation-aware encoding is
-    enabled (a valid h92.v1 transform W loads), HNSW recall still uses the RAW
-    query embedding, then every candidate is RE-SCORED symmetrically by
-    cosine(W·q, W·emb) — the de-correlating transform applied to BOTH sides — so a
-    near-duplicate's distinctive residual decides rank. Disabled (or transform
-    absent / dim-mismatch) => the HNSW cosine score is used unchanged, so the
-    Cypher and the ranking are byte-identical to the pre-encoding behavior.
     """
-    # Load the transform ONCE. When the encoding is off this returns (None, None)
-    # immediately, rerank stays False, and the hot path is byte-identical.
-    rerank_W, rerank_dim = _load_correlation_transform()
-    rerank = rerank_W is not None and rerank_dim == len(query_embedding)
-    wq = _transform_unit(query_embedding, rerank_W, rerank_dim) if rerank else None
-    if rerank and wq is None:
-        rerank = False  # degenerate transformed query — fall back to HNSW score
-
     # Scope to a single label when record_type is set.
     if record_type_filter:
         label = record_type_filter.capitalize()
@@ -788,7 +1246,6 @@ def _hybrid_vector_ranks(
     else:
         labels_to_query = list(LABEL_VECTOR_INDEXES.keys())
 
-    emb_return = f", node.{_EMBEDDING_PROPERTY} AS embedding" if rerank else ""
     by_rid: Dict[str, Dict[str, Any]] = {}
     for label in labels_to_query:
         index_name = LABEL_VECTOR_INDEXES[label]
@@ -796,7 +1253,11 @@ def _hybrid_vector_ranks(
             "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
             "YIELD node, score "
             "WHERE node.project_id = $project_id "
-            f"RETURN node.record_id AS rid, score, labels(node) AS labels{emb_return}"
+            # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
+            # recall signal so a twin no longer competes with its canonical — the
+            # central precision@1 fix (DOC-DF651F07D5C2 §3).
+            "AND node.superseded_by IS NULL "
+            "RETURN node.record_id AS rid, score, labels(node) AS labels"
         )
         try:
             with driver.session() as session:
@@ -812,13 +1273,6 @@ def _hybrid_vector_ranks(
                     if not rid:
                         continue
                     score = float(rec.get("score") or 0.0)
-                    if rerank:
-                        # Symmetric re-score: cosine of the unit-normalized
-                        # W·q and W·emb. Falls back to the HNSW score if this
-                        # candidate's embedding is absent/degenerate.
-                        we = _transform_unit(rec.get("embedding"), rerank_W, rerank_dim)
-                        if we is not None:
-                            score = sum(a * b for a, b in zip(wq, we))
                     prev = by_rid.get(rid)
                     if prev is None or score > prev["score"]:
                         by_rid[rid] = {
@@ -901,7 +1355,7 @@ def _hybrid_graph_ranks_gds(
                     $name,
                     src,
                     tgt,
-                    {{relationshipProperties: {{weight: {weight_case_sql}}}}},
+                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: coalesce(r.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)}}}},
                     {{memory: '2GB'}}
                 ) AS g
                 RETURN g.graphName
@@ -934,7 +1388,7 @@ def _hybrid_graph_ranks_gds(
                         sourceNodes: [$anchorId],
                         dampingFactor: $damping,
                         maxIterations: $maxIter,
-                        relationshipWeightProperty: 'weight'
+                        relationshipWeightProperty: $weightProp
                     }
                 )
                 YIELD nodeId, score
@@ -946,6 +1400,7 @@ def _hybrid_graph_ranks_gds(
                 anchorId=anchor_rec["nodeId"],
                 damping=PPR_DAMPING_FACTOR,
                 maxIter=PPR_MAX_ITERATIONS,
+                weightProp=_GDS_PPR_WEIGHT_PROPERTY,
                 limit=top_n,
             )
             node_rows: List[tuple] = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
@@ -1021,7 +1476,8 @@ def _hybrid_graph_ranks_cypher_fallback(
         f"AND neighbor.project_id = $project_id "
         f"AND neighbor.record_id <> $rid "
         f"WITH neighbor, path, "
-        f"  reduce(s = 0.0, rel IN relationships(path) | s + {weight_case_sql}) "
+        f"  reduce(s = 0.0, rel IN relationships(path) | "
+        f"    s + ({weight_case_sql}) * coalesce(rel.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)) "
         f"  * ({decay} ^ length(path)) AS path_score "
         f"WITH neighbor.record_id AS rid, sum(path_score) AS score "
         f"RETURN rid, score ORDER BY score DESC LIMIT $limit"
@@ -1132,7 +1588,7 @@ def _hybrid_graph_ranks_gds_warm(
                 anchorId=anchor_rec["nodeId"],
                 damping=PPR_DAMPING_FACTOR,
                 maxIter=PPR_MAX_ITERATIONS,
-                weightProp=_GDS_WEIGHT_PROPERTY,
+                weightProp=_GDS_PPR_WEIGHT_PROPERTY,
                 limit=top_n,
             )
             node_rows = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
@@ -1174,8 +1630,9 @@ def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
     — never from the request path — so the FlightRuntimeException
     'already a job running' same-graph-name race (DOC-D4CB8048798B, Concurrency
     Hazards) cannot occur. Drops any prior projection of the same name, projects
-    the project's nodes/edges with BOTH a per-type 'weight' and a flow_weight=1.0
-    slot (ENC-FTR-101 AC-5), then stamps a GdsProjectionMeta marker carrying the
+    the project's nodes/edges with BOTH a per-type 'weight' and a flow_weight
+    property read from each relationship (ENC-TSK-J03 / FTR-108 Ph3), then stamps
+    a GdsProjectionMeta marker carrying the
     last-refresh epoch for staleness telemetry (AC-3). Never raises.
     """
     if _GDS_HARD_DISABLED:
@@ -1210,7 +1667,7 @@ def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
                     $name,
                     src,
                     tgt,
-                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: 1.0}}}},
+                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: coalesce(r.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)}}}},
                     {{memory: $memory}}
                 ) AS g
                 RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount AS relationshipCount
@@ -1292,6 +1749,86 @@ def _handle_refresh_projection(event: Dict) -> Dict[str, Any]:
     project_ids = event.get("project_ids") or [event.get("project_id") or _HEALTH_PROBE_PROJECT]
     results = [_refresh_standing_projection(driver, pid) for pid in project_ids]
     return {"ok": all(r.get("refreshed") for r in results), "results": results}
+
+
+def _handle_feed_selection(event: Dict) -> Dict[str, Any]:
+    """ENC-TSK-M39 out-of-band OpenSearch feed-selection entrypoint.
+
+    Invoked directly by feed_query_lambda (event carries
+    action='feed_selection') to get the top-N most-recently-updated record IDs
+    per (project_id, record_type) from the records_read OpenSearch alias --
+    feed_query is not VPC-attached, so it proxies through this already
+    VPC-attached function rather than reaching OpenSearch itself. NOT exposed
+    on the public API Gateway route; no Neo4j driver involved.
+    """
+    project_ids = event.get("project_ids") or []
+    caps = event.get("caps") or {}
+    if not isinstance(project_ids, list) or not project_ids or not isinstance(caps, dict) or not caps:
+        return {"ok": False, "error": "project_ids (non-empty list) and caps (non-empty dict) are required"}
+    # ENC-TSK-M76: optional upstream page-cap mode. When feed_query passes
+    # page_size, each sub-query fetches page_size+1 hits WITH updated_at (and
+    # an optional updated_at<=before range bound for deep pages) so feed_query
+    # can hydrate ONLY the page instead of the whole corpus. Absent page_size
+    # this is byte-identical to the ENC-TSK-M39 legacy selection.
+    raw_page_size = event.get("page_size")
+    page_size: Optional[int] = None
+    if isinstance(raw_page_size, int) and raw_page_size > 0:
+        page_size = raw_page_size
+    before = event.get("before")
+    before = str(before) if before else None
+    selection, error = opensearch_keyword.feed_selection_msearch(
+        project_ids, caps, page_size=page_size, before=before
+    )
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "selection": selection}
+
+
+def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
+    """ENC-FTR-108 Ph2 (ENC-TSK-J02) out-of-band flow_weight refresh entrypoint.
+    Mirrors _handle_refresh_projection's contract: invoked by an EventBridge
+    scheduled/wave-close rule or a direct Lambda invoke carrying
+    action='refresh_flow_weight' (dispatched in lambda_handler below); NOT
+    exposed on the public API Gateway route. Delegates to flow_weight_refresh.
+    run_refresh, which reads FTR-082's existing edge_participation telemetry
+    from S3 and writes the Tero current-reinforcement law onto existing
+    relationships in batched, watermarked Cypher. See flow_weight_refresh.py
+    for the full design (delta/mu defaults, watermark storage, idempotency).
+    """
+    try:
+        import flow_weight_refresh as _fwr
+    except Exception:
+        logger.exception("[ERROR] flow_weight_refresh module unavailable")
+        return {"ok": False, "error": "flow_weight_refresh module unavailable"}
+    driver = _ensure_live_driver(_get_neo4j_driver())
+    if driver is None:
+        return {"ok": False, "error": "neo4j driver unavailable after rebuild attempt"}
+    return _fwr.run_refresh(driver, _get_s3(), event)
+
+
+def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
+    """ENC-TSK-K43 (B66 Ph5, gamma re-delivery of ENC-TSK-C10) out-of-band
+    Fiedler lambda-2 GraphHealth metric publisher entrypoint. Mirrors
+    _handle_refresh_projection's/_handle_refresh_flow_weight's contract:
+    invoked by an EventBridge scheduled rule or a direct Lambda invoke
+    carrying action='publish_graph_health' (dispatched in lambda_handler
+    below); NOT exposed on the public API Gateway route. Delegates to
+    graph_health_metric, which computes lambda2 exclusively via the existing
+    FTR-088 _query_laplacian CSR/Fiedler path (ISS-465: no GDS projection —
+    see graph_health_metric.py module docstring) and publishes it to the
+    Enceladus/GraphHealth CloudWatch namespace.
+    """
+    try:
+        import graph_health_metric as _ghm
+    except Exception:
+        logger.exception("[ERROR] graph_health_metric module unavailable")
+        return {"ok": False, "error": "graph_health_metric module unavailable"}
+    return _ghm.handle_publish_graph_health(
+        event,
+        get_driver_fn=lambda: _ensure_live_driver(_get_neo4j_driver()),
+        get_cloudwatch_fn=_get_cloudwatch,
+        query_laplacian_fn=_query_laplacian,
+    )
 
 
 def _hybrid_keyword_ranks(
@@ -1420,6 +1957,13 @@ def _fetch_nodes_by_record_ids(
         return {}
     cypher = (
         "MATCH (n) WHERE n.project_id = $project_id "
+        # ENC-TSK-I07 (Dedup P3): retire superseded records from active retrieval.
+        # A superseded duplicate must not surface alongside (or compete for
+        # precision@1 with) its canonical. `superseded_by` is set only on
+        # superseded nodes (graph_sync NODE_PROPERTIES); audit access is via a
+        # direct record fetch, not retrieval. Reversible: un-supersession clears
+        # the property and the node becomes retrieval-eligible again.
+        "AND n.superseded_by IS NULL "
         "AND n.record_id IN $rids RETURN n"
     )
     out: Dict[str, Dict[str, Any]] = {}
@@ -1583,10 +2127,25 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
 def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
                                     anchor_record_id, node_sequence, edges_traversed,
                                     edge_participation, result_count, graph_algorithm,
-                                    signal_availability) -> Dict[str, Any]:
+                                    signal_availability, retrieval_records=None,
+                                    lambda_graph=None, lambda_kw=None) -> Dict[str, Any]:
     """Assemble the AC-1 raw telemetry record (also carries the AC-10 edge
-    participation list). This field set IS the ENC-FTR-108 AC-4 input contract."""
-    return {
+    participation list). This field set IS the ENC-FTR-108 AC-4 input contract.
+
+    ENC-TSK-J01 (FTR-108 Ph1, design-only): edge_participation[].edge_id entries
+    with retrieval_outcome == "hit" are the Ph1 source of truth for "did edge e
+    participate in a successful retrieval this wave" -- the flow(e, t) signal in
+    the Tero current-reinforcement contract (DOC-88A8F4835811). No flow_weight
+    write path exists yet; that is Ph2, gated on an OGTM preflight not yet run.
+
+    ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): additive ``energy`` block carrying the
+    per-record E(x) breakdown (``energy_function.build_retrieval_record``
+    shape) computed for this hybrid call, plus the lambda weights used to
+    compute it. ``retrieval_records``/``lambda_graph``/``lambda_kw`` all
+    default to None/empty so existing callers (and the pre-I98 telemetry
+    schema) are unaffected — no rename/removal of any existing field.
+    """
+    record = {
         "schema": "enceladus.pathway.telemetry.v1",
         "wave_id": wave_id or "unassigned",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1602,6 +2161,14 @@ def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
             "signal_availability": signal_availability,
         },
     }
+    if retrieval_records is not None or lambda_graph is not None or lambda_kw is not None:
+        record["energy"] = {
+            "schema": energy_function.ENERGY_SCHEMA,
+            "lambda_graph": lambda_graph,
+            "lambda_kw": lambda_kw,
+            "records": retrieval_records or [],
+        }
+    return record
 
 
 def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
@@ -1634,6 +2201,61 @@ def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
         logger.exception("[ERROR] pathway telemetry emit failed (suppressed)")
 
 
+def _emit_stigmergic_trace(record: Dict[str, Any]) -> None:
+    """ENC-FTR-109 / ENC-TSK-K05 sink. Persist one trace to DynamoDB when configured;
+    otherwise emit a structured CloudWatch line. Never raises into the request path."""
+    try:
+        line = json.dumps(record, default=str)
+        if STIGMERGIC_TRACE_TABLE:
+            try:
+                import stigmergic_trace
+
+                stigmergic_trace.emit_stigmergic_trace(
+                    _get_dynamodb(), STIGMERGIC_TRACE_TABLE, record,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "[WARNING] stigmergic trace DDB put failed (%s); CloudWatch fallback",
+                    exc,
+                )
+        logger.info("STIGMERGIC_TRACE %s", line)
+    except Exception:
+        logger.exception("[ERROR] stigmergic trace emit failed (suppressed)")
+
+
+def _session_id_from_params(params: Dict[str, Any]) -> str:
+    for key in ("session_id", "agent_session_id", "wave_id"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value
+    return "unassigned"
+
+
+def _maybe_emit_stigmergic_trace(
+    *,
+    project_id: str,
+    params: Dict[str, Any],
+    event_type: str,
+    result: Dict[str, Any],
+    outcome_signal: Dict[str, Any],
+) -> None:
+    """Build and emit one stigmergic trace record (telemetry-only)."""
+    try:
+        import stigmergic_trace
+
+        record = stigmergic_trace.build_trace_record(
+            project_id=project_id,
+            session_id=_session_id_from_params(params),
+            event_type=event_type,
+            record_id_path=stigmergic_trace.record_id_path_from_graph_result(result),
+            outcome_signal=outcome_signal,
+        )
+        _emit_stigmergic_trace(record)
+    except Exception:
+        logger.exception("[ERROR] stigmergic trace build failed (suppressed)")
+
+
 def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     """Phase 1 hybrid retrieval: vector + graph + keyword fused via RRF.
 
@@ -1643,10 +2265,13 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
       record_type      Optional filter (task/issue/feature/plan/lesson/document).
       top_n            Final result count (default 20, max 50).
       include_below_threshold  When "true", includes Lessons below T3.
+      include_energy   When "true", each node carries energy_score +
+                       energy_breakdown (FTR-104 Ph3 / ENC-TSK-J52). Default off.
 
     Response contract:
       {
-        "nodes":             [...ordered by fused score...],
+        "nodes":             [...ordered by final score (fused RRF score +
+                              ENC-TSK-I92 dispersion/corroboration bonus)...],
         "edges":             [],
         "paths":             [],
         "summary":           "Hybrid: N nodes (vector=V, graph=G, keyword=K)",
@@ -1655,8 +2280,17 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "graph_algorithm":   "gds_pagerank" | "cypher_fallback" | "unavailable",
         "rrf_k":             60,
         "embedding_coverage_sample": {covered: N, total_ranked: N},
-        "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks}}
+        "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks, ...,
+                              k_corr, b_corr, final_score, final_rank}},
+        "corroboration_weber_k": 0.3,
       }
+
+    ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
+    (vector/graph/keyword/PPR fused via `_rrf_fuse`) is augmented with a fifth,
+    additive corroboration bonus B_corr — see the `corroboration` module and
+    the "ENC-TSK-I92" banner below — to produce `final_score`, which is what
+    `nodes`/`per_node_fusion` are actually ordered by. `fused_score`/
+    `fused_rank` remain the unmodified pure-RRF values throughout.
     """
     query_text = str(params.get("query", "")).strip()
     anchor_record_id = str(params.get("anchor_record_id", "")).strip()
@@ -1667,6 +2301,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         top_n = 20
     top_n = max(1, min(top_n, 50))
     include_below_threshold = str(params.get("include_below_threshold", "")).lower() == "true"
+    include_energy = str(params.get("include_energy", "")).lower() == "true"
 
     # ENC-FTR-082 Phase A (AC-1): optional pathway-telemetry provenance. Backward
     # compatible — both default to empty; intent_signature is derived deterministically
@@ -1679,6 +2314,16 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
         return {"error": "hybrid search requires at least one of: query, anchor_record_id"}
+
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): resolve the energy-function lambda
+    # weights once per call (not once per candidate) so a single hybrid call
+    # never re-probes AppConfig more than once.
+    energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
+
+    # ENC-TSK-I92 (ENC-FTR-110 Ph1): resolve the corroboration Weber_k bonus
+    # weight once per call, same one-AppConfig-probe-per-call discipline as
+    # the energy lambda weights above.
+    corroboration_weber_k = corroboration.load_weber_k()
 
     # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
     # pool is live before dispatching to any of the three signal functions.
@@ -1699,12 +2344,6 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     if query_text:
         query_embedding = _compute_query_embedding(query_text)
         if query_embedding is not None:
-            # ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): the RAW query drives HNSW
-            # recall; the flag-gated correlation-aware encoding is applied
-            # SYMMETRICALLY as a candidate re-rank inside _hybrid_vector_ranks
-            # (cosine(W·q, W·emb)), not as a query-side pre-HNSW transform — the
-            # query-side variant (ENC-TSK-H92) measured net-negative (precision@1
-            # -0.9%) because it compared W·q against an un-transformed index.
             vector_ranks = _hybrid_vector_ranks(
                 driver,
                 project_id,
@@ -1770,18 +2409,49 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         finally:
             _gex.shutdown(wait=False)
 
-    # ---- Keyword signal ----------------------------------------------------
+    # ---- Keyword signal (ENC-TSK-L43: OpenSearch primary, Neo4j fallback) --
     keyword_ranks: List[Dict[str, Any]] = []
     keyword_available = False
+    keyword_source = "unavailable"
+    facets: Dict[str, Dict[str, int]] = {}
+    facets_source: Optional[str] = None
     if query_text:
-        keyword_ranks = _hybrid_keyword_ranks(
-            driver,
+        os_ranks, os_facets, os_err = opensearch_keyword.hybrid_keyword_ranks(
             project_id,
             query_text,
             top_n=HYBRID_SIGNAL_TOP_N,
             record_type_filter=record_type_filter,
         )
-        keyword_available = bool(keyword_ranks)
+        if os_err is None:
+            keyword_ranks = os_ranks
+            keyword_available = bool(keyword_ranks)
+            keyword_source = "opensearch"
+            facets = os_facets
+            facets_source = "opensearch"
+        else:
+            logger.warning(
+                "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
+                os_err,
+            )
+            keyword_ranks = _hybrid_keyword_ranks(
+                driver,
+                project_id,
+                query_text,
+                top_n=HYBRID_SIGNAL_TOP_N,
+                record_type_filter=record_type_filter,
+            )
+            keyword_available = bool(keyword_ranks)
+            keyword_source = "neo4j_fallback"
+            fallback_facets, fb_err = opensearch_keyword.fetch_feed_corpus_facets(
+                project_id=project_id,
+                query_text=query_text,
+                record_type_filter=record_type_filter,
+            )
+            if fallback_facets:
+                facets = fallback_facets
+                facets_source = "feed_corpus"
+            elif fb_err:
+                logger.warning("[WARNING] feed/corpus facet fallback failed: %s", fb_err)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -1799,12 +2469,26 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "keyword": keyword_available,
         }
         # AC-1: emit telemetry even for zero-result retrievals (no edges/nodes).
+        # ENC-TSK-I98: lambda weights are still logged even with zero candidates
+        # so the AppConfig-resolved values used for this call are auditable.
         _emit_pathway_telemetry(_build_pathway_telemetry_record(
             wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
             anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
             edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
-            signal_availability=_sig_avail,
+            signal_availability=_sig_avail, retrieval_records=[],
+            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
         ))
+        _maybe_emit_stigmergic_trace(
+            project_id=project_id,
+            params=params,
+            event_type="retrieval",
+            result={"pathway": {"node_sequence": []}, "nodes": []},
+            outcome_signal={
+                "result_count": 0,
+                "graph_algorithm": graph_algorithm,
+                "signal_availability": _sig_avail,
+            },
+        )
         return {
             "nodes": [],
             "edges": [],
@@ -1820,6 +2504,20 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "signal_availability": _sig_avail,
             "graph_algorithm": graph_algorithm,
             "rrf_k": RRF_K,
+            # ENC-TSK-I98 (ENC-FTR-104 Ph1): per-retrieval energy telemetry —
+            # empty when no candidates were fused, but the lambda weights used
+            # for this call are still surfaced for observability.
+            "retrieval_records": [],
+            "energy_lambda_weights": {
+                "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
+            },
+            # ENC-TSK-I92 (ENC-FTR-110 Ph1): the Weber_k bonus weight used for
+            # this call, surfaced even with zero candidates for observability
+            # parity with energy_lambda_weights above.
+            "corroboration_weber_k": corroboration_weber_k,
+            "facets": facets,
+            "facets_source": facets_source,
+            "keyword_source": keyword_source,
         }
 
     fused = _rrf_fuse(signals, k=RRF_K)
@@ -1830,6 +2528,78 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
+    # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
+    # this call's own vector/graph/keyword signals — no new signal sources.
+    # graph_score/keyword_score are normalized call-relative against the top
+    # score in their respective ranked signal list (vector is already [0,1]
+    # cosine similarity, so it needs no re-normalization). graph_algorithm is
+    # threaded through unchanged so a unit test can assert E_PPR was sourced
+    # from the FTR-101 standing AGA projection ("gds_pagerank") rather than the
+    # "cypher_fallback" proxy.
+    _max_graph_score = graph_ranks[0]["score"] if graph_ranks else None
+    _max_keyword_score = keyword_ranks[0]["score"] if keyword_ranks else None
+    energy_by_rid: Dict[str, Dict[str, Any]] = {}
+    for item in top_fused:
+        rid = item["record_id"]
+        sig_scores = item.get("per_signal_scores") or {}
+        energy_by_rid[rid] = energy_function.compute_retrieval_energy(
+            vector_score=sig_scores.get("vector"),
+            graph_score=sig_scores.get("graph"),
+            keyword_score=sig_scores.get("keyword"),
+            max_graph_score=_max_graph_score,
+            max_keyword_score=_max_keyword_score,
+            graph_algorithm=graph_algorithm,
+            lambda_graph=energy_lambda_graph,
+            lambda_kw=energy_lambda_kw,
+        )
+
+    # ENC-TSK-I92 (ENC-FTR-110 Ph1): dispersion/corroboration Weber-law bonus —
+    # a fifth scoring signal, layered on top of (not folded into) the 4-signal
+    # RRF sum above. For each candidate, count corroborators: other candidates
+    # in this SAME result set that are similar enough to it (cosine similarity
+    # >= corroboration.DEFAULT_SIMILARITY_THRESHOLD) AND pairwise dispersed
+    # from each other (cosine distance >= corroboration.DISPERSION_MIN_
+    # DISTANCE), so a cluster of near-duplicate records never counts as more
+    # than one independent corroborator (the "dispersion constraint" —
+    # corroboration.count_corroborators). B_corr is a bonus, not an RRF term:
+    # it is added on top of each candidate's already-fused RRF fused_score to
+    # produce final_score, and is never folded into _rrf_fuse's 1/(k+rank) sum
+    # — that sum is exact-value-asserted by test_hybrid_retrieval.py and must
+    # stay pure RRF. Degrades to a no-op (B_corr == 0.0 for everyone, final_
+    # score == fused_score) when no candidate in this call carries a usable
+    # embedding, so this is fully backward compatible with callers/tests that
+    # never populate the embedding property.
+    embeddings_by_rid = {
+        rid: node_by_rid[rid].get(_EMBEDDING_PROPERTY)
+        for rid in top_rids
+        if node_by_rid.get(rid) and node_by_rid[rid].get(_EMBEDDING_PROPERTY)
+    }
+    corroboration_counts = corroboration.compute_corroboration_counts(embeddings_by_rid)
+    corroboration_bonuses = corroboration.compute_bonuses(
+        corroboration_counts, weber_k=corroboration_weber_k,
+    )
+    for item in top_fused:
+        rid = item["record_id"]
+        bonus = corroboration_bonuses.get(rid)
+        item["k_corr"] = bonus["k_corr"] if bonus else 0
+        item["b_corr"] = bonus["b_corr"] if bonus else 0.0
+        item["final_score"] = item["fused_score"] + item["b_corr"]
+
+    # Re-rank by final_score (RRF fused_score + corroboration bonus), NOT
+    # fused_score alone, so a candidate several genuinely-distinct records
+    # independently corroborate can outrank a single high-RRF candidate with
+    # zero independent corroboration (ENC-FTR-110 AC-4 — the spurious-
+    # attractor hedge this signal exists to provide). fused_rank/fused_score
+    # above are left untouched (the pure-RRF values); only presentation order
+    # — and the node-level final_rank/final_score below — reflect the bonus.
+    # Python's sort is stable, so when every candidate's b_corr is 0.0 (no
+    # embeddings / no corroboration anywhere in this call) the RRF order from
+    # _rrf_fuse is preserved exactly.
+    top_fused.sort(key=lambda d: d["final_score"], reverse=True)
+    for idx, item in enumerate(top_fused, start=1):
+        item["final_rank"] = idx
 
     # Ordered list of nodes matching the fused ranking.
     nodes: List[Dict[str, Any]] = []
@@ -1845,6 +2615,24 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         node["_fused_rank"] = item["fused_rank"]
         node["_fused_score"] = item["fused_score"]
         node["_per_signal_ranks"] = item["per_signal_ranks"]
+        energy_payload = energy_by_rid[rid]
+        if include_energy:
+            node["energy_score"] = energy_payload["retrieval_energy"]
+            node["energy_breakdown"] = {
+                "E_vector": energy_payload["E_vector"],
+                "E_PPR": energy_payload["E_PPR"],
+                "E_keyword": energy_payload["E_keyword"],
+                "lambda_graph": energy_payload["lambda_graph"],
+                "lambda_kw": energy_payload["lambda_kw"],
+                "graph_algorithm": energy_payload["graph_algorithm"],
+            }
+            node["_retrieval_energy"] = energy_payload["retrieval_energy"]
+        # ENC-TSK-I92 (ENC-FTR-110 Ph1): corroboration count + Weber bonus +
+        # the bonus-adjusted final_score/final_rank (see banner above).
+        node["_corroboration_count"] = item["k_corr"]
+        node["_b_corr"] = item["b_corr"]
+        node["_final_score"] = item["final_score"]
+        node["_final_rank"] = item["final_rank"]
         if node.get(_EMBEDDING_PROPERTY):
             embedding_covered += 1
             # Drop the 256-float blob from the response to keep payloads small.
@@ -1853,7 +2641,14 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "fused_rank": item["fused_rank"],
             "fused_score": item["fused_score"],
             "per_signal_ranks": item["per_signal_ranks"],
+            "k_corr": item["k_corr"],
+            "b_corr": item["b_corr"],
+            "final_score": item["final_score"],
+            "final_rank": item["final_rank"],
         }
+        if include_energy:
+            per_node_fusion[rid]["retrieval_energy"] = energy_payload["retrieval_energy"]
+            per_node_fusion[rid]["energy_breakdown"] = node.get("energy_breakdown")
         nodes.append(node)
 
     # ---- FSRS-6 / T3 Lesson post-filter -----------------------------------
@@ -1882,15 +2677,48 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "keyword": keyword_available,
     }
 
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-5): the wave-close `retrieval_records`
+    # shape consumed by drift_telemetry.compute_spurious_attractor_rate
+    # (ENC-FTR-105 AC-7 / ENC-TSK-I91) — one entry per FINAL returned node
+    # (post T3-filter/top_n trim), each carrying retrieval_energy/
+    # avg_retrieval_energy plus the full component breakdown. graph_query_api
+    # does not itself assemble/dispatch the wave-close event (no caller in
+    # this package builds the multi-call wave aggregate and invokes
+    # action="wave_close_drift" — that orchestration lives outside this
+    # Lambda); this is the producer-side payload such a caller forwards
+    # verbatim into retrieval_records.
+    retrieval_records = [
+        energy_function.build_retrieval_record(rid, energy_by_rid[rid])
+        for rid in result_rids if rid in energy_by_rid
+    ]
+
     # AC-1: emit the raw pathway-telemetry record (S3 append log when configured,
     # else CloudWatch fallback). Carries the AC-10 edge_participation list.
+    # ENC-TSK-I98: additively carries the per-record energy breakdown (AC-2)
+    # alongside everything FTR-082 already logs here.
     _emit_pathway_telemetry(_build_pathway_telemetry_record(
         wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
         anchor_record_id=anchor_record_id, node_sequence=node_sequence,
         edges_traversed=edges_traversed, edge_participation=edge_participation,
         result_count=len(nodes), graph_algorithm=graph_algorithm,
-        signal_availability=_sig_avail,
+        signal_availability=_sig_avail, retrieval_records=retrieval_records,
+        lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
     ))
+    _maybe_emit_stigmergic_trace(
+        project_id=project_id,
+        params=params,
+        event_type="retrieval",
+        result={
+            "pathway": {"node_sequence": node_sequence},
+            "nodes": nodes,
+            "edges": edges_traversed,
+        },
+        outcome_signal={
+            "result_count": len(nodes),
+            "graph_algorithm": graph_algorithm,
+            "signal_availability": _sig_avail,
+        },
+    )
 
     return {
         "nodes": nodes,
@@ -1915,206 +2743,288 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "per_node_fusion": per_node_fusion,
         "fsrs_t3_threshold": FSRS_T3_THRESHOLD,
         "include_below_threshold": include_below_threshold,
+        # ENC-TSK-I98 (ENC-FTR-104 Ph1): per-retrieval energy telemetry, ready
+        # to be forwarded as `retrieval_records` on a wave-close event.
+        "retrieval_records": retrieval_records,
+        "energy_lambda_weights": {
+            "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
+        },
+        # ENC-TSK-I92 (ENC-FTR-110 Ph1): Weber_k bonus weight used for this
+        # call's corroboration bonus (see per_node_fusion[*].b_corr/k_corr and
+        # nodes[*]._b_corr/_corroboration_count/_final_score/_final_rank).
+        "corroboration_weber_k": corroboration_weber_k,
+        "facets": facets,
+        "facets_source": facets_source,
+        "keyword_source": keyword_source,
     }
-
-
-# Embedding property name must mirror graph_sync/embedding.py EMBEDDING_PROPERTY
 # without forcing an import at module load time (deploy packages the helper at
 # the top level, so the import is deferred to _compute_query_embedding).
 _EMBEDDING_PROPERTY = "embedding"
 
 
-def _load_correlation_transform():
-    """ENC-TSK-H92: lazy-load the offline-fit de-correlating transform W (h92.v1
-    artifact). Returns (W, dim) or (None, None), cached after the first attempt.
-    Fully defensive — any failure disables the encoding (returns None) and is
-    logged, never raised into the request path."""
-    if not _CORRELATION_ENCODING_ENABLED or not _CORRELATION_ENCODING_TRANSFORM_URI:
-        return None, None
-    if _correlation_transform_cache["loaded"]:
-        return _correlation_transform_cache["W"], _correlation_transform_cache["dim"]
-    W = None
-    dim = None
-    try:
-        uri = _CORRELATION_ENCODING_TRANSFORM_URI
-        if uri.startswith("s3://"):
-            bucket, _, key = uri[5:].partition("/")
-            body = _get_s3().get_object(Bucket=bucket, Key=key)["Body"].read()
-            artifact = json.loads(body)
-        else:
-            with open(uri, "r", encoding="utf-8") as fh:
-                artifact = json.load(fh)
-        W = artifact.get("W")
-        dim = int(artifact.get("dim") or (len(W) if W else 0))
-        if not W or dim <= 0 or len(W) != dim:
-            logger.warning("[WARNING] correlation transform malformed; encoding disabled")
-            W, dim = None, None
-    except Exception:
-        logger.exception("[ERROR] correlation transform load failed; encoding disabled")
-        W, dim = None, None
-    _correlation_transform_cache.update({"loaded": True, "W": W, "dim": dim})
-    return W, dim
+def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
+    """Return the project-scoped undirected simple-graph adjacency (ENC-TSK-I88).
 
+    Read-only structural export for offline analytics — specifically the
+    comp-percolation-monitor nightly Lambda (ENC-FTR-085), which needs the live
+    degree sequence (Molloy-Reed) and an edge list (Monte Carlo site-percolation
+    sweep). It matches every edge label without filtering, introduces NO new edge
+    type, and performs no writes, so OGTM (ENC-FTR-066) is N/A — mirroring the
+    vector_read exemption (graph_query_api.vector_read).
 
-def _transform_unit(vec, W, dim):
-    """ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): pure-Python W·vec then L2-normalize to
-    a unit vector; returns None on a missing/degenerate input. Used by the
-    symmetric vector re-rank in _hybrid_vector_ranks for BOTH the query and each
-    candidate embedding, so cosine(W·q, W·emb) reduces to a dot product of the two
-    returned unit vectors. Assumes W is a loaded dim×dim matrix; no numpy."""
-    if vec is None or len(vec) != dim:
-        return None
-    out = [0.0] * dim
-    for i in range(dim):
-        row = W[i]
-        acc = 0.0
-        for j in range(dim):
-            acc += row[j] * vec[j]
-        out[i] = acc
-    norm = sum(x * x for x in out) ** 0.5
-    if norm <= 0.0:
-        return None
-    return [x / norm for x in out]
+    Project ('Project') container nodes and placeholder edge-target stubs
+    (is_placeholder, ENC-TSK-E06) are excluded so degree statistics reflect only
+    real governed records. Each undirected pair is emitted once (a.record_id <
+    b.record_id also drops self-loops), deduplicated to a simple graph across
+    multiple parallel edge types. Pagination is via offset/limit over a stable
+    (s, t) ordering; node_count/edge_count totals are returned on the first page
+    (offset == 0) so the caller can size the corpus before streaming.
 
-
-def _query_vector_read(driver, project_id: str, params: Dict) -> Dict:
-    """ENC-TSK-H89 / ENC-FTR-082 AC-12 — governed bulk vector-read over the
-    n.embedding corpus.
-
-    A dedicated, strip-EXEMPT, paginated read of node embeddings for downstream
-    correlation analysis (ENC-TSK-H34 AC-1). This is the ONLY graphsearch path
-    that returns the raw n.embedding vector; the hybrid retrieval path
-    (_query_hybrid) keeps stripping it (lambda_function.py:1785-1788). The read is
-    latency-bounded by a dedicated wall-clock deadline and server-side SKIP/LIMIT
-    pagination so a large page can never extend or perturb the hybrid request
-    path. Backward compatible: this handler is only reached for
-    search_type=vector_read, so the hybrid/other paths are unchanged.
-
-    Query parameters:
-      project_id    (required; validated by _handle_search)
-      offset        Pagination cursor; default 0.
-      limit         Page size; default 200, clamped to [1, 1000].
-      record_type   Optional label filter (task/issue/feature/plan/lesson/document).
-
-    Response contract:
-      {
-        "nodes":   [{record_id, record_type, embedding:[...float]}],
-        "edges":   [], "paths": [],
-        "pagination": {offset, limit, returned, next_offset|null, has_more},
-        "embedding_property": "embedding",
-        "embedding_dim": <int|null>,
-        "summary": "...",
-        "query_cypher": "vector_read/paginated",
-      }
+    The first page also carries ``spurious_attractor_rate`` (ENC-FTR-105 AC-7 /
+    ENC-TSK-I91) — a best-effort mean over the project's most recent
+    drift-telemetry records (see ``_recent_spurious_attractor_rate``), null when
+    unavailable. This is a read of an existing telemetry sink, not a new edge
+    type or graph write, so it does not change the OGTM analysis above.
     """
-    # ---- Parse + clamp pagination -----------------------------------------
     try:
-        offset = int(params.get("offset", 0))
+        offset = int(params.get("offset", 0) or 0)
     except (TypeError, ValueError):
-        offset = 0
-    offset = max(0, offset)
+        return {"error": "offset must be an integer"}
     try:
-        limit = int(params.get("limit", _VECTOR_READ_DEFAULT_LIMIT))
+        limit = int(params.get("limit", ADJACENCY_DEFAULT_LIMIT) or ADJACENCY_DEFAULT_LIMIT)
     except (TypeError, ValueError):
-        limit = _VECTOR_READ_DEFAULT_LIMIT
-    limit = max(1, min(limit, _VECTOR_READ_MAX_LIMIT))
+        return {"error": "limit must be an integer"}
+    if offset < 0:
+        return {"error": "offset must be >= 0"}
+    if limit < 1 or limit > ADJACENCY_MAX_LIMIT:
+        return {"error": f"limit must be between 1 and {ADJACENCY_MAX_LIMIT}"}
 
-    record_type_filter = params.get("record_type") or None
-
-    # Reuse the live-pool guard so a frozen container's half-open Bolt socket
-    # cannot stall this read (mirrors _query_hybrid).
-    driver = _ensure_live_driver(driver)
-    if driver is None:
-        return {"error": "neo4j driver unavailable after rebuild attempt"}
-
-    # Optional single-label scope; otherwise read across the embedded corpus.
-    label_clause = ""
-    if record_type_filter:
-        label = str(record_type_filter).capitalize()
-        if label not in LABEL_VECTOR_INDEXES:
-            valid = ", ".join(sorted(k.lower() for k in LABEL_VECTOR_INDEXES))
-            return {"error": f"record_type must be one of: {valid}"}
-        label_clause = f":{label}"
-
-    # Stable record_id ordering => deterministic SKIP/LIMIT pages across calls.
-    # Fetch limit+1 to detect has_more without a second round-trip.
-    cypher = (
-        f"MATCH (n{label_clause}) "
-        f"WHERE n.project_id = $project_id AND n.{_EMBEDDING_PROPERTY} IS NOT NULL "
-        f"RETURN n.record_id AS record_id, labels(n) AS labels, "
-        f"n.{_EMBEDDING_PROPERTY} AS embedding "
-        "ORDER BY n.record_id "
-        "SKIP $offset LIMIT $limit"
+    node_filter = (
+        "n.project_id = $project_id "
+        "AND NOT 'Project' IN labels(n) "
+        "AND coalesce(n.is_placeholder, false) = false "
+        "AND n.record_id IS NOT NULL"
+    )
+    edge_match = (
+        "MATCH (a)-[r]-(b) "
+        "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+        "AND NOT 'Project' IN labels(a) AND NOT 'Project' IN labels(b) "
+        "AND coalesce(a.is_placeholder, false) = false "
+        "AND coalesce(b.is_placeholder, false) = false "
+        "AND a.record_id IS NOT NULL AND b.record_id IS NOT NULL "
+        "AND a.record_id < b.record_id "
     )
 
-    def _read():
-        rows: List[Dict[str, Any]] = []
-        with driver.session() as session:
-            result = session.run(
-                cypher,
-                project_id=project_id,
-                offset=offset,
-                limit=limit + 1,
+    edges: List[Dict[str, str]] = []
+    node_count: Optional[int] = None
+    edge_count: Optional[int] = None
+    with driver.session() as session:
+        if offset == 0:
+            node_count = int(
+                session.run(
+                    f"MATCH (n) WHERE {node_filter} RETURN count(n) AS c",
+                    project_id=project_id,
+                ).single()["c"]
             )
-            for rec in result:
-                rid = rec.get("record_id")
-                if not rid:
-                    continue
-                labels = rec.get("labels") or []
-                embedding = rec.get("embedding")
-                rows.append({
-                    "record_id": rid,
-                    "record_type": labels[0].lower() if labels else "",
-                    _EMBEDDING_PROPERTY: list(embedding) if embedding is not None else None,
-                })
-        return rows
-
-    # Latency-bound the read on a worker thread; abandon on timeout so a slow
-    # page can never hang the handler (mirrors the hybrid graph-signal pattern).
-    _vex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        rows = _vex.submit(_read).result(timeout=_VECTOR_READ_DEADLINE_S)
-    except concurrent.futures.TimeoutError:
-        logger.warning(
-            "[WARNING] vector_read exceeded %.1fs deadline (offset=%s limit=%s) — reduce limit",
-            _VECTOR_READ_DEADLINE_S, offset, limit,
+            edge_count = int(
+                session.run(
+                    f"{edge_match} "
+                    "RETURN count(DISTINCT [a.record_id, b.record_id]) AS c",
+                    project_id=project_id,
+                ).single()["c"]
+            )
+        page = session.run(
+            f"{edge_match} "
+            "WITH DISTINCT a.record_id AS s, b.record_id AS t "
+            "ORDER BY s, t "
+            "SKIP $offset LIMIT $limit "
+            "RETURN s, t",
+            project_id=project_id,
+            offset=offset,
+            limit=limit,
         )
-        return {"error": f"vector_read exceeded {_VECTOR_READ_DEADLINE_S:.0f}s deadline; reduce limit"}
-    except Exception:
-        logger.exception("[ERROR] vector_read query failed (offset=%s limit=%s)", offset, limit)
-        return {"error": "vector_read query failed"}
-    finally:
-        _vex.shutdown(wait=False)
+        for rec in page:
+            edges.append({"s": rec["s"], "t": rec["t"]})
 
-    has_more = len(rows) > limit
-    page = rows[:limit]
-    next_offset = offset + limit if has_more else None
-    embedding_dim = (
-        len(page[0][_EMBEDDING_PROPERTY])
-        if page and page[0].get(_EMBEDDING_PROPERTY) is not None
-        else None
+    returned = len(edges)
+    has_more = returned == limit
+    result: Dict[str, Any] = {
+        "nodes": [],
+        "edges": edges,
+        "paths": [],
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "has_more": has_more,
+        "next_offset": (offset + returned) if has_more else None,
+        "summary": f"Adjacency page for {project_id}: {returned} edges (offset {offset}, has_more={has_more})",
+        "query_cypher": "adjacency",
+    }
+    if node_count is not None:
+        result["node_count"] = node_count
+        result["edge_count"] = edge_count
+        result["spurious_attractor_rate"] = _recent_spurious_attractor_rate(project_id)
+        try:
+            import flow_weight_entropy as _fwe
+            with driver.session() as entropy_session:
+                entropy_info = _fwe.compute_from_session(entropy_session, project_id)
+            result.update(entropy_info)
+        except Exception:  # noqa: BLE001 — enrichment must never break adjacency reads
+            logger.warning(
+                "[WARNING] flow_weight_entropy enrichment failed project_id=%s",
+                project_id,
+                exc_info=True,
+            )
+    return result
+# ---------------------------------------------------------------------------
+# ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
+# ---------------------------------------------------------------------------
+
+def _query_sheaf_cohomology(driver, project_id: str, params: Dict) -> Dict:
+    """Compute the first sheaf cohomology dimension over a tracker subgraph.
+
+    Reads the existing governed graph (nodes + edges) via Cypher and builds a
+    cellular sheaf with R^d stalks (d = embedding dim) and identity restriction
+    maps on consistent edges; contradictory-status edges zero their restriction
+    maps, producing first cohomology. No writes, no new edge types (OGTM-safe).
+
+    Optional ``vertex_set_query`` restricts the computation to the connected
+    subgraph around an anchor record_id; otherwise the whole project graph is
+    used (bounded by MAX_RESULTS nodes).
+    """
+    if _sheaf_cohomology is None:
+        return {"error": "sheaf_cohomology module unavailable"}
+
+    vertex_set_query = str(params.get("vertex_set_query", "") or "").strip()
+
+    node_projection = (
+        "RETURN n.record_id AS record_id, n.status AS status, "
+        "CASE WHEN n.embedding IS NULL THEN 0 ELSE size(n.embedding) END AS embedding_dim "
+        "LIMIT $limit"
     )
+    if vertex_set_query:
+        node_cypher = (
+            "MATCH (start) WHERE start.project_id = $project_id "
+            "AND start.record_id = $anchor "
+            "OPTIONAL MATCH (start)-[*1..3]-(m) WHERE m.project_id = $project_id "
+            "WITH collect(DISTINCT start) + collect(DISTINCT m) AS ns "
+            "UNWIND ns AS n WITH DISTINCT n "
+            "WHERE n IS NOT NULL AND NOT 'Project' IN labels(n) "
+            + node_projection
+        )
+        node_params: Dict[str, Any] = {
+            "project_id": project_id,
+            "anchor": vertex_set_query.upper(),
+            "limit": MAX_RESULTS,
+        }
+    else:
+        node_cypher = (
+            "MATCH (n) WHERE n.project_id = $project_id "
+            "AND NOT 'Project' IN labels(n) AND n.record_id IS NOT NULL "
+            + node_projection
+        )
+        node_params = {"project_id": project_id, "limit": MAX_RESULTS}
+
+    nodes: List[Dict[str, Any]] = []
+    node_ids: List[str] = []
+    embedding_dims: List[int] = []
+    with driver.session() as session:
+        for rec in session.run(node_cypher, **node_params):
+            rid = rec.get("record_id")
+            if not rid:
+                continue
+            emb_dim = int(rec.get("embedding_dim") or 0)
+            nodes.append({"record_id": rid, "status": rec.get("status") or ""})
+            node_ids.append(rid)
+            if emb_dim > 0:
+                embedding_dims.append(emb_dim)
+
+        edges: List[Dict[str, Any]] = []
+        if node_ids:
+            edge_cypher = (
+                "MATCH (a)-[r]->(b) "
+                "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+                "AND a.record_id IN $ids AND b.record_id IN $ids "
+                "RETURN startNode(r).record_id AS start, endNode(r).record_id AS end, "
+                "type(r) AS type LIMIT $limit"
+            )
+            for rec in session.run(
+                edge_cypher, project_id=project_id, ids=node_ids, limit=MAX_RESULTS * 10
+            ):
+                edges.append({
+                    "start": rec.get("start"),
+                    "end": rec.get("end"),
+                    "type": rec.get("type"),
+                })
+
+    embedding_dim = max(embedding_dims) if embedding_dims else 1
+    result = _sheaf_cohomology.compute_sheaf_h1(nodes, edges, embedding_dim=embedding_dim)
 
     return {
-        "nodes": page,
+        "nodes": [],
         "edges": [],
         "paths": [],
-        "pagination": {
-            "offset": offset,
-            "limit": limit,
-            "returned": len(page),
-            "next_offset": next_offset,
-            "has_more": has_more,
-        },
-        "embedding_property": _EMBEDDING_PROPERTY,
-        "embedding_dim": embedding_dim,
+        "h1_dim": result["h1_dim"],
+        "h1_structural": result["h1_structural"],
+        "betti_1": result["betti_1"],
+        "embedding_dim": result["embedding_dim"],
+        "node_count": result["node_count"],
+        "edge_count": result["edge_count"],
+        "incidence_rank": result["incidence_rank"],
+        "inconsistency_nodes": result["inconsistency_nodes"],
+        "inconsistency_edges": result["inconsistency_edges"],
+        "computation_ms": result["computation_ms"],
         "summary": (
-            f"Vector-read: {len(page)} nodes "
-            f"(offset={offset}, limit={limit}, has_more={str(has_more).lower()}; "
-            f"dim={embedding_dim}; record_type={record_type_filter or 'all'})"
+            f"Sheaf H1: dim={result['h1_dim']} (structural={result['h1_structural']}, "
+            f"stalk_dim={result['embedding_dim']}) over {result['node_count']} nodes / "
+            f"{result['edge_count']} edges; {len(result['inconsistency_nodes'])} inconsistency node(s)"
         ),
-        "query_cypher": "vector_read/paginated",
+        "query_cypher": node_cypher,
     }
+def _query_dedup_convergence(driver, project_id: str, params: Dict) -> Dict:
+    """ENC-TSK-I10 (Dedup P6): on-demand duplicate-dedup convergence snapshot
+    (DOC-DF651F07D5C2 §10). Read-only; mutation-free.
+
+    Computes the four graph-derived signals — duplicate-pair stock, the
+    precision@1 recovery proxy (vs the 0.3727 baseline / ~0.8242 ceiling), new
+    duplicate flow per window, and the same-type duplicate graph's LCC
+    (percolation → 1) — over the live Neo4j projection. The production
+    auto-merge walk-back rate is layered on by the scheduled probe
+    (graph_health_metrics) from the audit-feed counters; it is not derivable
+    from the graph projection (supersession provenance is not a node property),
+    so this read surface returns the graph signals only.
+
+    Query params (all optional): cosine_threshold, flow_window_days,
+    vector_top_k.
+    """
+    def _flt(name: str, default: float) -> float:
+        try:
+            return float(params.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _intp(name: str, default: int) -> int:
+        try:
+            return max(1, int(params.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    cosine_threshold = _flt("cosine_threshold", dedup_convergence.DEFAULT_COSINE_THRESHOLD)
+    if not (0.0 <= cosine_threshold <= 1.0):
+        return {"error": "cosine_threshold must be in [0, 1]."}
+    flow_window_days = _flt("flow_window_days", float(dedup_convergence.DEFAULT_FLOW_WINDOW_DAYS))
+    vector_top_k = _intp("vector_top_k", dedup_convergence.DEFAULT_VECTOR_TOP_K)
+
+    signals = dedup_convergence.compute_graph_signals(
+        driver,
+        project_id,
+        cosine_threshold=cosine_threshold,
+        flow_window_days=flow_window_days,
+        label_vector_indexes=LABEL_VECTOR_INDEXES,
+        vector_top_k=vector_top_k,
+    )
+    # _handle_search audits node/edge/path counts; keep those keys present.
+    return {"nodes": [], "edges": [], "paths": [], "convergence": signals}
 
 
 SEARCH_HANDLERS = {
@@ -2123,7 +3033,10 @@ SEARCH_HANDLERS = {
     "path": _query_path,
     "keyword": _query_keyword,
     "hybrid": _query_hybrid,
-    "vector_read": _query_vector_read,
+    "adjacency": _query_adjacency,
+        "sheaf_cohomology": _query_sheaf_cohomology,
+    "dedup_convergence": _query_dedup_convergence,
+    "laplacian": _query_laplacian,
 }
 
 
@@ -2194,6 +3107,21 @@ def _handle_search(event: Dict) -> Dict:
         })
     )
 
+    if search_type != "hybrid":
+        _maybe_emit_stigmergic_trace(
+            project_id=project_id,
+            params=qs,
+            event_type="traversal",
+            result=result,
+            outcome_signal={
+                "search_type": search_type,
+                "node_count": len(result.get("nodes", [])),
+                "edge_count": len(result.get("edges", [])),
+                "path_count": len(result.get("paths", [])),
+                "duration_ms": duration_ms,
+            },
+        )
+
     response_body: Dict[str, Any] = {
         "success": True,
         "nodes": result.get("nodes", []),
@@ -2215,17 +3143,279 @@ def _handle_search(event: Dict) -> Dict:
         "include_below_threshold",
         "edge_participation",
         "pathway",
-        # ENC-TSK-I03 / ENC-ISS-404: vector_read pagination + embedding metadata
-        # must survive the response envelope so --source gamma can paginate. They
-        # were dropped here, leaving has_more only inside the summary string and
-        # the gamma reader stuck on page 1 (200 of 2899 nodes).
-        "pagination",
-        "embedding_property",
+        "facets",
+        "facets_source",
+        "keyword_source",
+        # ENC-TSK-I88: adjacency export pagination + corpus-size fields.
+        "node_count",
+        "edge_count",
+        "offset",
+        "limit",
+        "returned",
+        "has_more",
+        "next_offset",
+                # ENC-FTR-095 / ENC-TSK-I90: sheaf_cohomology observability fields.
+        "h1_dim",
+        "h1_structural",
+        "betti_1",
         "embedding_dim",
+        "node_count",
+        "edge_count",
+        "incidence_rank",
+        "inconsistency_nodes",
+        "inconsistency_edges",
+        "computation_ms",
+        "convergence",
+        # ENC-TSK-I81 / ENC-FTR-088: graph_laplacian response fields.
+        "vertex_map",
+        "adjacency_csr",
+        "degrees",
+        "eigenvalues",
+        "fiedler_vector",
+        "laplacian",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
     return _response(200, response_body)
+
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-089 / ENC-TSK-I89 — raw-embedding egress (admin-scoped)
+# ---------------------------------------------------------------------------
+
+def _extract_egress_token(headers: Dict[str, str]) -> str:
+    """Pull a JWT from the Authorization bearer header or the auth cookies."""
+    auth_header = headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[len("Bearer "):].strip()
+    cookie = headers.get("cookie", "")
+    for part in cookie.split(";"):
+        part = part.strip()
+        for cookie_name in ("enceladus_id_token=", "enceladus_access_token="):
+            if part.startswith(cookie_name):
+                return part[len(cookie_name):].strip()
+    return ""
+
+
+def _decode_jwt_claims(token: str) -> Dict[str, Any]:
+    """Best-effort decode of a JWT payload segment.
+
+    Signature verification is delegated to the API Gateway JWT authorizer
+    (ENC-FTR-074 Ph2 / ENC-TSK-I80) — this only reads the governed tier claim
+    for egress gating on the gamma research plane, mirroring the existing
+    in-Lambda auth posture where cryptographic validation is performed at the
+    edge. Returns an empty dict on any malformed input.
+    """
+    try:
+        segments = token.split(".")
+        if len(segments) < 2:
+            return {}
+        import base64
+
+        payload = segments[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        claims = json.loads(decoded.decode("utf-8"))
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def _egress_jwt_claims(event: Dict) -> Dict[str, Any]:
+    """Resolve verified JWT claims, preferring authorizer-injected context."""
+    request_context = event.get("requestContext") or {}
+    authorizer = request_context.get("authorizer") or {}
+    jwt_context = authorizer.get("jwt") or {}
+    claims = jwt_context.get("claims")
+    if isinstance(claims, dict) and claims:
+        return claims
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    token = _extract_egress_token(headers)
+    if not token:
+        return {}
+    return _decode_jwt_claims(token)
+
+
+def _authorize_embedding_egress(event: Dict) -> Optional[str]:
+    """Authorize raw-embedding egress. Returns None if allowed, else a reason.
+
+    Accepted principals:
+      - the internal service key (X-Coordination-Internal-Key), used by the MCP
+        server's governed forward path;
+      - Cognito tokens carrying enc:agent_tier == 'admin' OR the io-dev-admin
+        group.
+    Standard / elevated / observe agent tokens (and anonymous callers) are
+    rejected so the caller can be answered with HTTP 403 (ENC-FTR-089 AC-2).
+    """
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+
+    internal_key = headers.get("x-coordination-internal-key", "")
+    if internal_key and COORDINATION_INTERNAL_API_KEY:
+        valid_keys = {COORDINATION_INTERNAL_API_KEY}
+        if COORDINATION_INTERNAL_API_KEY_PREVIOUS:
+            valid_keys.add(COORDINATION_INTERNAL_API_KEY_PREVIOUS)
+        if internal_key.strip() in valid_keys:
+            return None
+
+    claims = _egress_jwt_claims(event)
+    tier = str(claims.get("enc:agent_tier") or "").strip().lower()
+    if tier == _EGRESS_ADMIN_AGENT_TIER:
+        return None
+
+    raw_groups = claims.get("cognito:groups") or []
+    if isinstance(raw_groups, str):
+        raw_groups = raw_groups.replace(",", " ").split()
+    groups = {str(g).strip().lower() for g in raw_groups if str(g).strip()}
+    if _EGRESS_ADMIN_COGNITO_GROUP in groups:
+        return None
+
+    return (
+        "Raw-embedding egress requires the internal service key or an "
+        "admin-tier (io-dev-admin) Cognito token."
+    )
+
+
+def _parse_egress_record_ids(event: Dict) -> List[str]:
+    """Parse and de-duplicate record_ids from query params (csv or multiValue)."""
+    qs = event.get("queryStringParameters") or {}
+    multi_qs = event.get("multiValueQueryStringParameters") or {}
+
+    raw_ids: List[str] = []
+    if isinstance(multi_qs.get("record_ids"), list):
+        for value in multi_qs["record_ids"]:
+            raw_ids.extend(str(value).split(","))
+    else:
+        raw_ids.extend(str(qs.get("record_ids", "")).split(","))
+    # Tolerate the singular form for ergonomic single-record calls.
+    if not any(r.strip() for r in raw_ids) and qs.get("record_id"):
+        raw_ids = str(qs.get("record_id")).split(",")
+
+    seen: set = set()
+    ordered: List[str] = []
+    for candidate in raw_ids:
+        record_id = candidate.strip()
+        if record_id and record_id not in seen:
+            seen.add(record_id)
+            ordered.append(record_id)
+    return ordered
+
+
+def _handle_embeddings_for(event: Dict) -> Dict:
+    """Handle GET /api/v1/tracker/graphsearch?search_type=embeddings_for.
+
+    ENC-FTR-089 / ENC-TSK-I89. Returns the stored Titan V2 embedding vector
+    (256-dim float32, L2-normalized) for each requested record_id. Operates
+    over the existing `embedding` node property written by graph_sync — no new
+    edge types or graph nodes are introduced (OGTM AC-4).
+    """
+    auth_failure = _authorize_embedding_egress(event)
+    if auth_failure is not None:
+        return _error(403, auth_failure, code="PERMISSION_DENIED")
+
+    qs = event.get("queryStringParameters") or {}
+    project_id = qs.get("project_id", "")
+    if not project_id:
+        return _error(400, "project_id query parameter required")
+
+    record_ids = _parse_egress_record_ids(event)
+    if not record_ids:
+        return _error(400, "record_ids query parameter required (comma-separated record IDs)")
+    if len(record_ids) > MAX_EMBEDDING_EGRESS_RECORD_IDS:
+        return _error(
+            400,
+            f"record_ids exceeds the maximum of {MAX_EMBEDDING_EGRESS_RECORD_IDS} per request",
+        )
+
+    driver = _ensure_live_driver(_get_neo4j_driver())
+    if driver is None:
+        return _error(503, "Graph index temporarily unavailable. Use tracker_list for equivalent queries.",
+                      code="GRAPH_UNAVAILABLE", retryable=True)
+
+    cypher = (
+        "MATCH (n) WHERE n.project_id = $project_id AND n.record_id IN $record_ids "
+        f"RETURN n.record_id AS record_id, n.`{_EMBEDDING_PROPERTY}` AS embedding, "
+        "labels(n) AS labels"
+    )
+
+    start = time.time()
+    found: Dict[str, Dict[str, Any]] = {}
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, project_id=project_id, record_ids=record_ids)
+            for record in result:
+                rid = record["record_id"]
+                if rid is None:
+                    continue
+                embedding = record["embedding"]
+                # A record_id should resolve to one node; if a stale duplicate
+                # exists, keep the first row that carries a usable vector.
+                existing = found.get(rid)
+                if existing is not None and existing.get("embedding") is not None:
+                    continue
+                found[rid] = {
+                    "embedding": list(embedding) if embedding is not None else None,
+                    "labels": sorted(record["labels"]) if record["labels"] else [],
+                }
+    except Exception:
+        logger.exception("[ERROR] embeddings_for query failed: project_id=%s", project_id)
+        return _error(503, "Graph index temporarily unavailable. Use tracker_list for equivalent queries.",
+                      code="GRAPH_UNAVAILABLE", retryable=True)
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    embeddings: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for rid in record_ids:
+        entry = found.get(rid)
+        vector = entry.get("embedding") if entry else None
+        if isinstance(vector, list) and len(vector) == EMBEDDING_EGRESS_DIMENSIONS:
+            embeddings.append({
+                "record_id": rid,
+                "embedding": vector,
+                "dimension": len(vector),
+                "labels": entry.get("labels", []),
+            })
+        else:
+            missing.append(rid)
+
+    # Row-aligned (N x 256) matrix of only the resolved vectors so a client can
+    # call np.mean(matrix, axis=0) directly for the demand-centroid / Fréchet
+    # barycenter approximation (ENC-FTR-089 AC-3).
+    matrix = [item["embedding"] for item in embeddings]
+
+    logger.info(
+        json.dumps({
+            "event": "embeddings_for_query",
+            "project_id": project_id,
+            "requested_count": len(record_ids),
+            "returned_count": len(embeddings),
+            "missing_count": len(missing),
+            "duration_ms": duration_ms,
+        })
+    )
+
+    return _response(200, {
+        "success": True,
+        "model_id": EMBEDDING_EGRESS_MODEL_ID,
+        "dimension": EMBEDDING_EGRESS_DIMENSIONS,
+        "normalize": True,
+        "requested_count": len(record_ids),
+        "returned_count": len(embeddings),
+        "embeddings": embeddings,
+        "matrix": matrix,
+        "missing": missing,
+        "duration_ms": duration_ms,
+        # ENC-FTR-089 AC-3: response-schema documentation for centroid use.
+        "response_schema": {
+            "embeddings": "Array of {record_id, embedding: float[256], dimension, labels}; "
+                          "row-order matches the requested record_ids minus any in `missing`.",
+            "matrix": "N x 256 float matrix of the resolved vectors (embeddings[*].embedding). "
+                      "Compute the demand centroid / Fréchet barycenter approximation as "
+                      "np.mean(np.asarray(matrix), axis=0); valid because Titan V2 vectors are "
+                      "L2-normalized so the Euclidean mean approximates the spherical barycenter.",
+            "missing": "record_ids with no graph node or no stored embedding (excluded from matrix).",
+        },
+    })
 
 
 def _handle_health(event: Dict) -> Dict:
@@ -2289,8 +3479,231 @@ def _handle_health(event: Dict) -> Dict:
 # Lambda handler
 # ---------------------------------------------------------------------------
 
+def _handle_wave_close_drift(event: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-FTR-087 Phase 1 wave-close drift emission (direct-invoke action).
+
+    Payload (event) fields:
+      project_id (required), wave_id (required), prev_wave_id (optional),
+      h_embeddings / v_embeddings (lists of equal-length float vectors) for
+      d_centroid_L2, and one of {h_fiedler/v_fiedler} or {h_adjacency/v_adjacency}
+      for d_spectral. Both metrics degrade to null when their inputs are absent
+      (d_centroid may ship ahead of d_spectral per ENC-FTR-087 / ENC-FTR-088).
+      retrieval_records (ENC-FTR-105 AC-7 / ENC-TSK-I91, optional) — the wave's
+      retrieval records (each carrying retrieval_energy / avg_retrieval_energy)
+      from which spurious_attractor_rate is computed; an explicit
+      spurious_attractor_rate field, if present, takes precedence over it.
+
+    Returns the emitted record. Never raises into the caller for a malformed
+    payload — returns a structured 400 instead.
+    """
+    import drift_telemetry
+
+    project_id = str(event.get("project_id", "")).strip()
+    wave_id = str(event.get("wave_id", "")).strip()
+    if not project_id or not wave_id:
+        return _error(400, "wave_close_drift requires project_id and wave_id")
+    if not DRIFT_TELEMETRY_TABLE:
+        return _error(503, "DRIFT_TELEMETRY_TABLE is not configured")
+
+    k = event.get("k", drift_telemetry.DEFAULT_SPECTRAL_K)
+    try:
+        record = drift_telemetry.compute_and_emit_wave_close_drift(
+            ddb_client=_get_dynamodb(),
+            table_name=DRIFT_TELEMETRY_TABLE,
+            project_id=project_id,
+            wave_id=wave_id,
+            prev_wave_id=event.get("prev_wave_id"),
+            h_embeddings=event.get("h_embeddings"),
+            v_embeddings=event.get("v_embeddings"),
+            h_adjacency=event.get("h_adjacency"),
+            v_adjacency=event.get("v_adjacency"),
+            h_fiedler=event.get("h_fiedler"),
+            v_fiedler=event.get("v_fiedler"),
+            k=int(k),
+            retrieval_records=event.get("retrieval_records"),
+            spurious_attractor_rate=event.get("spurious_attractor_rate"),
+            re_traversal_rate=event.get("re_traversal_rate"),
+        )
+    except ValueError as exc:
+        return _error(400, f"wave_close_drift payload error: {exc}")
+    except Exception as exc:  # noqa: BLE001 — emission failures must not crash the invoke
+        logger.exception("[ERROR] wave_close_drift emission failed")
+        return _error(500, f"wave_close_drift emission failed: {exc}")
+    return _response(200, {"emitted": record})
+
+
+def _iter_wave_pathway_telemetry_records(wave_id: str) -> tuple[List[Dict[str, Any]], int, int]:
+    """ENC-TSK-J90 — read back every pathway-telemetry object emitted for a wave.
+
+    Lists ``s3://{PATHWAY_TELEMETRY_BUCKET}/{PATHWAY_TELEMETRY_PREFIX}/wave_id=<wid>/``
+    (the exact partition ``_emit_pathway_telemetry`` writes to) via a paginated
+    ``list_objects_v2`` and parses each object's body. Each object holds one JSON
+    telemetry record per line (the emitter writes a single line today, but the
+    ``.jsonl`` / ``application/x-ndjson`` contract permits multiple, so we parse
+    line-by-line defensively). Blank lines and individually malformed lines are
+    skipped rather than aborting the whole wave.
+
+    Returns ``(records, objects_seen, objects_failed)`` where ``records`` is the
+    flat list of every parsed telemetry record. Fully defensive: on any S3 error
+    (bucket unset, list/get failure) it degrades to ``([], 0, 0)`` / partial
+    results rather than raising, mirroring ``_emit_pathway_telemetry``'s
+    "never crash the request path" philosophy — while still reporting the counts
+    so the caller can be transparent about how much telemetry it actually saw.
+    """
+    records: List[Dict[str, Any]] = []
+    objects_seen = 0
+    objects_failed = 0
+    if not PATHWAY_TELEMETRY_BUCKET:
+        return records, objects_seen, objects_failed
+
+    wid = str(wave_id or "unassigned").replace("/", "_") or "unassigned"
+    prefix = f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
+    try:
+        s3 = _get_s3()
+        paginator = s3.get_paginator("list_objects_v2")
+        keys: List[str] = []
+        for page in paginator.paginate(Bucket=PATHWAY_TELEMETRY_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                key = obj.get("Key")
+                if key:
+                    keys.append(key)
+    except Exception:
+        logger.exception("[ERROR] close_wave list_objects_v2 failed (degrading to empty)")
+        return records, objects_seen, objects_failed
+
+    for key in keys:
+        objects_seen += 1
+        try:
+            resp = s3.get_object(Bucket=PATHWAY_TELEMETRY_BUCKET, Key=key)
+            body = resp["Body"].read()
+            if isinstance(body, bytes):
+                body = body.decode("utf-8")
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except (ValueError, TypeError):
+                    logger.warning("[WARNING] close_wave: skipping malformed JSONL line in %s", key)
+        except Exception:
+            objects_failed += 1
+            logger.warning("[WARNING] close_wave: failed to read telemetry object %s", key, exc_info=True)
+
+    return records, objects_seen, objects_failed
+
+
+def _handle_close_wave(event: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-TSK-J90 (ENC-FTR-105 AC-7 / ENC-FTR-087) — wave-close orchestrator.
+
+    Reads back the per-wave pathway-telemetry JSONL objects that every
+    ``_query_hybrid`` call appended to S3 (``_emit_pathway_telemetry``),
+    aggregates their ``energy.records[]`` arrays (the
+    ``energy_function.build_retrieval_record`` shape carrying
+    ``avg_retrieval_energy`` / ``retrieval_energy``) into one combined
+    ``retrieval_records`` list for the wave, and drives the existing
+    ``drift_telemetry.compute_and_emit_wave_close_drift`` with it — closing the
+    gap where nothing fed real telemetry into ``spurious_attractor_rate``.
+
+    Payload (event) fields:
+      project_id (required), wave_id (required), prev_wave_id (optional).
+
+    Scope: only the ``spurious_attractor_rate`` (retrieval_records) path.
+    ``d_centroid_L2`` / ``d_spectral`` intentionally degrade to null here — this
+    handler sources no embeddings/adjacency (per the drift_telemetry independent-
+    degrade contract). OGTM: reads S3 + writes an existing DynamoDB series only;
+    no new Neo4j edge type or node label is introduced.
+
+    Empty-wave / S3-unavailable degrade cleanly: the aggregated list is empty and
+    ``compute_spurious_attractor_rate`` returns its null-stub value. The response
+    reports ``objects_seen`` / ``records_aggregated`` for transparency rather than
+    pretending telemetry existed.
+    """
+    import drift_telemetry
+
+    project_id = str(event.get("project_id", "")).strip()
+    wave_id = str(event.get("wave_id", "")).strip()
+    if not project_id or not wave_id:
+        return _error(400, "close_wave requires project_id and wave_id")
+    if not DRIFT_TELEMETRY_TABLE:
+        return _error(503, "DRIFT_TELEMETRY_TABLE is not configured")
+
+    telemetry_records, objects_seen, objects_failed = _iter_wave_pathway_telemetry_records(wave_id)
+
+    combined_records: List[Dict[str, Any]] = []
+    for rec in telemetry_records:
+        if not isinstance(rec, dict):
+            continue
+        energy = rec.get("energy") or {}
+        if not isinstance(energy, dict):
+            continue
+        for er in energy.get("records") or []:
+            if isinstance(er, dict):
+                combined_records.append(er)
+
+    try:
+        record = drift_telemetry.compute_and_emit_wave_close_drift(
+            ddb_client=_get_dynamodb(),
+            table_name=DRIFT_TELEMETRY_TABLE,
+            project_id=project_id,
+            wave_id=wave_id,
+            prev_wave_id=event.get("prev_wave_id"),
+            retrieval_records=combined_records,
+        )
+    except ValueError as exc:
+        return _error(400, f"close_wave payload error: {exc}")
+    except Exception as exc:  # noqa: BLE001 — emission failures must not crash the invoke
+        logger.exception("[ERROR] close_wave emission failed")
+        return _error(500, f"close_wave emission failed: {exc}")
+
+    return _response(200, {
+        "emitted": record,
+        "wave_id": wave_id,
+        "project_id": project_id,
+        "objects_seen": objects_seen,
+        "objects_failed": objects_failed,
+        "records_aggregated": len(combined_records),
+    })
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 proxy handler."""
+    # ENC-FTR-087 Phase 1: wave-close drift emission via direct invoke / event.
+    if isinstance(event, dict) and event.get("action") == "wave_close_drift":
+        return _handle_wave_close_drift(event)
+
+    # ENC-TSK-J90 (ENC-FTR-105 AC-7): wave-close orchestrator — reads back the
+    # wave's pathway-telemetry JSONL from S3, aggregates energy.records[] into a
+    # combined retrieval_records list, and drives compute_and_emit_wave_close_drift
+    # (feeding spurious_attractor_rate with real telemetry). Checked before the
+    # generic Scheduled-Event fallback below.
+    if isinstance(event, dict) and event.get("action") == "close_wave":
+        return _handle_close_wave(event)
+
+    # ENC-FTR-108 Ph2 (ENC-TSK-J02): out-of-band flow_weight refresh. Checked
+    # before the generic aws.events/Scheduled-Event fallback below so an
+    # explicit action='refresh_flow_weight' invoke (or EventBridge rule Input)
+    # never falls through to the FTR-101 projection-refresh handler.
+    if isinstance(event, dict) and event.get("action") == "refresh_flow_weight":
+        return _handle_refresh_flow_weight(event)
+
+    # ENC-TSK-M39: feed_query's OpenSearch-tier selection proxy. Checked before
+    # the generic aws.events/Scheduled-Event fallback below (same reasoning as
+    # refresh_flow_weight above) so an explicit action='feed_selection' invoke
+    # never falls through to the FTR-101 projection-refresh handler. No Neo4j
+    # driver or auth involved -- this is a direct Lambda-to-Lambda invoke, not
+    # an API Gateway route.
+    if isinstance(event, dict) and event.get("action") == "feed_selection":
+        return _handle_feed_selection(event)
+
+    # ENC-TSK-K43 (B66 Ph5): out-of-band Fiedler lambda-2 GraphHealth metric
+    # publish. Checked before the generic aws.events/Scheduled-Event fallback
+    # below (same reasoning as refresh_flow_weight above) so an explicit
+    # action='publish_graph_health' invoke (or EventBridge rule Input) never
+    # falls through to the FTR-101 projection-refresh handler.
+    if isinstance(event, dict) and event.get("action") == "publish_graph_health":
+        return _handle_publish_graph_health(event)
+
     # ENC-FTR-101 (Option B): out-of-band standing-projection refresh. EventBridge
     # scheduled events / direct invokes carry action='refresh_projection' (and lack
     # the API Gateway requestContext), so detect them before the HTTP routing below.
@@ -2319,6 +3732,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # Route dispatch
     if method == "GET" and "/graphsearch" in path and not path.endswith("/health"):
+        qs = event.get("queryStringParameters") or {}
+        # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress shares the
+        # graphsearch route via search_type=embeddings_for (no new API Gateway
+        # route or CFN change); the handler enforces its own stricter admin gate.
+        if (qs.get("search_type") or "") == EMBEDDING_EGRESS_SEARCH_TYPE:
+            return _handle_embeddings_for(event)
         return _handle_search(event)
 
     return _error(404, f"Route not found: {method} {path}")

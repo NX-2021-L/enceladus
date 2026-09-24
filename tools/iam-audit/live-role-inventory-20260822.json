@@ -1,0 +1,1055 @@
+{
+  "_meta": {
+    "task": "ENC-TSK-O46",
+    "generated": "2026-08-22",
+    "account": "356364570033",
+    "region": "us-west-2",
+    "aws_profile": "enceladus-agent",
+    "purpose": "Re-derive the live IAM role gap (attached-to-Lambda but not declared in CloudFormation) superseding the stale claimed '12-role gap' in tools/iam-audit/README.md (2026-06-17 audit).",
+    "inclusion_rule": "A Lambda counts as an 'Enceladus/devops platform function' if (a) its FunctionName starts with 'devops-', 'enceladus-', or is 'auth-refresh'/'auth-refresh-gamma', AND (b) its suffix-stripped base name is referenced somewhere in infrastructure/cloudformation/*.yaml (as a FunctionName, ARN target, or invoke-permission grant) in THIS repo -- i.e. it is part of this repo's declared infrastructure surface, not a same-prefixed Lambda belonging to a different codebase (e.g. NX-2021-L/devops). This excludes devops-adhoc-promotion, devops-glue-crawler-launcher, devops-governance-mart, devops-io-devops-mcp, and devops-platform-health -- none referenced anywhere in these templates; devops-platform-health's exclusion is independently confirmed by ENC-ISS-617 (closed as misattributed, real owner NX-2021-L/devops, not enceladus mart). Also excluded: non-devops/enceladus-prefixed functions sharing the account (mod-*, io-graph-*, finance-mcp, io-travel-mcp-server, hfy-check-allowed, escalation-decision-authorizer, support-hello-world) -- unrelated projects in the same AWS account.",
+    "declared_role_source": "infrastructure/cloudformation/*.yaml, EXCLUDING 02-compute-import-stage-k44.yaml (a staged IMPORT variant, not an applied template -- confirmed not referenced by any deploy workflow as the active compute template; 02-compute.yaml is the applied one). RoleName values declared as !Sub \"<name>${EnvironmentSuffix}\" are expanded to both '<name>' (prod, suffix='') and '<name>-gamma' (gamma, suffix='-gamma') for like-with-like comparison against live attached role names, which are plane-specific.",
+    "denied_iam_calls_confirmed": [
+      "iam:ListRoles",
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:SimulatePrincipalPolicy"
+    ],
+    "granted_calls_used": [
+      "lambda:ListFunctions",
+      "lambda:GetFunctionConfiguration (via ListFunctions Role field)"
+    ]
+  },
+  "platform_lambda_count": 87,
+  "excluded_same_account_functions": [
+    "devops-adhoc-promotion",
+    "devops-glue-crawler-launcher",
+    "devops-governance-mart",
+    "devops-io-devops-mcp",
+    "devops-platform-health"
+  ],
+  "lambda_to_role_arn": {
+    "auth-refresh": "arn:aws:iam::356364570033:role/auth-refresh-lambda-role",
+    "auth-refresh-gamma": "arn:aws:iam::356364570033:role/auth-refresh-lambda-role-gamma",
+    "devops-appsync-feed-publisher-gamma": "arn:aws:iam::356364570033:role/devops-appsync-feed-publisher-role-gamma",
+    "devops-changelog-api": "arn:aws:iam::356364570033:role/devops-changelog-api-lambda-role",
+    "devops-changelog-api-gamma": "arn:aws:iam::356364570033:role/devops-changelog-api-lambda-role-gamma",
+    "devops-coordination-api": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role",
+    "devops-coordination-api-gamma": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role-gamma",
+    "devops-coordination-monitor-api": "arn:aws:iam::356364570033:role/devops-coordination-monitor-lambda-role",
+    "devops-coordination-monitor-api-gamma": "arn:aws:iam::356364570033:role/devops-coordination-monitor-lambda-role-gamma",
+    "devops-deploy-decide": "arn:aws:iam::356364570033:role/devops-deploy-decide-lambda-role",
+    "devops-deploy-decide-gamma": "arn:aws:iam::356364570033:role/devops-deploy-decide-lambda-role-gamma",
+    "devops-deploy-finalize": "arn:aws:iam::356364570033:role/devops-deploy-finalize-lambda-role",
+    "devops-deploy-finalize-gamma": "arn:aws:iam::356364570033:role/devops-deploy-finalize-lambda-role-gamma",
+    "devops-deploy-intake": "arn:aws:iam::356364570033:role/devops-deploy-intake-lambda-role",
+    "devops-deploy-intake-gamma": "arn:aws:iam::356364570033:role/devops-deploy-intake-lambda-role-gamma",
+    "devops-deploy-orchestrator": "arn:aws:iam::356364570033:role/devops-deploy-orchestrator-lambda-role",
+    "devops-deploy-orchestrator-gamma": "arn:aws:iam::356364570033:role/devops-deploy-orchestrator-lambda-role-gamma",
+    "devops-deploy-parity-validator": "arn:aws:iam::356364570033:role/devops-deploy-parity-validator-role",
+    "devops-deploy-parity-validator-gamma": "arn:aws:iam::356364570033:role/devops-deploy-parity-validator-role-gamma",
+    "devops-doc-prep": "arn:aws:iam::356364570033:role/devops-doc-prep-lambda-role",
+    "devops-doc-prep-gamma": "arn:aws:iam::356364570033:role/devops-doc-prep-lambda-role-gamma",
+    "devops-document-api": "arn:aws:iam::356364570033:role/devops-document-api-lambda-role",
+    "devops-document-api-gamma": "arn:aws:iam::356364570033:role/devops-document-api-lambda-role-gamma",
+    "devops-env-drift-auditor": "arn:aws:iam::356364570033:role/devops-env-drift-auditor-role",
+    "devops-env-drift-auditor-gamma": "arn:aws:iam::356364570033:role/devops-env-drift-auditor-role-gamma",
+    "devops-feed-publisher": "arn:aws:iam::356364570033:role/devops-feed-publisher-lambda-role",
+    "devops-feed-publisher-gamma": "arn:aws:iam::356364570033:role/devops-feed-publisher-lambda-role-gamma",
+    "devops-feed-query-api": "arn:aws:iam::356364570033:role/devops-feed-query-lambda-role",
+    "devops-feed-query-api-gamma": "arn:aws:iam::356364570033:role/devops-feed-query-lambda-role-gamma",
+    "devops-github-integration": "arn:aws:iam::356364570033:role/devops-github-integration-lambda-role",
+    "devops-github-integration-gamma": "arn:aws:iam::356364570033:role/devops-github-integration-lambda-role-gamma",
+    "devops-governance-drift-check-gamma": "arn:aws:iam::356364570033:role/devops-governance-drift-check-lambda-role-gamma",
+    "devops-graph-query-api": "arn:aws:iam::356364570033:role/devops-graph-query-api-lambda-role",
+    "devops-graph-query-api-gamma": "arn:aws:iam::356364570033:role/devops-graph-query-api-lambda-role-gamma",
+    "devops-graph-sync": "arn:aws:iam::356364570033:role/devops-graph-sync-lambda-role",
+    "devops-graph-sync-gamma": "arn:aws:iam::356364570033:role/devops-graph-sync-lambda-role-gamma",
+    "devops-json-to-parquet-transformer": "arn:aws:iam::356364570033:role/devops-json-parquet-lambda",
+    "devops-opensearch-backfill-gamma": "arn:aws:iam::356364570033:role/devops-opensearch-backfill-lambda-role-gamma",
+    "devops-opensearch-indexer-gamma": "arn:aws:iam::356364570033:role/devops-opensearch-indexer-lambda-role-gamma",
+    "devops-project-service": "arn:aws:iam::356364570033:role/devops-project-service-lambda-role",
+    "devops-project-service-gamma": "arn:aws:iam::356364570033:role/devops-project-service-lambda-role-gamma",
+    "devops-recompute-governance": "arn:aws:iam::356364570033:role/devops-recompute-governance-lambda-role",
+    "devops-recompute-governance-gamma": "arn:aws:iam::356364570033:role/devops-recompute-governance-lambda-role-gamma",
+    "devops-reference-search": "arn:aws:iam::356364570033:role/devops-reference-search-lambda-role",
+    "devops-reference-search-gamma": "arn:aws:iam::356364570033:role/devops-reference-search-lambda-role-gamma",
+    "devops-titan-embedding-backfill": "arn:aws:iam::356364570033:role/devops-titan-embedding-backfill-lambda-role",
+    "devops-titan-embedding-backfill-gamma": "arn:aws:iam::356364570033:role/devops-titan-embedding-backfill-lambda-role-gamma",
+    "devops-tracker-mutation-api": "arn:aws:iam::356364570033:role/devops-tracker-mutation-lambda-role",
+    "devops-tracker-mutation-api-gamma": "arn:aws:iam::356364570033:role/devops-tracker-mutation-lambda-role-gamma",
+    "enceladus-agent-authorizer-gamma": "arn:aws:iam::356364570033:role/enceladus-agent-authorizer-role-gamma",
+    "enceladus-agent-m2m-rotation-gamma": "arn:aws:iam::356364570033:role/enceladus-agent-m2m-rotation-role-gamma",
+    "enceladus-agent-pretoken-gamma": "arn:aws:iam::356364570033:role/enceladus-agent-pretoken-role-gamma",
+    "enceladus-agent-selftest-gamma": "arn:aws:iam::356364570033:role/enceladus-agent-selftest-role-gamma",
+    "enceladus-arc-walk-metrics-gamma": "arn:aws:iam::356364570033:role/enceladus-arc-walk-metrics-role-gamma",
+    "enceladus-bedrock-agent-actions": "arn:aws:iam::356364570033:role/enceladus-bedrock-actions-lambda-role",
+    "enceladus-bedrock-agent-actions-gamma": "arn:aws:iam::356364570033:role/enceladus-bedrock-actions-lambda-role-gamma",
+    "enceladus-checkout-service": "arn:aws:iam::356364570033:role/enceladus-checkout-service-role",
+    "enceladus-checkout-service-auto": "arn:aws:iam::356364570033:role/enceladus-checkout-service-role",
+    "enceladus-checkout-service-auto-gamma": "arn:aws:iam::356364570033:role/enceladus-checkout-service-role-gamma",
+    "enceladus-checkout-service-gamma": "arn:aws:iam::356364570033:role/enceladus-checkout-service-role-gamma",
+    "enceladus-convergence-telemetry-gamma": "arn:aws:iam::356364570033:role/enceladus-convergence-telemetry-role-gamma",
+    "enceladus-corpus-entropy-engine-gamma": "arn:aws:iam::356364570033:role/enceladus-corpus-entropy-engine-role-gamma",
+    "enceladus-corpus-entropy-gdmp-remediation-gamma": "arn:aws:iam::356364570033:role/enceladus-corpus-entropy-gdmp-role-gamma",
+    "enceladus-governance-audit": "arn:aws:iam::356364570033:role/enceladus-governance-audit-role",
+    "enceladus-governance-audit-gamma": "arn:aws:iam::356364570033:role/enceladus-governance-audit-role-gamma",
+    "enceladus-graph-health-metrics": "arn:aws:iam::356364570033:role/enceladus-graph-health-metrics-role",
+    "enceladus-graph-health-metrics-gamma": "arn:aws:iam::356364570033:role/enceladus-graph-health-metrics-role-gamma",
+    "enceladus-handoff-consolidation-engine-gamma": "arn:aws:iam::356364570033:role/enceladus-handoff-consolidation-engine-role-gamma",
+    "enceladus-id-service-gamma": "arn:aws:iam::356364570033:role/enceladus-id-service-lambda-role-gamma",
+    "enceladus-lifecycle-service-gamma": "arn:aws:iam::356364570033:role/enceladus-lifecycle-service-lambda-role-gamma",
+    "enceladus-mcp-code": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role",
+    "enceladus-mcp-code-gamma": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role-gamma",
+    "enceladus-mcp-gamma-synthetic-gamma": "arn:aws:iam::356364570033:role/enceladus-mcp-gamma-synthetic-gamma",
+    "enceladus-mcp-streamable": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role",
+    "enceladus-mcp-streamable-gamma": "arn:aws:iam::356364570033:role/devops-coordination-api-lambda-role-gamma",
+    "enceladus-mcp-streaming-gateway-gamma": "arn:aws:iam::356364570033:role/enceladus-mcp-streaming-gateway-lambda-role-gamma",
+    "enceladus-memory-consolidation-gamma": "arn:aws:iam::356364570033:role/enceladus-memory-consolidation-role-gamma",
+    "enceladus-neo4j-backup": "arn:aws:iam::356364570033:role/enceladus-neo4j-backup-lambda-role",
+    "enceladus-neo4j-backup-gamma": "arn:aws:iam::356364570033:role/enceladus-neo4j-backup-lambda-role-gamma",
+    "enceladus-percolation-monitor-gamma": "arn:aws:iam::356364570033:role/enceladus-percolation-monitor-role-gamma",
+    "enceladus-prod-health-monitor": "arn:aws:iam::356364570033:role/enceladus-prod-health-monitor-role",
+    "enceladus-prod-health-monitor-gamma": "arn:aws:iam::356364570033:role/enceladus-prod-health-monitor-role-gamma",
+    "enceladus-rhythm-cycle-gamma": "arn:aws:iam::356364570033:role/enceladus-rhythm-cycle-role-gamma",
+    "enceladus-scoring-service-gamma": "arn:aws:iam::356364570033:role/enceladus-scoring-service-lambda-role-gamma",
+    "enceladus-stale-checkout-monitor-gamma": "arn:aws:iam::356364570033:role/enceladus-stale-checkout-monitor-role-gamma",
+    "enceladus-unlearning-gamma": "arn:aws:iam::356364570033:role/enceladus-unlearning-role-gamma",
+    "enceladus-user-preferences-api-gamma": "arn:aws:iam::356364570033:role/enceladus-user-preferences-api-lambda-role-gamma"
+  },
+  "attached_role_names": [
+    "auth-refresh-lambda-role",
+    "auth-refresh-lambda-role-gamma",
+    "devops-appsync-feed-publisher-role-gamma",
+    "devops-changelog-api-lambda-role",
+    "devops-changelog-api-lambda-role-gamma",
+    "devops-coordination-api-lambda-role",
+    "devops-coordination-api-lambda-role-gamma",
+    "devops-coordination-monitor-lambda-role",
+    "devops-coordination-monitor-lambda-role-gamma",
+    "devops-deploy-decide-lambda-role",
+    "devops-deploy-decide-lambda-role-gamma",
+    "devops-deploy-finalize-lambda-role",
+    "devops-deploy-finalize-lambda-role-gamma",
+    "devops-deploy-intake-lambda-role",
+    "devops-deploy-intake-lambda-role-gamma",
+    "devops-deploy-orchestrator-lambda-role",
+    "devops-deploy-orchestrator-lambda-role-gamma",
+    "devops-deploy-parity-validator-role",
+    "devops-deploy-parity-validator-role-gamma",
+    "devops-doc-prep-lambda-role",
+    "devops-doc-prep-lambda-role-gamma",
+    "devops-document-api-lambda-role",
+    "devops-document-api-lambda-role-gamma",
+    "devops-env-drift-auditor-role",
+    "devops-env-drift-auditor-role-gamma",
+    "devops-feed-publisher-lambda-role",
+    "devops-feed-publisher-lambda-role-gamma",
+    "devops-feed-query-lambda-role",
+    "devops-feed-query-lambda-role-gamma",
+    "devops-github-integration-lambda-role",
+    "devops-github-integration-lambda-role-gamma",
+    "devops-governance-drift-check-lambda-role-gamma",
+    "devops-graph-query-api-lambda-role",
+    "devops-graph-query-api-lambda-role-gamma",
+    "devops-graph-sync-lambda-role",
+    "devops-graph-sync-lambda-role-gamma",
+    "devops-json-parquet-lambda",
+    "devops-opensearch-backfill-lambda-role-gamma",
+    "devops-opensearch-indexer-lambda-role-gamma",
+    "devops-project-service-lambda-role",
+    "devops-project-service-lambda-role-gamma",
+    "devops-recompute-governance-lambda-role",
+    "devops-recompute-governance-lambda-role-gamma",
+    "devops-reference-search-lambda-role",
+    "devops-reference-search-lambda-role-gamma",
+    "devops-titan-embedding-backfill-lambda-role",
+    "devops-titan-embedding-backfill-lambda-role-gamma",
+    "devops-tracker-mutation-lambda-role",
+    "devops-tracker-mutation-lambda-role-gamma",
+    "enceladus-agent-authorizer-role-gamma",
+    "enceladus-agent-m2m-rotation-role-gamma",
+    "enceladus-agent-pretoken-role-gamma",
+    "enceladus-agent-selftest-role-gamma",
+    "enceladus-arc-walk-metrics-role-gamma",
+    "enceladus-bedrock-actions-lambda-role",
+    "enceladus-bedrock-actions-lambda-role-gamma",
+    "enceladus-checkout-service-role",
+    "enceladus-checkout-service-role-gamma",
+    "enceladus-convergence-telemetry-role-gamma",
+    "enceladus-corpus-entropy-engine-role-gamma",
+    "enceladus-corpus-entropy-gdmp-role-gamma",
+    "enceladus-governance-audit-role",
+    "enceladus-governance-audit-role-gamma",
+    "enceladus-graph-health-metrics-role",
+    "enceladus-graph-health-metrics-role-gamma",
+    "enceladus-handoff-consolidation-engine-role-gamma",
+    "enceladus-id-service-lambda-role-gamma",
+    "enceladus-lifecycle-service-lambda-role-gamma",
+    "enceladus-mcp-gamma-synthetic-gamma",
+    "enceladus-mcp-streaming-gateway-lambda-role-gamma",
+    "enceladus-memory-consolidation-role-gamma",
+    "enceladus-neo4j-backup-lambda-role",
+    "enceladus-neo4j-backup-lambda-role-gamma",
+    "enceladus-percolation-monitor-role-gamma",
+    "enceladus-prod-health-monitor-role",
+    "enceladus-prod-health-monitor-role-gamma",
+    "enceladus-rhythm-cycle-role-gamma",
+    "enceladus-scoring-service-lambda-role-gamma",
+    "enceladus-stale-checkout-monitor-role-gamma",
+    "enceladus-unlearning-role-gamma",
+    "enceladus-user-preferences-api-lambda-role-gamma"
+  ],
+  "declared_role_names_expanded": [
+    "GitHubActions-Build-Role",
+    "GitHubActions-V4Gamma-DeployRole",
+    "auth-refresh-lambda-role",
+    "auth-refresh-lambda-role-gamma",
+    "devops-appsync-feed-publisher-role",
+    "devops-appsync-feed-publisher-role-gamma",
+    "devops-changelog-api-lambda-role",
+    "devops-changelog-api-lambda-role-gamma",
+    "devops-coordination-api-lambda-role",
+    "devops-coordination-api-lambda-role-gamma",
+    "devops-coordination-monitor-lambda-role",
+    "devops-coordination-monitor-lambda-role-gamma",
+    "devops-deploy-decide-lambda-role",
+    "devops-deploy-decide-lambda-role-gamma",
+    "devops-deploy-finalize-lambda-role",
+    "devops-deploy-finalize-lambda-role-gamma",
+    "devops-deploy-intake-lambda-role",
+    "devops-deploy-intake-lambda-role-gamma",
+    "devops-deploy-orchestrator-lambda-role",
+    "devops-deploy-orchestrator-lambda-role-gamma",
+    "devops-deploy-parity-validator-role",
+    "devops-deploy-parity-validator-role-gamma",
+    "devops-doc-prep-lambda-role",
+    "devops-doc-prep-lambda-role-gamma",
+    "devops-document-api-lambda-role",
+    "devops-document-api-lambda-role-gamma",
+    "devops-env-drift-auditor-role",
+    "devops-env-drift-auditor-role-gamma",
+    "devops-feed-pipe-role",
+    "devops-feed-pipe-role-gamma",
+    "devops-feed-publisher-lambda-role",
+    "devops-feed-publisher-lambda-role-gamma",
+    "devops-feed-query-lambda-role",
+    "devops-feed-query-lambda-role-gamma",
+    "devops-governance-drift-check-lambda-role",
+    "devops-governance-drift-check-lambda-role-gamma",
+    "devops-graph-pipe-role",
+    "devops-graph-pipe-role-gamma",
+    "devops-graph-query-api-lambda-role",
+    "devops-graph-query-api-lambda-role-gamma",
+    "devops-graph-sync-lambda-role",
+    "devops-graph-sync-lambda-role-gamma",
+    "devops-opensearch-backfill-lambda-role",
+    "devops-opensearch-backfill-lambda-role-gamma",
+    "devops-opensearch-indexer-lambda-role",
+    "devops-opensearch-indexer-lambda-role-gamma",
+    "devops-project-service-lambda-role",
+    "devops-project-service-lambda-role-gamma",
+    "devops-recompute-governance-lambda-role",
+    "devops-recompute-governance-lambda-role-gamma",
+    "devops-reference-search-lambda-role",
+    "devops-reference-search-lambda-role-gamma",
+    "devops-search-index-pipe-role",
+    "devops-search-index-pipe-role-gamma",
+    "devops-tracker-mutation-lambda-role",
+    "devops-tracker-mutation-lambda-role-gamma",
+    "enceladus-agent-authorizer-role",
+    "enceladus-agent-authorizer-role-gamma",
+    "enceladus-agent-m2m-rotation-role",
+    "enceladus-agent-m2m-rotation-role-gamma",
+    "enceladus-agent-pretoken-role",
+    "enceladus-agent-pretoken-role-gamma",
+    "enceladus-agent-selftest-role",
+    "enceladus-agent-selftest-role-gamma",
+    "enceladus-arc-walk-metrics-role",
+    "enceladus-arc-walk-metrics-role-gamma",
+    "enceladus-backend-deploy-github-role",
+    "enceladus-bedrock-actions-lambda-role",
+    "enceladus-bedrock-actions-lambda-role-gamma",
+    "enceladus-cloudformation-deploy-github-role",
+    "enceladus-codedeploy-role",
+    "enceladus-codedeploy-role-gamma",
+    "enceladus-convergence-telemetry-pipe-role",
+    "enceladus-convergence-telemetry-pipe-role-gamma",
+    "enceladus-convergence-telemetry-role",
+    "enceladus-convergence-telemetry-role-gamma",
+    "enceladus-corpus-entropy-engine-role",
+    "enceladus-corpus-entropy-engine-role-gamma",
+    "enceladus-corpus-entropy-gdmp-role",
+    "enceladus-corpus-entropy-gdmp-role-gamma",
+    "enceladus-governance-audit-pipe-role",
+    "enceladus-governance-audit-pipe-role-gamma",
+    "enceladus-governance-audit-role",
+    "enceladus-governance-audit-role-gamma",
+    "enceladus-graph-health-metrics-role",
+    "enceladus-graph-health-metrics-role-gamma",
+    "enceladus-handoff-consolidation-engine-role",
+    "enceladus-handoff-consolidation-engine-role-gamma",
+    "enceladus-id-service-lambda-role",
+    "enceladus-id-service-lambda-role-gamma",
+    "enceladus-lifecycle-service-lambda-role",
+    "enceladus-lifecycle-service-lambda-role-gamma",
+    "enceladus-mcp-gamma-synthetic",
+    "enceladus-mcp-gamma-synthetic-gamma",
+    "enceladus-mcp-streaming-gateway-lambda-role",
+    "enceladus-mcp-streaming-gateway-lambda-role-gamma",
+    "enceladus-memory-consolidation-role",
+    "enceladus-memory-consolidation-role-gamma",
+    "enceladus-neo4j-backup-lambda-role",
+    "enceladus-neo4j-backup-lambda-role-gamma",
+    "enceladus-opensearch-node-role",
+    "enceladus-opensearch-node-role-gamma",
+    "enceladus-percolation-monitor-role",
+    "enceladus-percolation-monitor-role-gamma",
+    "enceladus-prod-health-monitor-role",
+    "enceladus-prod-health-monitor-role-gamma",
+    "enceladus-rhythm-cycle-role",
+    "enceladus-rhythm-cycle-role-gamma",
+    "enceladus-rhythm-scheduler-role",
+    "enceladus-rhythm-scheduler-role-gamma",
+    "enceladus-scoring-service-lambda-role",
+    "enceladus-scoring-service-lambda-role-gamma",
+    "enceladus-stale-checkout-monitor-role",
+    "enceladus-stale-checkout-monitor-role-gamma",
+    "enceladus-unlearning-role",
+    "enceladus-unlearning-role-gamma",
+    "enceladus-user-preferences-api-lambda-role",
+    "enceladus-user-preferences-api-lambda-role-gamma"
+  ],
+  "declared_role_detail": [
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 2219,
+      "base_name": "enceladus-stale-checkout-monitor-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-stale-checkout-monitor-role",
+        "enceladus-stale-checkout-monitor-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 2340,
+      "base_name": "enceladus-prod-health-monitor-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-prod-health-monitor-role",
+        "enceladus-prod-health-monitor-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 2835,
+      "base_name": "enceladus-arc-walk-metrics-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-arc-walk-metrics-role",
+        "enceladus-arc-walk-metrics-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 3761,
+      "base_name": "devops-coordination-api-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-coordination-api-lambda-role",
+        "devops-coordination-api-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4098,
+      "base_name": "devops-tracker-mutation-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-tracker-mutation-lambda-role",
+        "devops-tracker-mutation-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4271,
+      "base_name": "enceladus-lifecycle-service-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-lifecycle-service-lambda-role",
+        "enceladus-lifecycle-service-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4327,
+      "base_name": "enceladus-scoring-service-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-scoring-service-lambda-role",
+        "enceladus-scoring-service-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4377,
+      "base_name": "enceladus-id-service-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-id-service-lambda-role",
+        "enceladus-id-service-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4447,
+      "base_name": "devops-document-api-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-document-api-lambda-role",
+        "devops-document-api-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4562,
+      "base_name": "devops-project-service-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-project-service-lambda-role",
+        "devops-project-service-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4665,
+      "base_name": "devops-feed-query-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-feed-query-lambda-role",
+        "devops-feed-query-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4734,
+      "base_name": "devops-coordination-monitor-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-coordination-monitor-lambda-role",
+        "devops-coordination-monitor-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4781,
+      "base_name": "devops-deploy-intake-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-deploy-intake-lambda-role",
+        "devops-deploy-intake-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4858,
+      "base_name": "devops-deploy-orchestrator-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-deploy-orchestrator-lambda-role",
+        "devops-deploy-orchestrator-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 4956,
+      "base_name": "devops-deploy-finalize-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-deploy-finalize-lambda-role",
+        "devops-deploy-finalize-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5022,
+      "base_name": "devops-deploy-decide-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-deploy-decide-lambda-role",
+        "devops-deploy-decide-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5075,
+      "base_name": "devops-deploy-parity-validator-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-deploy-parity-validator-role",
+        "devops-deploy-parity-validator-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5179,
+      "base_name": "devops-reference-search-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-reference-search-lambda-role",
+        "devops-reference-search-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5225,
+      "base_name": "devops-feed-publisher-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-feed-publisher-lambda-role",
+        "devops-feed-publisher-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5350,
+      "base_name": "enceladus-governance-audit-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-governance-audit-role",
+        "enceladus-governance-audit-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5398,
+      "base_name": "devops-doc-prep-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-doc-prep-lambda-role",
+        "devops-doc-prep-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5464,
+      "base_name": "enceladus-bedrock-actions-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-bedrock-actions-lambda-role",
+        "enceladus-bedrock-actions-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5574,
+      "base_name": "enceladus-mcp-streaming-gateway-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-mcp-streaming-gateway-lambda-role",
+        "enceladus-mcp-streaming-gateway-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5613,
+      "base_name": "enceladus-user-preferences-api-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-user-preferences-api-lambda-role",
+        "enceladus-user-preferences-api-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5648,
+      "base_name": "devops-changelog-api-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-changelog-api-lambda-role",
+        "devops-changelog-api-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5704,
+      "base_name": "auth-refresh-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "auth-refresh-lambda-role",
+        "auth-refresh-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5760,
+      "base_name": "devops-feed-pipe-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-feed-pipe-role",
+        "devops-feed-pipe-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5802,
+      "base_name": "devops-graph-sync-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-graph-sync-lambda-role",
+        "devops-graph-sync-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5920,
+      "base_name": "enceladus-convergence-telemetry-pipe-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-convergence-telemetry-pipe-role",
+        "enceladus-convergence-telemetry-pipe-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 5955,
+      "base_name": "enceladus-convergence-telemetry-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-convergence-telemetry-role",
+        "enceladus-convergence-telemetry-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6027,
+      "base_name": "devops-graph-query-api-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-graph-query-api-lambda-role",
+        "devops-graph-query-api-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6171,
+      "base_name": "enceladus-neo4j-backup-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-neo4j-backup-lambda-role",
+        "enceladus-neo4j-backup-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6221,
+      "base_name": "enceladus-memory-consolidation-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-memory-consolidation-role",
+        "enceladus-memory-consolidation-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6284,
+      "base_name": "enceladus-handoff-consolidation-engine-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-handoff-consolidation-engine-role",
+        "enceladus-handoff-consolidation-engine-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6350,
+      "base_name": "enceladus-unlearning-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-unlearning-role",
+        "enceladus-unlearning-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6428,
+      "base_name": "enceladus-graph-health-metrics-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-graph-health-metrics-role",
+        "enceladus-graph-health-metrics-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6504,
+      "base_name": "enceladus-percolation-monitor-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-percolation-monitor-role",
+        "enceladus-percolation-monitor-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6571,
+      "base_name": "enceladus-corpus-entropy-engine-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-corpus-entropy-engine-role",
+        "enceladus-corpus-entropy-engine-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6629,
+      "base_name": "enceladus-corpus-entropy-gdmp-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-corpus-entropy-gdmp-role",
+        "enceladus-corpus-entropy-gdmp-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6675,
+      "base_name": "enceladus-governance-audit-pipe-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-governance-audit-pipe-role",
+        "enceladus-governance-audit-pipe-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6712,
+      "base_name": "devops-search-index-pipe-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-search-index-pipe-role",
+        "devops-search-index-pipe-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6872,
+      "base_name": "devops-opensearch-indexer-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-opensearch-indexer-lambda-role",
+        "devops-opensearch-indexer-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 6959,
+      "base_name": "devops-opensearch-backfill-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-opensearch-backfill-lambda-role",
+        "devops-opensearch-backfill-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7020,
+      "base_name": "devops-graph-pipe-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-graph-pipe-role",
+        "devops-graph-pipe-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7090,
+      "base_name": "devops-env-drift-auditor-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-env-drift-auditor-role",
+        "devops-env-drift-auditor-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7359,
+      "base_name": "devops-recompute-governance-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-recompute-governance-lambda-role",
+        "devops-recompute-governance-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7452,
+      "base_name": "devops-governance-drift-check-lambda-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-governance-drift-check-lambda-role",
+        "devops-governance-drift-check-lambda-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7714,
+      "base_name": "enceladus-rhythm-cycle-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-rhythm-cycle-role",
+        "enceladus-rhythm-cycle-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "line": 7821,
+      "base_name": "enceladus-rhythm-scheduler-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-rhythm-scheduler-role",
+        "enceladus-rhythm-scheduler-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/04-github-roles.yaml",
+      "line": 43,
+      "base_name": "enceladus-cloudformation-deploy-github-role",
+      "style": "literal",
+      "expands_to": [
+        "enceladus-cloudformation-deploy-github-role"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/04-github-roles.yaml",
+      "line": 560,
+      "base_name": "enceladus-backend-deploy-github-role",
+      "style": "literal",
+      "expands_to": [
+        "enceladus-backend-deploy-github-role"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/04-github-roles.yaml",
+      "line": 922,
+      "base_name": "GitHubActions-Build-Role",
+      "style": "literal",
+      "expands_to": [
+        "GitHubActions-Build-Role"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/04-github-roles.yaml",
+      "line": 989,
+      "base_name": "GitHubActions-V4Gamma-DeployRole",
+      "style": "literal",
+      "expands_to": [
+        "GitHubActions-V4Gamma-DeployRole"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/05-monitoring.yaml",
+      "line": 353,
+      "base_name": "enceladus-mcp-gamma-synthetic",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-mcp-gamma-synthetic",
+        "enceladus-mcp-gamma-synthetic-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/06-appsync-events.yaml",
+      "line": 157,
+      "base_name": "devops-appsync-feed-publisher-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "devops-appsync-feed-publisher-role",
+        "devops-appsync-feed-publisher-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/07-codedeploy.yaml",
+      "line": 71,
+      "base_name": "enceladus-codedeploy-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-codedeploy-role",
+        "enceladus-codedeploy-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/08-agent-auth.yaml",
+      "line": 82,
+      "base_name": "enceladus-agent-pretoken-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-agent-pretoken-role",
+        "enceladus-agent-pretoken-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/08-agent-auth.yaml",
+      "line": 327,
+      "base_name": "enceladus-agent-m2m-rotation-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-agent-m2m-rotation-role",
+        "enceladus-agent-m2m-rotation-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/08-agent-auth.yaml",
+      "line": 501,
+      "base_name": "enceladus-agent-authorizer-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-agent-authorizer-role",
+        "enceladus-agent-authorizer-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/08-agent-auth.yaml",
+      "line": 901,
+      "base_name": "enceladus-agent-selftest-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-agent-selftest-role",
+        "enceladus-agent-selftest-role-gamma"
+      ]
+    },
+    {
+      "file": "infrastructure/cloudformation/10-opensearch-node.yaml",
+      "line": 96,
+      "base_name": "enceladus-opensearch-node-role",
+      "style": "templated_EnvironmentSuffix",
+      "expands_to": [
+        "enceladus-opensearch-node-role",
+        "enceladus-opensearch-node-role-gamma"
+      ]
+    }
+  ],
+  "covered_role_names": [
+    "auth-refresh-lambda-role",
+    "auth-refresh-lambda-role-gamma",
+    "devops-appsync-feed-publisher-role-gamma",
+    "devops-changelog-api-lambda-role",
+    "devops-changelog-api-lambda-role-gamma",
+    "devops-coordination-api-lambda-role",
+    "devops-coordination-api-lambda-role-gamma",
+    "devops-coordination-monitor-lambda-role",
+    "devops-coordination-monitor-lambda-role-gamma",
+    "devops-deploy-decide-lambda-role",
+    "devops-deploy-decide-lambda-role-gamma",
+    "devops-deploy-finalize-lambda-role",
+    "devops-deploy-finalize-lambda-role-gamma",
+    "devops-deploy-intake-lambda-role",
+    "devops-deploy-intake-lambda-role-gamma",
+    "devops-deploy-orchestrator-lambda-role",
+    "devops-deploy-orchestrator-lambda-role-gamma",
+    "devops-deploy-parity-validator-role",
+    "devops-deploy-parity-validator-role-gamma",
+    "devops-doc-prep-lambda-role",
+    "devops-doc-prep-lambda-role-gamma",
+    "devops-document-api-lambda-role",
+    "devops-document-api-lambda-role-gamma",
+    "devops-env-drift-auditor-role",
+    "devops-env-drift-auditor-role-gamma",
+    "devops-feed-publisher-lambda-role",
+    "devops-feed-publisher-lambda-role-gamma",
+    "devops-feed-query-lambda-role",
+    "devops-feed-query-lambda-role-gamma",
+    "devops-governance-drift-check-lambda-role-gamma",
+    "devops-graph-query-api-lambda-role",
+    "devops-graph-query-api-lambda-role-gamma",
+    "devops-graph-sync-lambda-role",
+    "devops-graph-sync-lambda-role-gamma",
+    "devops-opensearch-backfill-lambda-role-gamma",
+    "devops-opensearch-indexer-lambda-role-gamma",
+    "devops-project-service-lambda-role",
+    "devops-project-service-lambda-role-gamma",
+    "devops-recompute-governance-lambda-role",
+    "devops-recompute-governance-lambda-role-gamma",
+    "devops-reference-search-lambda-role",
+    "devops-reference-search-lambda-role-gamma",
+    "devops-tracker-mutation-lambda-role",
+    "devops-tracker-mutation-lambda-role-gamma",
+    "enceladus-agent-authorizer-role-gamma",
+    "enceladus-agent-m2m-rotation-role-gamma",
+    "enceladus-agent-pretoken-role-gamma",
+    "enceladus-agent-selftest-role-gamma",
+    "enceladus-arc-walk-metrics-role-gamma",
+    "enceladus-bedrock-actions-lambda-role",
+    "enceladus-bedrock-actions-lambda-role-gamma",
+    "enceladus-convergence-telemetry-role-gamma",
+    "enceladus-corpus-entropy-engine-role-gamma",
+    "enceladus-corpus-entropy-gdmp-role-gamma",
+    "enceladus-governance-audit-role",
+    "enceladus-governance-audit-role-gamma",
+    "enceladus-graph-health-metrics-role",
+    "enceladus-graph-health-metrics-role-gamma",
+    "enceladus-handoff-consolidation-engine-role-gamma",
+    "enceladus-id-service-lambda-role-gamma",
+    "enceladus-lifecycle-service-lambda-role-gamma",
+    "enceladus-mcp-gamma-synthetic-gamma",
+    "enceladus-mcp-streaming-gateway-lambda-role-gamma",
+    "enceladus-memory-consolidation-role-gamma",
+    "enceladus-neo4j-backup-lambda-role",
+    "enceladus-neo4j-backup-lambda-role-gamma",
+    "enceladus-percolation-monitor-role-gamma",
+    "enceladus-prod-health-monitor-role",
+    "enceladus-prod-health-monitor-role-gamma",
+    "enceladus-rhythm-cycle-role-gamma",
+    "enceladus-scoring-service-lambda-role-gamma",
+    "enceladus-stale-checkout-monitor-role-gamma",
+    "enceladus-unlearning-role-gamma",
+    "enceladus-user-preferences-api-lambda-role-gamma"
+  ],
+  "gap": {
+    "description": "Role names attached to a live platform-Lambda's execution role but NOT declared as an AWS::IAM::Role RoleName (expanded for both planes) anywhere in the applied CloudFormation templates.",
+    "count": 7,
+    "claimed_count_in_task_record": 12,
+    "role_names": [
+      "devops-github-integration-lambda-role",
+      "devops-github-integration-lambda-role-gamma",
+      "devops-json-parquet-lambda",
+      "devops-titan-embedding-backfill-lambda-role",
+      "devops-titan-embedding-backfill-lambda-role-gamma",
+      "enceladus-checkout-service-role",
+      "enceladus-checkout-service-role-gamma"
+    ],
+    "affected_lambdas": {
+      "devops-github-integration-lambda-role": [
+        "devops-github-integration"
+      ],
+      "devops-github-integration-lambda-role-gamma": [
+        "devops-github-integration-gamma"
+      ],
+      "devops-json-parquet-lambda": [
+        "devops-json-to-parquet-transformer"
+      ],
+      "devops-titan-embedding-backfill-lambda-role": [
+        "devops-titan-embedding-backfill"
+      ],
+      "devops-titan-embedding-backfill-lambda-role-gamma": [
+        "devops-titan-embedding-backfill-gamma"
+      ],
+      "enceladus-checkout-service-role": [
+        "enceladus-checkout-service",
+        "enceladus-checkout-service-auto"
+      ],
+      "enceladus-checkout-service-role-gamma": [
+        "enceladus-checkout-service-auto-gamma",
+        "enceladus-checkout-service-gamma"
+      ]
+    },
+    "notes": {
+      "devops-github-integration-lambda-role": "ENC-TSK-M03 comment (02-compute.yaml ~3527): 'github-integration Lambda is Gen2-managed (no CFN Function resource yet)' -- documented, intentional out-of-band.",
+      "devops-github-integration-lambda-role-gamma": "Same as above, gamma plane.",
+      "devops-json-parquet-lambda": "devops-json-to-parquet-transformer is only referenced as an EventBridge rule target ARN (02-compute.yaml ~7793); no Function or Role resource declared, no explanatory comment found. Prod-only (no -gamma live function observed).",
+      "devops-titan-embedding-backfill-lambda-role": "Referenced only via wildcard Lambda-invoke ARN grant (ENC-ISS-549 comment, 02-compute.yaml ~7793-7797); no Function or Role resource declared.",
+      "devops-titan-embedding-backfill-lambda-role-gamma": "Same as above, gamma plane.",
+      "enceladus-checkout-service-role": "Explicit code comment (02-compute.yaml ~615-626, ENC-TSK-K45/B66 Ph5): role intentionally NOT CFN-managed because this agent identity's IAM deny on iam:GetRole/ListRolePolicies means its live policy body cannot be safely re-authored as a managed resource without risking clobbering live grants on stack update.",
+      "enceladus-checkout-service-role-gamma": "Same as above, gamma plane. This is the role receiving the AgentSessionsGammaAccess inline policy in this task via a standalone AWS::IAM::Policy resource (attached by role name, not by owning the Role resource) -- the role itself remains correctly uncodified per the comment's reasoning."
+    }
+  }
+}

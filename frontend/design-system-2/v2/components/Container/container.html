@@ -1,0 +1,22 @@
+<!-- @dsCard group="v2 · Primitives" viewport="720x260" name="Container" subtitle="Surface panel with header/footer slots" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const NS = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+const header = NS.Header
+  ? e(NS.Header, { variant: 'h2', counter: '(17)', description: 'Institutional knowledge, evidence-gated and append-only.' }, 'Governed Lessons')
+  : e('h3', { style: { margin: 0, color: '#C8DDD9', fontFamily: 'Space Grotesk' } }, 'Governed Lessons');
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e(NS.Container, {
+    header,
+    footer: 'Last mined 2026-07-03 · 2,789 records scanned',
+  }, 'Every lesson is constitutionally scored against four pillars and a vibe board before it can propose governance amendments.')
+);
+</script>
+</body></html>

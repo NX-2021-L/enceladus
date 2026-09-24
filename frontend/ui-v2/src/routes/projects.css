@@ -1,0 +1,32 @@
+/* ENC-TSK-M26 -- Projects route had no CSS file at all: the design-system-2
+ * <Cards columns={3}> component renders its grid with an INLINE style
+ * (gridTemplateColumns: `repeat(${columns}, 1fr)`), which is unconditional
+ * and beats a plain class selector at any viewport. feed/governance/docs
+ * already override this at mobile widths with `!important`; projects.css
+ * never existed, so the 3-column grid stayed 3-column at 526px and
+ * .ev2-al__content overflowed horizontally. */
+
+@media (max-width: 48rem) {
+  .projects-route .ev2-cards__grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* ENC-TSK-P59 (ENC-ISS-723): project cards navigate — header + browse links. */
+.projects-route__card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.projects-route__card-link:hover {
+  color: var(--accent);
+}
+
+.projects-route__browse {
+  display: inline-flex;
+  gap: var(--space-4);
+}
+
+.projects-route__browse a {
+  color: var(--accent);
+}

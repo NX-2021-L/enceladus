@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://enceladus.internal/schemas/tracker/census_v1.schema.json",
+  "title": "tracker.census v1 payload",
+  "description": "GET /api/v1/tracker/{project}?mode=census response body (ENC-TSK-Q14 O2.4). See governance_data_dictionary.json tracker.census for full field semantics (D3-D6). Deliberately has NO `records` key -- this is a bounded summary, not a page of records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "count",
+    "count_truncated",
+    "exhausted",
+    "pages",
+    "page_size",
+    "as_of",
+    "order",
+    "by_type",
+    "ids_inline_cap"
+  ],
+  "properties": {
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total matching records walked (primary + escalation, unless the escalation walk truncated -- D5)."
+    },
+    "count_truncated": {
+      "type": "boolean",
+      "description": "True iff either walk's budget (D3) tripped before exhaustion -- CENSUS_MAX_RAW_PAGES or CENSUS_WALL_CLOCK_MS on the primary walk, or the escalation walk (D5)."
+    },
+    "exhausted": {
+      "type": "boolean",
+      "description": "True iff the primary walk's final DynamoDB call had no LastEvaluatedKey."
+    },
+    "pages": {
+      "type": "array",
+      "description": "Page anchors (O2.2) sliced from the primary walk's rows at page_size, never re-queried.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cursor", "first", "last", "n"],
+        "properties": {
+          "cursor": {
+            "type": ["string", "null"],
+            "description": "O1.1 _encode_list_cursor encoding of the last row of the PRECEDING page; null for page 0."
+          },
+          "first": {
+            "$ref": "#/definitions/anchor"
+          },
+          "last": {
+            "$ref": "#/definitions/anchor"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "as_of": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "started_at", "max_updated_at"],
+      "properties": {
+        "kind": {
+          "const": "wall_clock+max_updated_at"
+        },
+        "started_at": {
+          "type": "string",
+          "description": "ISO8601 timestamp captured at walk start (D4)."
+        },
+        "max_updated_at": {
+          "type": "string",
+          "description": "Maximum updated_at observed across every primary-walk row; empty string when zero rows were walked."
+        }
+      }
+    },
+    "order": {
+      "type": "string",
+      "enum": ["record_id_asc", "unspecified"],
+      "description": "D6: 'record_id_asc' on the untyped base-table branch, 'unspecified' on the typed project-type-index GSI branch."
+    },
+    "by_type": {
+      "type": "object",
+      "description": "Per-record-type counts. Keys are a subset of task/issue/feature/plan/lesson/escalation depending on the type filter and whether the escalation walk ran/completed.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "ids": {
+      "type": "array",
+      "description": "Present iff count <= ids_inline_cap. Full list of primary-walk record ids -- never a partial/truncated list.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ids_inline_cap": {
+      "const": 500
+    },
+    "excluded_types": {
+      "type": "array",
+      "description": "Present only when the escalation second walk (D5) truncated before exhaustion; escalation rows are then excluded from count/by_type/pages.",
+      "items": {
+        "const": "escalation"
+      }
+    }
+  },
+  "definitions": {
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "title"],
+      "properties": {
+        "id": {"type": "string"},
+        "status": {"type": "string"},
+        "title": {"type": "string"}
+      }
+    }
+  }
+}

@@ -192,6 +192,71 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
 
         self.assertEqual(result, "c" * 64)
 
+    # --- ENC-TSK-I29: connection_health authority cutover + docstore fallback removal ---
+
+    @staticmethod
+    def _fake_ddb_with_canonical(hash_value):
+        """DDB stub whose governance-version record returns hash_value."""
+        class _FakeDdb:
+            def get_item(self, TableName=None, Key=None, ConsistentRead=None, **_kwargs):
+                # Assert the canonical record is read consistently by id.
+                assert ConsistentRead is True, "canonical read must be ConsistentRead"
+                assert Key == {"version_id": {"S": coordination_lambda.GOVERNANCE_VERSION_RECORD_ID}}
+                if hash_value is None:
+                    return {}
+                return {"Item": {"governance_hash": {"S": hash_value}}}
+
+        return _FakeDdb()
+
+    def test_compute_governance_hash_local_prefers_canonical_ddb(self):
+        """AC#1: the served value is the canonical governance-version record's hash."""
+        mcp_module = MagicMock()  # must never be consulted when DDB resolves
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            return_value=self._fake_ddb_with_canonical("a" * 64),
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module", mcp_module,
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        self.assertEqual(result, "a" * 64)
+        mcp_module.assert_not_called()
+
+    def test_compute_governance_hash_local_live_s3_is_the_tiebreak(self):
+        """AC#3: when the canonical DDB warm value is absent, live-derived-from-S3 wins."""
+        class _FakeMcpServer:
+            def _compute_governance_hash(self, force_refresh=False):
+                return "b" * 64
+
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            return_value=self._fake_ddb_with_canonical(None),  # canonical record missing/empty
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module",
+            return_value=_FakeMcpServer(),
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        self.assertEqual(result, "b" * 64)
+
+    def test_compute_governance_hash_local_never_serves_docstore_fallback(self):
+        """AC#2: with both authoritative sources down, no frozen docstore value is served."""
+        docstore = MagicMock(return_value="f" * 64)  # the formerly-silent stale path
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            side_effect=RuntimeError("ddb down"),
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module",
+            side_effect=RuntimeError("mcp down"),
+        ), patch.object(
+            coordination_lambda, "_compute_governance_hash_docstore_fallback", docstore,
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        # Empty string propagates as GOVERNANCE_STALE rather than a silently-wrong hash.
+        self.assertEqual(result, "")
+        docstore.assert_not_called()
+
     def test_build_ssm_commands_uses_idempotent_mcp_profile_bootstrap(self):
         request = {
             "request_id": "CRQ-MCP001",
@@ -286,8 +351,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
     def test_load_governance_dictionary_reads_bundled_file_only(self):
         """ENC-TSK-K34 (ENC-ISS-477): the DDB scan branch is retired -- the
         bundled repo file is the sole and always-authoritative source. Does
-        NOT mock _get_ddb, proving no DynamoDB client is touched at all.
-        Backported to main by ENC-TSK-N82 (ENC-ISS-599 / ENC-ISS-600)."""
+        NOT mock _get_ddb, proving no DynamoDB client is touched at all."""
         with patch.object(coordination_lambda, "_get_ddb") as mock_get_ddb:
             dictionary, source_meta = coordination_lambda._load_governance_dictionary()
         mock_get_ddb.assert_not_called()
@@ -314,7 +378,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
                     }
                 },
             },
-            {"source": "dynamodb", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+            {"source": "bundled", "version": "test-v1"},
         ),
     )
     def test_governance_dictionary_lookup_validates_enum_value(self, _mock_dictionary):
@@ -350,7 +414,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
                     }
                 },
             },
-            {"source": "dynamodb", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+            {"source": "bundled", "version": "test-v1"},
         ),
     )
     def test_governance_dictionary_lookup_rejects_unknown_field(self, _mock_dictionary):
@@ -373,7 +437,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
                     "deploy.request": {"description": "Deploy", "fields": {"change_type": {"type": "enum", "enum": ["patch"]}}},
                 },
             },
-            {"source": "fallback_file", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+            {"source": "bundled", "version": "test-v1"},
         ),
     )
     def test_governance_dictionary_index_lists_entities(self, _mock_dictionary):
@@ -563,6 +627,97 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("set_cookie_headers", session)
         self.assertEqual(session["tokens"]["id_token"], "id-token-value")
 
+    @patch.object(
+        coordination_lambda,
+        "_load_terminal_cognito_credentials",
+        return_value={
+            "username": "svc-user",
+            "password": "svc-pass",
+            "client_id": "client-123",
+            "auth_flow": "USER_PASSWORD_AUTH",
+        },
+    )
+    @patch.object(coordination_lambda, "_get_cognito")
+    def test_handle_auth_cognito_terminal_session_include_tokens_false_suppresses_cookie_bundle(
+        self,
+        mock_get_cognito,
+        _mock_load_credentials,
+    ):
+        """ENC-ISS-559: include_tokens=false must suppress token values in
+        cookies / playwright_cookies / set_cookie_headers, not just withhold
+        the separate `tokens` object."""
+
+        class _FakeCognito:
+            class exceptions:
+                class NotAuthorizedException(Exception):
+                    pass
+
+                class UserNotConfirmedException(Exception):
+                    pass
+
+                class PasswordResetRequiredException(Exception):
+                    pass
+
+            def initiate_auth(self, **_kwargs):
+                return {
+                    "AuthenticationResult": {
+                        "IdToken": "id-token-value",
+                        "AccessToken": "access-token-value",
+                        "RefreshToken": "refresh-token-value",
+                        "ExpiresIn": 3600,
+                        "TokenType": "Bearer",
+                    }
+                }
+
+        mock_get_cognito.return_value = _FakeCognito()
+        event = {
+            "body": json.dumps(
+                {
+                    "target_origin": "https://jreese.net",
+                    "include_set_cookie_headers": True,
+                    "include_tokens": False,
+                }
+            )
+        }
+        claims = {"auth_mode": "internal-key"}
+        resp = coordination_lambda._handle_auth_cognito_terminal_session(event, claims)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        session = body["session"]
+
+        # No raw tokens object at all.
+        self.assertNotIn("tokens", session)
+
+        token_values = {"id-token-value", "access-token-value", "refresh-token-value"}
+
+        # cookies: token-bearing cookie values must be suppressed; non-token
+        # cookies (session timestamp) keep their real value and every cookie
+        # keeps its structural metadata (name/path/secure/etc).
+        cookie_by_name = {c["name"]: c for c in session["cookies"]}
+        self.assertIn("enceladus_id_token", cookie_by_name)
+        self.assertIn("enceladus_refresh_token", cookie_by_name)
+        self.assertEqual(cookie_by_name["enceladus_id_token"]["value"], "")
+        self.assertEqual(cookie_by_name["enceladus_refresh_token"]["value"], "")
+        self.assertTrue(cookie_by_name["enceladus_id_token"]["http_only"])
+        self.assertEqual(cookie_by_name["enceladus_id_token"]["path"], "/")
+        self.assertNotEqual(cookie_by_name["enceladus_session_at"]["value"], "")
+        for c in session["cookies"]:
+            self.assertNotIn(c["value"], token_values)
+
+        # playwright_cookies: same suppression.
+        pw_by_name = {c["name"]: c for c in session["playwright_cookies"]}
+        self.assertEqual(pw_by_name["enceladus_id_token"]["value"], "")
+        self.assertEqual(pw_by_name["enceladus_refresh_token"]["value"], "")
+        for c in session["playwright_cookies"]:
+            self.assertNotIn(c["value"], token_values)
+
+        # set_cookie_headers: no raw token value serialized into the header line.
+        self.assertIn("set_cookie_headers", session)
+        header_blob = "\n".join(session["set_cookie_headers"])
+        for tok in token_values:
+            self.assertNotIn(tok, header_blob)
+
     def test_handle_auth_cognito_terminal_session_requires_write_permission(self):
         event = {"body": "{}"}
         claims = {"auth_mode": "managed-token", "permissions": ["read"]}
@@ -588,6 +743,71 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         resp = coordination_lambda.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 200)
         mock_route_handler.assert_called_once()
+
+    @patch.object(coordination_lambda._agent_id_alloc, "release_checkouts_for_retired_sessions")
+    def test_handle_agent_session_checkout_release_backfill_accepts_direct_event(
+        self,
+        mock_release,
+    ):
+        mock_release.return_value = {
+            "success": True,
+            "dry_run": True,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "candidates_by_session": {"ENC-SES-057": ["ENC-TSK-L06"]},
+        }
+
+        resp = coordination_lambda._handle_agent_session_checkout_release_backfill({
+            "dry_run": True,
+            "session_ids": ["ENC-SES-057"],
+        })
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_release.assert_called_once_with(
+            dry_run=True,
+            session_ids=["ENC-SES-057"],
+        )
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["candidates_by_session"], {"ENC-SES-057": ["ENC-TSK-L06"]})
+
+    @patch.object(coordination_lambda, "_handle_agent_session_checkout_release_backfill")
+    def test_lambda_handler_routes_checkout_release_backfill_direct_action(self, mock_route_handler):
+        mock_route_handler.return_value = coordination_lambda._response(
+            200,
+            {"success": True, "released_task_count": 1},
+        )
+        event = {
+            "action": "agent_session_checkout_release_backfill",
+            "session_ids": ["ENC-SES-057"],
+        }
+
+        resp = coordination_lambda.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_route_handler.assert_called_once_with(event)
+
+    @patch.object(coordination_lambda, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    @patch.object(coordination_lambda, "_handle_agent_session_checkout_release_backfill")
+    def test_lambda_handler_routes_checkout_release_backfill_http(
+        self,
+        mock_route_handler,
+        _mock_auth,
+    ):
+        mock_route_handler.return_value = coordination_lambda._response(
+            200,
+            {"success": True, "released_task_count": 1},
+        )
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/agents/sessions/checkout-release-backfill",
+            "body": "{}",
+        }
+
+        resp = coordination_lambda.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_route_handler.assert_called_once_with(event)
 
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
@@ -973,11 +1193,18 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         parsed = coordination_lambda._parse_mcp_result(content)
         self.assertEqual(parsed, {"success": True})
 
+    # ENC-TSK-I29: pin the governance hash so this test exercises decomposition
+    # helpers hermetically rather than depending on ambient hash resolution
+    # (the old docstore-empty deterministic fallback was removed by I29).
     @patch.object(coordination_lambda, "_load_project_meta")
     @patch.object(coordination_lambda, "_append_tracker_history")
     @patch.object(coordination_lambda, "_create_tracker_record_auto")
+    @patch.object(
+        coordination_lambda, "_compute_governance_hash_local", return_value="d" * 64
+    )
     def test_decomposition_uses_tracker_helpers_with_metadata(
         self,
+        mock_compute_governance_hash_local,
         mock_create_tracker_record_auto,
         mock_append_tracker_history,
         mock_load_project_meta,
@@ -2571,6 +2798,80 @@ class SessionBridgeIntegrationTests(unittest.TestCase):
         mock_send_dispatch.assert_not_called()
         mock_find_host_dispatch.assert_not_called()
 
+    def test_dispatch_claude_batch_eligible_returns_202_running(self):
+        request = {
+            "request_id": "CRQ-CLAUDE-BATCH",
+            "project_id": "enceladus",
+            "state": "queued",
+            "dispatch_attempts": 0,
+            "provider_session": {
+                "preferred_provider": "claude_agent_sdk",
+                "batch_eligible": True,
+                "batch_workload_type": "nightly_changelog_generation",
+            },
+            "task_ids": [],
+            "feature_id": None,
+            "issue_ids": [],
+        }
+        updated_items = []
+        event = {
+            "body": json.dumps(
+                {
+                    "execution_mode": "claude_agent_sdk",
+                    "dispatch_id": "DSP-BATCH01",
+                    "prompt": "Generate nightly changelog",
+                    "provider_preferences": {
+                        "batch_eligible": True,
+                        "batch_workload_type": "nightly_changelog_generation",
+                    },
+                }
+            )
+        }
+
+        with patch.object(coordination_lambda, "_get_request", return_value=request), \
+             patch.object(coordination_lambda, "_acquire_dispatch_lock", return_value=True), \
+             patch.object(coordination_lambda, "_lambda_provider_preflight", return_value={"passed": True, "results": []}), \
+             patch.object(
+                 coordination_lambda,
+                 "_dispatch_claude_batch_api",
+                 return_value={
+                     "dispatch_id": "DSP-BATCH01",
+                     "execution_id": "batch_abc123",
+                     "execution_mode": "claude_agent_sdk",
+                     "provider": "claude_agent_sdk",
+                     "transport": "anthropic_messages_batches_api",
+                     "api_endpoint": "https://api.anthropic.com/v1/messages/batches",
+                     "sent_at": "2026-07-02T00:00:00Z",
+                     "status": "running",
+                     "batch_context": {
+                         "batch_id": "batch_abc123",
+                         "processing_status": "in_progress",
+                     },
+                 },
+             ) as mock_batch_dispatch, \
+             patch.object(coordination_lambda, "_dispatch_claude_api") as mock_sync_dispatch, \
+             patch.object(coordination_lambda, "_finalize_tracker_from_request"), \
+             patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            resp = coordination_lambda._handle_dispatch_request(event, "CRQ-CLAUDE-BATCH")
+
+        self.assertEqual(resp["statusCode"], 202)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual((body.get("dispatch") or {}).get("status"), "running")
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(final.get("state"), "running")
+        mock_batch_dispatch.assert_called_once()
+        mock_sync_dispatch.assert_not_called()
+
+    def test_handle_coordination_batch_poll_invokes_pending_scan(self):
+        with patch.object(coordination_lambda, "_find_pending_batch_requests", return_value=[]):
+            resp = coordination_lambda._handle_coordination_batch_poll({"action": "coordination_batch_poll"})
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["polled_count"], 0)
+
     def test_dispatch_bedrock_agent_routes_to_direct_api(self):
         request = {
             "request_id": "CRQ-BEDROCK-DIRECT",
@@ -3489,6 +3790,192 @@ class TriggerGovernanceSyncPushTests(unittest.TestCase):
 
     def tearDown(self):
         coordination_lambda._lambda_client = None
+
+
+class ContextManagementG17Tests(unittest.TestCase):
+    """ENC-TSK-G17 (G60/G61/G62): context-management beta wiring.
+
+    These are structural/config tests. G62's AC asks for a 30-turn live governed
+    session showing >=50% input-token reduction by turn 30 — that requires a real
+    Anthropic API session and cannot be honestly asserted in this sandbox. The
+    tests below verify the WIRING is correct (the config the Lambda emits would
+    trigger clearing above the 100k threshold with a keep-5 policy), not a live
+    measured reduction.
+    """
+
+    def test_append_anthropic_beta_appends_not_overwrites(self):
+        # Simulate deferred-tool-loading having already set the header first.
+        headers = {"anthropic-beta": "advanced-tool-use-2024,mcp-client-2025-11-20"}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        values = headers["anthropic-beta"].split(",")
+        # Both the pre-existing mcp-client-style beta AND context-management present.
+        self.assertIn("mcp-client-2025-11-20", values)
+        self.assertIn("advanced-tool-use-2024", values)
+        self.assertIn("context-management-2025-06-27", values)
+        # Comma-joined, order preserved (existing first), no clobber.
+        self.assertEqual(
+            headers["anthropic-beta"],
+            "advanced-tool-use-2024,mcp-client-2025-11-20,context-management-2025-06-27",
+        )
+
+    def test_append_anthropic_beta_deduplicates(self):
+        headers = {"anthropic-beta": "context-management-2025-06-27"}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        self.assertEqual(headers["anthropic-beta"], "context-management-2025-06-27")
+
+    def test_append_anthropic_beta_from_empty(self):
+        headers = {}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        self.assertEqual(headers["anthropic-beta"], "context-management-2025-06-27")
+
+    def test_context_management_config_shape(self):
+        cfg = coordination_lambda._build_claude_context_management_config()
+        edits = cfg["edits"]
+        self.assertEqual(len(edits), 1)
+        edit = edits[0]
+        self.assertEqual(edit["type"], "clear_tool_uses_20250919")
+        self.assertEqual(edit["trigger"], {"type": "input_tokens", "value": 100_000})
+        self.assertEqual(edit["keep"], {"type": "tool_uses", "value": 5})
+        # Memory tool is excluded from eviction (G61).
+        self.assertEqual(edit["exclude_tools"], ["memory"])
+
+    def test_attach_registers_memory_tool_and_composes_with_deferred(self):
+        # Simulate deferred tool loading having run first: a toolset + beta header.
+        request_body = {"tools": [{"type": "tool_search_tool_bm25_20251119"}]}
+        headers = {"anthropic-beta": "mcp-client-2025-11-20"}
+        attached = coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            request_body,
+            headers,
+            "claude-sonnet-4-6",
+            None,
+        )
+        self.assertTrue(attached)
+        # context_management block present with clear_tool_uses.
+        self.assertIn("context_management", request_body)
+        self.assertEqual(
+            request_body["context_management"]["edits"][0]["type"],
+            "clear_tool_uses_20250919",
+        )
+        # Memory tool appended (not clobbering the deferred toolset).
+        tool_types = [t.get("type") for t in request_body["tools"]]
+        self.assertIn("tool_search_tool_bm25_20251119", tool_types)
+        self.assertIn("memory_20250818", tool_types)
+        # Memory tool excluded from eviction.
+        self.assertIn(
+            "memory", request_body["context_management"]["edits"][0]["exclude_tools"]
+        )
+        # Beta header appended, not overwritten.
+        betas = headers["anthropic-beta"].split(",")
+        self.assertIn("mcp-client-2025-11-20", betas)
+        self.assertIn("context-management-2025-06-27", betas)
+
+    def test_attach_disabled_is_noop(self):
+        request_body = {}
+        headers = {}
+        attached = coordination_lambda._maybe_attach_context_management(
+            {}, request_body, headers, "claude-sonnet-4-6", None
+        )
+        self.assertFalse(attached)
+        self.assertNotIn("context_management", request_body)
+        self.assertNotIn("tools", request_body)
+        self.assertEqual(headers, {})
+
+    def test_attach_does_not_duplicate_memory_tool(self):
+        request_body = {"tools": [{"type": "memory_20250818", "name": "memory"}]}
+        headers = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            request_body,
+            headers,
+            "claude-sonnet-4-6",
+            None,
+        )
+        memory_tools = [
+            t for t in request_body["tools"] if t.get("type") == "memory_20250818"
+        ]
+        self.assertEqual(len(memory_tools), 1)
+
+    def test_clear_thinking_added_only_for_opus_with_thinking(self):
+        # Opus + active thinking -> clear_thinking companion edit present.
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-opus-4-6",
+            {"type": "adaptive"},
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertIn("clear_thinking_20251015", edit_types)
+
+    def test_clear_thinking_absent_for_opus_without_thinking(self):
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-opus-4-6",
+            None,
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertNotIn("clear_thinking_20251015", edit_types)
+
+    def test_clear_thinking_absent_for_non_opus_with_thinking(self):
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-sonnet-4-6",
+            {"type": "adaptive"},
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertNotIn("clear_thinking_20251015", edit_types)
+
+    def test_g62_synthetic_30_turn_clearing_wiring(self):
+        """G62 wiring proof (NOT a live 50% measurement).
+
+        Build a synthetic sequence of 30 tool_use/tool_result turns whose
+        accumulated input tokens cross the configured 100k trigger, then apply
+        the keep-5 policy pulled from the SAME config the Lambda emits. Asserts:
+        (a) the config trigger would fire above threshold, and (b) keep-5 retains
+        the last 5 tool-use records and evicts the older 25, yielding a large
+        input-token reduction. This validates the config/wiring, not a live
+        Anthropic-measured reduction.
+        """
+        cfg = coordination_lambda._build_claude_context_management_config()
+        edit = cfg["edits"][0]
+        trigger_tokens = edit["trigger"]["value"]
+        keep = edit["keep"]["value"]
+
+        # Synthetic accumulation: 30 turns, each tool_use+tool_result ~= 4000 tok.
+        per_turn_tokens = 4000
+        turns = [
+            {"index": i, "tokens": per_turn_tokens} for i in range(30)
+        ]
+        total_before = sum(t["tokens"] for t in turns)
+
+        # (a) Config trigger would fire: accumulated context exceeds 100k.
+        self.assertGreater(total_before, trigger_tokens)
+
+        # (b) Apply keep-5 eviction policy from the wired config.
+        retained = turns[-keep:]
+        evicted = turns[:-keep]
+        self.assertEqual(len(retained), 5)
+        self.assertEqual(len(evicted), 25)
+
+        total_after = sum(t["tokens"] for t in retained)
+        reduction_pct = (1.0 - total_after / total_before) * 100.0
+        # keep-5 of 30 evenly-sized turns => ~83% structural reduction of
+        # evictable tool context. (Structural, not a live token-count claim.)
+        self.assertGreater(reduction_pct, 50.0)
 
 
 if __name__ == "__main__":

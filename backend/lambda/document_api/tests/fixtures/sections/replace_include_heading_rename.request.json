@@ -1,0 +1,11 @@
+{
+  "anchor": {
+    "heading_path": [
+      "Alpha"
+    ]
+  },
+  "op": "replace",
+  "body": "### Renamed Alpha\n\nNew body under renamed heading.",
+  "include_heading": true,
+  "rebase_headings": false
+}

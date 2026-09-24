@@ -427,23 +427,63 @@ def _get_project_deploy_mode(project_id: str) -> str:
 # --- Record-only helpers (ENC-ISS-102) ---
 # Prefix-to-project cache for tracker worklog writes
 _prefix_to_project: Dict[str, str] = {}
+# Populated whenever _load_prefix_map() finds a prefix that is simultaneously
+# one project's MINT `prefix` and another project's `alias_prefixes` entry.
+# MINT always wins the cache entry, but the collision is kept here -- in
+# addition to a logger.warning -- so it stays programmatically detectable
+# instead of silently resolving (ENC-TSK-O47; mirrors tools/enceladus-mcp-
+# server/server.py::_PREFIX_COLLISIONS and coordination_api/project_utils.py's
+# equivalent; guards against re-creating the ENC-ISS-538 collision class).
+_PREFIX_COLLISIONS: Dict[str, Dict[str, str]] = {}
 
 
 def _load_prefix_map() -> None:
-    """Load prefix -> project_id mapping from projects table."""
+    """Load prefix -> project_id mapping from projects table.
+
+    Maps each row's canonical MINT `prefix` AND every entry of its optional
+    `alias_prefixes` list (ENC-TSK-O47) to that row's project_id, so a
+    project (e.g. gamma under ENC-TSK-O45) can repoint its MINT prefix to a
+    disjoint value without this Lambda losing the ability to attribute
+    pre-existing record IDs -- minted under the old prefix -- back to it for
+    [DEPLOYMENT] worklog stamping. If a prefix is simultaneously one
+    project's MINT prefix and a different project's alias, MINT always wins,
+    deterministically, regardless of scan/page order.
+    """
     if _prefix_to_project:
         return
     try:
         ddb = _get_ddb()
         resp = ddb.scan(
             TableName=PROJECTS_TABLE,
-            ProjectionExpression="project_id, prefix",
+            ProjectionExpression="project_id, prefix, alias_prefixes",
         )
+        alias_to_project: Dict[str, str] = {}
+        mint_to_project: Dict[str, str] = {}
         for item in resp.get("Items", []):
             pid = item.get("project_id", {}).get("S", "")
-            pfx = item.get("prefix", {}).get("S", "")
-            if pid and pfx:
-                _prefix_to_project[pfx] = pid
+            if not pid:
+                continue
+            pfx = str(item.get("prefix", {}).get("S", "")).strip().upper()
+            if pfx:
+                mint_to_project[pfx] = pid
+            for alias in item.get("alias_prefixes", {}).get("L", []):
+                alias_pfx = str(alias.get("S", "")).strip().upper()
+                if alias_pfx:
+                    alias_to_project[alias_pfx] = pid
+
+        _prefix_to_project.update(alias_to_project)
+        for pfx, mint_pid in mint_to_project.items():
+            alias_pid = alias_to_project.get(pfx)
+            if alias_pid is not None and alias_pid != mint_pid:
+                _PREFIX_COLLISIONS[pfx] = {"mint_project_id": mint_pid, "alias_project_id": alias_pid}
+                logger.warning(
+                    "[PREFIX-COLLISION] prefix %r is project %r's MINT prefix but also project %r's "
+                    "alias_prefixes entry; MINT wins (ENC-ISS-538 collision class)",
+                    pfx,
+                    mint_pid,
+                    alias_pid,
+                )
+            _prefix_to_project[pfx] = mint_pid
     except Exception:
         logger.warning("Failed to load prefix map", exc_info=True)
 
@@ -1285,52 +1325,6 @@ def _orchestrate_typed_batch(
     spec_id = f"SPEC-{_utc_now_compact()}"
     logger.info(f"[INFO] Spec ID: {spec_id}")
 
-    # --- Record-only mode: skip all execution for externally-deployed projects ---
-    # Check BEFORE the non-UI branch so lambda_update (and other non-UI types) also
-    # take the record-only path when deploy_mode='record_only'. Previously this check
-    # appeared after the non-UI branch exit, making it unreachable for those types.
-    # See ENC-ISS-452, ENC-ISS-102, ENC-ISS-103.
-    deploy_mode = _get_project_deploy_mode(project_id)
-    if deploy_mode == "record_only":
-        logger.info("[INFO] Record-only mode for %s — skipping execution", project_id)
-        config = _read_deploy_config(project_id)
-        current_version = _get_current_version(project_id, config)
-        new_version, change_type = _resolve_version(current_version, requests)
-        logger.info(
-            "[INFO] Version: %s → %s (%s) [record-only]",
-            current_version, new_version, change_type,
-        )
-        _write_spec(
-            project_id,
-            spec_id,
-            deployment_type=deployment_type,
-            deployment_category="ui",
-            previous_version=current_version,
-            resolved_version=new_version,
-            resolved_change_type=change_type,
-            included_request_ids=request_ids,
-            aggregated_changes=all_changes,
-            aggregated_release_summary=agg_summary,
-            integration_analysis=analysis,
-            all_related_record_ids=all_related,
-        )
-        _mark_requests(project_id, request_ids, "included", spec_id)
-        _finalize_record_only(
-            project_id,
-            spec_id,
-            current_version,
-            new_version,
-            change_type,
-            all_changes,
-            agg_summary,
-            request_ids,
-            all_related,
-        )
-        logger.info(
-            "[SUCCESS] Record-only deployment finalized: v%s (%s)", new_version, spec_id,
-        )
-        return
-
     if deployment_type in NON_UI_SERVICE_GROUP_BY_TYPE:
         valid, targets, errors = _validate_non_ui_requests(deployment_type, requests)
         if not valid:
@@ -1423,6 +1417,52 @@ def _orchestrate_typed_batch(
 
     if deployment_type not in UI_DEPLOYMENT_TYPES:
         logger.error("[ERROR] Unsupported deployment type '%s'", deployment_type)
+        return
+
+    # --- Record-only mode: skip CodeBuild for externally-deployed projects ---
+    # Projects with deploy_mode='record_only' deploy via their own CI/CD.
+    # We only need to track version + changelog. See ENC-ISS-102, ENC-ISS-103.
+    deploy_mode = _get_project_deploy_mode(project_id)
+    if deploy_mode == "record_only":
+        logger.info("[INFO] Record-only mode for %s — skipping CodeBuild", project_id)
+        config = _read_deploy_config(project_id)
+        current_version = _get_current_version(project_id, config)
+        new_version, change_type = _resolve_version(current_version, requests)
+        logger.info(
+            "[INFO] Version: %s → %s (%s) [record-only]",
+            current_version, new_version, change_type,
+        )
+
+        _write_spec(
+            project_id,
+            spec_id,
+            deployment_type=deployment_type,
+            deployment_category="ui",
+            previous_version=current_version,
+            resolved_version=new_version,
+            resolved_change_type=change_type,
+            included_request_ids=request_ids,
+            aggregated_changes=all_changes,
+            aggregated_release_summary=agg_summary,
+            integration_analysis=analysis,
+            all_related_record_ids=all_related,
+        )
+        _mark_requests(project_id, request_ids, "included", spec_id)
+
+        _finalize_record_only(
+            project_id,
+            spec_id,
+            current_version,
+            new_version,
+            change_type,
+            all_changes,
+            agg_summary,
+            request_ids,
+            all_related,
+        )
+        logger.info(
+            "[SUCCESS] Record-only deployment finalized: v%s (%s)", new_version, spec_id,
+        )
         return
 
     # UI deployment flow: read deploy config and run semver resolution + CodeBuild.

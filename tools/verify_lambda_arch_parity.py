@@ -1,44 +1,86 @@
 #!/usr/bin/env python3
 """Verify Lambda architecture parity between CFN and deploy scripts.
 
-CI guard preventing arm64 architecture from reaching production.
+CI guard enforcing the arm64/python3.12 architecture contract on BOTH planes
+(ENC-TSK-P38, the ENC-PLN-082 cutover commit, flipped IsArm64 unconditionally
+true — before it, this guard enforced the inverse: x86_64 kept OUT of prod).
 Validates that:
-  1. Every Lambda in 02-compute.yaml uses !If [IsGamma, arm64, x86_64]
-     for Architectures (prod must resolve to x86_64).
-  2. Every Lambda uses !If [IsGamma, python3.12, python3.11] for Runtime
-     (prod must resolve to python3.11).
-  3. Deploy scripts with pip --platform use ENVIRONMENT_SUFFIX conditionals
-     that default to x86_64/py3.11 for production (empty suffix).
+  1. Every Lambda in 02-compute.yaml uses !If [IsArm64, arm64, x86_64]
+     for Architectures (the shape is unchanged; the condition is now always
+     true, so every plane resolves arm64).
+  2. Every Lambda uses !If [IsArm64, python3.12, python3.11] for Runtime
+     (every plane resolves python3.12).
+  3. Build lanes carry the four pip ABI flags; the arch/runtime selector is
+     the target env manifest (envs/*.yaml), not per-script pins.
 
-Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown).
+Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown); contract
+flipped to arm64-everywhere by ENC-PLN-082.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, NamedTuple, Optional
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+# ENC-TSK-Q19 FR-1/FR-2: envs/architecture.yaml is the ONE canonical
+# declaration; this module cross-validates against it via the stdlib-only
+# loader. verify_lambda_arch_parity.py is always run as
+# `python3 tools/verify_lambda_arch_parity.py` (or with tools/ pre-pended to
+# sys.path by the test module), so tools/ is already importable as a plain
+# module path -- same convention the test file uses for `import
+# verify_lambda_arch_parity as vlap`.
+import arch_declaration
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
 SHARED_LAYER_DEPLOY = REPO_ROOT / "backend/lambda/shared_layer/deploy.sh"
 
-# Expected CFN conditional patterns for prod safety
-EXPECTED_ARCH_PATTERN = re.compile(
-    r"^\s*-\s*!If\s+\[IsGamma,\s*arm64,\s*x86_64\]\s*$"
-)
-EXPECTED_RUNTIME_PATTERN = re.compile(
-    r"^\s*Runtime:\s*!If\s+\[IsGamma,\s*python3\.12,\s*python3\.11\]\s*$"
-)
+# ENC-TSK-P15 / ENC-ISS-669 AC-6: the pinned, hash-verified devops ownership
+# snapshot (see tools/verify_devops_ownership_snapshot.py and that file's own
+# _doc). Read by _validate_cross_source_reconciliation below.
+DEVOPS_OWNERSHIP_SNAPSHOT_PATH = REPO_ROOT / "infrastructure/devops_lambda_ownership_snapshot.json"
 
-# Patterns that indicate a hardcoded (non-conditional) architecture or runtime
-# Handles both inline [arm64] and YAML list "- arm64" forms
-HARDCODED_ARCH_INLINE = re.compile(r"^\s*Architectures:\s*\[(arm64|x86_64)\]\s*$")
-HARDCODED_ARCH_LIST = re.compile(r"^\s*-\s*(arm64|x86_64)\s*$")
-HARDCODED_RUNTIME = re.compile(r"^\s*Runtime:\s*(python3\.\d+)\s*$")
+# ENC-TSK-O87: the two real arm64-dependency build paths. Neither is a
+# "deploy script" in the ENVIRONMENT_SUFFIX-conditional sense the two
+# constants above validate, so they get their own dedicated check.
+BUILD_WORKFLOW_PATH = REPO_ROOT / ".github/workflows/_build.yml"
+PACKAGE_ARTIFACT_SCRIPT = REPO_ROOT / "tools/package_lambda_artifact.sh"
+
+# Expected structural values for prod safety. These are compared directly
+# against the parsed Properties.Runtime / Properties.Architectures values
+# (see LambdaResource below) rather than against raw template text, so
+# formatting differences (spacing, quoting, flow vs. block YAML) can't hide
+# or fabricate a violation.
+# ENC-TSK-P40 / ENC-ISS-696: the ABI-selecting condition is now IsArm64, NOT IsGamma.
+#
+# IsGamma means "this is a suffixed non-prod plane" — PLANE IDENTITY. It used to double as the
+# architecture selector purely because gamma happened to be the arm64 plane, and ENC-ISS-696 is
+# what that conflation cost: the ENC-TSK-O11 cutover flips prod to arm64 while IsGamma stays FALSE
+# for prod, so architecture-derived values that rode IsGamma would NOT flip with it. 02-compute.yaml
+# and 06-appsync-events.yaml now select every ABI-derived value (Architectures, Runtime, and the
+# architecture-specific AppConfig and LambdaAdapter layer ARNs) on IsArm64, leaving the genuinely
+# plane-semantic sites on IsGamma.
+#
+# Named once here so a future rename is a ONE-LINE edit rather than another literal hunt.
+# ENC-TSK-P38 correction: the claim that previously stood here — "this guard does not hardcode an
+# ARCHITECTURE" — was FALSE. _validate_manifest_expectations pins the per-plane targets as literals
+# (now arm64/python3.12 on BOTH planes, flipped by the ENC-PLN-082 cutover commit), and
+# _resolve_plane_architecture/ARTIFACT_ARCH_TAGS encode the same targets. The guard hardcodes the
+# SHAPE of the conditional, the NAME of the condition, AND the per-plane target pairing; the
+# manifest must AGREE with those targets, which is what couples the manifest flip and the template
+# flip into one commit (runbook DOC-F3878E7260B6 §3.3).
+ABI_CONDITION = "IsArm64"
+
+EXPECTED_RUNTIME_IF: Dict[str, list] = {"!If": [ABI_CONDITION, "python3.12", "python3.11"]}
+EXPECTED_ARCH_IF_LIST: list = [{"!If": [ABI_CONDITION, "arm64", "x86_64"]}]
 
 # Deploy script patterns
 DEPLOY_PROD_X86 = re.compile(
@@ -64,94 +106,254 @@ _ENC_TSK_E19_BLOCK_RE = re.compile(
 )
 
 
-class LambdaBlock(NamedTuple):
-    """A Lambda function block parsed from the CFN template."""
+class _CfnTagPreservingLoader(yaml.SafeLoader):
+    """SafeLoader that preserves CloudFormation short-form intrinsic tags.
+
+    PyYAML's SafeLoader raises yaml.constructor.ConstructorError on any tag
+    it doesn't recognize, and CFN templates are full of short-form
+    intrinsics (!Sub, !If, !Ref, !GetAtt, !Condition, !Equals, ...) that
+    aren't standard YAML. Registering a multi-constructor for the bare "!"
+    prefix means every such tag round-trips into an inspectable
+    {"!TagName": <value>} dict instead of blowing up the parse.
+    """
+
+
+def _construct_cfn_tag(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Node) -> Dict[str, Any]:
+    if isinstance(node, yaml.ScalarNode):
+        value: Any = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node)
+    elif isinstance(node, yaml.MappingNode):
+        value = loader.construct_mapping(node)
+    else:  # pragma: no cover - defensive, no other yaml.Node subclass exists
+        value = None
+    return {f"!{tag_suffix}": value}
+
+
+_CfnTagPreservingLoader.add_multi_constructor("!", _construct_cfn_tag)
+
+
+@dataclass
+class LambdaResource:
+    """A Lambda function resource selected structurally from Resources{}.
+
+    Replaces the old line-window LambdaBlock (ENC-TSK-O83): runtime and
+    architectures are the actual parsed Properties values (str, dict, list,
+    or None), not text scraped from a fixed-size window after the Type:
+    declaration -- so a large Environment.Variables block or a missing
+    Runtime key (container-image functions) can no longer push a function
+    out of view.
+    """
     resource_name: str
     function_name: str
+    runtime: Any
+    architectures: Any
     line_number: int
-    runtime_line: str
-    runtime_lineno: int
-    arch_line: str
-    arch_lineno: int
 
 
-def _parse_lambda_blocks(template_path: Path) -> List[LambdaBlock]:
-    """Parse Lambda function blocks from the CFN template."""
+def _load_cfn_document(template_path: Path) -> tuple[dict, str]:
+    text = template_path.read_text(encoding="utf-8")
+    document = yaml.load(text, Loader=_CfnTagPreservingLoader) or {}
+    return document, text
+
+
+def _resolve_function_name(raw: Any) -> str:
+    """Resolve a FunctionName property value (literal or !Sub) to a plain string."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict) and "!Sub" in raw:
+        sub_value = raw["!Sub"]
+        template = sub_value[0] if isinstance(sub_value, list) and sub_value else sub_value
+        if isinstance(template, str):
+            return template.replace("${EnvironmentSuffix}", "")
+    return ""
+
+
+def _resource_line_numbers(text: str) -> Dict[str, int]:
+    """Best-effort logical-ID -> 1-based line number map, via yaml.compose().
+
+    yaml.load() discards node position info once it constructs Python
+    objects. yaml.compose() stops one step earlier and keeps the Node tree
+    (with .start_mark), so we do a second, cheap pass purely to recover line
+    numbers for diagnostics. Never raises: a compose failure just means
+    error messages fall back to line 0, it doesn't affect resource selection.
+    """
+    line_numbers: Dict[str, int] = {}
+    try:
+        root = yaml.compose(text, Loader=_CfnTagPreservingLoader)
+    except yaml.YAMLError:
+        return line_numbers
+    if root is None or not hasattr(root, "value"):
+        return line_numbers
+    for key_node, value_node in root.value:
+        if getattr(key_node, "value", None) != "Resources":
+            continue
+        if not hasattr(value_node, "value"):
+            continue
+        for res_key_node, _res_value_node in value_node.value:
+            line_numbers[res_key_node.value] = res_key_node.start_mark.line + 1
+    return line_numbers
+
+
+_LAMBDA_TYPE_LINE_RE = re.compile(r"^\s*Type:\s*AWS::Lambda::Function\s*$")
+
+
+def _count_declared_lambda_resources_by_text(template_path: Path) -> int:
+    """Independent census of declared Lambda resources via a raw-text scan.
+
+    ENC-TSK-O83 AC2: deliberately does NOT reuse the YAML structural parser
+    below. The whole point of the count-reconciliation assertion is to catch
+    a defect in structural selection (an undercount, an exception silently
+    swallowed, an unexpected document shape) -- so the number it reconciles
+    against has to come from an independent method, not the same one being
+    checked. A raw grep for the `Type: AWS::Lambda::Function` line is about
+    as independent and as hard to accidentally break as it gets.
+    """
     lines = template_path.read_text(encoding="utf-8").splitlines()
-    blocks: List[LambdaBlock] = []
+    return sum(1 for line in lines if _LAMBDA_TYPE_LINE_RE.match(line))
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].rstrip()
 
-        # Find resource blocks that are Lambda functions
-        if line.strip().startswith("Type:") and "AWS::Lambda::Function" in line:
-            # Walk back to find the resource name
-            resource_name = ""
-            for j in range(i - 1, max(i - 10, -1), -1):
-                candidate = lines[j].rstrip()
-                if candidate and not candidate.startswith(" ") and not candidate.startswith("#"):
-                    break
-                if re.match(r"^  \w+.*:$", candidate):
-                    resource_name = candidate.strip().rstrip(":")
-                    break
+def _parse_lambda_blocks(template_path: Path) -> List[LambdaResource]:
+    """Structurally select every AWS::Lambda::Function resource in Resources{}.
 
-            # Find FunctionName, Runtime, and Architectures within this block
-            function_name = ""
-            runtime_line = ""
-            runtime_lineno = 0
-            arch_line = ""
-            arch_lineno = 0
+    ENC-TSK-O83: replaces the prior 40-line text-window scan, which walked
+    forward from each `Type: AWS::Lambda::Function` line and silently
+    dropped the function if FunctionName or Runtime hadn't appeared within
+    40 lines (large Environment.Variables blocks push both out of range) or
+    if Runtime was absent entirely (container-image functions). This walks
+    the parsed Resources mapping directly and selects every resource of
+    that Type, unconditionally -- there is no window to fall out of.
+    """
+    document, text = _load_cfn_document(template_path)
+    resources = document.get("Resources") or {}
+    line_numbers = _resource_line_numbers(text)
 
-            for k in range(i + 1, min(i + 40, len(lines))):
-                l = lines[k].rstrip()
-
-                if l.strip().startswith("FunctionName:"):
-                    fn_val = l.split("FunctionName:", 1)[1].strip()
-                    # Handle !Sub patterns
-                    sub_match = re.match(r"""!Sub\s+['"]([^'"]+)['"]""", fn_val)
-                    if sub_match:
-                        function_name = sub_match.group(1).replace(
-                            "${EnvironmentSuffix}", ""
-                        )
-                    else:
-                        function_name = fn_val.strip("'\"")
-
-                if l.strip().startswith("Runtime:"):
-                    runtime_line = l
-                    runtime_lineno = k + 1  # 1-based
-
-                if l.strip().startswith("Architectures:"):
-                    # The value might be on the same line or the next line
-                    if "[" in l:
-                        arch_line = l
-                        arch_lineno = k + 1
-                    elif k + 1 < len(lines):
-                        arch_line = lines[k + 1]
-                        arch_lineno = k + 2
-
-                # Stop at the next resource block
-                if k > i + 2 and re.match(r"^  \w+.*:", l) and not l.startswith("    "):
-                    break
-
-            if function_name and runtime_line:
-                blocks.append(LambdaBlock(
-                    resource_name=resource_name,
-                    function_name=function_name,
-                    line_number=i + 1,
-                    runtime_line=runtime_line,
-                    runtime_lineno=runtime_lineno,
-                    arch_line=arch_line,
-                    arch_lineno=arch_lineno,
-                ))
-        i += 1
-
+    blocks: List[LambdaResource] = []
+    for resource_name, resource in resources.items():
+        if not isinstance(resource, dict):
+            continue
+        if resource.get("Type") != "AWS::Lambda::Function":
+            continue
+        properties = resource.get("Properties") or {}
+        blocks.append(
+            LambdaResource(
+                resource_name=resource_name,
+                function_name=_resolve_function_name(properties.get("FunctionName")),
+                runtime=properties.get("Runtime"),
+                architectures=properties.get("Architectures"),
+                line_number=line_numbers.get(resource_name, 0),
+            )
+        )
     return blocks
 
 
-def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
-    """Validate that all CFN Lambda declarations use IsGamma conditionals."""
+def _validate_nonzero_declared_lambdas(template_path: Path) -> List[str]:
+    """Fail if the template declares zero Lambda resources at all.
+
+    The count-reconciliation assertion alone can't catch this degenerate
+    case: if nothing is declared, evaluated == declared == 0 and the counts
+    trivially reconcile even though there is nothing to check. ENC-TSK-O83:
+    "nothing to check" must be an explicit, visible failure -- never a
+    silent pass (the ENC-ISS-651 census class: 29 false clears from empty
+    lookup lists).
+    """
+    declared = _count_declared_lambda_resources_by_text(template_path)
+    if declared == 0:
+        return [
+            f"Zero AWS::Lambda::Function resources declared in "
+            f"{template_path.name} — the arch-parity guard has nothing to "
+            f"check. Treating this as a failure, not a vacuous pass."
+        ]
+    return []
+
+
+def _validate_resource_count_reconciliation(
+    blocks: List[LambdaResource], template_path: Path
+) -> List[str]:
+    """ENC-TSK-O83 AC2: fail when the structural selector's count doesn't
+    match an independently-derived census of declared Lambda resources.
+
+    This is what actually closes the vacuous-pass mode Defect 1 opened: a
+    parser that silently drops some functions (a bad filter, a swallowed
+    exception, an unanticipated document shape) would previously report
+    success on whatever subset it did see. Now the number evaluated must
+    equal the number declared, or the run fails with a name-level diff.
+    """
+    declared = _count_declared_lambda_resources_by_text(template_path)
+    evaluated = len(blocks)
+    if declared != evaluated:
+        document, _text = _load_cfn_document(template_path)
+        resources = document.get("Resources") or {}
+        declared_names = sorted(
+            name
+            for name, res in resources.items()
+            if isinstance(res, dict) and res.get("Type") == "AWS::Lambda::Function"
+        )
+        evaluated_names = sorted(b.resource_name for b in blocks)
+        missing = sorted(set(declared_names) - set(evaluated_names))
+        extra = sorted(set(evaluated_names) - set(declared_names))
+        return [
+            "Lambda resource count reconciliation FAILED: "
+            f"{declared} AWS::Lambda::Function resources declared in "
+            f"{template_path.name} (independent raw-text census) but "
+            f"{evaluated} were structurally selected and evaluated by the "
+            f"arch-parity guard.",
+            f"  declared={declared} evaluated={evaluated}",
+            f"  declared but NOT evaluated ({len(missing)}): {', '.join(missing) or '(none)'}",
+            f"  evaluated but NOT declared ({len(extra)}): {', '.join(extra) or '(none)'}",
+        ]
+    return []
+
+
+def _is_named_architecture_exception(function_name: str, exceptions: Dict[str, Any]) -> bool:
+    """True if function_name appears on any leaf list inside a manifest's
+    architecture_exceptions block (any plane, any class, any architecture).
+
+    ENC-TSK-O82: used by _validate_cfn below to defer a hardcoded-Architectures
+    finding to _validate_architecture_exceptions (which knows which plane and
+    which class it belongs to, and catches the both-lists contradiction) for
+    any function the manifest has actually named as an exception, rather than
+    unconditionally rejecting it here. A function that ISN'T named anywhere
+    still gets today's unconditional rejection -- this only recognizes
+    exceptions the manifest actually declares.
+    """
+    for plane_exceptions in exceptions.values():
+        for cls in ("temporary", "permanent"):
+            class_block = (plane_exceptions or {}).get(cls) or {}
+            for key, value in class_block.items():
+                if key in ("rationale", "terminal_state", "ratchet"):
+                    continue
+                if isinstance(value, list) and function_name in value:
+                    return True
+    return False
+
+
+def _validate_cfn(
+    blocks: List[LambdaResource], architecture_exceptions: Optional[Dict[str, Any]] = None
+) -> List[str]:
+    """Validate that all CFN Lambda declarations use IsArm64 conditionals.
+
+    ENC-TSK-O83: compares the parsed Properties.Runtime / .Architectures
+    values directly against the expected structural shape (EXPECTED_RUNTIME_IF
+    / EXPECTED_ARCH_IF_LIST) instead of regex-matching raw template text.
+
+    ENC-TSK-O82: a hardcoded Architectures value is still rejected here
+    unconditionally UNLESS the function is named on the manifest's
+    architecture_exceptions block, in which case this defers entirely to
+    _validate_architecture_exceptions (which is plane- and class-aware, and
+    is what actually decides whether the exception is valid, contradictory,
+    or mismatched). If architecture_exceptions isn't passed explicitly, it's
+    read from the on-disk manifest at MANIFEST_PATH.
+    """
     errors: List[str] = []
+
+    if architecture_exceptions is None:
+        import json
+        if MANIFEST_PATH.is_file():
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            architecture_exceptions = _manifest_architecture_exceptions(manifest)
+        else:
+            architecture_exceptions = {}
 
     for block in blocks:
         # ENC-TSK-F74: gamma-only literal Lambdas (e.g. enceladus-mcp-code-gamma)
@@ -163,44 +365,47 @@ def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
         if block.function_name.endswith("-gamma"):
             continue
 
+        label = f"{block.function_name or block.resource_name} ({block.resource_name}, line {block.line_number})"
+
         # Check Runtime
-        if not EXPECTED_RUNTIME_PATTERN.match(block.runtime_line):
-            match = HARDCODED_RUNTIME.match(block.runtime_line.strip())
-            if match:
-                runtime_val = match.group(1)
+        if block.runtime != EXPECTED_RUNTIME_IF:
+            if isinstance(block.runtime, str):
                 errors.append(
-                    f"{block.function_name} (line {block.runtime_lineno}): "
-                    f"hardcoded Runtime={runtime_val}, expected "
-                    f"!If [IsGamma, python3.12, python3.11]"
+                    f"{label}: hardcoded Runtime={block.runtime}, expected "
+                    f"!If [{ABI_CONDITION}, python3.12, python3.11]"
+                )
+            elif block.runtime is None:
+                errors.append(
+                    f"{label}: missing Runtime property (container-image "
+                    f"functions must still be explicitly exempted, not "
+                    f"silently skipped)"
                 )
             else:
                 errors.append(
-                    f"{block.function_name} (line {block.runtime_lineno}): "
-                    f"unexpected Runtime pattern: {block.runtime_line.strip()}"
+                    f"{label}: unexpected Runtime value: {block.runtime!r}, "
+                    f"expected !If [{ABI_CONDITION}, python3.12, python3.11]"
                 )
 
         # Check Architectures
-        if not EXPECTED_ARCH_PATTERN.match(block.arch_line):
-            inline_match = HARDCODED_ARCH_INLINE.match(block.arch_line.strip())
-            list_match = HARDCODED_ARCH_LIST.match(block.arch_line)
-            if inline_match:
-                arch_val = inline_match.group(1)
+        if block.architectures != EXPECTED_ARCH_IF_LIST:
+            if _is_named_architecture_exception(block.function_name, architecture_exceptions):
+                pass  # ENC-TSK-O82: deferred to _validate_architecture_exceptions
+            elif (
+                isinstance(block.architectures, list)
+                and len(block.architectures) == 1
+                and isinstance(block.architectures[0], str)
+            ):
                 errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"hardcoded Architectures=[{arch_val}], expected "
-                    f"!If [IsGamma, arm64, x86_64]"
+                    f"{label}: hardcoded Architectures=[{block.architectures[0]}], "
+                    f"expected !If [{ABI_CONDITION}, arm64, x86_64]"
                 )
-            elif list_match:
-                arch_val = list_match.group(1)
-                errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"hardcoded Architectures=[{arch_val}], expected "
-                    f"!If [IsGamma, arm64, x86_64]"
-                )
+            elif block.architectures is None:
+                errors.append(f"{label}: missing Architectures property")
             else:
                 errors.append(
-                    f"{block.function_name} (line {block.arch_lineno}): "
-                    f"unexpected Architectures pattern: {block.arch_line.strip()}"
+                    f"{label}: unexpected Architectures value: "
+                    f"{block.architectures!r}, expected "
+                    f"[!If [{ABI_CONDITION}, arm64, x86_64]]"
                 )
 
     return errors
@@ -315,11 +520,21 @@ def _validate_shared_layer_deploy_script() -> List[str]:
 
     content = SHARED_LAYER_DEPLOY.read_text(encoding="utf-8")
 
-    # ENC-TSK-F59: script tombstoned — artifact build moved to _deploy.yml matrix
+    # ENC-TSK-F59 tombstoned this script claiming _deploy.yml's matrix build took
+    # over -- ENC-TSK-P13 found that claim was false the entire time (_build.yml's
+    # function-discovery glob never matches shared_layer/, and no workflow in this
+    # repo ever published this layer). ENC-TSK-P13 landed the real lane,
+    # .github/workflows/shared-layer-build.yml, which builds a deliberately
+    # dependency-free pure-Python zip (no pip install, no compiled deps, see that
+    # workflow's header comment) -- so the ABI-flag checks below (--platform /
+    # --python-version / --abi, meant for a pip-installing build) do not apply to
+    # it either. This skip is correct for today's real lane, not just a fallback
+    # for an absent one.
     if content.strip().startswith("# TOMBSTONE:"):
         print(
             "[INFO] shared_layer/deploy.sh is tombstoned — ABI flag validation skipped"
-            " (artifact build handled by .github/workflows/_deploy.yml)"
+            " (build lane is .github/workflows/shared-layer-build.yml, ENC-TSK-P13;"
+            " it does not pip-install compiled deps, so these ABI-pin checks do not apply)"
         )
         return []
 
@@ -377,14 +592,121 @@ def _validate_shared_layer_deploy_script() -> List[str]:
     return errors
 
 
+# ENC-TSK-O87: the four flags every arm64 dependency build must pass. Order
+# in the tuple has no meaning; presence is checked independently per flag.
+REQUIRED_PIP_ARCH_FLAGS: tuple = (
+    "--platform",
+    "--implementation cp",
+    "--python-version",
+    "--only-binary=:all:",
+)
+
+
+def _extract_shell_command_block(text: str, anchor: str) -> Optional[str]:
+    """Return the backslash-continued shell command starting at `anchor`.
+
+    Scans line-by-line from the first occurrence of `anchor`, including every
+    subsequent line that is part of the same continued command (a line ending
+    in ``\``), and stops at (and includes) the first line that does not end
+    in a continuation backslash — i.e. the line that actually terminates the
+    shell command. Returns None if `anchor` is not found in `text`.
+
+    This mirrors how both real invocations are written: multi-line pip
+    installs with a trailing backslash on every line but the last.
+    """
+    idx = text.find(anchor)
+    if idx == -1:
+        return None
+    block_lines: List[str] = []
+    for line in text[idx:].splitlines():
+        block_lines.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    return "\n".join(block_lines)
+
+
+def _validate_build_invocation_flags() -> List[str]:
+    """ENC-TSK-O87: assert both real arm64-dependency build invocations still
+    carry the full pip flag contract, so the contract is enforced
+    structurally instead of by one-time inspection.
+
+    BRD Sec 6.5: "The build invocation is therefore part of the contract,
+    not an implementation detail." Without --only-binary=:all: specifically,
+    a missing aarch64 wheel makes pip silently fall back to a source build
+    or an older version instead of failing CI loudly (ENC-TSK-O87 AC-2,
+    observed at https://github.com/NX-2021-L/enceladus/actions/runs/32615808666).
+
+    Checks two paths — there is no third; deploy.sh / shared_layer/deploy.sh
+    are tombstoned and validated separately, and _deploy.yml has no
+    independent install path of its own (it only calls _build.yml):
+      1. .github/workflows/_build.yml — the Gen2 matrix build (one shared
+         `python -m pip install` invocation, arch selected via
+         matrix.pip_platform).
+      2. tools/package_lambda_artifact.sh — the legacy per-function build
+         invoked by build-lambda-artifacts.yml.
+    """
+    errors: List[str] = []
+
+    checks = (
+        ("_build.yml", BUILD_WORKFLOW_PATH, "python -m pip install"),
+        ("package_lambda_artifact.sh", PACKAGE_ARTIFACT_SCRIPT, "pip install"),
+    )
+
+    for label, path, anchor in checks:
+        if not path.is_file():
+            errors.append(f"{label}: file not found at {path}")
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        block = _extract_shell_command_block(text, anchor)
+        if block is None:
+            errors.append(
+                f"{label}: no '{anchor}' invocation found. The arm64 wheel "
+                f"contract (ENC-TSK-O87) can't be verified because this "
+                f"build path no longer installs dependencies via pip, or "
+                f"the invocation no longer starts with '{anchor}'."
+            )
+            continue
+
+        for flag in REQUIRED_PIP_ARCH_FLAGS:
+            if flag not in block:
+                errors.append(
+                    f"{label}: pip install invocation is missing required "
+                    f"flag '{flag}' (ENC-TSK-O87 aarch64 wheel contract, "
+                    f"BRD Sec 6.5). Without every one of "
+                    f"{', '.join(REQUIRED_PIP_ARCH_FLAGS)}, a missing "
+                    f"aarch64 wheel silently falls back to a source build "
+                    f"or a stale version instead of failing CI loudly."
+                )
+
+    if not errors:
+        # Deliberately not path.relative_to(REPO_ROOT) here: tests mock
+        # BUILD_WORKFLOW_PATH / PACKAGE_ARTIFACT_SCRIPT to tempfiles outside
+        # REPO_ROOT, and an [INFO] print crashing on relative_to() would be
+        # exactly the kind of guard-goes-vacuously-green-by-accident bug
+        # this check exists to prevent elsewhere. Labels are stable regardless
+        # of what's mocked underneath them.
+        checked_labels = ", ".join(label for label, _, _ in checks)
+        print(
+            f"[INFO] Build invocation flag contract validated: both "
+            f"{checked_labels} carry {', '.join(REQUIRED_PIP_ARCH_FLAGS)}"
+        )
+
+    return errors
+
+
 def _validate_manifest_expectations() -> List[str]:
-    """Cross-validate manifest expected_architecture/expected_runtime against CFN and deploy scripts.
+    """Cross-validate manifest expected_architecture/expected_runtime against
+    envs/architecture.yaml (ENC-TSK-Q19 FR-3).
 
-    The manifest serves as the single source of truth for what each environment should use.
-    This check ensures the manifest expectations are internally consistent and that the
-    CFN template's IsGamma conditionals resolve to the manifest's declared values.
+    The manifest serves as the single source of truth for what each Lambda
+    should use; envs/architecture.yaml (ENC-TSK-Q19 FR-1) is now the single
+    source of truth for what each PLANE should use. This check ensures the
+    two don't drift: the manifest's expected_architecture/expected_runtime
+    per plane must equal the declaration's planes[<plane>].arch/runtime.
 
-    Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7.
+    Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7,
+    re-sourced from the declaration by ENC-TSK-Q19 FR-3.
     """
     errors: List[str] = []
 
@@ -396,36 +718,47 @@ def _validate_manifest_expectations() -> List[str]:
     expected_arch = manifest.get("expected_architecture", {})
     expected_runtime = manifest.get("expected_runtime", {})
 
+    # ENC-TSK-O83 Defect 3: previously `return []` here — a manifest with no
+    # expected_architecture/expected_runtime keys at all (malformed,
+    # truncated, or a bad hand-edit) silently passed this check because
+    # there was "nothing to validate". That's the same vacuous-pass shape as
+    # Defects 1 and 2, just in a third place. Absent expectations must now
+    # fail, not skip.
     if not expected_arch or not expected_runtime:
-        return []  # No manifest expectations defined yet — skip
+        return [
+            "Manifest is missing expected_architecture and/or "
+            "expected_runtime keys entirely. A malformed or truncated "
+            "manifest must fail this guard, not silently skip validation "
+            "(ENC-TSK-O83)."
+        ]
 
-    # Validate manifest expectations match the IsGamma conditional contract
-    # The CFN pattern is: !If [IsGamma, <gamma_value>, <prod_value>]
-    # So prod=x86_64 and gamma=arm64 must match manifest
-    if expected_arch.get("prod") != "x86_64":
-        errors.append(
-            f"Manifest expected_architecture.prod={expected_arch.get('prod')}, "
-            f"but CFN IsGamma resolves prod to x86_64"
-        )
-    if expected_arch.get("gamma") != "arm64":
-        errors.append(
-            f"Manifest expected_architecture.gamma={expected_arch.get('gamma')}, "
-            f"but CFN IsGamma resolves gamma to arm64"
-        )
-    if expected_runtime.get("prod") != "python3.11":
-        errors.append(
-            f"Manifest expected_runtime.prod={expected_runtime.get('prod')}, "
-            f"but CFN IsGamma resolves prod to python3.11"
-        )
-    if expected_runtime.get("gamma") != "python3.12":
-        errors.append(
-            f"Manifest expected_runtime.gamma={expected_runtime.get('gamma')}, "
-            f"but CFN IsGamma resolves gamma to python3.12"
-        )
+    try:
+        decl = arch_declaration.load_declaration()
+    except arch_declaration.ArchDeclarationError as exc:
+        return [f"envs/architecture.yaml: {exc}"]
+
+    # ENC-TSK-Q19 FR-3: expectations must equal envs/architecture.yaml's
+    # per-plane declaration, not a hardcoded literal -- the declaration is
+    # now the arbiter, not this function.
+    for plane in ("prod", "gamma"):
+        declared_arch = decl.planes.get(plane, {}).get("arch")
+        declared_runtime = decl.planes.get(plane, {}).get("runtime")
+        if expected_arch.get(plane) != declared_arch:
+            errors.append(
+                f"Manifest expected_architecture.{plane}={expected_arch.get(plane)}, "
+                f"but envs/architecture.yaml declares planes[{plane!r}].arch={declared_arch!r}"
+            )
+        if expected_runtime.get(plane) != declared_runtime:
+            errors.append(
+                f"Manifest expected_runtime.{plane}={expected_runtime.get(plane)}, "
+                f"but envs/architecture.yaml declares "
+                f"planes[{plane!r}].runtime={declared_runtime!r}"
+            )
 
     if not errors:
         print(
-            f"[INFO] Manifest expectations cross-validated: "
+            f"[INFO] Manifest expectations cross-validated against "
+            f"envs/architecture.yaml: "
             f"prod={expected_arch.get('prod')}/{expected_runtime.get('prod')}, "
             f"gamma={expected_arch.get('gamma')}/{expected_runtime.get('gamma')}"
         )
@@ -433,9 +766,348 @@ def _validate_manifest_expectations() -> List[str]:
     return errors
 
 
+def _manifest_architecture_exceptions(manifest: dict) -> Dict[str, Any]:
+    """Read point for the manifest's two-class `architecture_exceptions` block.
+
+    ENC-TSK-O83 left this as an unwired seam. ENC-TSK-O82 (BRD DOC-56CFA21523C1
+    section 6.2) wires it via _validate_architecture_exceptions() below: each
+    plane's exceptions carry a `temporary` class (monotonically shrinking,
+    terminal state empty) and a `permanent` class (stable; additions require
+    an io ruling), each keyed by the deviant architecture string (e.g.
+    "x86_64") to the list of function names carrying that deviation.
+    """
+    return manifest.get("architecture_exceptions", {})
+
+
+def _resolve_plane_architecture(architectures: Any, plane: str) -> Optional[str]:
+    """Resolve a LambdaResource.architectures value to a single string for
+    one deploy plane ("prod" or "gamma").
+
+    Two shapes are understood:
+      - The IsArm64 conditional list (EXPECTED_ARCH_IF_LIST): resolves to
+        "arm64" on EVERY plane. ENC-TSK-P38 (ENC-PLN-082 cutover) made the
+        IsArm64 condition definition unconditionally true, so the !If's arm64
+        branch is taken on prod and gamma alike; the structural shape at the
+        call sites is unchanged.
+      - A hardcoded single-element list (e.g. ["arm64"]): that literal value
+        applies on every plane, since nothing conditions it.
+
+    Anything else (missing Architectures, an unrecognized shape) resolves to
+    None. The caller treats an unresolved architecture as a mismatch against
+    the plane's target -- it can only pass by exception, never by matching.
+    """
+    if architectures == EXPECTED_ARCH_IF_LIST:
+        return "arm64"
+    if (
+        isinstance(architectures, list)
+        and len(architectures) == 1
+        and isinstance(architectures[0], str)
+    ):
+        return architectures[0]
+    return None
+
+
+def _validate_architecture_exceptions(blocks: List[LambdaResource]) -> List[str]:
+    """ENC-TSK-O82: enforce the two-class architecture_exceptions contract
+    (BRD DOC-56CFA21523C1 section 6.2) declared in the manifest.
+
+    For every plane the manifest declares an architecture_exceptions entry
+    for (today: "prod" only -- expected_architecture.prod flipped to arm64 in
+    ENC-TSK-P38, the ENC-PLN-082 one-apply cutover commit, with both
+    exception classes verified empty rather than populated: a single apply
+    has no tranches), each non-"-gamma" function passes when its resolved
+    architecture for that plane either:
+
+      (a) matches manifest.expected_architecture[plane], or
+      (b) appears on exactly one of the plane's two exception classes
+          (temporary, permanent) under that resolved architecture value.
+
+    A function listed on BOTH classes for the same resolved architecture is
+    a contradiction -- an exception cannot simultaneously be a stable,
+    permanent decision and a shrinking, temporary one -- and fails
+    regardless of whether it also matches the target. A function matching
+    neither the target nor exactly one exception list fails.
+
+    Does not implement the ratchet check itself (whether a class's
+    membership only ever moves the direction its own "ratchet" field
+    promises, release over release) -- that is ENC-TSK-O84. This only
+    checks that today's manifest + CFN state is internally consistent.
+    """
+    errors: List[str] = []
+
+    import json
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found"]
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    expected_arch = manifest.get("expected_architecture", {})
+    exceptions = _manifest_architecture_exceptions(manifest)
+
+    for plane, plane_exceptions in exceptions.items():
+        target = expected_arch.get(plane)
+        temporary = (plane_exceptions or {}).get("temporary") or {}
+        permanent = (plane_exceptions or {}).get("permanent") or {}
+
+        for block in blocks:
+            if block.function_name.endswith("-gamma"):
+                continue  # gamma-only literals never participate in prod/gamma parity
+
+            name = block.function_name or block.resource_name
+            resolved = _resolve_plane_architecture(block.architectures, plane)
+
+            temp_list = temporary.get(resolved, []) if resolved else []
+            perm_list = permanent.get(resolved, []) if resolved else []
+            on_temp = name in temp_list
+            on_perm = name in perm_list
+
+            if on_temp and on_perm:
+                errors.append(
+                    f"{name} ({plane}): listed on BOTH the temporary and "
+                    f"permanent architecture_exceptions classes for "
+                    f"{resolved!r} -- an exception must be exactly one or "
+                    f"the other."
+                )
+                continue
+
+            if resolved == target:
+                continue
+
+            if on_temp or on_perm:
+                continue
+
+            errors.append(
+                f"{name} ({plane}): resolved architecture {resolved!r} does "
+                f"not match target {target!r} and is not listed on either "
+                f"architecture_exceptions class."
+            )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O84 (ENC-PLN-086 Wave 2, ENC-FTR-135): monotonic ratchet on the
+# temporary exception class, and an io-ruling gate on permanent-class growth.
+#
+# ENC-TSK-O82 wired the two-class contract (a function is exempt if it's
+# named on exactly one of temporary/permanent) but explicitly left the
+# ratchet itself unimplemented -- that a class's membership only ever moves
+# the direction its own "ratchet" field promises, release over release, is
+# this task's job. Neither class's ratchet is enforceable by reading the
+# manifest alone: "may only shrink" and "additions require an io ruling" are
+# both properties of a *transition*, not of a single snapshot. Both checks
+# below therefore take a `baseline` and a `current` architecture_exceptions
+# dict and diff them, rather than inspecting either one in isolation.
+# ---------------------------------------------------------------------------
+
+_EXCEPTION_CLASS_METADATA_KEYS = ("rationale", "terminal_state", "ratchet")
+
+# Required citation shape for a permanent-class addition: the literal marker
+# "io ruling:" (case-insensitive) followed by a tracker-record-ID-shaped
+# token, e.g. "io ruling: ENC-TSK-0102" or "io ruling: DVP-ISS-14". This is
+# deliberately loose about the ID's prefix/shape (this repo runs several:
+# ENC-TSK-, ENC-ISS-, DVP-TSK-, ...) and strict about the marker itself,
+# since the marker -- not the ID format -- is what makes an addition
+# reviewable rather than silent.
+_IO_RULING_RE = re.compile(
+    r"io ruling\s*:\s*([A-Za-z]{2,5}-[A-Za-z]{2,5}-[A-Za-z0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def _class_name_sets(class_block: Optional[Dict[str, Any]]) -> Dict[str, set]:
+    """Map each architecture key in a temporary/permanent class block to the
+    set of function names listed under it, skipping the class's own
+    rationale/terminal_state/ratchet metadata keys.
+
+    Pure and manifest-shape-only: takes an already-parsed class dict (e.g.
+    architecture_exceptions["prod"]["temporary"]), never touches disk or
+    git. That's what makes diff_architecture_exceptions() below directly
+    unit-testable against synthetic before/after manifests (ENC-TSK-O84
+    AC-1/AC-2) without needing a real git history, or either of the real
+    exception lists (both empty today) to have anything in them.
+    """
+    result: Dict[str, set] = {}
+    for key, value in (class_block or {}).items():
+        if key in _EXCEPTION_CLASS_METADATA_KEYS:
+            continue
+        if isinstance(value, list):
+            result[key] = set(value)
+    return result
+
+
+def _ruling_tokens(class_block: Optional[Dict[str, Any]]) -> set:
+    """Extract every 'io ruling: <RECORD-ID>' citation token from a class's
+    rationale prose (case-insensitive marker, any tracker-ID-shaped token).
+    """
+    rationale = (class_block or {}).get("rationale") or ""
+    if not isinstance(rationale, str):
+        return set()
+    return {match.group(1) for match in _IO_RULING_RE.finditer(rationale)}
+
+
+def diff_architecture_exceptions(
+    baseline: Dict[str, Any], current: Dict[str, Any]
+) -> List[str]:
+    """ENC-TSK-O84: enforce both exception-class ratchets across a
+    baseline -> current transition of the manifest's architecture_exceptions
+    block.
+
+    Pure function -- baseline and current are already-parsed
+    architecture_exceptions dicts (e.g. manifest["architecture_exceptions"]),
+    never file paths or git refs -- so both AC-1 and AC-2 can be proven with
+    synthetic manifests in unit tests, independent of git plumbing and of
+    the real exception lists (both empty today; see ENC-TSK-O82/ENC-TSK-O72).
+
+    AC-1 (temporary ratchet): for every plane and every architecture key
+    under a `temporary` class, current membership must be a subset of
+    baseline membership. Any name present at `current` but absent at
+    `baseline` is a ratchet violation -- growth requires a deliberate
+    baseline update (moving what this function is diffed against), not a
+    silent edit. Shrinking, or no change, is always allowed -- that's the
+    entire point of the class existing.
+
+    AC-2 (permanent ruling gate): for every plane and every architecture key
+    under a `permanent` class, a name added relative to baseline is an
+    undocumented decision UNLESS the plane's permanent-class rationale text
+    ALSO gained a fresh `io ruling: <RECORD-ID>` citation in this same
+    baseline -> current transition. A citation already present at baseline
+    does not count: it can't be evidence of a ruling on an addition that
+    didn't exist yet, and would let one stale citation silently cover every
+    future addition forever. The citation is required once per growth
+    event (not once per function name), matching the manifest's existing
+    plane+class-scoped -- not per-function -- rationale granularity.
+
+    Returns a list of human-readable violation strings that name exactly
+    which entries were added and where; an empty list means both class
+    contracts hold.
+    """
+    errors: List[str] = []
+    planes = sorted(set(baseline.keys()) | set(current.keys()))
+
+    for plane in planes:
+        baseline_plane = baseline.get(plane) or {}
+        current_plane = current.get(plane) or {}
+
+        # --- AC-1: the temporary class may only shrink ---
+        temp_baseline = _class_name_sets(baseline_plane.get("temporary"))
+        temp_current = _class_name_sets(current_plane.get("temporary"))
+        for arch in sorted(set(temp_baseline.keys()) | set(temp_current.keys())):
+            added = temp_current.get(arch, set()) - temp_baseline.get(arch, set())
+            if added:
+                errors.append(
+                    f"architecture_exceptions.{plane}.temporary.{arch}: "
+                    f"ratchet violation -- grew by {sorted(added)} relative "
+                    f"to the baseline. The temporary class may only shrink; "
+                    f"growth requires a deliberate baseline update, not a "
+                    f"silent edit (ENC-TSK-O84 AC-1)."
+                )
+
+        # --- AC-2: permanent-class additions require a fresh io ruling ---
+        perm_baseline = _class_name_sets(baseline_plane.get("permanent"))
+        perm_current = _class_name_sets(current_plane.get("permanent"))
+        perm_added: Dict[str, set] = {}
+        for arch in sorted(set(perm_baseline.keys()) | set(perm_current.keys())):
+            added = perm_current.get(arch, set()) - perm_baseline.get(arch, set())
+            if added:
+                perm_added[arch] = added
+
+        if perm_added:
+            ruling_baseline = _ruling_tokens(baseline_plane.get("permanent"))
+            ruling_current = _ruling_tokens(current_plane.get("permanent"))
+            new_rulings = ruling_current - ruling_baseline
+            if not new_rulings:
+                for arch, added in perm_added.items():
+                    errors.append(
+                        f"architecture_exceptions.{plane}.permanent.{arch}: "
+                        f"un-ruled addition -- grew by {sorted(added)} "
+                        f"without a fresh 'io ruling: <RECORD-ID>' citation "
+                        f"added to the permanent class's rationale in this "
+                        f"change. Permanent-class entries are decisions, not "
+                        f"debt -- they may not pass silently (ENC-TSK-O84 "
+                        f"AC-2)."
+                    )
+            else:
+                for arch, added in perm_added.items():
+                    print(
+                        f"[INFO] architecture_exceptions.{plane}.permanent."
+                        f"{arch}: grew by {sorted(added)}, covered by fresh "
+                        f"ruling citation(s): {sorted(new_rulings)}"
+                    )
+
+    return errors
+
+
+def _git_show_manifest_at_ref(ref: str) -> Optional[dict]:
+    """Read infrastructure/lambda_workflow_manifest.json as it existed at
+    `ref`, via `git show`, without touching the working tree or requiring a
+    second on-disk artifact -- history is the baseline.
+
+    Returns None if the ref/path can't be resolved (unknown ref, a shallow
+    clone missing the needed history, or the file not yet existing at that
+    ref). Callers must treat that as a hard failure, not a silent skip: an
+    unresolvable baseline is not evidence of an empty one (ENC-TSK-O83
+    vacuous-pass lesson -- "nothing to check" must be visible, never quiet).
+    """
+    import json
+
+    try:
+        rel_path = MANIFEST_PATH.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        rel_path = "infrastructure/lambda_workflow_manifest.json"
+
+    proc = subprocess.run(
+        ["git", "show", f"{ref}:{rel_path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _validate_architecture_exceptions_ratchet(base_ref: str) -> List[str]:
+    """ENC-TSK-O84: CI-facing glue for diff_architecture_exceptions().
+
+    The baseline is the same manifest file at `base_ref` (the PR's base sha
+    for a pull_request event, or the previous commit for a direct push),
+    read via `git show` -- no new committed artifact. `current` is the
+    on-disk manifest at HEAD, i.e. the working tree CI just checked out.
+    Comparing the file to its own history means the ratchet naturally scopes
+    to exactly what this change did, with no second file to keep in sync
+    or let drift.
+    """
+    baseline_manifest = _git_show_manifest_at_ref(base_ref)
+    if baseline_manifest is None:
+        return [
+            f"Could not read infrastructure/lambda_workflow_manifest.json "
+            f"at base ref {base_ref!r} via `git show` -- cannot evaluate "
+            f"the architecture_exceptions ratchet. Treating an unresolvable "
+            f"baseline as a hard failure, not a silent skip (ENC-TSK-O83 "
+            f"vacuous-pass lesson). Check that the checkout has enough "
+            f"history (fetch-depth: 0) and that {base_ref!r} is a valid ref."
+        ]
+
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found"]
+
+    import json
+
+    current_manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    baseline_exceptions = _manifest_architecture_exceptions(baseline_manifest)
+    current_exceptions = _manifest_architecture_exceptions(current_manifest)
+    return diff_architecture_exceptions(baseline_exceptions, current_exceptions)
+
+
 # ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
+# ENC-TSK-P38: prod flipped to the arm64-py312 artifact family with the cutover —
+# both planes now deploy from the same arch tag.
 ARTIFACT_ARCH_TAGS = {
-    "prod": "x86_64-py311",
+    "prod": "arm64-py312",
     "gamma": "arm64-py312",
 }
 ARTIFACT_BUCKET = "jreese-net"
@@ -449,9 +1121,9 @@ def _validate_artifact_s3_layout(
     """Check S3 bucket for correct arch-tagged artifact structure per manifest function.
 
     For each function in the manifest, verifies that a zip artifact exists at
-    the expected S3 key for each target environment:
-      lambda-artifacts/{git_sha}/x86_64-py311/{function_name}.zip  (prod)
-      lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip   (gamma)
+    the expected S3 key for each target environment (both arm64-py312 since
+    ENC-TSK-P38):
+      lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip  (prod and gamma)
 
     Returns a list of error strings for missing or misplaced artifacts.
     Requires boto3 and AWS credentials with S3 read access.
@@ -517,6 +1189,446 @@ def _validate_artifact_s3_layout(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-P15 / ENC-ISS-669 AC-6: cross-source reconciliation.
+#
+# ENC-TSK-O83 taught this file to reconcile "declared" against "evaluated"
+# WITHIN one template (02-compute.yaml): an independent text-based census
+# had to equal the structural selector's count, or the run failed loudly.
+# ENC-ISS-669 is the same defect one layer up: lambda_workflow_manifest.json
+# declares only what 02-compute.yaml's own author thought to list, and nine
+# more source_of_truth-adjacent facts were true and unchecked --
+#   * three more of THIS repo's OWN CloudFormation templates (05-monitoring,
+#     06-appsync-events, 08-agent-auth) also declare AWS::Lambda::Function
+#     resources the manifest never enumerates;
+#   * a sibling repository (NX-2021-L/devops) owns and deploys five more
+#     Lambdas in the SAME AWS account, one of which (devops-io-devops-mcp)
+#     is declared in neither its own functions.yaml manifest nor anywhere
+#     in this repo.
+# "Declared in the one file I happened to read" is not "declared in any
+# source we own." This section makes "any source we own" a literal union --
+# every CFN template under infrastructure/cloudformation/, plus the pinned
+# devops ownership snapshot -- and reconciles that union against what
+# lambda:ListFunctions says is actually running, so a function invisible to
+# every declared source fails loudly instead of just never being asked
+# about.
+# ---------------------------------------------------------------------------
+
+# The two families whose Lambda naming this reconciliation is scoped to.
+# NOT an ownership predicate (see DEVOPS_OWNERSHIP_SNAPSHOT_PATH / AC-3's own
+# ownership_predicate field for why a prefix can't decide ownership -- dozens
+# of enceladus's OWN functions carry the "devops-" prefix too). This is a
+# SCOPE boundary only: the AWS account behind this identity is shared with
+# several of the account owner's other, unrelated products (an SST app, a
+# separate "io-graph" project, a personal finance MCP server, a family-site
+# support stack, ...) that have nothing to do with enceladus's arm64
+# architecture contract. Reconciling against literally every Lambda in the
+# account would make every one of those unrelated tenants an "unclassifiable
+# failure" and the guard would cry wolf on every run -- exactly the failure
+# mode tools/assert_no_placeholder_lambdas.py's own comments warn about
+# ("a guard that cries wolf on healthy functions gets switched off"). A live
+# function outside this scope is reported as OUT_OF_RECONCILIATION_SCOPE,
+# tallied and printed every run -- never silently dropped -- but is not
+# reconciled against declared sources and can never fail this check.
+_RECONCILIATION_SCOPE_PREFIXES = ("enceladus-", "devops-")
+
+
+def _strip_gamma_suffix(name: str) -> str:
+    suffix = "-gamma"
+    return name[: -len(suffix)] if name.endswith(suffix) else name
+
+
+def _load_devops_ownership_snapshot() -> tuple[Optional[dict], List[str]]:
+    """Load and parse the pinned devops ownership snapshot.
+
+    Returns (snapshot_or_None, errors). A missing or malformed snapshot is
+    always an error -- never a silent empty set of devops-owned names, which
+    would make every live devops function an unclassifiable failure instead
+    of the governed exception AC-3/AC-5 require it to be.
+    """
+    if not DEVOPS_OWNERSHIP_SNAPSHOT_PATH.is_file():
+        return None, [
+            f"devops ownership snapshot not found at "
+            f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH} -- cannot classify any live "
+            f"devops-owned function as a governed exception. Every one of "
+            f"them would resolve to an unclassifiable failure instead "
+            f"(ENC-TSK-P15 AC-3/AC-5: a missing declaration is a failure, "
+            f"never a silent pass)."
+        ]
+
+    import json
+
+    try:
+        snapshot = json.loads(DEVOPS_OWNERSHIP_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, [f"devops ownership snapshot is not valid JSON: {exc}"]
+    return snapshot, []
+
+
+def _devops_owned_function_names(snapshot: dict) -> set:
+    return {
+        entry["function_name"]
+        for entry in (snapshot or {}).get("functions", [])
+        if isinstance(entry, dict) and entry.get("function_name")
+    }
+
+
+def _enceladus_declared_function_names() -> set:
+    """Every Lambda FunctionName declared in ANY source enceladus owns.
+
+    ENC-ISS-669's generalised lesson: lambda_workflow_manifest.json's
+    `functions[]` reflects only what someone remembered to add, scoped to
+    the one template its own `source_of_truth` names. This unions that with
+    an independent structural sweep of EVERY infrastructure/cloudformation/
+    template -- reusing _parse_lambda_blocks exactly as-is, the same
+    selector 02-compute.yaml's own count-reconciliation (ENC-TSK-O83) trusts
+    -- so a Lambda declared in 05-monitoring.yaml, 06-appsync-events.yaml,
+    08-agent-auth.yaml, or any future template is counted as declared even
+    if nobody remembered to also add it to the manifest.
+    """
+    import json
+
+    names: set = set()
+    if MANIFEST_PATH.is_file():
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        for entry in manifest.get("functions", []):
+            name = entry.get("function_name")
+            if name:
+                names.add(name)
+
+    for template_path in sorted(COMPUTE_TEMPLATE.parent.glob("*.yaml")):
+        for block in _parse_lambda_blocks(template_path):
+            if block.function_name:
+                names.add(block.function_name)
+
+    return names
+
+
+def _enumerate_live_lambda_functions(region: str = "us-west-2"):
+    """Enumerate every live Lambda FunctionName in the account via
+    lambda:ListFunctions.
+
+    Returns (names_or_None, reason). `names` is None whenever the live call
+    could not be made -- no boto3, no credentials, an AWS-side failure --
+    and `reason` explains why. Callers MUST treat None as "could not run",
+    never as "zero functions" or as a pass: AC-6 is explicit that an
+    unavailable live call must surface as UNKNOWN, never as a silent pass.
+    """
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError:
+        return None, "boto3 not available"
+
+    try:
+        client = boto3.client("lambda", region_name=region)
+        names: set = set()
+        paginator = client.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page.get("Functions", []):
+                fn_name = fn.get("FunctionName")
+                if fn_name:
+                    names.add(fn_name)
+        return names, ""
+    except (BotoCoreError, ClientError) as exc:
+        return None, f"AWS Lambda ListFunctions call failed: {exc}"
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        return None, f"unexpected error enumerating live Lambda functions: {exc}"
+
+
+def _validate_cross_source_reconciliation(region: str = "us-west-2"):
+    """ENC-TSK-P15 / ENC-ISS-669 AC-6: reconcile "declared in any source we
+    own" against "running in the account" as two distinct sets, scoped to
+    the enceladus/devops naming family (see _RECONCILIATION_SCOPE_PREFIXES).
+
+    Every in-scope live function resolves to exactly one of:
+      * declared (enceladus manifest+templates, or the -gamma variant of a
+        declared name) -- fine, no finding.
+      * NOT_APPLICABLE_ON_PLANE -- its name matches the pinned devops
+        ownership snapshot: a governed exception, printed every run, never
+        a silent skip (AC-5).
+      * VIOLATION -- live, in-scope, and declared by NEITHER source. This
+        is the exact ENC-ISS-669 shape and is a hard failure.
+
+    Returns (errors, status). status is one of:
+      "SNAPSHOT_ERROR"        -- the devops ownership snapshot is missing or
+                                 malformed; errors explains why.
+      "UNKNOWN_NO_LIVE_ACCESS" -- the live lambda:ListFunctions call could
+                                 not be made; errors is empty (this must
+                                 never fail a plain CI run with no AWS
+                                 credentials configured), but this is NEVER
+                                 to be read as a pass -- see the printed
+                                 [UNKNOWN] line, which is the visible half
+                                 of AC-5's "never to silence."
+      "VIOLATIONS_FOUND"      -- at least one in-scope live function is
+                                 declared by neither source.
+      "RECONCILED"            -- every in-scope live function is accounted
+                                 for.
+    """
+    snapshot, snapshot_errors = _load_devops_ownership_snapshot()
+    if snapshot_errors:
+        return snapshot_errors, "SNAPSHOT_ERROR"
+
+    devops_names = _devops_owned_function_names(snapshot)
+    enceladus_bare = _enceladus_declared_function_names()
+    enceladus_all = set(enceladus_bare) | {f"{name}-gamma" for name in enceladus_bare}
+
+    live, unavailable_reason = _enumerate_live_lambda_functions(region=region)
+    if live is None:
+        print(
+            f"[UNKNOWN] Cross-source reconciliation (ENC-TSK-P15 AC-6): live "
+            f"Lambda enumeration unavailable ({unavailable_reason}). This is "
+            f"NOT a pass -- declared-vs-live reconciliation did not run this "
+            f"invocation. {len(enceladus_all)} enceladus-declared name(s) and "
+            f"{len(devops_names)} devops-owned name(s) are known from static "
+            f"sources; neither was checked against the live account."
+        )
+        return [], "UNKNOWN_NO_LIVE_ACCESS"
+
+    def in_scope(name: str) -> bool:
+        base = _strip_gamma_suffix(name)
+        return (
+            base.startswith(_RECONCILIATION_SCOPE_PREFIXES)
+            or base in enceladus_bare
+            or base in devops_names
+        )
+
+    in_scope_live = sorted(name for name in live if in_scope(name))
+    out_of_scope_count = len(live) - len(in_scope_live)
+
+    functions_by_name = {
+        entry.get("function_name"): entry
+        for entry in snapshot.get("functions", [])
+        if isinstance(entry, dict)
+    }
+
+    exceptions_fired: List[str] = []
+    violations: List[str] = []
+    for name in in_scope_live:
+        if name in enceladus_all:
+            continue
+        if name in devops_names:
+            entry = functions_by_name.get(name, {})
+            exceptions_fired.append(
+                f"NOT_APPLICABLE_ON_PLANE {name}: owned by "
+                f"{snapshot.get('owning_repo', 'NX-2021-L/devops')} (source: "
+                f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH.relative_to(REPO_ROOT)}); "
+                f"deploy_channel={entry.get('deploy_channel', '?')}"
+            )
+            continue
+        violations.append(
+            f"{name}: live in the account, in the enceladus/devops naming "
+            f"family scope, but declared in NEITHER lambda_workflow_manifest.json "
+            f"/ any infrastructure/cloudformation/*.yaml template NOR "
+            f"{DEVOPS_OWNERSHIP_SNAPSHOT_PATH.relative_to(REPO_ROOT)}. "
+            f"Unclassifiable -- this is exactly the ENC-ISS-669 shape: a live "
+            f"function no declared source accounts for. Either declare it (if "
+            f"it is enceladus's), add it to the devops ownership snapshot with "
+            f"real provenance (if it is devops's and the snapshot is stale), "
+            f"or treat it as drift requiring investigation."
+        )
+
+    declared_not_live = sorted(
+        name for name in enceladus_bare
+        if name not in live and f"{name}-gamma" not in live
+    )
+
+    print(
+        f"[INFO] Cross-source reconciliation (ENC-TSK-P15 AC-6): "
+        f"{len(live)} live Lambda function(s) enumerated in the account, "
+        f"{len(in_scope_live)} in the enceladus/devops naming-family scope "
+        f"({out_of_scope_count} out of scope -- other AWS-account tenants, "
+        f"tallied and reported, not silently dropped, but not this "
+        f"governance's concern), {len(enceladus_all)} enceladus-declared "
+        f"name(s) (manifest + every infrastructure/cloudformation/*.yaml "
+        f"template), {len(devops_names)} devops-owned name(s) (pinned "
+        f"snapshot)."
+    )
+    for line in exceptions_fired:
+        print(f"::notice::{line}")
+    if declared_not_live:
+        print(
+            f"[INFO] {len(declared_not_live)} enceladus-declared name(s) not "
+            f"currently live -- not yet deployed, or a stale declaration; out "
+            f"of scope for ENC-TSK-P15's devops-ownership remediation, "
+            f"reported for visibility only, not failed: "
+            f"{', '.join(declared_not_live)}"
+        )
+
+    if violations:
+        return violations, "VIOLATIONS_FOUND"
+
+    return [], "RECONCILED"
+
+
+def _resolve_abi_condition(document: dict) -> Optional[bool]:
+    """Structurally resolve the 02-compute.yaml `IsArm64` condition.
+
+    Handles exactly the shape the template uses today --
+    `IsArm64: !Equals ["arm64", "arm64"]` (or any two-literal-string
+    !Equals). Returns True/False, or None when the condition isn't in that
+    recognized shape; a None means "cannot resolve" and the caller must
+    treat that as a failure, never a silent pass.
+    """
+    conditions = document.get("Conditions") or {}
+    condition = conditions.get(ABI_CONDITION)
+    if not isinstance(condition, dict):
+        return None
+    equals_args = condition.get("!Equals")
+    if not (isinstance(equals_args, list) and len(equals_args) == 2):
+        return None
+    left, right = equals_args
+    if not (isinstance(left, str) and isinstance(right, str)):
+        return None
+    return left == right
+
+
+def _validate_declaration() -> List[str]:
+    """Cross-validate envs/architecture.yaml (ENC-TSK-Q19 FR-1) against its
+    consumers: every envs/*.yaml manifest's architecture_plane + runner_label,
+    and 02-compute.yaml's IsArm64 resolution (both the structural !If form
+    and, since Phase D will literalize the template function-by-function, a
+    hardcoded literal per function -- either form must resolve to the same
+    value the declaration names, and only x86_64/python3.11 (or a condition
+    that resolves to them) is a failure).
+
+    Part of ENC-TSK-Q19 FR-2 (DOC-5368FE6515ED): the declaration and its
+    consumers must not be able to drift independently.
+    """
+    errors: List[str] = []
+
+    try:
+        decl = arch_declaration.load_declaration()
+    except arch_declaration.ArchDeclarationError as exc:
+        return [f"envs/architecture.yaml: {exc}"]
+
+    # 1. Every envs/*.yaml manifest (other than the declaration itself)
+    #    resolves to a plane the declaration knows about, and its
+    #    runner_label agrees with that plane's declared runner.
+    envs_dir = REPO_ROOT / "envs"
+    manifest_paths = sorted(
+        p for p in envs_dir.glob("*.yaml") if p.name != "architecture.yaml"
+    )
+    if not manifest_paths:
+        errors.append("no envs/*.yaml manifests found to cross-validate against the declaration")
+    for manifest_path in manifest_paths:
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        env_name = data.get("env_name")
+        if not env_name:
+            errors.append(f"{manifest_path.name}: missing env_name")
+            continue
+        if env_name not in decl.env_plane:
+            errors.append(
+                f"{manifest_path.name}: env_name={env_name!r} has no "
+                f"envs/architecture.yaml env_plane entry"
+            )
+            continue
+        expected_plane = decl.env_plane[env_name]
+        actual_plane = data.get("architecture_plane")
+        if actual_plane != expected_plane:
+            errors.append(
+                f"{manifest_path.name}: architecture_plane={actual_plane!r}, but "
+                f"envs/architecture.yaml env_plane[{env_name!r}]={expected_plane!r}"
+            )
+        expected_runner = decl.planes.get(expected_plane, {}).get("runner")
+        actual_runner = data.get("runner_label")
+        if actual_runner != expected_runner:
+            errors.append(
+                f"{manifest_path.name}: runner_label={actual_runner!r}, but "
+                f"envs/architecture.yaml planes[{expected_plane!r}].runner={expected_runner!r}"
+            )
+
+    # 2. 02-compute.yaml's IsArm64 condition must resolve to exactly what
+    #    every plane declares (today: arm64/python3.12 on both planes).
+    if not COMPUTE_TEMPLATE.is_file():
+        errors.append(f"cannot resolve {ABI_CONDITION}: {COMPUTE_TEMPLATE} not found")
+        return errors
+
+    document, _ = _load_cfn_document(COMPUTE_TEMPLATE)
+    condition_true = _resolve_abi_condition(document)
+    if condition_true is None:
+        errors.append(
+            f"cannot structurally resolve Conditions.{ABI_CONDITION} in "
+            f"{COMPUTE_TEMPLATE} (expected a two-literal-string !Equals)"
+        )
+    else:
+        resolved_arch = "arm64" if condition_true else "x86_64"
+        resolved_runtime = "python3.12" if condition_true else "python3.11"
+        for plane in ("prod", "gamma"):
+            plane_decl = decl.planes.get(plane)
+            if plane_decl is None:
+                errors.append(f"envs/architecture.yaml has no planes entry for {plane!r}")
+                continue
+            if plane_decl["arch"] != resolved_arch:
+                errors.append(
+                    f"envs/architecture.yaml planes[{plane!r}].arch={plane_decl['arch']!r}, "
+                    f"but {ABI_CONDITION} resolves to {resolved_arch!r}"
+                )
+            if plane_decl["runtime"] != resolved_runtime:
+                errors.append(
+                    f"envs/architecture.yaml planes[{plane!r}].runtime="
+                    f"{plane_decl['runtime']!r}, but {ABI_CONDITION} resolves to "
+                    f"{resolved_runtime!r}"
+                )
+
+        # 3. Per-function acceptance: a Lambda may select arch/runtime either
+        #    via the !If[IsArm64, ...] conditional (resolved above) or,
+        #    ahead of the Phase D literalization, a hardcoded literal -- but
+        #    either way the EFFECTIVE value must match the declaration.
+        #    Named architecture_exceptions defer to
+        #    _validate_architecture_exceptions, same as _validate_cfn.
+        import json
+
+        exceptions: Dict[str, Any] = {}
+        if MANIFEST_PATH.is_file():
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            exceptions = _manifest_architecture_exceptions(manifest)
+
+        for block in _parse_lambda_blocks(COMPUTE_TEMPLATE):
+            if _is_named_architecture_exception(block.function_name, exceptions):
+                continue
+            label = f"{block.function_name or block.resource_name} (line {block.line_number})"
+
+            if block.runtime == EXPECTED_RUNTIME_IF:
+                effective_runtime: Optional[str] = resolved_runtime
+            elif isinstance(block.runtime, str):
+                effective_runtime = block.runtime
+            else:
+                effective_runtime = None
+            if effective_runtime is not None and effective_runtime != resolved_runtime:
+                errors.append(
+                    f"{label}: effective runtime {effective_runtime!r} does not match "
+                    f"the declaration ({resolved_runtime!r})"
+                )
+
+            if block.architectures == EXPECTED_ARCH_IF_LIST:
+                effective_arch: Optional[str] = resolved_arch
+            elif (
+                isinstance(block.architectures, list)
+                and len(block.architectures) == 1
+                and isinstance(block.architectures[0], str)
+            ):
+                effective_arch = block.architectures[0]
+            else:
+                effective_arch = None
+            if effective_arch is not None and effective_arch != resolved_arch:
+                errors.append(
+                    f"{label}: effective architecture {effective_arch!r} does not match "
+                    f"the declaration ({resolved_arch!r})"
+                )
+
+    if not errors:
+        prod = decl.planes["prod"]
+        gamma = decl.planes["gamma"]
+        print(
+            f"declaration envs/architecture.yaml: "
+            f"prod={prod['arch']}/{prod['runtime']} "
+            f"gamma={gamma['arch']}/{gamma['runtime']} -- OK"
+        )
+
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify Lambda architecture parity between CFN, deploy scripts, and S3 artifacts."
@@ -536,24 +1648,132 @@ def main() -> int:
         default="prod,gamma",
         help="Comma-separated environments to check (default: prod,gamma).",
     )
+    parser.add_argument(
+        "--exceptions-base-ref",
+        metavar="REF",
+        help=(
+            "Git ref/sha to diff infrastructure/lambda_workflow_manifest.json's "
+            "architecture_exceptions block against: fails when the temporary "
+            "class grew, or when the permanent class grew without a fresh "
+            "'io ruling: <RECORD-ID>' citation (ENC-TSK-O84). Omit to skip "
+            "the ratchet (e.g. for a plain local structural check)."
+        ),
+    )
+    parser.add_argument(
+        "--check-live-reconciliation",
+        action="store_true",
+        help=(
+            "Cross-source reconciliation (ENC-TSK-P15 / ENC-ISS-669 AC-6): "
+            "enumerate live Lambda functions via lambda:ListFunctions and "
+            "reconcile them against every declared source this repo owns "
+            "(the manifest plus every infrastructure/cloudformation/*.yaml "
+            "template) union the pinned devops ownership snapshot. Requires "
+            "boto3 + AWS credentials with lambda:ListFunctions; prints "
+            "[UNKNOWN] and does not fail the run when unavailable (never a "
+            "silent pass, but never a hard-required credential either). Not "
+            "part of the default invocation, same convention as "
+            "--check-s3-artifacts -- plain CI has no AWS credentials "
+            "configured today."
+        ),
+    )
+    parser.add_argument(
+        "--live-reconciliation-region",
+        default="us-west-2",
+        help="AWS region for --check-live-reconciliation's lambda:ListFunctions call (default: us-west-2).",
+    )
+    parser.add_argument(
+        "--manifest-parity-only",
+        action="store_true",
+        help=(
+            "Run only the declaration (ENC-TSK-Q19 FR-2, envs/architecture.yaml "
+            "cross-validation) and manifest expectation (ENC-TSK-Q19 FR-3, "
+            "lambda_workflow_manifest.json expected_architecture/expected_runtime) "
+            "checks, skipping the full CFN/deploy-script parity sweep. For a "
+            "fast, dedicated CI step -- see ci.yml 'Manifest / declaration "
+            "parity (ENC-TSK-Q19 FR-3)'."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.manifest_parity_only:
+        parity_errors: List[str] = []
+        declaration_errors = _validate_declaration()
+        if declaration_errors:
+            parity_errors.append("=== Declaration consistency violations (ENC-TSK-Q19 FR-2) ===")
+            parity_errors.extend(declaration_errors)
+        manifest_errors = _validate_manifest_expectations()
+        if manifest_errors:
+            parity_errors.append("=== Manifest expectation violations (ENC-TSK-Q19 FR-3) ===")
+            parity_errors.extend(manifest_errors)
+        if parity_errors:
+            print("[ERROR] Manifest / declaration parity check FAILED:")
+            for err in parity_errors:
+                print(f"  {err}")
+            return 1
+        print("[SUCCESS] Manifest / declaration parity valid (ENC-TSK-Q19 FR-2/FR-3).")
+        return 0
 
     if not COMPUTE_TEMPLATE.is_file():
         print(f"[ERROR] Compute template missing: {COMPUTE_TEMPLATE}")
         return 1
 
     blocks = _parse_lambda_blocks(COMPUTE_TEMPLATE)
-    if not blocks:
-        print("[ERROR] No Lambda functions found in compute template")
-        return 1
 
     errors: List[str] = []
+
+    # ENC-TSK-O83: "nothing to check" must be an explicit failure, never a
+    # silent pass. Run before anything else so an empty or malformed
+    # Resources block can't slip through as a trivially-reconciled 0 == 0.
+    nonzero_errors = _validate_nonzero_declared_lambdas(COMPUTE_TEMPLATE)
+    if nonzero_errors:
+        errors.append("=== Lambda resource census violations ===")
+        errors.extend(nonzero_errors)
+
+    # ENC-TSK-O83 AC2: count-reconciliation assertion. Independently counts
+    # declared Lambda resources and fails when that count does not equal
+    # the number the structural selector actually evaluated.
+    reconciliation_errors = _validate_resource_count_reconciliation(blocks, COMPUTE_TEMPLATE)
+    if reconciliation_errors:
+        errors.append("=== Lambda resource count reconciliation violations ===")
+        errors.extend(reconciliation_errors)
 
     # Validate CFN declarations
     cfn_errors = _validate_cfn(blocks)
     if cfn_errors:
         errors.append("=== CFN Architecture/Runtime violations ===")
         errors.extend(cfn_errors)
+
+    # ENC-TSK-Q19 FR-2: envs/architecture.yaml declaration cross-validation
+    declaration_errors = _validate_declaration()
+    if declaration_errors:
+        errors.append("=== Declaration consistency violations (ENC-TSK-Q19 FR-2) ===")
+        errors.extend(declaration_errors)
+
+    # ENC-TSK-O82: validate the two-class architecture_exceptions contract
+    exceptions_errors = _validate_architecture_exceptions(blocks)
+    if exceptions_errors:
+        errors.append("=== Architecture exceptions contract violations ===")
+        errors.extend(exceptions_errors)
+
+    # ENC-TSK-O84: monotonic ratchet (temporary) + permanent-class ruling
+    # gate, diffed against the base ref a CI run supplies. Skipped (not
+    # vacuously passed) when no base ref is given -- there is genuinely
+    # nothing to diff against for a plain local structural check.
+    if args.exceptions_base_ref:
+        ratchet_errors = _validate_architecture_exceptions_ratchet(
+            args.exceptions_base_ref
+        )
+        if ratchet_errors:
+            errors.append(
+                "=== Architecture exceptions ratchet violations (ENC-TSK-O84) ==="
+            )
+            errors.extend(ratchet_errors)
+        else:
+            print(
+                f"[INFO] Architecture exceptions ratchet clear against "
+                f"{args.exceptions_base_ref}: temporary class did not grow, "
+                f"no un-ruled permanent-class additions."
+            )
 
     # Validate deploy scripts
     deploy_errors = _validate_deploy_scripts()
@@ -566,6 +1786,13 @@ def main() -> int:
     if shared_layer_errors:
         errors.append("=== Shared layer build script violations ===")
         errors.extend(shared_layer_errors)
+
+    # ENC-TSK-O87: assert the aarch64 wheel contract survives on both real
+    # arm64-dependency build paths, not just at the time someone inspected it.
+    build_invocation_errors = _validate_build_invocation_flags()
+    if build_invocation_errors:
+        errors.append("=== Build invocation flag violations ===")
+        errors.extend(build_invocation_errors)
 
     # Cross-validate manifest expectations (ENC-TSK-D17 AC7)
     manifest_errors = _validate_manifest_expectations()
@@ -585,6 +1812,28 @@ def main() -> int:
             errors.append("=== S3 artifact layout violations ===")
             errors.extend(artifact_errors)
 
+    # ENC-TSK-P15 / ENC-ISS-669 AC-6: cross-source reconciliation when
+    # requested. status "UNKNOWN_NO_LIVE_ACCESS" deliberately contributes no
+    # errors (a plain CI run with no AWS credentials must not fail because
+    # of that alone) but is never printed as a pass either -- see the
+    # [UNKNOWN] line _validate_cross_source_reconciliation itself prints.
+    if args.check_live_reconciliation:
+        reconciliation_errors, reconciliation_status = _validate_cross_source_reconciliation(
+            region=args.live_reconciliation_region
+        )
+        if reconciliation_errors:
+            errors.append(
+                f"=== Cross-source reconciliation violations "
+                f"(ENC-TSK-P15 AC-6, status={reconciliation_status}) ==="
+            )
+            errors.extend(reconciliation_errors)
+        elif reconciliation_status == "RECONCILED":
+            print(
+                "[INFO] Cross-source reconciliation clear: every in-scope live "
+                "Lambda function is either declared by this repo or a governed "
+                "devops-ownership exception."
+            )
+
     if errors:
         print("[ERROR] Lambda architecture parity check FAILED:")
         for err in errors:
@@ -593,8 +1842,9 @@ def main() -> int:
 
     print(
         f"[SUCCESS] Lambda architecture parity valid: "
-        f"{len(blocks)} CFN Lambdas use IsGamma conditionals "
-        f"(prod=x86_64/py3.11, gamma=arm64/py3.12)"
+        f"{len(blocks)} CFN Lambdas structurally selected and evaluated "
+        f"(count-reconciled against an independent census), all use "
+        f"{ABI_CONDITION} conditionals (prod=arm64/py3.12, gamma=arm64/py3.12)"
     )
     return 0
 

@@ -7,6 +7,8 @@ for .md documents stored on S3 with metadata in DynamoDB.
 Routes (via API Gateway proxy):
     PUT    /api/v1/documents                         — upload new document
     GET    /api/v1/documents/{documentId}             — retrieve document + content
+    GET    /api/v1/documents/{documentId}?digest_only=true — digest projection, no content (ENC-TSK-P69)
+    GET    /api/v1/documents/{documentId}/manifest     — digest projection, no content (ENC-TSK-P69)
     GET    /api/v1/documents?project={id}             — list documents by project
     PATCH  /api/v1/documents/{documentId}             — edit document
     GET    /api/v1/documents/search?<params>          — search documents
@@ -46,6 +48,16 @@ import urllib.request
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+
+# ENC-TSK-P69: pure-function outline parser, shared by the digest/manifest
+# read path (this file) and, later, ELR (via .build_extras). No boto3
+# imports in outline.py — keep it that way.
+import outline as outline_mod
+
+# ENC-TSK-P71: pure section-patch engine (anchor resolution, section ops,
+# heading rebasing, block-id stamping) for POST .../sections. Same
+# no-boto3-imports contract as outline.py, for the same ELR-vendoring reason.
+import sections as sections_mod
 
 try:
     import jwt
@@ -128,13 +140,6 @@ _INTERNAL_SCOPE_MAP_RAW = (
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file").strip().lower()
 PROJECT_REFERENCE_KEYWORD = os.environ.get("PROJECT_REFERENCE_KEYWORD", "project-reference").strip().lower()
-# ENC-TSK-I63 / ENC-TSK-I62: governance-policies DDB record that serves the live
-# governance.dictionary. A governance_data_dictionary.json sync must propagate into
-# this record (discrete `version` + `updated_at` + the served `dictionary_json` blob),
-# eliminating the manual `aws dynamodb update-item` gap discovered in ENC-TSK-I61.
-GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
-GOVERNANCE_DICTIONARY_POLICY_ID = "governance_data_dictionary"
-GOVERNANCE_DICTIONARY_FILE = "governance_data_dictionary.json"
 SYNC_CREATED_BY = "document-api-sync"
 CORS_ORIGIN = "https://jreese.net"
 MAX_CONTENT_SIZE = 1_048_576  # 1 MB max document content
@@ -161,6 +166,20 @@ HANDOFF_STATUS_TRANSITIONS = {
     "stale": set(),
 }
 HANDOFF_REQUIRED_FIELDS = {"source_record_id"}  # required when subtype=handoff
+
+# ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate documents (drafted by the I84
+# memory_consolidation Lambda, written directly via DynamoDB) reuse the
+# handoff_status attribute as their curation-state field. "approved" is only
+# valid for this subtype -- handoff documents keep their own vocabulary above.
+CANDIDATE_STATUSES = {"pending", "approved", "stale"}
+CANDIDATE_STATUS_TRANSITIONS = {
+    "pending": {"approved", "stale"},
+    "approved": set(),
+    "stale": set(),
+}
+# Curation-state transitions that constitute promoting/rejecting a lesson
+# candidate must come from an io-Cognito PWA session -- never an agent session.
+CANDIDATE_GATED_TRANSITIONS = {"approved", "stale"}
 
 # ---------------------------------------------------------------------------
 # COE (correction-of-errors) document schema (ENC-FTR-077)
@@ -484,6 +503,196 @@ def _verify_token(token: str) -> Dict[str, Any]:
     return claims
 
 
+def _extract_if_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-Match header value (ENC-TSK-L47 revision-conflict contract).
+
+    Returns the raw revision token as a string (quotes stripped per ETag convention),
+    or None if the header is absent. Absence preserves today's unconditional-PATCH
+    behavior for backward compatibility.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-match") or headers.get("If-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
+
+
+def _extract_if_none_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-None-Match header value (ENC-TSK-P69 digest cache contract).
+
+    Mirrors `_extract_if_match` (quotes stripped per ETag convention).
+    Returns None when the header is absent.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-none-match") or headers.get("If-None-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P70: content-hash / version precondition (FR-B1-9..12)
+# ---------------------------------------------------------------------------
+
+_PRECONDITION_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_PRECONDITION_VERSION_RE = re.compile(r"^[0-9]+$")
+
+
+def _extract_precondition(event: Optional[Dict], body: Optional[Dict] = None) -> Optional[str]:
+    """ENC-TSK-P70 AC-1: unified If-Match precondition extraction.
+
+    Prefers the HTTP If-Match header (via `_extract_if_match`, which also strips
+    ETag-style quoting); falls back to the body field `if_match` when the header
+    is absent. Returns None when neither is present.
+    """
+    header_val = _extract_if_match(event)
+    if header_val is not None:
+        return header_val
+    if body and isinstance(body, dict):
+        body_val = body.get("if_match")
+        if body_val is not None:
+            body_val = str(body_val).strip()
+            return body_val or None
+    return None
+
+
+def _classify_precondition(raw: str) -> Optional[str]:
+    """ENC-TSK-P70 AC-1: classify a raw precondition token.
+
+    Returns 'hash' for a 64-hex sha256 (^[0-9a-f]{64}$), 'version' for the
+    ENC-TSK-L47 counter form (^[0-9]+$), or None when the shape matches neither
+    (caller should reject 400 PRECONDITION_MALFORMED).
+    """
+    if _PRECONDITION_HASH_RE.match(raw):
+        return "hash"
+    if _PRECONDITION_VERSION_RE.match(raw):
+        return "version"
+    return None
+
+
+def _derive_write_surface(event: Optional[Dict], claims: Optional[Dict]) -> str:
+    """ENC-TSK-P70 AC-4: derive the caller surface for the LegacyWriteUnguarded metric.
+
+    'lambda' for system/managed-token identities, 'mcp' for internal-key callers
+    whose User-Agent or X-Write-Source header says mcp, 'pwa' for Cognito-session
+    callers, else 'unknown'. Kept as a single small helper per AC-4.
+    """
+    claims = claims or {}
+    auth_mode = str(claims.get("auth_mode") or "").strip().lower()
+    if auth_mode == "managed-token":
+        return "lambda"
+    if auth_mode == "internal-key":
+        headers = (event or {}).get("headers") or {}
+        ua = str(headers.get("user-agent") or headers.get("User-Agent") or "").lower()
+        write_source = str(
+            headers.get("x-write-source") or headers.get("X-Write-Source") or ""
+        ).lower()
+        if "mcp" in ua or "mcp" in write_source:
+            return "mcp"
+        return "unknown"
+    if _is_cognito_session(claims):
+        return "pwa"
+    return "unknown"
+
+
+def _emit_legacy_write_unguarded_metric(project_id: str, surface: str) -> None:
+    """ENC-TSK-P70 AC-4: fire-and-forget CloudWatch metric for unguarded writes.
+
+    Emits Enceladus/Docstore LegacyWriteUnguarded (dims ProjectId, Surface) whenever
+    a put/patch/append proceeds without a client-supplied precondition. Never raises —
+    failures are logged at WARNING and swallowed so the request is never impacted.
+    """
+    try:
+        cw = _get_cloudwatch()
+        cw.put_metric_data(
+            Namespace="Enceladus/Docstore",
+            MetricData=[
+                {
+                    "MetricName": "LegacyWriteUnguarded",
+                    "Dimensions": [
+                        {"Name": "ProjectId", "Value": str(project_id or "unknown")},
+                        {"Name": "Surface", "Value": str(surface or "unknown")},
+                    ],
+                    "Value": 1,
+                    "Unit": "Count",
+                }
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P70] LegacyWriteUnguarded metric emit failed (non-fatal): %s", exc)
+
+
+def _emit_patch_section_outcome_metric(
+    project_id: str,
+    surface: str,
+    outcome: str,
+    *,
+    patch_bytes: Optional[int] = None,
+    document_bytes: Optional[int] = None,
+) -> None:
+    """ENC-TSK-P84 AC-1: fire-and-forget CloudWatch metrics for patch_section
+    outcomes (Enceladus/Docstore, dims ProjectId + Surface). `outcome` is one
+    of PatchSectionAccepted / PatchSectionRejected412 / PatchSectionRejected409
+    / AnchorNotFound; `surface` MUST come from _derive_write_surface (the same
+    normalizer ENC-TSK-P72 uses for the history-event `surface` field, so the
+    metric dimension and the event field always agree). For the accepted
+    outcome only, also emits EditCostRatio (as a statistic set over
+    patch_bytes/document_bytes) plus plain PatchBytes/DocumentBytes values.
+    All datapoints for one call are batched into a single put_metric_data
+    call; failures are logged at WARNING and never raise — same fire-and-
+    forget contract as _emit_legacy_write_unguarded_metric."""
+    dims = [
+        {"Name": "ProjectId", "Value": str(project_id or "unknown")},
+        {"Name": "Surface", "Value": str(surface or "unknown")},
+    ]
+    metric_data = [
+        {
+            "MetricName": outcome,
+            "Dimensions": dims,
+            "Value": 1,
+            "Unit": "Count",
+        }
+    ]
+    if outcome == "PatchSectionAccepted":
+        pb = int(patch_bytes or 0)
+        db = int(document_bytes or 0)
+        ratio = (pb / db) if db else 0.0
+        metric_data.append(
+            {
+                "MetricName": "EditCostRatio",
+                "Dimensions": dims,
+                "StatisticValues": {
+                    "SampleCount": 1,
+                    "Sum": ratio,
+                    "Minimum": ratio,
+                    "Maximum": ratio,
+                },
+                "Unit": "None",
+            }
+        )
+        metric_data.append(
+            {"MetricName": "PatchBytes", "Dimensions": dims, "Value": pb, "Unit": "Bytes"}
+        )
+        metric_data.append(
+            {"MetricName": "DocumentBytes", "Dimensions": dims, "Value": db, "Unit": "Bytes"}
+        )
+    try:
+        cw = _get_cloudwatch()
+        cw.put_metric_data(Namespace="Enceladus/Docstore", MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P84] patch_section outcome metric emit failed (non-fatal): %s", exc)
+
+
 def _extract_token(event: Dict) -> Optional[str]:
     headers = event.get("headers") or {}
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
@@ -542,6 +751,12 @@ def _authenticate(event: Dict, required_scopes: Optional[List[str]] = None) -> T
         return None, _error(401, str(exc))
 
 
+def _is_cognito_session(claims: Dict[str, Any]) -> bool:
+    """Return True if the request was authenticated via a Cognito JWT cookie (not internal key)."""
+    mode = str((claims or {}).get("auth_mode") or "").strip().lower()
+    return mode not in ("internal-key", "managed-token")
+
+
 # ---------------------------------------------------------------------------
 # Project validation (fail-open, same as tracker_mutation)
 # ---------------------------------------------------------------------------
@@ -580,6 +795,7 @@ def _validate_project_exists(project_id: str) -> Optional[str]:
 
 _ddb = None
 _s3 = None
+_cloudwatch = None
 
 
 def _get_ddb():
@@ -597,6 +813,18 @@ def _get_s3():
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
+
+
+def _get_cloudwatch():
+    """ENC-TSK-P70 AC-4: lazy singleton with a short fast-fail timeout — the
+    LegacyWriteUnguarded metric is fire-and-forget and must never slow a request."""
+    global _cloudwatch
+    if _cloudwatch is None:
+        _cloudwatch = boto3.client(
+            "cloudwatch", region_name=DYNAMODB_REGION,
+            config=Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+        )
+    return _cloudwatch
 
 
 def _now_z() -> str:
@@ -949,8 +1177,22 @@ def _is_allowed_file_name(file_name: str) -> bool:
     return any(lower_name.endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS)
 
 
-def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[str, str, int]:
-    """Upload .md content to S3. Returns (s3_key, content_hash, size_bytes)."""
+def _upload_content(
+    project_id: str, document_id: str, content: str, version: Optional[int] = None,
+) -> Tuple[str, str, int]:
+    """Upload .md content to S3. Returns (s3_key, content_hash, size_bytes).
+
+    ENC-TSK-P72 AC-4: when `version` is given (every real call site passes
+    it — put's create version=1, and _handle_patch's unguarded content/
+    append_content branches pass current_version + 1), also writes the
+    immutable versions/{document_id}/{version}.md snapshot. Kept optional
+    (not folded silently) so the many existing tests across this file that
+    `@patch.object(document_api, "_upload_content", ...)` at the module
+    level — replacing this whole function, version write included — keep
+    working unchanged; the ENC-TSK-P70 staged-write sibling
+    (_upload_content_staged) already always writes its version key the same
+    way for the guarded path.
+    """
     s3 = _get_s3()
     key = _s3_key(project_id, document_id)
     content_bytes = content.encode("utf-8")
@@ -964,22 +1206,187 @@ def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[st
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
+    if version is not None:
+        _put_version_object_immutable(s3, _staging_s3_key(project_id, document_id, version), content_bytes)
     return key, content_hash, size_bytes
 
 
-def _get_content(project_id: str, document_id: str) -> Optional[str]:
-    """Download .md content from S3. Returns content string or None."""
+# ---------------------------------------------------------------------------
+# ENC-TSK-P70 AC-3: staged content write for guarded (precondition-bearing)
+# writes. Ordering: caller writes the body to the staging key BEFORE the
+# guarded DynamoDB conditional UpdateItem runs, then either promotes the
+# staging key to the canonical key (condition succeeded) or deletes the
+# staging key best-effort (ConditionalCheckFailedException). This avoids the
+# canonical-key clobber a losing racer would otherwise cause by writing
+# directly to the shared canonical key ahead of an uncertain conditional
+# write. Unguarded (no precondition) writes are unaffected — they keep using
+# `_upload_content` straight to the canonical key per AC-4.
+# ---------------------------------------------------------------------------
+
+
+def _staging_s3_key(project_id: str, document_id: str, next_version: int) -> str:
+    """BRD FR-B2-6 staging key: {S3_PREFIX}/{project_id}/versions/{document_id}/{next_version}.md"""
+    return f"{S3_PREFIX}/{project_id}/versions/{document_id}/{next_version}.md"
+
+
+def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> None:
+    """ENC-TSK-P72 AC-4: version snapshot objects are never overwritten. Tries
+    PutObject with IfNoneMatch='*' (S3 conditional write — fails with
+    PreconditionFailed/412 if the key already exists); older botocore/moto
+    reject the IfNoneMatch kwarg outright (TypeError / ParamValidationError),
+    so that path falls back to a HeadObject existence check before an
+    unconditional put. Either way, an existing object under this key is never
+    overwritten — a collision is logged and swallowed (the DynamoDB
+    conditional write is what actually arbitrates who gets a given version
+    number; this is defense in depth, not the primary guard).
+    """
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=content_bytes,
+            ContentType="text/markdown; charset=utf-8",
+            CacheControl="max-age=0, s-maxage=300, must-revalidate",
+            IfNoneMatch="*",
+        )
+        return
+    except TypeError:
+        pass  # IfNoneMatch not supported by this botocore/mock — fall through.
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("PreconditionFailed", "412"):
+            logger.warning("[ENC-TSK-P72] version object already exists, not overwritten: key=%s", key)
+            return
+        if code not in ("InvalidRequest", "NotImplemented", "UnknownParameter"):
+            raise
+        # Parameter unsupported by this endpoint — fall through to the
+        # HeadObject-then-put fallback below.
+
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=key)
+        logger.warning("[ENC-TSK-P72] version object already exists, not overwritten: key=%s", key)
+        return
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+            raise
+    except Exception:  # noqa: BLE001
+        pass
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=content_bytes,
+        ContentType="text/markdown; charset=utf-8",
+        CacheControl="max-age=0, s-maxage=300, must-revalidate",
+    )
+
+
+def _upload_content_staged(
+    project_id: str, document_id: str, content: str, next_version: int,
+) -> Tuple[str, str, int]:
+    """Upload .md content to the version-suffixed staging key (AC-4: this key
+    IS the permanent version snapshot once promoted — see _promote_staged_content).
+    Returns (staging_s3_key, content_hash, size_bytes). Caller promotes or
+    deletes it."""
+    s3 = _get_s3()
+    key = _staging_s3_key(project_id, document_id, next_version)
+    content_bytes = content.encode("utf-8")
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    size_bytes = len(content_bytes)
+
+    _put_version_object_immutable(s3, key, content_bytes)
+    return key, content_hash, size_bytes
+
+
+def _promote_staged_content(staging_key: str, project_id: str, document_id: str) -> str:
+    """Copy the staging object onto the canonical key after a guarded conditional
+    write succeeds. Returns the canonical s3_key."""
+    s3 = _get_s3()
+    canonical_key = _s3_key(project_id, document_id)
+    s3.copy_object(
+        Bucket=S3_BUCKET,
+        CopySource={"Bucket": S3_BUCKET, "Key": staging_key},
+        Key=canonical_key,
+        ContentType="text/markdown; charset=utf-8",
+        CacheControl="max-age=0, s-maxage=300, must-revalidate",
+        MetadataDirective="REPLACE",
+    )
+    return canonical_key
+
+
+def _delete_s3_object_best_effort(key: str) -> None:
+    """Delete an orphaned staging object after a lost conditional-write race.
+    Never raises — logs the orphan key at WARNING if deletion fails."""
+    try:
+        _get_s3().delete_object(Bucket=S3_BUCKET, Key=key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P70] orphaned staging object left behind (delete failed): key=%s err=%s", key, exc)
+
+
+def _get_content(
+    project_id: str,
+    document_id: str,
+    stored_s3_key: Optional[str] = None,
+    stored_s3_bucket: Optional[str] = None,
+) -> Optional[str]:
+    """Download .md content from S3. Returns content string or None.
+
+    ENC-TSK-M59 / ENC-ISS-526: the env-prefixed computed key is authoritative,
+    but gamma's documents table carries rows cloned from prod whose s3_key
+    points at the unprefixed prod path and whose bodies were never provisioned
+    into the gamma prefix. When the computed key is absent and the record's
+    stored s3_key names a different location, fall back to a read-only fetch
+    of the stored location, then lazily copy the body to the computed key so
+    the env prefix self-provisions. The fallback swallows AccessDenied so the
+    Lambda stays safe to deploy ahead of the IAM read grant.
+    """
     s3 = _get_s3()
     key = _s3_key(project_id, document_id)
     try:
         resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
         return resp["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
+        pass
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "NoSuchKey":
+            raise
+
+    fallback_key = str(stored_s3_key or "").strip()
+    fallback_bucket = str(stored_s3_bucket or "").strip() or S3_BUCKET
+    if not fallback_key or (fallback_bucket == S3_BUCKET and fallback_key == key):
+        return None
+    try:
+        resp = s3.get_object(Bucket=fallback_bucket, Key=fallback_key)
+        content = resp["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
         return None
     except ClientError as exc:
-        if exc.response["Error"]["Code"] == "NoSuchKey":
+        if exc.response["Error"]["Code"] in ("NoSuchKey", "AccessDenied", "403"):
+            logger.warning(
+                "stored-s3_key fallback read failed for %s (s3://%s/%s): %s",
+                document_id, fallback_bucket, fallback_key,
+                exc.response["Error"]["Code"],
+            )
             return None
         raise
+
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType="text/markdown; charset=utf-8",
+            CacheControl="max-age=0, s-maxage=300, must-revalidate",
+        )
+        logger.info(
+            "lazily provisioned %s into s3://%s/%s from s3://%s/%s",
+            document_id, S3_BUCKET, key, fallback_bucket, fallback_key,
+        )
+    except Exception as exc:
+        logger.warning(
+            "lazy provision of %s to s3://%s/%s failed: %s",
+            document_id, S3_BUCKET, key, exc,
+        )
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1396,36 @@ def _get_content(project_id: str, document_id: str) -> Optional[str]:
 
 def _serialize_list(items: List[str]) -> Dict:
     return {"L": [{"S": s} for s in items]}
+
+
+def _extract_provenance_fields(body: Dict) -> Dict[str, Any]:
+    """Validate + serialize the optional HCE/GDMP provenance fields.
+
+    ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065. Shared by PUT and PATCH so the
+    persisted shape stays identical. Returns {"item_fields": {...}} on success
+    (only keys actually present in `body` are returned) or {"error": msg}.
+    """
+    out: Dict[str, Dict] = {}
+    for list_field in ("informed_by", "consolidated_from"):
+        if list_field in body:
+            val = body[list_field]
+            if not isinstance(val, list):
+                return {"error": f"'{list_field}' must be an array of record IDs."}
+            cleaned = [str(v).strip() for v in val[:MAX_RELATED_ITEMS] if str(v).strip()]
+            out[list_field] = _serialize_list(cleaned)
+    if "proposed_by" in body:
+        proposer = str(body["proposed_by"]).strip()
+        if proposer:
+            out["proposed_by"] = {"S": proposer}
+    if "fsrs_initial_stability" in body:
+        try:
+            s0 = float(body["fsrs_initial_stability"])
+        except (TypeError, ValueError):
+            return {"error": "'fsrs_initial_stability' must be numeric."}
+        if s0 < 0:
+            return {"error": "'fsrs_initial_stability' must be non-negative."}
+        out["fsrs_initial_stability"] = {"N": str(s0)}
+    return {"item_fields": out}
 
 
 def _deserialize_list(attr: Dict) -> List[str]:
@@ -1037,6 +1474,66 @@ def _merge_keywords(existing: Any, required: List[str]) -> List[str]:
         if text:
             merged.add(text)
     return sorted(merged)
+
+
+# ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): minimal ID-prefix -> tracker record_type
+# map, just enough to route a related_items reverse-edge write to the right SK.
+_L07_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+
+
+def _mirror_related_items_to_tracker(
+    project_id: str, document_id: str, old_items: Optional[List[str]], new_items: Optional[List[str]]
+) -> None:
+    """Mirror newly-added document related_items onto each target tracker
+    record's related_document_ids (B65 AC-5/AC-7). Best-effort and non-blocking:
+    the document write is already the source of truth by the time this runs;
+    a missing/unknown target or a target on another project is skipped, and an
+    already-present back-reference is a silent, atomic no-op (contains-check
+    ConditionExpression — same pattern as tracker_mutation's reverse-edge write)."""
+    old_set = set(old_items or [])
+    added = [str(i).strip().upper() for i in (new_items or []) if str(i).strip() and str(i).strip().upper() not in old_set]
+    if not added:
+        return
+    ddb = _get_ddb()
+    now = _now_z()
+    for target_id in added:
+        parts = target_id.split("-")
+        if len(parts) < 2:
+            continue
+        target_type = _L07_ID_SEGMENT_TO_TYPE.get(parts[1])
+        if not target_type:
+            continue
+        target_sk = f"{target_type}#{target_id}"
+        try:
+            ddb.update_item(
+                TableName=TRACKER_TABLE,
+                Key={"project_id": {"S": project_id}, "record_id": {"S": target_sk}},
+                UpdateExpression=(
+                    "SET related_document_ids = list_append(if_not_exists(related_document_ids, :empty), :new), "
+                    "updated_at = :now"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(related_document_ids) OR NOT contains(related_document_ids, :did)"
+                ),
+                ExpressionAttributeValues={
+                    ":empty": {"L": []},
+                    ":new": {"L": [{"S": document_id}]},
+                    ":did": {"S": document_id},
+                    ":now": {"S": now},
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                continue  # target already carries the back-reference — idempotent no-op
+            logger.warning(
+                "[ENC-TSK-L07] related_document_ids mirror failed %s -> %s: %s",
+                document_id, target_id, exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ENC-TSK-L07] related_document_ids mirror failed %s -> %s: %s",
+                document_id, target_id, exc,
+            )
 
 
 def _query_project_documents(project_id: str) -> List[Dict[str, Any]]:
@@ -1277,93 +1774,6 @@ def _list_governance_live_files() -> List[str]:
     return sorted(set(files))
 
 
-def _propagate_dictionary_to_governance_policies(s3_body: bytes) -> None:
-    """Propagate a governance_data_dictionary.json S3 sync into the governance-policies
-    DDB record so the three storage surfaces stay in lockstep (ENC-TSK-I63 / ENC-TSK-I62):
-
-      1. S3 live object  ........................ governance/live/governance_data_dictionary.json
-      2. governance-policies discrete `version` .. -> governance.dictionary source.version
-      3. governance-policies `dictionary_json` ... -> governance.dictionary dictionary_version
-                                                      (the live-served entities blob)
-
-    This closes the ENC-TSK-I61 gap where _governance_sync_push refreshed the docstore but
-    left the DDB record untouched, forcing a manual `aws dynamodb update-item`.
-
-    Implementation notes (gotchas from the source incident):
-      * Writes the *verified raw S3 bytes* as dictionary_json — byte-identical to the live
-        object, so it is inherently within the 400KB DynamoDB item limit (a pretty-print
-        round-trip would add ~65KB and risk ItemSizeLimitExceeded).
-      * `version` is a DynamoDB reserved word -> aliased as #v.
-      * Drift pre-check: the new S3 dictionary's `entities` MUST equal the live DDB blob's
-        `entities`. The discrete version and the blob are independent copies that can drift;
-        a version/metadata bump must never silently rewrite the served entities. On mismatch
-        we abort loudly rather than clobber.
-    """
-    try:
-        new_dict = json.loads(s3_body)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"governance dictionary S3 object is not valid JSON: {exc}") from exc
-    if not isinstance(new_dict, dict):
-        raise ValueError("governance dictionary S3 object must be a JSON object")
-    new_version = str(new_dict.get("version") or "").strip()
-    if not new_version:
-        raise ValueError("governance dictionary S3 object missing top-level 'version'")
-
-    ddb = _get_ddb()
-    resp = ddb.get_item(
-        TableName=GOVERNANCE_POLICIES_TABLE,
-        Key={"policy_id": {"S": GOVERNANCE_DICTIONARY_POLICY_ID}},
-    )
-    item = resp.get("Item")
-    if not item:
-        raise RuntimeError(
-            f"governance-policies record '{GOVERNANCE_DICTIONARY_POLICY_ID}' not found; "
-            "refusing to create it from a background sync"
-        )
-
-    current_version = str((item.get("version") or {}).get("S") or "")
-    current_blob = str((item.get("dictionary_json") or {}).get("S") or "")
-    blob_str = s3_body.decode("utf-8")
-
-    # Idempotent: nothing to do when the discrete version and served blob already match S3.
-    if current_version == new_version and current_blob == blob_str:
-        logger.info(
-            "[GOVERNANCE_SYNC] dictionary already in lockstep at version %s", new_version
-        )
-        return
-
-    # Drift pre-check — entities must be identical across surfaces before we overwrite.
-    if current_blob:
-        try:
-            current_dict = json.loads(current_blob)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError(
-                f"existing governance dictionary_json blob is not valid JSON: {exc}"
-            ) from exc
-        if current_dict.get("entities") != new_dict.get("entities"):
-            raise RuntimeError(
-                "DICTIONARY DRIFT: governance_data_dictionary.json S3 entities != "
-                "governance-policies dictionary_json entities. Aborting propagation to avoid "
-                "clobbering divergent served entities — reconcile entities before the version bump."
-            )
-
-    ddb.update_item(
-        TableName=GOVERNANCE_POLICIES_TABLE,
-        Key={"policy_id": {"S": GOVERNANCE_DICTIONARY_POLICY_ID}},
-        UpdateExpression="SET #v = :ver, updated_at = :ts, dictionary_json = :blob",
-        ExpressionAttributeNames={"#v": "version"},
-        ExpressionAttributeValues={
-            ":ver": {"S": new_version},
-            ":ts": {"S": _now_z()},
-            ":blob": {"S": blob_str},
-        },
-    )
-    logger.info(
-        "[GOVERNANCE_SYNC] dictionary propagated to %s: version %s -> %s (blob=%d bytes)",
-        GOVERNANCE_POLICIES_TABLE, current_version or "(none)", new_version, len(blob_str),
-    )
-
-
 def _sync_governance_documents() -> None:
     docs = _query_project_documents(GOVERNANCE_PROJECT_ID)
     doc_by_file: Dict[str, Dict[str, Any]] = {}
@@ -1379,14 +1789,6 @@ def _sync_governance_documents() -> None:
     for rel_file in _list_governance_live_files():
         key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel_file}"
         existing = doc_by_file.get(rel_file)
-
-        # ENC-TSK-I63: the dictionary's DDB lockstep is propagated regardless of the
-        # docstore fast-path below — the docstore copy can be current while the
-        # governance-policies record is stale (the exact ENC-TSK-I61 drift). Fetch the
-        # live object and propagate before any content short-circuit.
-        if rel_file == GOVERNANCE_DICTIONARY_FILE:
-            dict_body = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
-            _propagate_dictionary_to_governance_policies(dict_body)
 
         # Fast path: compare metadata hash when available.
         metadata_hash = ""
@@ -1967,12 +2369,17 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     now = _now_z()
     created_by = claims.get("email") or claims.get("sub", "unknown")
 
-    # Upload to S3
+    # Upload to S3 — ENC-TSK-P72 AC-4: version=1 also stores the
+    # versions/{document_id}/1.md snapshot for this create.
     try:
-        s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+        s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content, version=1)
     except Exception as exc:
         logger.error("S3 upload failed: %s", exc)
         return _error(500, "Failed to store document content.")
+
+    # ENC-TSK-P69 / AC-4: persist the outline on every write so digest reads
+    # are served from the item alone.
+    outline_entries = outline_mod.compute_outline(content)
 
     # Write metadata to DynamoDB
     ddb = _get_ddb()
@@ -1988,6 +2395,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "content_type": {"S": "text/markdown"},
         "content_hash": {"S": content_hash},
         "size_bytes": {"N": str(size_bytes)},
+        "outline": {"S": json.dumps(outline_entries)},
         "related_items": _serialize_list(related_items),
         "keywords": _serialize_list(keywords),
         "created_by": {"S": created_by},
@@ -2004,6 +2412,41 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         # project Document nodes to Neo4j.
         "record_type": {"S": "document"},
     }
+
+    # ENC-TSK-P72 AC-1: 'put' is the first history_event for a document — part
+    # of this SAME put_item call, not a follow-up write, so an event can never
+    # exist without its body (there is no prior body for a create: before_hash
+    # / before_version are null/0).
+    _p72_event_id = sections_mod.generate_ulid()
+    _p72_history_event = _section_history_event(
+        event_id=_p72_event_id, ts=now, actor=created_by,
+        surface=_derive_write_surface(event, claims), op="put", anchor=None,
+        before_hash=None, after_hash=content_hash,
+        before_version=0, after_version=1,
+        patch_bytes=None, document_bytes=size_bytes,
+        caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+    )
+    item["history"] = {"L": [_ddb_value_from_python(_p72_history_event)]}
+    # AC-7: stamp version_seq/feed_scope on the same item write (create has no
+    # separate UpdateItem to piggyback on — these just land in the put_item).
+    try:
+        _p72_seq = _allocate_document_version_seq()
+        item["version_seq"] = {"N": str(_p72_seq)}
+        item["feed_scope"] = {"S": FEED_SCOPE}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P72] version_seq allocation failed on create (non-fatal): %s", exc)
+
+    # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065: provenance fields used by the
+    # Handoff Consolidation Engine and GDMP. All optional and additive:
+    #   informed_by         -> GDMP ancestral context (INFORMED_BY edges)
+    #   consolidated_from   -> HCE source handoffs (CONSOLIDATED_FROM edges)
+    #   proposed_by         -> HCE proposer record (PROPOSED_BY edge)
+    #   fsrs_initial_stability -> FSRS-6 S_0 derived from recurrence (AC-5)
+    # graph_sync projects the edge fields; the Document API only persists them.
+    _provenance = _extract_provenance_fields(body)
+    if _provenance.get("error"):
+        return _error(400, _provenance["error"])
+    item.update(_provenance["item_fields"])
 
     # Add handoff-specific fields to DynamoDB item
     if handoff_fields:
@@ -2056,6 +2499,12 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             pass
         return _error(500, "Failed to save document metadata.")
 
+    # ENC-TSK-L07 (B65 AC-5/AC-7): mirror related_items onto each target's related_document_ids.
+    try:
+        _mirror_related_items_to_tracker(project_id, document_id, [], related_items)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-L07] related_items mirror on create failed (non-fatal): %s", exc)
+
     logger.info("document created: %s project=%s size=%d", document_id, project_id, size_bytes)
     return _response(201, {
         "success": True,
@@ -2074,11 +2523,28 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _handle_get(event: Dict, claims: Dict, document_id: Optional[str]) -> Dict:
+def _handle_get(
+    event: Dict, claims: Dict, document_id: Optional[str], is_manifest: bool = False,
+    is_history: bool = False, is_diff: bool = False,
+) -> Dict:
     """Retrieve a single document or list documents."""
     qs = event.get("queryStringParameters") or {}
 
     if document_id and document_id != "search":
+        # ENC-TSK-P72 AC-5 / ENC-TSK-P91 route: GET /documents/{id}/history
+        # and GET /documents/{id}/diff — checked before digest/manifest so
+        # neither path segment is mistaken for a document read.
+        if is_history:
+            return _handle_document_history(document_id, qs)
+        if is_diff:
+            return _handle_document_diff(document_id, qs)
+        # ENC-TSK-P69 / AC-1: GET /documents/{id}?digest_only=true and
+        # GET /documents/{id}/manifest are two routes into one handler.
+        digest_only = is_manifest or str(qs.get("digest_only", "")).strip().lower() in (
+            "true", "1", "yes",
+        )
+        if digest_only:
+            return _get_document_digest(document_id, event)
         return _get_single(document_id, qs)
     elif document_id == "search":
         return _handle_search(qs)
@@ -2106,10 +2572,22 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
         return _error(404, f"Document not found: {document_id}")
 
     doc = _deserialize_item(item)
+
+    # ENC-TSK-P72 AC-6: documents.get?at_version=&at_event= reconstruction.
+    at_version_raw = qs.get("at_version")
+    at_event_raw = qs.get("at_event")
+    if at_version_raw is not None or at_event_raw is not None:
+        return _get_document_at_version(document_id, doc, item, at_version_raw, at_event_raw)
+
     include_content = qs.get("include_content", "true").lower() == "true"
 
     if include_content:
-        content = _get_content(doc.get("project_id", ""), document_id)
+        content = _get_content(
+            doc.get("project_id", ""),
+            document_id,
+            stored_s3_key=doc.get("s3_key"),
+            stored_s3_bucket=doc.get("s3_bucket"),
+        )
         if content is not None:
             doc["content"] = content
 
@@ -2118,6 +2596,169 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
     # - top-level document fields support legacy/mobile clients reading raw doc.
     payload = {"success": True, "document": doc, **doc}
     return _response(200, payload)
+
+
+# ---------------------------------------------------------------------------
+# Digest / manifest — content-free projection (ENC-TSK-P69, FR-B1-1..8)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_outline(doc: Dict[str, Any], document_id: str) -> List[Dict[str, Any]]:
+    """Return the document's outline entries.
+
+    AC-4: served from the persisted `outline` item attribute when present.
+    When absent (a pre-existing item written before this feature), the body
+    is fetched from S3 and the outline is computed on the fly — this is a
+    READ path and must never write the computed outline back to the item.
+    """
+    raw = doc.get("outline")
+    if raw is not None:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("outline attribute on %s is not valid JSON; recomputing from S3", document_id)
+
+    content = _get_content(
+        doc.get("project_id", ""),
+        document_id,
+        stored_s3_key=doc.get("s3_key"),
+        stored_s3_bucket=doc.get("s3_bucket"),
+    )
+    if content is None:
+        return []
+    return outline_mod.compute_outline(content)
+
+
+def _digest_projection(doc: Dict[str, Any], outline_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build the digest projection shape shared by digest_only GET and GET .../manifest (AC-1).
+
+    Omits `content` entirely — this projection is the content-free surface.
+    """
+    return {
+        "document_id": doc.get("document_id"),
+        "project_id": doc.get("project_id"),
+        "title": doc.get("title"),
+        "document_subtype": doc.get("document_subtype"),
+        "subtypepattern": doc.get("subtypepattern"),
+        "version": doc.get("version"),
+        "content_hash": doc.get("content_hash"),
+        "size_bytes": doc.get("size_bytes"),
+        "updated_at": doc.get("updated_at"),
+        "history_count": doc.get("history_count", 0),
+        "outline": outline_entries,
+    }
+
+
+def _get_document_digest(document_id: str, event: Optional[Dict] = None) -> Dict:
+    """Shared handler for GET /documents/{id}?digest_only=true and GET /documents/{id}/manifest.
+
+    AC-1: both routes resolve to this one function and return the same
+    content-free projection.
+    AC-3: sets the `ETag` response header to the double-quoted content_hash;
+    an `If-None-Match` request for the current hash gets HTTP 304 with an
+    empty body.
+    AC-4: never mutates the item — see `_resolve_outline`.
+    """
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+
+    doc = _deserialize_item(item)
+    content_hash = str(doc.get("content_hash") or "")
+    etag = f'"{content_hash}"'
+
+    if_none_match = _extract_if_none_match(event)
+    if if_none_match is not None and content_hash and if_none_match == content_hash:
+        return {
+            "statusCode": 304,
+            "headers": {
+                **_cors_headers(),
+                "ETag": etag,
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+            },
+            "body": "",
+        }
+
+    outline_entries = _resolve_outline(doc, document_id)
+    projection = _digest_projection(doc, outline_entries)
+
+    resp_obj = _response(200, {"success": True, **projection})
+    resp_obj["headers"]["ETag"] = etag
+    return resp_obj
+
+
+# ENC-TSK-L93: body fields stripped from list responses when include_content=false.
+_LIST_BODY_FIELDS = frozenset({
+    "full_description", "claude_description", "content",
+    "agentskills_manifest", "agentskills_spec_version", "runtime_variants",
+})
+
+
+def _parse_include_content(qs: Dict) -> bool:
+    """Parse list/get include_content; accepts content=false alias (ENC-TSK-L93)."""
+    if "include_content" in qs:
+        return str(qs.get("include_content", "true")).strip().lower() in ("true", "1", "yes")
+    if "content" in qs:
+        val = str(qs.get("content", "true")).strip().lower()
+        return val not in ("false", "0", "no")
+    return True
+
+
+def _parse_json_field(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+    return value
+
+
+def _skill_list_version(doc: Dict[str, Any]) -> str:
+    manifest = _parse_json_field(doc.get("agentskills_manifest"))
+    if isinstance(manifest, dict):
+        ver = manifest.get("version")
+        if ver:
+            return str(ver)
+    ver = doc.get("version")
+    return str(ver) if ver else ""
+
+
+def _skill_runtime_hint(doc: Dict[str, Any]) -> str:
+    variants = _parse_json_field(doc.get("runtime_variants"))
+    if isinstance(variants, dict) and variants:
+        return ",".join(sorted(str(k) for k in variants.keys()))
+    return "claude,agentskills"
+
+
+def _project_list_document(doc: Dict[str, Any], include_content: bool) -> Dict[str, Any]:
+    """Apply list projection. Default (include_content=true) returns full metadata unchanged."""
+    if include_content:
+        return doc
+    subtype = str(doc.get("document_subtype") or "general").lower()
+    if subtype == "skill":
+        return {
+            "document_id": doc.get("document_id"),
+            "title": doc.get("title"),
+            "description": doc.get("description"),
+            "version": _skill_list_version(doc),
+            "updated_at": doc.get("updated_at"),
+            "runtime_hint": _skill_runtime_hint(doc),
+            "document_subtype": "skill",
+        }
+    return {k: v for k, v in doc.items() if k not in _LIST_BODY_FIELDS}
 
 
 def _list_by_project(qs: Dict) -> Dict:
@@ -2161,7 +2802,21 @@ def _list_by_project(qs: Dict) -> Dict:
     if maturity_filter:
         docs = [d for d in docs if d.get("document_maturity_state", "") == maturity_filter]
 
-    docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+    # ENC-TSK-J46 / ENC-FTR-096 Ph2: handoff_status filter (also covers the
+    # lesson-candidate curation-state field, which reuses this attribute).
+    handoff_status_filter = qs.get("handoff_status", "").strip().lower()
+    if handoff_status_filter:
+        docs = [d for d in docs if d.get("handoff_status", "") == handoff_status_filter]
+
+    # ENC-TSK-J46: candidate curation lists sort oldest-drafted-first so the
+    # queue is worked in draft order; every other list keeps the existing
+    # most-recently-updated-first ordering.
+    if qs.get("sort", "").strip().lower() == "created_at":
+        docs.sort(key=lambda d: d.get("created_at", "") or "")
+    else:
+        docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+    include_content = _parse_include_content(qs)
+    docs = [_project_list_document(d, include_content) for d in docs]
     sliced = docs[:PAGE_SIZE]
     return _response(
         200,
@@ -2187,6 +2842,14 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     except (ValueError, TypeError):
         return _error(400, "Invalid JSON body.")
 
+    # ENC-TSK-P72 AC-1: which write path this PATCH is, purely from body-key
+    # presence (content/append_content are already validated as mutually
+    # exclusive below) — used to label the history_event `op` at every
+    # accepted/rejected return site in this handler. Dictionary enum:
+    # document.history_event.op includes "patch" (content field), "append_content",
+    # and "metadata" (neither — a metadata-only patch).
+    _p72_patch_op = "patch" if "content" in body else ("append_content" if "append_content" in body else "metadata")
+
     # Fetch current record
     ddb = _get_ddb()
     try:
@@ -2206,6 +2869,79 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     current_version = int(existing.get("version", {}).get("N", "0"))
     project_id = existing.get("project_id", {}).get("S", "")
     now = _now_z()
+
+    # ENC-TSK-L47 / ENC-TSK-P70: If-Match / HTTP 409|412 per-record precondition
+    # contract. Own lightweight counter (version), decoupled from ENC-TSK-L27's
+    # version_seq. Absent precondition preserves today's unconditional-PATCH
+    # behavior (backward compatible) — AC-4. ENC-TSK-P70 (FR-B1-9..12) extends the
+    # L47 header-only version form with a content-hash form (64-hex sha256) taken
+    # from either the If-Match header or the body field `if_match` (AC-1).
+    precondition_raw = _extract_precondition(event, body)
+    precondition_kind: Optional[str] = None  # 'hash' | 'version' | None (absent)
+    precondition_absent = precondition_raw is None
+    current_content_hash = str(existing.get("content_hash", {}).get("S", ""))
+    if precondition_raw is not None:
+        precondition_kind = _classify_precondition(precondition_raw)
+        if precondition_kind is None:
+            return _error(
+                400,
+                (
+                    f"Malformed precondition '{precondition_raw}': must be a 64-hex "
+                    "sha256 content hash (^[0-9a-f]{64}$) or a decimal version "
+                    "counter (^[0-9]+$)."
+                ),
+                code="PRECONDITION_MALFORMED",
+                document_id=document_id,
+                received=precondition_raw,
+            )
+        if precondition_kind == "version" and precondition_raw != str(current_version):
+            _append_rejected_event(
+                document_id=document_id, project_id=project_id,
+                existing_history_attr=existing.get("history", {}).get("L", []),
+                event_id=sections_mod.generate_ulid(), ts=now,
+                actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+                op=_p72_patch_op, rejection_code="REVISION_CONFLICT", anchor=None,
+                before_hash=current_content_hash, before_version=current_version,
+                document_bytes=int(existing.get("size_bytes", {}).get("N", "0")),
+                caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+            )
+            return _error(
+                409,
+                f"If-Match revision mismatch: client expected revision '{precondition_raw}', "
+                f"server is at revision {current_version}.",
+                code="REVISION_CONFLICT",
+                document_id=document_id,
+                expected_revision=precondition_raw,
+                current_revision=current_version,
+                current=_deserialize_item(existing),
+            )
+        if precondition_kind == "hash" and precondition_raw != current_content_hash:
+            _append_rejected_event(
+                document_id=document_id, project_id=project_id,
+                existing_history_attr=existing.get("history", {}).get("L", []),
+                event_id=sections_mod.generate_ulid(), ts=now,
+                actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+                op=_p72_patch_op, rejection_code="CONTENT_HASH_MISMATCH", anchor=None,
+                before_hash=current_content_hash, before_version=current_version,
+                document_bytes=int(existing.get("size_bytes", {}).get("N", "0")),
+                caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+            )
+            return _error(
+                412,
+                (
+                    f"Content-hash precondition mismatch: client expected hash "
+                    f"'{precondition_raw}', server is at '{current_content_hash}'."
+                ),
+                code="CONTENT_HASH_MISMATCH",
+                document_id=document_id,
+                expected_hash=precondition_raw,
+                current_hash=current_content_hash,
+                current_version=current_version,
+                updated_at=str(existing.get("updated_at", {}).get("S", "")),
+                recommended_next_actions=[
+                    "re-read digest via documents.manifest and retry",
+                ],
+            )
 
     # ENC-FTR-078 AC-3 / AC-19: determine final_subtype for subsequent validations.
     # existing_subtype is the pre-patch value (may be a legacy read-only value for
@@ -2228,10 +2964,31 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     attr_values: Dict[str, Dict] = {
         ":ts": {"S": now},
         ":one": {"N": "1"},
-        ":expected": {"N": str(current_version)},
         ":rtype": {"S": "document"},
     }
     compliance: Optional[Dict[str, Any]] = None
+    # ENC-TSK-P70 AC-3: guarded (precondition-bearing) content writes go through a
+    # version-suffixed staging key first; this tracks the staging key so the final
+    # UpdateItem block below knows whether to promote it (success) or delete it
+    # best-effort (ConditionalCheckFailedException). Unguarded writes leave this None
+    # and use the pre-existing direct-to-canonical-key path (AC-4).
+    _p70_staging_key: Optional[str] = None
+    # ENC-ISS-763 (P0 fix, filed against ENC-TSK-P70): the ConditionExpression
+    # below is EITHER "content_hash = :expected_hash" (hash form) OR
+    # "#ver = :expected" (version form / absent-precondition race-safety net)
+    # — never both — so ExpressionAttributeValues must carry exactly the one
+    # placeholder the chosen ConditionExpression actually references.
+    # DynamoDB's UpdateItem rejects any value present in
+    # ExpressionAttributeValues but unreferenced by the expressions
+    # ("ValidationException: ... unused in expressions"), which is exactly
+    # what happened in gamma: :expected was always set unconditionally, so
+    # every hash-form (the common case) guarded write 500'd.
+    if precondition_kind == "hash":
+        # AC-3: single UpdateItem ConditionExpression content_hash = :expected_hash
+        # for the hash form (replaces the version-counter condition for this write).
+        attr_values[":expected_hash"] = {"S": current_content_hash}
+    else:
+        attr_values[":expected"] = {"N": str(current_version)}
 
     # ENC-FTR-078 AC-3: document_subtype patch validation (strict allow-list).
     # AC-19 backward compat: legacy values are readable but cannot be re-written.
@@ -2292,6 +3049,20 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         expr_parts.append("description = :desc")
         attr_values[":desc"] = {"S": str(body["description"]).strip()[:MAX_DESCRIPTION_LENGTH]}
 
+    # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065: provenance field patches. The HCE
+    # GDMP Stage 2 path PATCHes informed_by alongside document_maturity_state to
+    # advance compliant -> contextualized; consolidated_from / proposed_by /
+    # fsrs_initial_stability are set at candidate creation but patchable for
+    # backfill. Reuses the shared validator so PUT and PATCH stay in lockstep.
+    _provenance_patch = _extract_provenance_fields(body)
+    if _provenance_patch.get("error"):
+        return _error(400, _provenance_patch["error"])
+    for _pfield, _pval in _provenance_patch["item_fields"].items():
+        _alias = f"#prov_{_pfield}"
+        attr_names[_alias] = _pfield
+        expr_parts.append(f"{_alias} = :{_pfield}")
+        attr_values[f":{_pfield}"] = _pval
+
     if "related_items" in body:
         items = body["related_items"]
         if not isinstance(items, list):
@@ -2325,6 +3096,9 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             )
         expr_parts.append("related_items = :ri")
         attr_values[":ri"] = _serialize_list(items)
+        # ENC-TSK-L07: captured under its own name — `items` is reused generically
+        # elsewhere in this handler and must not be relied on after this block.
+        _l07_new_related_items = items
 
     if "keywords" in body:
         kws = body["keywords"]
@@ -2409,16 +3183,26 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         expr_parts.append("document_maturity_state = :dms")
         attr_values[":dms"] = {"S": dms}
 
-    # Handoff status transitions (ENC-FTR-061)
+    # Handoff status transitions (ENC-FTR-061); lesson-candidate curation-state
+    # transitions (ENC-TSK-J46 / ENC-FTR-096 Ph2) reuse the same attribute.
     current_subtype = existing.get("document_subtype", {}).get("S", "general")
     if "handoff_status" in body:
-        if current_subtype != "handoff":
-            return _error(400, "Cannot set handoff_status on a non-handoff document.")
+        is_candidate = current_subtype == "lesson-candidate"
+        if current_subtype != "handoff" and not is_candidate:
+            return _error(400, "Cannot set handoff_status on a document of this subtype.")
+        valid_statuses = CANDIDATE_STATUSES if is_candidate else HANDOFF_STATUSES
+        transitions = CANDIDATE_STATUS_TRANSITIONS if is_candidate else HANDOFF_STATUS_TRANSITIONS
         new_handoff_status = str(body["handoff_status"]).strip().lower()
-        if new_handoff_status not in HANDOFF_STATUSES:
-            return _error(400, f"Invalid handoff_status '{new_handoff_status}'. Must be one of: {', '.join(sorted(HANDOFF_STATUSES))}")
+        if is_candidate and new_handoff_status in CANDIDATE_GATED_TRANSITIONS and not _is_cognito_session(claims):
+            return _error(
+                403,
+                "Approving or rejecting a lesson candidate requires Cognito authentication "
+                "(PWA session only) -- no agent session may promote a lesson candidate autonomously.",
+            )
+        if new_handoff_status not in valid_statuses:
+            return _error(400, f"Invalid handoff_status '{new_handoff_status}'. Must be one of: {', '.join(sorted(valid_statuses))}")
         current_handoff_status = existing.get("handoff_status", {}).get("S", "pending")
-        allowed = HANDOFF_STATUS_TRANSITIONS.get(current_handoff_status, set())
+        allowed = transitions.get(current_handoff_status, set())
         if new_handoff_status != current_handoff_status and new_handoff_status not in allowed:
             return _error(
                 400,
@@ -2678,19 +3462,39 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                     compliance_score=compliance["compliance_score"],
                     compliance_warnings=compliance["compliance_warnings"],
                 )
-            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, content)
+            # ENC-TSK-P70 AC-3: guarded writes stage to a version-suffixed key first
+            # and only promote to canonical after the conditional UpdateItem below
+            # succeeds; unguarded writes keep the pre-existing direct-to-canonical
+            # path (AC-4).
+            if precondition_kind is not None:
+                s3_key, content_hash, size_bytes = _upload_content_staged(
+                    project_id, document_id, content, current_version + 1,
+                )
+                _p70_staging_key = s3_key
+                s3_key = _s3_key(project_id, document_id)
+            else:
+                # ENC-TSK-P72 AC-4: unguarded writes skip the stage-then-promote
+                # dance but _upload_content(version=...) still leaves a version
+                # snapshot behind.
+                s3_key, content_hash, size_bytes = _upload_content(
+                    project_id, document_id, content, version=current_version + 1,
+                )
+            # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
+            outline_entries = outline_mod.compute_outline(content)
             expr_parts.append("content_hash = :hash")
             expr_parts.append("size_bytes = :size")
             expr_parts.append("s3_key = :s3k")
             expr_parts.append("compliance_score = :cscore")
             expr_parts.append("compliance_warnings = :cwarnings")
             expr_parts.append("compliance_checked_at = :cchecked")
+            expr_parts.append("outline = :outline")
             attr_values[":hash"] = {"S": content_hash}
             attr_values[":size"] = {"N": str(size_bytes)}
             attr_values[":s3k"] = {"S": s3_key}
             attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
             attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
             attr_values[":cchecked"] = {"S": now}
+            attr_values[":outline"] = {"S": json.dumps(outline_entries)}
         except Exception as exc:
             logger.error("S3 upload (edit) failed: %s", exc)
             return _error(500, "Failed to update document content.")
@@ -2744,23 +3548,47 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         # Non-handoff/wave: format-agnostic general append (no validation)
 
         try:
-            existing_content = _get_content(project_id, document_id)
+            existing_content = _get_content(
+                project_id,
+                document_id,
+                stored_s3_key=existing.get("s3_key", {}).get("S"),
+                stored_s3_bucket=existing.get("s3_bucket", {}).get("S"),
+            )
             if existing_content is None:
                 existing_content = ""
             new_content = existing_content + "\n\n" + str(append_text)
             if len(new_content.encode("utf-8")) > MAX_CONTENT_SIZE:
                 return _error(400, f"Appended content exceeds maximum size of {MAX_CONTENT_SIZE} bytes.")
             compliance = _evaluate_markdown_compliance(new_content)
-            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+            # ENC-TSK-P70 AC-3: same stage-then-promote pattern as the content-field
+            # path above (mutually exclusive with it — content/append_content are
+            # already validated as mutually exclusive earlier in this handler).
+            if precondition_kind is not None:
+                s3_key, content_hash, size_bytes = _upload_content_staged(
+                    project_id, document_id, new_content, current_version + 1,
+                )
+                _p70_staging_key = s3_key
+                s3_key = _s3_key(project_id, document_id)
+            else:
+                # ENC-TSK-P72 AC-4: unguarded writes skip the stage-then-promote
+                # dance but _upload_content(version=...) still leaves a version
+                # snapshot behind.
+                s3_key, content_hash, size_bytes = _upload_content(
+                    project_id, document_id, new_content, version=current_version + 1,
+                )
+            # ENC-TSK-P69 / AC-4: recompute + persist the outline on every content write.
+            outline_entries = outline_mod.compute_outline(new_content)
             expr_parts.append("content_hash = :hash")
             expr_parts.append("size_bytes = :size")
             expr_parts.append("s3_key = :s3k")
             expr_parts.append("compliance_score = :cscore")
             expr_parts.append("compliance_warnings = :cwarnings")
             expr_parts.append("compliance_checked_at = :cchecked")
+            expr_parts.append("outline = :outline")
             attr_values[":hash"] = {"S": content_hash}
             attr_values[":size"] = {"N": str(size_bytes)}
             attr_values[":s3k"] = {"S": s3_key}
+            attr_values[":outline"] = {"S": json.dumps(outline_entries)}
             attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
             attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
             attr_values[":cchecked"] = {"S": now}
@@ -2768,22 +3596,155 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             logger.error("S3 append content failed: %s", exc)
             return _error(500, "Failed to append document content.")
 
+    # ENC-TSK-P72 AC-1 / AC-3 / AC-7: build this write's history_event and fold
+    # its append (with sidecar-rollover handling) plus the version_seq/feed_scope
+    # stamp into the SAME expr_parts/attr_values this handler's single UpdateItem
+    # already accumulates — so the event can never exist without its body change
+    # (AC-1) and every write path stamps version_seq (AC-7).
+    if _p72_patch_op == "append_content":
+        # dictionary contract: patch_bytes is the size of the delta applied;
+        # null for whole-document put/patch (a full replace, not a delta).
+        _p72_patch_bytes: Optional[int] = len(str(body.get("append_content") or "").encode("utf-8"))
+    else:
+        _p72_patch_bytes = None
+    if _p72_patch_op in ("patch", "append_content"):
+        _p72_after_hash = content_hash
+        _p72_document_bytes = size_bytes
+        _p72_fields_changed: List[str] = []
+    else:
+        _p72_after_hash = current_content_hash
+        _p72_document_bytes = int(existing.get("size_bytes", {}).get("N", "0"))
+        _p72_fields_changed = sorted(
+            k for k in body.keys() if k not in ("content", "append_content", "if_match", "caused_by", "idempotency_key")
+        )
+    _p72_history_event = _section_history_event(
+        event_id=sections_mod.generate_ulid(), ts=now,
+        actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+        op=_p72_patch_op, anchor=None,
+        before_hash=current_content_hash, after_hash=_p72_after_hash,
+        before_version=current_version, after_version=current_version + 1,
+        patch_bytes=_p72_patch_bytes, document_bytes=_p72_document_bytes,
+        caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+        fields_changed=_p72_fields_changed,
+    )
+    _p72_hist_set_clauses, _p72_hist_values = _history_append_parts(
+        existing.get("history", {}).get("L", []), _p72_history_event, project_id, document_id,
+    )
+    _p72_vseq_set_clauses, _p72_vseq_values = _document_version_seq_update_parts()
+    expr_parts.extend(_p72_hist_set_clauses)
+    expr_parts.extend(_p72_vseq_set_clauses)
+    attr_values.update(_p72_hist_values)
+    attr_values.update(_p72_vseq_values)
+
     update_expr = "SET " + ", ".join(expr_parts)
+
+    # ENC-TSK-P70 AC-3: the comparison and the metadata write are a single
+    # UpdateItem — content_hash = :expected_hash for the hash-form precondition,
+    # else the pre-existing version = :expected (L47 counter form / internal
+    # race-safety net for the unguarded case).
+    _p70_condition_expression = (
+        "content_hash = :expected_hash" if precondition_kind == "hash" else "#ver = :expected"
+    )
 
     try:
         ddb.update_item(
             TableName=DOCUMENTS_TABLE,
             Key={"document_id": {"S": document_id}},
             UpdateExpression=update_expr,
-            ConditionExpression="#ver = :expected",
+            ConditionExpression=_p70_condition_expression,
             ExpressionAttributeNames=attr_names,
             ExpressionAttributeValues=attr_values,
         )
     except ddb.exceptions.ConditionalCheckFailedException:
-        return _error(409, "Document was modified concurrently. Please refresh and try again.")
+        # ENC-TSK-P70 AC-3: a losing guarded writer must not leave its staged S3
+        # object behind — delete it best-effort (WARNING-logged orphan on failure)
+        # rather than ever letting it reach the canonical key.
+        if _p70_staging_key is not None:
+            _delete_s3_object_best_effort(_p70_staging_key)
+        try:
+            _refreshed_resp = ddb.get_item(
+                TableName=DOCUMENTS_TABLE,
+                Key={"document_id": {"S": document_id}},
+                ConsistentRead=True,
+            )
+            _refreshed_item_typed = _refreshed_resp.get("Item") or existing
+            _refreshed = _deserialize_item(_refreshed_item_typed)
+        except Exception:  # noqa: BLE001
+            _refreshed_item_typed = existing
+            _refreshed = _deserialize_item(existing)
+        # ENC-TSK-P72 AC-2: the race lost, but it's still a rejected mutation
+        # (412/409) — record it, keyed off the freshly-read current state.
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=_refreshed_item_typed.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=_p72_patch_op,
+            rejection_code="CONTENT_HASH_MISMATCH" if precondition_kind == "hash" else "REVISION_CONFLICT",
+            anchor=None,
+            before_hash=str(_refreshed.get("content_hash") or ""),
+            before_version=int(_refreshed.get("version") or 0),
+            document_bytes=int(_refreshed.get("size_bytes") or 0),
+            caused_by=body.get("caused_by"), idempotency_key=body.get("idempotency_key"),
+        )
+        if precondition_kind == "hash":
+            return _error(
+                412,
+                (
+                    "Content-hash precondition mismatch: document was modified "
+                    "concurrently. Please re-read the digest and retry."
+                ),
+                code="CONTENT_HASH_MISMATCH",
+                document_id=document_id,
+                expected_hash=precondition_raw,
+                current_hash=str(_refreshed.get("content_hash") or ""),
+                current_version=_refreshed.get("version"),
+                updated_at=str(_refreshed.get("updated_at") or ""),
+                recommended_next_actions=[
+                    "re-read digest via documents.manifest and retry",
+                ],
+            )
+        return _error(
+            409,
+            "Document was modified concurrently. Please refresh and try again.",
+            code="REVISION_CONFLICT",
+            document_id=document_id,
+            expected_revision=str(current_version),
+            current_revision=_refreshed.get("version"),
+            current=_refreshed,
+        )
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
+        if _p70_staging_key is not None:
+            _delete_s3_object_best_effort(_p70_staging_key)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-P70 AC-3: conditional write succeeded — promote the staged content
+    # to the canonical key now (never before the condition passed).
+    if _p70_staging_key is not None:
+        try:
+            _promote_staged_content(_p70_staging_key, project_id, document_id)
+        except Exception as exc:  # noqa: BLE001
+            # Metadata already committed pointing at the canonical key; log loudly
+            # but don't fail the (already-successful) request over a copy hiccup.
+            logger.error(
+                "[ENC-TSK-P70] staged content promote failed after successful "
+                "conditional update: staging_key=%s document_id=%s err=%s",
+                _p70_staging_key, document_id, exc,
+            )
+
+    # ENC-TSK-L07 (B65 AC-5/AC-7): mirror any newly-added related_items onto each
+    # target's related_document_ids.
+    if "related_items" in body:
+        try:
+            old_related_items = [
+                s.get("S", "") for s in existing.get("related_items", {}).get("L", [])
+            ]
+            _mirror_related_items_to_tracker(
+                project_id, document_id, old_related_items, _l07_new_related_items,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-L07] related_items mirror on patch failed (non-fatal): %s", exc)
 
     logger.info("document updated: %s", document_id)
     payload: Dict[str, Any] = {
@@ -2795,7 +3756,1019 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     if compliance is not None:
         payload["compliance_score"] = compliance["compliance_score"]
         payload["compliance_warnings"] = compliance["compliance_warnings"]
+    # ENC-TSK-P70 AC-4: absence of any precondition preserves the pre-existing
+    # unconditional write, flagged in the response, with a fire-and-forget metric.
+    if precondition_absent:
+        payload["precondition_absent"] = True
+        _emit_legacy_write_unguarded_metric(project_id, _derive_write_surface(event, claims))
     return _response(200, payload)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P71: POST /documents/{document_id}/sections — heading-anchored
+# section patch (FR-B1-13..25). Anchor resolution / section extent lean on
+# outline.compute_outline (ENC-TSK-P69); the atomic staged write + content-
+# hash precondition reuse the exact ENC-TSK-P70 helpers (_upload_content_staged
+# / _promote_staged_content / _delete_s3_object_best_effort / _s3_key).
+# Pure editing logic (anchor resolution, op application, rebasing, block-id
+# stamping) lives entirely in sections.py — no boto3 there, so ELR can vendor
+# it via .build_extras the same way outline.py already is.
+#
+# AC-8 / identity note: document_api has no SCI gate anywhere today (grepped
+# — none of its handlers check for an ENC-SES identity or reject non-SCI
+# callers). This handler follows the SAME claims-only _authenticate() pattern
+# every other write path in this file uses; it does not add a new gate. The
+# governance_hash field is validated for PRESENCE only (see AC-1) — no
+# handler in this file checks governance_hash FRESHNESS today either, so
+# GOVERNANCE_STALE (registered in the dictionary contract) is not enforced
+# here, consistent with the rest of document_api.
+# ---------------------------------------------------------------------------
+
+SECTION_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+
+
+def _section_actor(claims: Dict[str, Any]) -> str:
+    claims = claims or {}
+    return str(claims.get("email") or claims.get("sub") or "unknown")
+
+
+def _section_history_event(
+    *,
+    event_id: str,
+    ts: str,
+    actor: str,
+    surface: str,
+    op: str,
+    anchor: Dict[str, Any],
+    before_hash: str,
+    after_hash: str,
+    before_version: int,
+    after_version: int,
+    patch_bytes: Optional[int],
+    document_bytes: int,
+    caused_by: Optional[str],
+    idempotency_key: Optional[str],
+    rejection_code: Optional[str] = None,
+    fields_changed: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """document.history_event shape (ENC-TSK-P82 dictionary contract).
+
+    ENC-TSK-P72: added `fields_changed` (AC-1, non-body metadata-only patches)
+    as an optional kwarg so this stays the single generic event-builder used
+    by every write path (put, patch, append_content, patch_section,
+    metadata-only patch) — existing ENC-TSK-P71 callers that don't pass it
+    keep getting [] exactly as before.
+    """
+    return {
+        "event_id": event_id,
+        "ts": ts,
+        "actor": actor,
+        "surface": surface,
+        "op": op,
+        "rejection_code": rejection_code,
+        "anchor": anchor,
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "before_version": before_version,
+        "after_version": after_version,
+        "patch_bytes": patch_bytes,
+        "document_bytes": document_bytes,
+        "fields_changed": list(fields_changed) if fields_changed else [],
+        "caused_by": caused_by,
+        "idempotency_key": idempotency_key,
+    }
+
+
+def _ddb_value_from_python(value: Any) -> Dict[str, Any]:
+    """Serialize a plain Python value to a DynamoDB typed attribute value.
+    Small local helper — only used for the history-event map appended by
+    _handle_patch_section, so it only needs to cover that shape's types."""
+    if value is None:
+        return {"NULL": True}
+    if isinstance(value, bool):
+        return {"BOOL": value}
+    if isinstance(value, int):
+        return {"N": str(value)}
+    if isinstance(value, dict):
+        return {"M": {k: _ddb_value_from_python(v) for k, v in value.items()}}
+    if isinstance(value, (list, tuple)):
+        return {"L": [_ddb_value_from_python(v) for v in value]}
+    return {"S": str(value)}
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-P72 (FR-B2-1..10): operation log / rejected-event recording / history
+# sidecar / S3 body versioning / documents.history & documents.diff reads.
+# Generalizes the ENC-TSK-P71 in-UpdateItem history-append pattern (above) to
+# every write path (put, patch, append_content, patch_section, metadata-only
+# patch) and adds the AC-2 rejected-event, AC-3 sidecar rollover, AC-6
+# at_version/at_event reconstruction, and AC-7 version_seq/feed_scope
+# stamping. See document.history_event / document.body_versioning in
+# governance_data_dictionary.json for the field contract.
+# ---------------------------------------------------------------------------
+
+HISTORY_INLINE_CAP = 200
+HISTORY_ROLLOVER_BATCH = 100
+FEED_SCOPE = "global"
+DIFF_MAX_BYTES = 200_000
+_VERSION_SEQ_COUNTER_DOCUMENT_ID = "__COUNTER__VERSION_SEQ__"
+
+
+def _history_sidecar_key(project_id: str, document_id: str) -> str:
+    """document.body_versioning.history_sidecar: agent-documents/{project_id}/{document_id}.history.jsonl"""
+    return f"{S3_PREFIX}/{project_id}/{document_id}.history.jsonl"
+
+
+def _ddb_to_python(value: Any) -> Any:
+    """Inverse of _ddb_value_from_python — deserializes a DynamoDB typed
+    attribute value back to a plain Python value. Only needs to cover the
+    M/L/S/N/BOOL/NULL shapes _ddb_value_from_python emits."""
+    if not isinstance(value, dict):
+        return value
+    if "NULL" in value:
+        return None
+    if "BOOL" in value:
+        return bool(value["BOOL"])
+    if "N" in value:
+        raw = value["N"]
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return float(raw)
+    if "S" in value:
+        return value["S"]
+    if "M" in value:
+        return {k: _ddb_to_python(v) for k, v in value["M"].items()}
+    if "L" in value:
+        return [_ddb_to_python(v) for v in value["L"]]
+    return None
+
+
+def _allocate_document_version_seq() -> int:
+    """ENC-TSK-M79 / ENC-TSK-M92 discipline, adapted for DOCUMENTS_TABLE.
+
+    enceladus_shared.version_seq's counter row is keyed on {project_id,
+    record_id} — the tracker table's composite key. DOCUMENTS_TABLE's key
+    schema is document_id-only (infrastructure/cloudformation/01-data.yaml
+    DocumentsTable: KeySchema = [document_id HASH], no record_id attribute),
+    so that shape cannot be reused as-is against this table. This vendors an
+    equivalent monotonic counter scoped to DOCUMENTS_TABLE, keyed on the
+    document_id sentinel below — same atomic if_not_exists+1 pattern, same
+    feed_scope constant, so a future feed_query extension that adds a
+    matching version-seq GSI on DOCUMENTS_TABLE can read it unchanged.
+    """
+    ddb = _get_ddb()
+    resp = ddb.update_item(
+        TableName=DOCUMENTS_TABLE,
+        Key={"document_id": {"S": _VERSION_SEQ_COUNTER_DOCUMENT_ID}},
+        UpdateExpression=(
+            "SET next_num = if_not_exists(next_num, :zero) + :one, "
+            "feed_scope = :scope, record_type = :rtype"
+        ),
+        ExpressionAttributeValues={
+            ":zero": {"N": "0"},
+            ":one": {"N": "1"},
+            ":scope": {"S": FEED_SCOPE},
+            ":rtype": {"S": "counter"},
+        },
+        ReturnValues="UPDATED_NEW",
+    )
+    attrs = resp.get("Attributes") or {}
+    return int(attrs.get("next_num", {"N": "0"})["N"])
+
+
+def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
+    """AC-7: returns (extra_set_clauses, extra_attr_values) stamping
+    version_seq + feed_scope in the SAME UpdateItem as the caller's write."""
+    seq = _allocate_document_version_seq()
+    return (
+        ["version_seq = :p72_vseq", "feed_scope = :p72_fscope"],
+        {":p72_vseq": {"N": str(seq)}, ":p72_fscope": {"S": FEED_SCOPE}},
+    )
+
+
+def _append_history_sidecar(project_id: str, document_id: str, events: List[Dict[str, Any]]) -> None:
+    """AC-3: append `events` (plain-python history_event dicts, oldest first)
+    as newline-delimited JSON to the S3 sidecar, read-modify-append. Only
+    ever called from the rollover path below — the sidecar is append-only,
+    per AC-3's "the sidecar is only ever appended by this handler"."""
+    s3 = _get_s3()
+    key = _history_sidecar_key(project_id, document_id)
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        existing_body = resp["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
+        existing_body = ""
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "NoSuchKey":
+            raise
+        existing_body = ""
+    new_lines = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events)
+    s3.put_object(
+        Bucket=S3_BUCKET, Key=key, Body=(existing_body + new_lines).encode("utf-8"),
+        ContentType="application/x-ndjson",
+    )
+
+
+def _history_append_parts(
+    existing_history_attr: List[Dict[str, Any]],
+    history_event: Dict[str, Any],
+    project_id: str,
+    document_id: str,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """AC-1 / AC-3: returns (extra_set_clauses, extra_attr_values) that append
+    `history_event` to the item's inline `history` list within the SAME
+    UpdateItem as the caller's body/metadata write, performing the AC-3
+    sidecar rollover when the append would exceed HISTORY_INLINE_CAP.
+
+    Deviation from the brief's literal `REMOVE history[0], history[1], ...
+    history[99]` mechanism: DynamoDB evaluates a multi-index REMOVE against
+    the list sequentially as it shrinks, so an ascending-index REMOVE in one
+    UpdateExpression drops the wrong elements once the first removal shifts
+    everything after it — a documented DynamoDB gotcha (the fix is descending
+    order, which is itself easy to get wrong and awkward to unit-test against
+    a mock ddb client that doesn't emulate the shift). This computes the
+    resulting list in Python and SETs it wholesale in one atomic clause
+    instead — identical net effect (oldest N dropped from the inline list,
+    same UpdateItem as the write, oldest flushed to the sidecar first), and
+    is straightforward to unit-test exactly.
+    """
+    new_event_ddb = _ddb_value_from_python(history_event)
+    current_len = len(existing_history_attr)
+    if current_len + 1 > HISTORY_INLINE_CAP:
+        overflow_n = min(HISTORY_ROLLOVER_BATCH, current_len)
+        oldest = [_ddb_to_python({"M": e.get("M", {})}) for e in existing_history_attr[:overflow_n]]
+        _append_history_sidecar(project_id, document_id, oldest)
+        remainder = existing_history_attr[overflow_n:]
+        new_list = remainder + [new_event_ddb]
+        return (
+            [
+                "history = :p72_new_history",
+                "history_overflow_count = if_not_exists(history_overflow_count, :p72_hoc_zero) + :p72_hoc_inc",
+                "history_sidecar_key = :p72_hsk",
+            ],
+            {
+                ":p72_new_history": {"L": new_list},
+                ":p72_hoc_zero": {"N": "0"},
+                ":p72_hoc_inc": {"N": str(overflow_n)},
+                ":p72_hsk": {"S": _history_sidecar_key(project_id, document_id)},
+            },
+        )
+    return (
+        ["history = list_append(if_not_exists(history, :p72_empty_history), :p72_new_event)"],
+        {":p72_empty_history": {"L": []}, ":p72_new_event": {"L": [new_event_ddb]}},
+    )
+
+
+def _append_rejected_event(
+    *,
+    document_id: str,
+    project_id: str,
+    existing_history_attr: List[Dict[str, Any]],
+    event_id: str,
+    ts: str,
+    actor: str,
+    surface: str,
+    op: str,
+    rejection_code: str,
+    anchor: Optional[Dict[str, Any]],
+    before_hash: str,
+    before_version: int,
+    document_bytes: int,
+    caused_by: Optional[str],
+    idempotency_key: Optional[str],
+) -> None:
+    """AC-2: rejected mutations append a `<op>-rejected` event WITHOUT
+    advancing version, via a SEPARATE unconditional UpdateItem that touches
+    only history (+ AC-3 rollover fields, + AC-7 version_seq/feed_scope) —
+    never version/content_hash. Best-effort: a failure here must never turn a
+    legitimate 412/409/404 rejection response into a 500, so exceptions are
+    logged and swallowed (same discipline as _mirror_related_items_to_tracker
+    / _emit_legacy_write_unguarded_metric elsewhere in this file).
+    """
+    try:
+        rejected_event = _section_history_event(
+            event_id=event_id, ts=ts, actor=actor, surface=surface,
+            op=f"{op}-rejected", anchor=anchor,
+            before_hash=before_hash, after_hash=before_hash,
+            before_version=before_version, after_version=before_version,
+            patch_bytes=None, document_bytes=document_bytes,
+            caused_by=caused_by, idempotency_key=idempotency_key,
+            rejection_code=rejection_code,
+        )
+        set_clauses, values = _history_append_parts(
+            existing_history_attr, rejected_event, project_id, document_id,
+        )
+        vseq_clauses, vseq_values = _document_version_seq_update_parts()
+        set_clauses = set_clauses + vseq_clauses
+        values = {**values, **vseq_values}
+        _get_ddb().update_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            UpdateExpression="SET " + ", ".join(set_clauses),
+            ExpressionAttributeValues=values,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[ENC-TSK-P72] rejected-event append failed (non-fatal): document_id=%s op=%s err=%s",
+            document_id, op, exc,
+        )
+
+
+def _load_document_history_events(
+    document_id: str, project_id: str, inline_history_attr: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """AC-5: merge sidecar (older) then inline (recent) into one list of
+    plain-python history_event dicts, ascending ts (caller may re-sort)."""
+    events: List[Dict[str, Any]] = []
+    try:
+        s3 = _get_s3()
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=_history_sidecar_key(project_id, document_id))
+        raw = resp["Body"].read().decode("utf-8")
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+    except Exception:  # noqa: BLE001 — NoSuchKey (no sidecar yet) or any read failure: no sidecar events.
+        pass
+    for e in inline_history_attr:
+        events.append(_ddb_to_python({"M": e.get("M", {})}))
+    return events
+
+
+def _synthesize_legacy_event(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """AC-7: "pre-existing history entries are surfaced by documents.history
+    as op=legacy without hashes, earliest first" — a document written before
+    ENC-TSK-P72 (or before ENC-TSK-P71 for that matter) has no `history`
+    attribute at all. documents.history must not return an empty list for
+    such a document, so synthesize one op=legacy placeholder from the item's
+    own create/update stamps."""
+    return {
+        "event_id": f"legacy-{doc.get('document_id')}",
+        "ts": str(doc.get("created_at") or doc.get("updated_at") or ""),
+        "actor": str(doc.get("created_by") or "unknown"),
+        "surface": "unknown",
+        "op": "legacy",
+        "rejection_code": None,
+        "anchor": None,
+        "before_hash": None,
+        "after_hash": None,
+        "before_version": None,
+        "after_version": doc.get("version"),
+        "patch_bytes": None,
+        "document_bytes": doc.get("size_bytes"),
+        "fields_changed": [],
+        "caused_by": None,
+        "idempotency_key": None,
+    }
+
+
+def _version_object_exists(
+    project_id: str, document_id: str, version: Optional[int], cache: Dict[int, bool],
+) -> bool:
+    """AC-5 diff_available: HeadObject on a versions/ snapshot key, memoized
+    per-request via `cache` (the brief's "cache per request" note)."""
+    if version is None:
+        return False
+    if version in cache:
+        return cache[version]
+    try:
+        _get_s3().head_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, version))
+        cache[version] = True
+    except Exception:  # noqa: BLE001
+        cache[version] = False
+    return cache[version]
+
+
+def _handle_document_history(document_id: str, qs: Dict[str, Any]) -> Dict:
+    """GET /documents/{document_id}/history (AC-5, ENC-TSK-P91 route)."""
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+
+    doc = _deserialize_item(item)
+    project_id = str(doc.get("project_id") or "")
+    inline_history = item.get("history", {}).get("L", [])
+    events = _load_document_history_events(document_id, project_id, inline_history)
+    if not events:
+        events = [_synthesize_legacy_event(doc)]
+
+    since = qs.get("since")
+    until = qs.get("until")
+    actor_filter = qs.get("actor")
+    op_filter = qs.get("op")
+    block_id_filter = qs.get("anchor.block_id") or qs.get("anchor_block_id")
+
+    def _keep(e: Dict[str, Any]) -> bool:
+        ts = str(e.get("ts") or "")
+        if since and ts < str(since):
+            return False
+        if until and ts > str(until):
+            return False
+        if actor_filter and e.get("actor") != actor_filter:
+            return False
+        if op_filter and e.get("op") != op_filter:
+            return False
+        if block_id_filter:
+            anchor = e.get("anchor") or {}
+            if not isinstance(anchor, dict) or anchor.get("block_id") != block_id_filter:
+                return False
+        return True
+
+    filtered = [e for e in events if _keep(e)]
+    filtered.sort(key=lambda e: str(e.get("ts") or ""))
+
+    try:
+        page_size = int(qs.get("page_size") or 50)
+    except (TypeError, ValueError):
+        page_size = 50
+    page_size = max(1, min(page_size, HISTORY_INLINE_CAP))
+
+    offset = 0
+    cursor = qs.get("cursor")
+    if cursor:
+        try:
+            offset = max(0, int(json.loads(base64.b64decode(cursor).decode("utf-8")).get("offset", 0)))
+        except Exception:  # noqa: BLE001
+            offset = 0
+
+    page = filtered[offset: offset + page_size]
+    next_offset = offset + page_size
+    next_cursor = None
+    if next_offset < len(filtered):
+        next_cursor = base64.b64encode(json.dumps({"offset": next_offset}).encode("utf-8")).decode("ascii")
+
+    exists_cache: Dict[int, bool] = {}
+    out_events = []
+    for e in page:
+        e = dict(e)
+        e["diff_available"] = bool(
+            _version_object_exists(project_id, document_id, e.get("before_version"), exists_cache)
+            and _version_object_exists(project_id, document_id, e.get("after_version"), exists_cache)
+        )
+        out_events.append(e)
+
+    return _response(200, {
+        "success": True,
+        "document_id": document_id,
+        "events": out_events,
+        "total_matched": len(filtered),
+        "next_cursor": next_cursor,
+    })
+
+
+def _handle_document_diff(document_id: str, qs: Dict[str, Any]) -> Dict:
+    """GET /documents/{document_id}/diff?from=&to= (AC-5, ENC-TSK-P91 route)."""
+    try:
+        from_version = int(qs.get("from"))
+        to_version = int(qs.get("to"))
+    except (TypeError, ValueError):
+        return _error(400, "Query parameters 'from' and 'to' must be integers.", code="INVALID_INPUT")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Document not found: {document_id}")
+    project_id = item.get("project_id", {}).get("S", "")
+
+    s3 = _get_s3()
+
+    def _load_version(v: int) -> Optional[str]:
+        try:
+            r = s3.get_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, v))
+            return r["Body"].read().decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+
+    from_content = _load_version(from_version)
+    to_content = _load_version(to_version)
+    missing = [v for v, c in ((from_version, from_content), (to_version, to_content)) if c is None]
+    if missing:
+        return _error(
+            404, f"Version object(s) not found: {missing}", code="VERSION_NOT_FOUND",
+            document_id=document_id, missing_versions=missing,
+        )
+
+    from_hash = hashlib.sha256(from_content.encode("utf-8")).hexdigest()
+    to_hash = hashlib.sha256(to_content.encode("utf-8")).hexdigest()
+    diff_text = sections_mod.unified_diff_for_patch(from_content, to_content)
+    truncated = False
+    if len(diff_text.encode("utf-8")) > DIFF_MAX_BYTES:
+        diff_text = diff_text.encode("utf-8")[:DIFF_MAX_BYTES].decode("utf-8", errors="ignore")
+        truncated = True
+
+    return _response(200, {
+        "success": True,
+        "document_id": document_id,
+        "from_version": from_version,
+        "to_version": to_version,
+        "from_hash": from_hash,
+        "to_hash": to_hash,
+        "diff": diff_text,
+        "truncated": truncated,
+    })
+
+
+def _get_document_at_version(
+    document_id: str,
+    doc: Dict[str, Any],
+    item_typed: Dict[str, Any],
+    at_version_raw: Optional[str],
+    at_event_raw: Optional[str],
+) -> Dict:
+    """AC-6: documents.get?at_version=&at_event= — reconstruct the body from
+    the S3 version object, verifying content_hash against the recording
+    event's after_hash. Mismatch => 500 INTEGRITY_VIOLATION + CloudWatch
+    metric (AC-4 says version objects are never overwritten, so this should
+    be unreachable in practice; the check exists to catch that invariant
+    breaking rather than silently serving corrupt content)."""
+    project_id = str(doc.get("project_id") or "")
+    inline_history = item_typed.get("history", {}).get("L", [])
+    events = _load_document_history_events(document_id, project_id, inline_history)
+
+    target_event: Optional[Dict[str, Any]] = None
+    target_version: Optional[int] = None
+    if at_event_raw:
+        for e in events:
+            if e.get("event_id") == at_event_raw:
+                target_event = e
+                break
+        if target_event is None:
+            return _error(
+                404, f"No history event '{at_event_raw}' for document {document_id}.",
+                code="EVENT_NOT_FOUND", document_id=document_id,
+            )
+        target_version = target_event.get("after_version")
+    else:
+        try:
+            target_version = int(at_version_raw)
+        except (TypeError, ValueError):
+            return _error(400, "'at_version' must be an integer.", code="INVALID_INPUT")
+        for e in events:
+            if e.get("after_version") == target_version:
+                target_event = e
+                break
+
+    if target_version is None:
+        return _error(
+            400, "Could not resolve a version from the given at_version/at_event.",
+            code="INVALID_INPUT", document_id=document_id,
+        )
+
+    key = _staging_s3_key(project_id, document_id, target_version)
+    try:
+        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)
+        content = resp["Body"].read().decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-P72] version object read failed: key=%s err=%s", key, exc)
+        return _error(
+            404, f"Version {target_version} not found for document {document_id}.",
+            code="VERSION_NOT_FOUND", document_id=document_id, version=target_version,
+        )
+
+    actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    expected_hash = target_event.get("after_hash") if target_event else None
+    if expected_hash and actual_hash != expected_hash:
+        try:
+            _get_cloudwatch().put_metric_data(
+                Namespace="Enceladus/Docstore",
+                MetricData=[{
+                    "MetricName": "IntegrityViolation",
+                    "Dimensions": [{"Name": "DocumentId", "Value": document_id}],
+                    "Value": 1,
+                    "Unit": "Count",
+                }],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-P72] IntegrityViolation metric emit failed (non-fatal): %s", exc)
+        return _error(
+            500,
+            f"Integrity check failed for document {document_id} at version {target_version}.",
+            code="INTEGRITY_VIOLATION",
+            document_id=document_id, version=target_version,
+            expected_hash=expected_hash, actual_hash=actual_hash,
+        )
+
+    doc_out = dict(doc)
+    doc_out["content"] = content
+    doc_out["version"] = target_version
+    doc_out["content_hash"] = actual_hash
+    doc_out["reconstructed"] = True
+    payload = {"success": True, "document": doc_out, **doc_out}
+    return _response(200, payload)
+
+
+def _handle_patch_section(event: Dict, claims: Dict, document_id: str) -> Dict:
+    """POST /documents/{document_id}/sections (ENC-TSK-P71, FR-B1-13..25)."""
+    try:
+        body_raw = event.get("body") or "{}"
+        if event.get("isBase64Encoded"):
+            body_raw = base64.b64decode(body_raw).decode("utf-8")
+        req = json.loads(body_raw)
+    except (ValueError, TypeError):
+        return _error(400, "Invalid JSON body.")
+    if not isinstance(req, dict):
+        return _error(400, "Invalid JSON body.")
+
+    # --- AC-1: request-shape validation (cheap, no DB access yet) ---------
+    op = req.get("op")
+    if op not in sections_mod.VALID_OPS:
+        return _error(
+            400,
+            f"Field 'op' must be one of {sorted(sections_mod.VALID_OPS)}.",
+            code="INVALID_INPUT",
+            received=op,
+        )
+
+    anchor = req.get("anchor")
+    if not isinstance(anchor, dict) or not (anchor.get("block_id") or anchor.get("heading_path")):
+        return _error(
+            400,
+            "Field 'anchor' is required and must supply block_id or heading_path.",
+            code="ANCHOR_INVALID",
+        )
+
+    section_body = req.get("body")
+    body_err = sections_mod.validate_op_and_body(op, section_body)
+    if body_err:
+        code, message = body_err
+        return _error(400, message, code=code)
+
+    if section_body:
+        received_body_bytes = len(section_body.encode("utf-8"))
+        if received_body_bytes > sections_mod.MAX_BODY_BYTES:
+            return _error(
+                413,
+                f"body exceeds {sections_mod.MAX_BODY_BYTES} bytes.",
+                code="BODY_TOO_LARGE",
+                limit_bytes=sections_mod.MAX_BODY_BYTES,
+                received_bytes=received_body_bytes,
+            )
+
+    if not str(req.get("governance_hash") or "").strip():
+        return _error(400, "Field 'governance_hash' is required.", code="INVALID_INPUT")
+
+    include_heading = bool(req.get("include_heading", False))
+    rebase_headings_flag = bool(req.get("rebase_headings", True))
+    idempotency_key = req.get("idempotency_key")
+    caused_by = req.get("caused_by")
+    dry_run = bool(req.get("dry_run", False))
+
+    # --- AC-1 / AC-6: if_match is REQUIRED and hash-only for patch_section
+    # (unlike the whole-document PATCH path's optional if_match, which also
+    # accepts the ENC-TSK-L47 version-counter form). --------------------
+    precondition_raw = _extract_precondition(event, req)
+    if precondition_raw is None:
+        return _error(
+            428,
+            "if_match is required for patch_section — there is no unconditional mode.",
+            code="PRECONDITION_REQUIRED",
+            document_id=document_id,
+        )
+    if _classify_precondition(precondition_raw) != "hash":
+        return _error(
+            400,
+            (
+                f"Malformed if_match '{precondition_raw}': patch_section requires a "
+                "64-hex sha256 content_hash (the version-counter form is not accepted here)."
+            ),
+            code="PRECONDITION_MALFORMED",
+            document_id=document_id,
+            received=precondition_raw,
+        )
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            ConsistentRead=True,
+        )
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+
+    existing = resp.get("Item")
+    if not existing:
+        return _error(404, f"Document not found: {document_id}")
+
+    existing_plain = _deserialize_item(existing)
+    project_id = str(existing_plain.get("project_id") or "")
+    current_version = int(existing_plain.get("version") or 0)
+    current_content_hash = str(existing_plain.get("content_hash") or "")
+    now = _now_z()
+
+    # --- AC-6: idempotency replay, checked BEFORE the content-hash
+    # precondition — a retry necessarily carries the PRE-mutation if_match,
+    # which no longer equals current_content_hash once the first call has
+    # already landed. ------------------------------------------------------
+    idem_map_raw = (existing.get("section_idempotency") or {}).get("M", {})
+    if idempotency_key:
+        stored = (idem_map_raw.get(str(idempotency_key)) or {}).get("M")
+        if stored:
+            stored_if_match = (stored.get("if_match") or {}).get("S")
+            try:
+                expires_at = int((stored.get("expires_at") or {}).get("N", "0"))
+            except (TypeError, ValueError):
+                expires_at = 0
+            if stored_if_match == precondition_raw and expires_at > int(time.time()):
+                try:
+                    replay_payload = json.loads((stored.get("response_json") or {}).get("S", "{}"))
+                except (ValueError, TypeError):
+                    replay_payload = {}
+                replay_payload["replayed"] = True
+                replay_payload["code"] = "IDEMPOTENT_REPLAY"
+                return _response(200, replay_payload)
+
+    if precondition_raw != current_content_hash:
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=existing.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=op, rejection_code="CONTENT_HASH_MISMATCH", anchor=anchor,
+            before_hash=current_content_hash, before_version=current_version,
+            document_bytes=int(existing_plain.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
+        _emit_patch_section_outcome_metric(
+            project_id, _derive_write_surface(event, claims), "PatchSectionRejected412",
+        )
+        return _error(
+            412,
+            (
+                f"Content-hash precondition mismatch: client expected hash "
+                f"'{precondition_raw}', server is at '{current_content_hash}'."
+            ),
+            code="CONTENT_HASH_MISMATCH",
+            document_id=document_id,
+            expected_hash=precondition_raw,
+            current_hash=current_content_hash,
+            current_version=current_version,
+            updated_at=str(existing_plain.get("updated_at") or ""),
+            recommended_next_actions=["re-read digest via documents.manifest and retry"],
+        )
+
+    # ENC-TSK-P71: use compute_outline_with_spans (not the persisted plain
+    # `outline` attribute / _resolve_outline) — apply_patch() needs each
+    # entry's header_start_ln/header_end_ln to locate the heading construct
+    # in `content`, and this handler is about to mutate the body anyway, so
+    # recomputing fresh from the just-fetched content is also the safest
+    # choice (no risk of drift against a stale persisted outline).
+    content = _get_content(
+        project_id, document_id,
+        stored_s3_key=existing_plain.get("s3_key"),
+        stored_s3_bucket=existing_plain.get("s3_bucket"),
+    )
+    if content is None:
+        return _error(500, "Failed to load document content.")
+    outline_entries = outline_mod.compute_outline_with_spans(content)
+
+    # --- AC-2: anchor resolution ------------------------------------------
+    try:
+        resolved_entry = sections_mod.resolve_anchor(outline_entries, anchor)
+    except sections_mod.AnchorError as exc:
+        details = dict(exc.details)
+        if "outline" in details:
+            # Strip the P71-internal span fields before they leak into the
+            # ANCHOR_NOT_FOUND response's `outline` (must match the public
+            # document.digest.outline shape).
+            details["outline"] = [
+                {k: v for k, v in e.items() if k not in ("header_start_ln", "header_end_ln")}
+                for e in details["outline"]
+            ]
+        # ENC-TSK-P72 AC-2: ANCHOR_NOT_FOUND (404) / ANCHOR_AMBIGUOUS (409) are
+        # both rejected mutations per the AC-2 code list.
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=existing.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=_section_actor(claims), surface=_derive_write_surface(event, claims),
+            op=op, rejection_code=exc.code, anchor=anchor,
+            before_hash=current_content_hash, before_version=current_version,
+            document_bytes=int(existing_plain.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
+        _emit_patch_section_outcome_metric(
+            project_id,
+            _derive_write_surface(event, claims),
+            "AnchorNotFound" if exc.status == 404 else "PatchSectionRejected409",
+        )
+        return _error(exc.status, exc.message, code=exc.code, document_id=document_id, **details)
+
+    # --- AC-3/AC-4/AC-5: apply the op in memory ----------------------------
+    result = sections_mod.apply_patch(
+        content, resolved_entry, op, section_body,
+        include_heading=include_heading, rebase_headings=rebase_headings_flag,
+    )
+    new_content = result["content"]
+    new_content_bytes = new_content.encode("utf-8")
+    new_size = len(new_content_bytes)
+
+    if new_size > MAX_CONTENT_SIZE:
+        return _error(
+            413,
+            f"Patched document would exceed {MAX_CONTENT_SIZE} bytes.",
+            code="DOCUMENT_TOO_LARGE",
+            limit_bytes=MAX_CONTENT_SIZE,
+            would_be_bytes=new_size,
+        )
+
+    new_hash = hashlib.sha256(new_content_bytes).hexdigest()
+    new_outline_entries = outline_mod.compute_outline(new_content)
+
+    anchor_resolved = {
+        "heading_path": resolved_entry.get("heading_path"),
+        "level": resolved_entry.get("level"),
+        "ordinal": resolved_entry.get("ordinal"),
+        "block_id": result["block_id"],
+    }
+
+    # --- AC-7: dry_run preview, no write ------------------------------------
+    if dry_run:
+        payload = {
+            "success": True,
+            "dry_run": True,
+            "document_id": document_id,
+            "content_hash": new_hash,
+            "size_bytes": new_size,
+            "bytes_changed": result["bytes_changed"],
+            "anchor_resolved": anchor_resolved,
+            "outline": new_outline_entries,
+            "diff": sections_mod.unified_diff_for_patch(content, new_content),
+        }
+        return _response(200, payload)
+
+    # --- AC-6: atomic staged write + conditional UpdateItem ----------------
+    next_version = current_version + 1
+    event_id = sections_mod.generate_ulid()
+    surface = _derive_write_surface(event, claims)
+    actor = _section_actor(claims)
+
+    staged_key, _staged_hash, _staged_size = _upload_content_staged(
+        project_id, document_id, new_content, next_version,
+    )
+    canonical_key = _s3_key(project_id, document_id)
+
+    history_event = _section_history_event(
+        event_id=event_id, ts=now, actor=actor, surface=surface, op=op,
+        anchor=anchor_resolved, before_hash=current_content_hash, after_hash=new_hash,
+        before_version=current_version, after_version=next_version,
+        patch_bytes=(len(section_body.encode("utf-8")) if section_body else None),
+        document_bytes=new_size, caused_by=caused_by, idempotency_key=idempotency_key,
+    )
+
+    response_payload: Dict[str, Any] = {
+        "success": True,
+        "document_id": document_id,
+        "version": next_version,
+        "content_hash": new_hash,
+        "size_bytes": new_size,
+        "event_id": event_id,
+        "anchor_resolved": anchor_resolved,
+        "bytes_changed": result["bytes_changed"],
+        "outline": new_outline_entries,
+    }
+
+    set_clauses = [
+        "content_hash = :hash",
+        "size_bytes = :size",
+        "s3_key = :s3k",
+        "outline = :outline",
+        "#ver = #ver + :one",
+    ]
+    attr_names: Dict[str, str] = {"#ver": "version"}
+    attr_values: Dict[str, Any] = {
+        ":expected_hash": {"S": current_content_hash},
+        ":hash": {"S": new_hash},
+        ":size": {"N": str(new_size)},
+        ":s3k": {"S": canonical_key},
+        ":outline": {"S": json.dumps(new_outline_entries)},
+        ":one": {"N": "1"},
+    }
+    # ENC-TSK-P72 AC-1 / AC-3 / AC-7: same history-append (+ sidecar rollover)
+    # + version_seq/feed_scope stamp as _handle_patch, folded into this
+    # handler's single conditional UpdateItem.
+    _p72_hist_set_clauses, _p72_hist_values = _history_append_parts(
+        existing.get("history", {}).get("L", []), history_event, project_id, document_id,
+    )
+    _p72_vseq_set_clauses, _p72_vseq_values = _document_version_seq_update_parts()
+    set_clauses.extend(_p72_hist_set_clauses)
+    set_clauses.extend(_p72_vseq_set_clauses)
+    attr_values.update(_p72_hist_values)
+    attr_values.update(_p72_vseq_values)
+
+    if idempotency_key:
+        # AC-6: whole-map rewrite (never a nested `section_idempotency.#key`
+        # SET alongside a top-level `section_idempotency = ...` SET in the
+        # same UpdateExpression — DynamoDB rejects overlapping document
+        # paths). Opportunistically prunes expired (>24h) entries too.
+        now_epoch = int(time.time())
+        pruned_map: Dict[str, Any] = {}
+        for k, v in idem_map_raw.items():
+            try:
+                exp = int(((v or {}).get("M") or {}).get("expires_at", {}).get("N", "0"))
+            except (TypeError, ValueError):
+                exp = 0
+            if exp > now_epoch:
+                pruned_map[k] = v
+        pruned_map[str(idempotency_key)] = {
+            "M": {
+                "if_match": {"S": precondition_raw},
+                "response_json": {"S": json.dumps(response_payload)},
+                "expires_at": {"N": str(now_epoch + SECTION_IDEMPOTENCY_TTL_SECONDS)},
+            }
+        }
+        set_clauses.append("section_idempotency = :idem_map")
+        attr_values[":idem_map"] = {"M": pruned_map}
+
+    update_expr = "SET " + ", ".join(set_clauses)
+
+    try:
+        ddb.update_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            UpdateExpression=update_expr,
+            ConditionExpression="content_hash = :expected_hash",
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        # AC-6: a losing racer must not leave its staged S3 object behind,
+        # and must never promote it to the canonical key — same discipline
+        # as ENC-TSK-P70's whole-document guarded write.
+        _delete_s3_object_best_effort(staged_key)
+        try:
+            _refreshed_resp = ddb.get_item(
+                TableName=DOCUMENTS_TABLE, Key={"document_id": {"S": document_id}}, ConsistentRead=True,
+            )
+            _refreshed_item_typed = _refreshed_resp.get("Item") or existing
+            _refreshed = _deserialize_item(_refreshed_item_typed)
+        except Exception:  # noqa: BLE001
+            _refreshed_item_typed = existing
+            _refreshed = existing_plain
+        _append_rejected_event(
+            document_id=document_id, project_id=project_id,
+            existing_history_attr=_refreshed_item_typed.get("history", {}).get("L", []),
+            event_id=sections_mod.generate_ulid(), ts=now,
+            actor=actor, surface=surface, op=op, rejection_code="CONTENT_HASH_MISMATCH",
+            anchor=anchor_resolved,
+            before_hash=str(_refreshed.get("content_hash") or ""),
+            before_version=int(_refreshed.get("version") or 0),
+            document_bytes=int(_refreshed.get("size_bytes") or 0),
+            caused_by=caused_by, idempotency_key=idempotency_key,
+        )
+        return _error(
+            412,
+            "Content-hash precondition mismatch: document was modified concurrently.",
+            code="CONTENT_HASH_MISMATCH",
+            document_id=document_id,
+            expected_hash=precondition_raw,
+            current_hash=str(_refreshed.get("content_hash") or ""),
+            current_version=_refreshed.get("version"),
+            updated_at=str(_refreshed.get("updated_at") or ""),
+            recommended_next_actions=["re-read digest via documents.manifest and retry"],
+        )
+    except Exception as exc:
+        logger.error("update_item failed (patch_section): %s", exc)
+        _delete_s3_object_best_effort(staged_key)
+        return _error(500, "Database write failed.")
+
+    # AC-6: conditional write succeeded — promote staged content now.
+    try:
+        _promote_staged_content(staged_key, project_id, document_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[ENC-TSK-P71] staged content promote failed after successful "
+            "conditional update: staging_key=%s document_id=%s err=%s",
+            staged_key, document_id, exc,
+        )
+
+    logger.info(
+        "document section patched: %s op=%s anchor=%s event_id=%s",
+        document_id, op, anchor_resolved, event_id,
+    )
+    _emit_patch_section_outcome_metric(
+        project_id, surface, "PatchSectionAccepted",
+        patch_bytes=(len(section_body.encode("utf-8")) if section_body else 0),
+        document_bytes=new_size,
+    )
+    return _response(200, response_payload)
 
 
 # ---------------------------------------------------------------------------
@@ -2937,8 +4910,24 @@ def _handle_governance_sync_push(event: Dict) -> Dict:
 # Path parsing
 # ---------------------------------------------------------------------------
 
-def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict]:
-    """Parse method, document_id, and query params from event."""
+def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool, bool, bool]:
+    """Parse method, document_id, query params, and manifest/sections/history/
+    diff route flags from event.
+
+    ENC-TSK-P69: the 4th element (`is_manifest`) is True for
+    GET /documents/{documentId}/manifest — checked before the bare-ID
+    fallback regex so the "manifest" path segment is never mistaken for
+    part of the document_id itself.
+
+    ENC-TSK-P71: the 5th element (`is_sections`) is True for
+    POST /documents/{documentId}/sections, same reasoning — the "sections"
+    path segment must never be mistaken for part of the document_id.
+
+    ENC-TSK-P72: the 6th/7th elements (`is_history` / `is_diff`) are True for
+    GET /documents/{documentId}/history and GET /documents/{documentId}/diff
+    (ENC-TSK-P91 routes that reach this Lambda but, before this task, fell
+    through to the bare document GET handler and 400'd) — same reasoning.
+    """
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
@@ -2951,21 +4940,57 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict]:
         or path_params.get("document_id")
         or None
     )
+    is_manifest = False
+    is_sections = False
+    is_history = False
+    is_diff = False
 
     if not document_id:
         # Handle arbitrary API mappings/stage prefixes by matching the tail.
-        match = re.search(r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/?$", raw_path)
-        if match:
-            document_id = match.group("documentId")
-        elif re.search(r"/documents/search/?$", raw_path):
-            document_id = "search"
+        manifest_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/manifest/?$", raw_path,
+        )
+        sections_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/sections/?$", raw_path,
+        )
+        history_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/history/?$", raw_path,
+        )
+        diff_match = re.search(
+            r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/diff/?$", raw_path,
+        )
+        if manifest_match:
+            document_id = manifest_match.group("documentId")
+            is_manifest = True
+        elif sections_match:
+            document_id = sections_match.group("documentId")
+            is_sections = True
+        elif history_match:
+            document_id = history_match.group("documentId")
+            is_history = True
+        elif diff_match:
+            document_id = diff_match.group("documentId")
+            is_diff = True
+        else:
+            match = re.search(r"/documents/(?P<documentId>[A-Za-z0-9_-]+)/?$", raw_path)
+            if match:
+                document_id = match.group("documentId")
+            elif re.search(r"/documents/search/?$", raw_path):
+                document_id = "search"
+    else:
+        is_manifest = bool(re.search(r"/manifest/?$", raw_path))
+        is_sections = bool(re.search(r"/sections/?$", raw_path))
+        is_history = bool(re.search(r"/history/?$", raw_path))
+        is_diff = bool(re.search(r"/diff/?$", raw_path))
 
     qs = event.get("queryStringParameters") or {}
     logger.info(
-        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s",
-        method, raw_path, document_id, sorted(qs.keys()),
+        "request parse: method=%s raw_path=%s document_id=%s qs_keys=%s is_manifest=%s "
+        "is_sections=%s is_history=%s is_diff=%s",
+        method, raw_path, document_id, sorted(qs.keys()), is_manifest, is_sections,
+        is_history, is_diff,
     )
-    return method, document_id, qs
+    return method, document_id, qs, is_manifest, is_sections, is_history, is_diff
 
 
 # ---------------------------------------------------------------------------
@@ -2979,7 +5004,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if event.get("_governance_sync_push"):
         return _handle_governance_sync_push(event)
 
-    method, document_id, qs = _parse_request(event)
+    method, document_id, qs, is_manifest, is_sections, is_history, is_diff = _parse_request(event)
 
     # CORS preflight
     if method == "OPTIONS":
@@ -2992,10 +5017,21 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return auth_err
 
     # Route
-    if method == "PUT" or method == "POST":
+    if method == "PUT":
+        return _handle_put(event, claims)
+    elif method == "POST":
+        # ENC-TSK-P71: POST /documents/{documentId}/sections — heading-anchored
+        # section patch. Any other POST keeps the pre-existing "create" route.
+        if is_sections:
+            if not document_id:
+                return _error(400, "POST .../sections requires a document ID in the path.")
+            return _handle_patch_section(event, claims, document_id)
         return _handle_put(event, claims)
     elif method == "GET":
-        return _handle_get(event, claims, document_id)
+        return _handle_get(
+            event, claims, document_id,
+            is_manifest=is_manifest, is_history=is_history, is_diff=is_diff,
+        )
     elif method == "PATCH":
         if not document_id:
             return _error(400, "PATCH requires a document ID in the path.")

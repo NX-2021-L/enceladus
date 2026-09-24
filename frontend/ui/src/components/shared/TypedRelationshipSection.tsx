@@ -143,7 +143,7 @@ export function TypedRelationshipSection({
                   <Link
                     key={`${relType}-${edge.target_id}`}
                     to={getRecordPath(edge.target_id, recordType)}
-                    className="flex items-start gap-2 rounded-md bg-slate-700/50 p-2 hover:bg-slate-700 transition-colors"
+                    className="flex items-start gap-2 rounded-lg bg-slate-700/50 p-2 border border-[color:var(--border-subtle)] hover:border-[color:var(--border-hover)] hover:bg-slate-700 transition-colors"
                   >
                     <div className="flex items-center gap-2 flex-shrink-0">
                       <span className="font-mono text-xs text-blue-400">{edge.target_id}</span>

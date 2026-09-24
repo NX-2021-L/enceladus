@@ -1,0 +1,21 @@
+<!-- @dsCard group="v2 · Layout" viewport="720x250" name="ExpandableSection" subtitle="Teal chevron · mono counter" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}.grid{display:flex;flex-direction:column;gap:10px;max-width:560px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { ExpandableSection } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e('div',{className:'grid'},
+    e(ExpandableSection,{headerText:'Evidence chain',headerCounter:'(7 fields)',defaultExpanded:true},
+      'Commit SHA validated against GitHub API · PR merge timestamp within 60s tolerance · deployment evidence from Actions Jobs API.'),
+    e(ExpandableSection,{headerText:'Constitutional pillars',headerCounter:'(4)'},
+      'force/surrender · convergence/play · efficiency/love · intention/flow'),
+    e(ExpandableSection,{headerText:'Related records',headerCounter:'(3)'},'ENC-TSK-A58 · ENC-ISS-041 · ENC-LSN-004'))
+);
+</script>
+</body></html>

@@ -1,0 +1,41 @@
+/* ============================================================
+ * ENCELADUS v2 · Component token layer
+ * Cloudscape-derived component vocabulary, deep re-branded.
+ * Dark only. Orbital easing. Telemetry as decoration.
+ * ============================================================ */
+
+:root {
+  /* ── Controls ─────────────────────────────────────────── */
+  --v2-control-height: 32px;            /* @kind spacing */
+  --v2-control-height-sm: 24px;         /* @kind spacing */
+  --v2-control-padding-x: 16px;         /* @kind spacing */
+  --v2-control-radius: 6px;             /* @kind radius */
+  --v2-chip-radius: 4px;                /* @kind radius */
+  --v2-panel-radius: 8px;               /* @kind radius */
+
+  /* ── Field surfaces ───────────────────────────────────── */
+  --v2-field-bg: #0D1220;               /* @kind color */
+  --v2-field-border: rgba(61, 155, 168, 0.25);   /* @kind color */
+  --v2-field-border-hover: rgba(61, 155, 168, 0.45); /* @kind color */
+  --v2-field-border-focus: #3D9BA8;     /* @kind color */
+  --v2-field-placeholder: #4A5E68;      /* @kind color */
+
+  /* ── Focus ring ───────────────────────────────────────── */
+  --v2-focus-ring: 0 0 0 2px rgba(61, 155, 168, 0.35); /* @kind shadow */
+
+  /* ── Dividers / structure ─────────────────────────────── */
+  --v2-divider: rgba(61, 155, 168, 0.12);   /* @kind color */
+  --v2-panel-border: rgba(61, 155, 168, 0.2); /* @kind color */
+
+  /* ── Status (Cloudscape → Enceladus mapping) ──────────── */
+  --v2-status-success: #3D9BA8;         /* @kind color */
+  --v2-status-error: #C85060;           /* @kind color */
+  --v2-status-warning: #C9A15C;         /* @kind color */
+  --v2-status-info: #7AC8D4;            /* @kind color */
+  --v2-status-pending: #8A8CB5;         /* @kind color */
+  --v2-status-stopped: #6B8A94;         /* @kind color */
+
+  /* ── Overlays ─────────────────────────────────────────── */
+  --v2-overlay-bg: rgba(10, 10, 15, 0.85);  /* @kind color */
+  --v2-dropdown-shadow: 0 8px 32px rgba(0, 0, 0, 0.6); /* @kind shadow */
+}

@@ -1,0 +1,282 @@
+/**
+ * Coordination monitor page (ENC-TSK-L34 / B67 PWA2.0).
+ *
+ * Cards + PropertyFilter + Tabs (record-type split): sessions / agent types /
+ * lessons / escalations / CRQ docs. Scoped to CRQ (coordination-request)
+ * documents and session/agent/lesson/escalation records -- served by the
+ * comp-coordination-api backend slice (src/api/coordination.ts), NOT the
+ * tracker/documents corpus, the OpenSearch index, or /feed/corpus.
+ *
+ * The Escalations tab below is a READ-ONLY monitor view. It is deliberately not
+ * the one surface for that record type: approve/deny are non-delegable human
+ * Cognito decisions (ENC-FTR-121 §6) and live on the dedicated /escalations
+ * route (ENC-TSK-O40). An earlier revision of this comment claimed the
+ * standalone menu item was deprecated by this page -- that was wrong, and left
+ * the cockpit with a tab that looked like a destination but could not decide
+ * anything.
+ */
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
+import { useSearch } from '@tanstack/react-router'
+import { Cards, PropertyFilter, Tabs } from '../design-system'
+import { Link } from '@tanstack/react-router'
+import { RecordLink } from '../components/RecordLink'
+import { StatusChip } from '../components/StatusChip'
+import { RecordCard } from '../components/RecordCard'
+import { VirtualList } from '../components/VirtualList'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import {
+  fetchAgentSessions,
+  fetchAgentTypes,
+  fetchCoordinationRequests,
+  fetchEscalations,
+  fetchLessons,
+  type AgentSession,
+  type AgentType,
+  type CoordinationRequest,
+  type EscalationRecord,
+  type LessonRecord,
+} from '../api/coordination'
+import { sessionHref } from '../api/sessions'
+import { formatSessionCardDescription } from '../format/agentTypeLabel'
+import type { PropertyFilterQuery } from '../../../design-system-2/v2/components/PropertyFilter/PropertyFilter.jsx'
+import { applyTokens } from './applyCoordinationFilter'
+import './coordination.css'
+
+const EMPTY_FILTER: PropertyFilterQuery = { tokens: [], operation: 'and' }
+
+// ENC-ISS-527 / ENC-TSK-M60: the coordination monitor is the enceladus
+// governance cockpit's own view, so it is pinned to the enceladus project.
+// Do NOT derive this from `projects[0]` -- the project-registry order is not
+// guaranteed to put enceladus first (on gamma it resolves to 'agentharmony'),
+// which silently made fetchLessons/fetchEscalations query the wrong project and
+// rendered the Lessons/Escalations sub-tabs empty. Same fix already applied in
+// GovernanceRoute.tsx and SkillLibraryRoute.tsx.
+const COORDINATION_PROJECT_ID = 'enceladus'
+
+const coordinationRequestsQueryOptions = {
+  queryKey: ['coordination', 'monitor'] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }) => fetchCoordinationRequests({ signal }),
+}
+
+const agentSessionsQueryOptions = {
+  queryKey: ['coordination', 'agent-sessions'] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }) => fetchAgentSessions({}, { signal }),
+}
+
+const agentTypesQueryOptions = {
+  queryKey: ['coordination', 'agent-types'] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }) => fetchAgentTypes(undefined, { signal }),
+}
+
+export function CoordinationRoute() {
+  useDocumentTitle('Coordination')
+  // ENC-TSK-M19: Home's "Requires io" queue deep-links here with
+  // ?tab=escalations; any other/missing value falls back to the default.
+  const { tab: initialTab } = useSearch({ from: '/coordination' })
+  const [activeTabId, setActiveTabId] = useState(initialTab || 'sessions')
+  const navigate = useNavigate()
+  const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
+
+  const sessionsQuery = useQuery(agentSessionsQueryOptions)
+  const agentTypesQuery = useQuery(agentTypesQueryOptions)
+  const lessonsQuery = useQuery({
+    queryKey: ['coordination', 'lessons', COORDINATION_PROJECT_ID] as const,
+    queryFn: ({ signal }) => fetchLessons(COORDINATION_PROJECT_ID, { signal }),
+  })
+  const escalationsQuery = useQuery({
+    queryKey: ['coordination', 'escalations', COORDINATION_PROJECT_ID] as const,
+    queryFn: ({ signal }) => fetchEscalations(COORDINATION_PROJECT_ID, { signal }),
+  })
+  const crqQuery = useQuery(coordinationRequestsQueryOptions)
+
+  // AC-16: React Compiler owns memoization -- no manual useMemo. These are
+  // cheap array filters over small (<=200 row) datasets.
+  const sessions = applyTokens(sessionsQuery.data ?? [], filterQuery)
+  const agentTypes = applyTokens(agentTypesQuery.data ?? [], filterQuery)
+  const lessons = applyTokens(lessonsQuery.data?.records ?? [], filterQuery)
+  const escalations = applyTokens(escalationsQuery.data ?? [], filterQuery)
+  const crqDocs = applyTokens(crqQuery.data ?? [], filterQuery)
+
+  const agentTypeById = new Map(
+    (agentTypesQuery.data ?? []).map((agentType) => [agentType.agent_type_id, agentType]),
+  )
+
+  const tabs = [
+    {
+      id: 'sessions',
+      label: 'Sessions',
+      count: sessions.length,
+      content: (
+        // ENC-TSK-M18 (AC-3): sessions is documented as a "<=200 row"
+        // dataset (see AC-16 note below) rendered with a bare .map() before
+        // this task -- VirtualList windows it past the 30-row threshold so
+        // an active-multi-agent day doesn't mount 100+ RecordCard DOM nodes
+        // at once.
+        <div className="ev2-rc-grid ev2-rc-grid--2col">
+          <VirtualList
+            items={sessions}
+            getKey={(row) => row.session_id}
+            estimateSize={96}
+            renderItem={(row: AgentSession) => (
+              <RecordCard
+                recordId={row.session_id}
+                recordType="session"
+                kindLabel="Session"
+                title={row.session_id}
+                description={formatSessionCardDescription(
+                  row.agent_type_id,
+                  row.runtime,
+                  agentTypeById.get(row.agent_type_id),
+                )}
+                status={row.status}
+                href={sessionHref(row.session_id)}
+                variant="standard"
+              />
+            )}
+          />
+        </div>
+      ),
+    },
+    {
+      id: 'agents',
+      label: 'Agent types',
+      count: agentTypes.length,
+      content: (
+        <Cards<AgentType>
+          items={agentTypes}
+          trackBy="agent_type_id"
+          columns={2}
+          cardDefinition={{
+            // ENC-TSK-P59 (obs 7): cards navigate like the session cards do.
+            header: (row) => <RecordLink id={row.agent_type_id} recordType="agent" />,
+            sections: [
+              { id: 'surface', header: 'Surface', content: (row) => row.surface },
+              { id: 'model', header: 'Model', content: (row) => row.model },
+              { id: 'cost_tier', header: 'Cost tier', content: (row) => row.cost_tier },
+              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'usage_count', header: 'Usage count', content: (row) => String(row.usage_count) },
+            ],
+          }}
+        />
+      ),
+    },
+    {
+      id: 'lessons',
+      // ENC-TSK-Q17-0D: an honest-cursors truncation marker beats a Lessons
+      // tab that quietly under-reports past the bounded page-follow cap.
+      label: lessonsQuery.data?.truncated ? 'Lessons (truncated)' : 'Lessons',
+      count: lessons.length,
+      content: (
+        <Cards<LessonRecord>
+          items={lessons}
+          trackBy="item_id"
+          columns={2}
+          cardDefinition={{
+            // ENC-TSK-P59 (obs 7): lesson title opens the lesson record page.
+            header: (row) => <RecordLink id={row.item_id}>{row.title}</RecordLink>,
+            sections: [
+              { id: 'id', header: 'ID', content: (row) => row.item_id },
+              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'provenance', header: 'Provenance', content: (row) => row.provenance },
+            ],
+          }}
+        />
+      ),
+    },
+    {
+      id: 'escalations',
+      label: 'Escalations',
+      count: escalations.length,
+      content: (
+        <>
+          {/* ENC-TSK-O40: this tab monitors; it cannot decide. Send io to the
+              decision surface rather than leaving a dead end here. */}
+          <div className="ev2-coord__escalation-cta">
+            <a href="/escalations">Open the escalations queue to approve or deny →</a>
+          </div>
+        <Cards<EscalationRecord>
+          items={escalations}
+          trackBy="item_id"
+          columns={2}
+          cardDefinition={{
+            // ENC-TSK-P59 (obs 7): escalation cards open the decision cockpit.
+            header: (row) => <Link to="/escalations">{row.item_id ?? row.record_id ?? '(unknown)'}</Link>,
+            sections: [
+              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'target', header: 'Target record', content: (row) => row.target_record_id ?? '—' },
+              { id: 'created_at', header: 'Created at', content: (row) => row.created_at },
+            ],
+          }}
+        />
+        </>
+      ),
+    },
+    {
+      id: 'crq',
+      label: 'CRQ docs',
+      count: crqDocs.length,
+      content: (
+        <Cards<CoordinationRequest>
+          items={crqDocs}
+          trackBy="request_id"
+          columns={2}
+          cardDefinition={{
+            header: (row) => row.initiative_title || row.request_id,
+            sections: [
+              { id: 'id', header: 'Request ID', content: (row) => row.request_id },
+              { id: 'state', header: 'State', content: (row) => <StatusChip status={row.state} /> },
+              { id: 'project', header: 'Project', content: (row) => row.project_id },
+              { id: 'updated_at', header: 'Updated at', content: (row) => row.updated_at },
+            ],
+          }}
+        />
+      ),
+    },
+  ]
+
+  const anyLoading =
+    sessionsQuery.isLoading ||
+    agentTypesQuery.isLoading ||
+    lessonsQuery.isLoading ||
+    escalationsQuery.isLoading ||
+    crqQuery.isLoading
+
+  return (
+    <div className="coordination-route">
+      <header className="coordination-route__header">
+        <p className="coordination-route__eyebrow">COORDINATION · LIVE</p>
+        <h1 className="coordination-route__title">Coordination monitor</h1>
+        <p className="coordination-route__subtitle">
+          Sessions, agent types, lessons, and escalations across active coordination requests.
+        </p>
+      </header>
+
+      <PropertyFilter
+        query={filterQuery}
+        onChange={(event) => setFilterQuery(event.detail)}
+        placeholder="Filter by field:value (e.g. status:claimed)"
+      />
+
+      {anyLoading && crqDocs.length === 0 && sessions.length === 0 && (
+        <p className="coordination-route__empty">Loading coordination monitor data…</p>
+      )}
+
+      <Tabs
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onChange={(event) => {
+          setActiveTabId(event.detail.activeTabId)
+          // ENC-TSK-P63 (obs 7): reflect the tab in the URL so deep links
+          // and refreshes land on the same tab.
+          void navigate({
+            to: '/coordination',
+            search: { tab: event.detail.activeTabId },
+            replace: true,
+          })
+        }}
+      />
+    </div>
+  )
+}

@@ -970,7 +970,14 @@ def _run_mentions_drift_audit() -> Dict:
             record_type, record_id, record, mentions_fields,
             extract_id_tokens, strip_code_fences,
         )
-        current = _current_mentions_for(record_id)
+        # ENC-TSK-L87: _sample_recent_records draws from the shared tracker
+        # table across ALL projects (type-updated-index has no project_id
+        # key), not just "enceladus" -- must thread the record's own
+        # project_id through, or graphsearch queries a project scope the
+        # record doesn't belong to and every non-enceladus sample reads back
+        # as a false-positive full mismatch.
+        record_project_id = str(record.get("project_id") or "enceladus")
+        current = _current_mentions_for(record_id, record_project_id)
         if current is None:
             skipped += 1
             continue

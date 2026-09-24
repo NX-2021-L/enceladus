@@ -1,0 +1,7 @@
+# ENC-TSK-K42: cross-Lambda module sharing manifest (honored by _build.yml).
+# GDMP Stage-1 remediation reuses K41's Compliance/Semantic detector
+# (detect_compliance_semantic_entropy) unmodified, so this Lambda scans with
+# the exact same finding shape corpus_entropy_engine emits. Declared here so
+# `import corpus_entropy_core` resolves at runtime; keep in lockstep with the
+# canonical owner (backend/lambda/corpus_entropy_engine/corpus_entropy_core.py).
+backend/lambda/corpus_entropy_engine/corpus_entropy_core.py

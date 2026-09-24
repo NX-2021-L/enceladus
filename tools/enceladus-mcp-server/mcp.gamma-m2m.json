@@ -1,0 +1,19 @@
+{
+  "$comment": "ENC-FTR-074 Ph2 (ENC-TSK-I80) — gamma headless-agent MCP profile authenticated by a Cognito M2M client_credentials access token. The 'headersHelper' runs agent_m2m_headers_helper.sh, which performs the client_credentials grant against the agent-auth pool and emits {\"Authorization\":\"Bearer <fresh access_token>\"}. The static 'headers' block is a fallback for clients without headersHelper support: run `eval \"$(bash tools/enceladus-mcp-server/agent_m2m_headers_helper.sh --export)\"` first to populate ENCELADUS_M2M_BEARER. See AGENT_M2M_AUTH.md. v3-prod is FROZEN; this profile targets gamma only.",
+  "mcpServers": {
+    "enceladus-gamma": {
+      "type": "http",
+      "url": "https://enceladus-gamma.jreese.net/api/v1/coordination/mcp",
+      "headersHelper": {
+        "command": "bash",
+        "args": [
+          "tools/enceladus-mcp-server/agent_m2m_headers_helper.sh",
+          "--headers-json"
+        ]
+      },
+      "headers": {
+        "Authorization": "${env:ENCELADUS_M2M_BEARER}"
+      }
+    }
+  }
+}

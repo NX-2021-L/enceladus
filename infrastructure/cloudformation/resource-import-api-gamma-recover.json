@@ -1,0 +1,10 @@
+[
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCheckoutByProjectTaskByTaskIdRecover",
+    "ResourceIdentifier": {
+      "ApiId": "hi0dzmvqrc",
+      "RouteId": "bd1r2f8"
+    }
+  }
+]

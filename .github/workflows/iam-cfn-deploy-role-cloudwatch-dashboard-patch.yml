@@ -1,5 +1,25 @@
 name: IAM CFN Deploy Role — CloudWatch Dashboard Patch
 
+# ENC-TSK-P99 / ENC-ISS-775: this workflow and its prod sibling
+# (iam-cfn-deploy-role-cloudwatch-dashboard-prod-patch.yml) both used to
+# `put-role-policy` under DIFFERENT policy names onto the same role. That
+# grew the role's inline-policy count and pushed it over the IAM aggregate
+# inline-policy cap (10,240 characters, whitespace excluded), which is what
+# made the prod sibling's run 35169979296 fail with LimitExceeded. Both
+# workflows now write the SAME merged document (one statement covering both
+# the gamma and prod dashboard ARNs) under the SAME existing policy name
+# (enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1), and both check
+# tools/iam_inline_policy_budget.py before the put so a run fails closed
+# instead of hitting LimitExceeded live. ENC-TSK-Q03: run 35172068267 of the
+# prod sibling failed because the assumed OIDC role can put/get-role-policy
+# on this one role but not list-role-policies, so the budget script's own
+# aggregate listing was denied and it never even printed why. Both budget
+# invocations below now pass --on-list-denied warn: if the listing is
+# denied the script degrades to measuring only the merge target policy via
+# get-role-policy (still gated) instead of failing the job — the atomic
+# put-role-policy call below is IAM's own LimitExceeded-guarded write, so a
+# denied aggregate LIST must not block it.
+
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -30,15 +53,15 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — gamma CloudWatch Dashboard bootstrap
+      - name: Write merged CloudWatch Dashboard policy document
         run: |
           set -euo pipefail
-          cat > /tmp/gamma-cloudwatch-dashboard-policy.json <<'JSON'
+          cat > /tmp/merged-cloudwatch-dashboard-policy.json <<'JSON'
           {
             "Version": "2012-10-17",
             "Statement": [
               {
-                "Sid": "GammaCloudWatchDashboardBootstrap",
+                "Sid": "CloudWatchDashboardOps",
                 "Effect": "Allow",
                 "Action": [
                   "cloudwatch:PutDashboard",
@@ -46,16 +69,30 @@ jobs:
                   "cloudwatch:DeleteDashboards",
                   "cloudwatch:ListDashboards"
                 ],
-                "Resource": "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma"
+                "Resource": [
+                  "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma",
+                  "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture"
+                ]
               }
             ]
           }
           JSON
 
+      - name: Check inline-policy budget (fails before any write if it does not fit)
+        run: |
+          python3 tools/iam_inline_policy_budget.py \
+            --role "enceladus-cloudformation-deploy-github-role" \
+            --merge-policy "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
+            --merge-document "/tmp/merged-cloudwatch-dashboard-policy.json" \
+            --on-list-denied warn
+
+      - name: Apply merged inline policy — CloudWatch Dashboard (gamma + prod)
+        run: |
+          set -euo pipefail
           aws iam put-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
             --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
-            --policy-document "file:///tmp/gamma-cloudwatch-dashboard-policy.json"
+            --policy-document "file:///tmp/merged-cloudwatch-dashboard-policy.json"
 
       - name: Verify inline policy attached
         run: |
@@ -64,3 +101,9 @@ jobs:
             --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
             --query '{RoleName:RoleName,PolicyName:PolicyName}' \
             --output table
+
+      - name: Post-write inline-policy budget (visibility for the next patch)
+        run: |
+          python3 tools/iam_inline_policy_budget.py \
+            --role "enceladus-cloudformation-deploy-github-role" \
+            --on-list-denied warn

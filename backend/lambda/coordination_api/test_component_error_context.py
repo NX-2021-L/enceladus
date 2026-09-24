@@ -36,10 +36,10 @@ class CoordinationComponentErrorContextTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 400)
         details = body["error_envelope"]["details"]
         self.assertEqual(details["field"], "transition_type")
-        self.assertIn("github_pr_deploy", details["allowed_values"])
+        self.assertIn("code", details["allowed_values"])
         rank_table = {entry["transition_type"]: entry["rank"] for entry in details["strictness_rank"]}
-        self.assertEqual(rank_table["github_pr_deploy"], 0)
-        self.assertEqual(rank_table["lambda_deploy"], 1)
+        self.assertEqual(rank_table["code"], 0)
+        self.assertEqual(rank_table["external_deploy"], 1)
 
 
 if __name__ == "__main__":

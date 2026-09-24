@@ -42,7 +42,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -60,6 +60,54 @@ except ModuleNotFoundError:
     _MCP_MODULE = importlib.util.module_from_spec(_MCP_SPEC)
     _MCP_SPEC.loader.exec_module(_MCP_MODULE)
     CoordinationMcpClient = _MCP_MODULE.CoordinationMcpClient
+
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier + drift.
+try:
+    import intent_classifier as _intent_classifier
+    import intent_drift as _intent_drift
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _IC_PATH = pathlib.Path(__file__).with_name("intent_classifier.py")
+    _IC_SPEC = importlib.util.spec_from_file_location("intent_classifier", _IC_PATH)
+    _intent_classifier = importlib.util.module_from_spec(_IC_SPEC)  # type: ignore[arg-type]
+    _IC_SPEC.loader.exec_module(_intent_classifier)  # type: ignore[union-attr]
+    _ID_PATH = pathlib.Path(__file__).with_name("intent_drift.py")
+    _ID_SPEC = importlib.util.spec_from_file_location("intent_drift", _ID_PATH)
+    _intent_drift = importlib.util.module_from_spec(_ID_SPEC)  # type: ignore[arg-type]
+    _ID_SPEC.loader.exec_module(_intent_drift)  # type: ignore[union-attr]
+
+# ENC-FTR-084 Ph2 / ENC-TSK-K02: intent-classifier training loop (scheduled).
+try:
+    import intent_training as _intent_training
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _IT_PATH = pathlib.Path(__file__).with_name("intent_training.py")
+    _IT_SPEC = importlib.util.spec_from_file_location("intent_training", _IT_PATH)
+    _intent_training = importlib.util.module_from_spec(_IT_SPEC)  # type: ignore[arg-type]
+    _IT_SPEC.loader.exec_module(_intent_training)  # type: ignore[union-attr]
+
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle allocator. Import with the
+# same packaging fallback used above so a flat-zip deploy resolves it by file path.
+try:
+    import agent_id_alloc as _agent_id_alloc
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _AIA_PATH = pathlib.Path(__file__).with_name("agent_id_alloc.py")
+    _AIA_SPEC = importlib.util.spec_from_file_location("agent_id_alloc", _AIA_PATH)
+    _agent_id_alloc = importlib.util.module_from_spec(_AIA_SPEC)  # type: ignore[arg-type]
+    _AIA_SPEC.loader.exec_module(_agent_id_alloc)  # type: ignore[union-attr]
+
+# ENC-TSK-L11 / B64 Ph3: provider adapter interface + registry.
+try:
+    from provider_adapters import (
+        dispatch_via_provider_adapter,
+        wire_default_provider_adapters,
+    )
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _PA_PATH = pathlib.Path(__file__).with_name("provider_adapters")
+    _PA_INIT = _PA_PATH / "__init__.py"
+    _PA_SPEC = importlib.util.spec_from_file_location("provider_adapters", _PA_INIT)
+    _PA_MODULE = importlib.util.module_from_spec(_PA_SPEC)  # type: ignore[arg-type]
+    _PA_SPEC.loader.exec_module(_PA_MODULE)  # type: ignore[union-attr]
+    dispatch_via_provider_adapter = _PA_MODULE.dispatch_via_provider_adapter
+    wire_default_provider_adapters = _PA_MODULE.wire_default_provider_adapters
 
 try:
     import jwt
@@ -87,12 +135,20 @@ try:
 except Exception:
     _CERT_BUNDLE = None
 
+# Budget Hierarchy Controller (ENC-FTR-083 Ph1 / ENC-TSK-I86; Ph2 / ENC-TSK-I87).
+# Imported with the same defensive fallback as mcp_client so a flat-file Lambda
+# package and a package-relative import both resolve.
 try:
-    import agent_id_alloc as _agent_alloc  # ENC-TSK-I38: agent.* identity actions
-    _AGENT_ALLOC_AVAILABLE = True
-except ImportError:
-    _agent_alloc = None  # type: ignore[assignment]
-    _AGENT_ALLOC_AVAILABLE = False
+    from budget_hierarchy import log_session_budget_allocation, evaluate_corpus_budget
+except ModuleNotFoundError:
+    _BHC_MODULE_PATH = pathlib.Path(__file__).with_name("budget_hierarchy.py")
+    _BHC_SPEC = importlib.util.spec_from_file_location("coordination_budget_hierarchy", _BHC_MODULE_PATH)
+    if _BHC_SPEC is None or _BHC_SPEC.loader is None:
+        raise
+    _BHC_MODULE = importlib.util.module_from_spec(_BHC_SPEC)
+    _BHC_SPEC.loader.exec_module(_BHC_MODULE)
+    log_session_budget_allocation = _BHC_MODULE.log_session_budget_allocation
+    evaluate_corpus_budget = _BHC_MODULE.evaluate_corpus_budget
 
 
 def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
@@ -123,21 +179,38 @@ def _first_nonempty_env(*names: str) -> str:
 # Configuration
 # ---------------------------------------------------------------------------
 
-AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
-AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
-# ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop config (mirrors config.py).
-AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
-    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
-)
-AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
-    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
-)
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+# ENC-TSK-M27 deploy-nudge (2026-07-08): the queue-read surfaces below merged in
+# #958 but the v4-gamma affected-set detector (tools/compute_affected_targets.py
+# resolve_last_deployed_sha) raced a concurrent CFN stack deploy that posted its
+# own success Deployment record for the same commit, so base_sha==head_sha and
+# the Lambda deploy step skipped this function (0 functions deployed). This
+# comment-only touch gives the affected-set diff a real change to catch so the
+# already-merged code actually ships. See flagged follow-up: fix the detector's
+# base_sha resolution to not trust deployment records from sibling CFN-only
+# workflows for the same environment name. (Re-push to refresh PR Commit Gate
+# payload after a body-only edit added the CCI token.)
+# ENC-TSK-M27: io-queue read surfaces. GITHUB_* envs are the existing ENC-FTR-021
+# GitHub App credential path (already provisioned on this function -- see
+# infrastructure/cloudformation/02-compute.yaml CoordinationApiFunction -- and
+# mirrored from backend/lambda/deploy_decide/lambda_function.py). No new secret.
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
+GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
+GITHUB_PRIVATE_KEY_SECRET = os.environ.get("GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key")
+GITHUB_QUEUE_REPO = os.environ.get("GITHUB_QUEUE_REPO", "NX-2021-L/enceladus")
+# Same default/threshold convention as backend/lambda/stale_checkout_monitor/lambda_function.py
+# (DOC-476D273C6566) so the PWA queue and the scheduled monitor agree on "stale".
+STALE_CHECKOUT_THRESHOLD_MINUTES = int(
+    os.environ.get("STALE_CHECKOUT_THRESHOLD_MINUTES", "") or 240
+)
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
+# ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
+GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
+GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 AUTH_TOKENS_TABLE = os.environ.get("AUTH_TOKENS_TABLE", GOVERNANCE_POLICIES_TABLE)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
@@ -146,6 +219,11 @@ GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 # ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
 DOCUMENT_API_LAMBDA_NAME = os.environ.get("DOCUMENT_API_LAMBDA_NAME", "devops-document-api")
+# ENC-TSK-Q26: push-on-write bundle-root recompute (ENC-ISS-799). Empty value disables the
+# nudge and leaves the hourly devops-recompute-governance-backstop rule as the only trigger.
+RECOMPUTE_GOVERNANCE_LAMBDA_NAME = os.environ.get(
+    "RECOMPUTE_GOVERNANCE_LAMBDA_NAME", "devops-recompute-governance"
+)
 # ENC-FTR-121 Ph3 (ENC-TSK-J70): tracker_mutation Lambda hosting applyEscalatedMutation.
 # Default derives the environment suffix so a code deploy that races the CFN env
 # addition still targets the same environment's tracker mutation function.
@@ -153,6 +231,11 @@ TRACKER_MUTATION_LAMBDA_NAME = os.environ.get(
     "TRACKER_MUTATION_LAMBDA_NAME",
     f"devops-tracker-mutation-api{os.environ.get('ENVIRONMENT_SUFFIX', '')}",
 )
+# ADE Component C: shared secret used to verify Cursor Cloud Agents completion
+# webhook signatures (HMAC-SHA256 over the raw body). Sourced via SSM/Secrets
+# param in CFN (see infrastructure/cloudformation/02-compute.yaml). Empty default
+# means signature verification fails closed.
+CURSOR_WEBHOOK_SECRET = os.environ.get("CURSOR_WEBHOOK_SECRET", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
@@ -172,6 +255,14 @@ COORDINATION_SESSION_ARCHIVE_RETRY_ATTEMPTS = max(
 COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = os.environ.get(
     "COORDINATION_SESSION_ARCHIVE_BUFFER_DIR",
     "/tmp/coordination-session-archive-buffer",
+)
+COORDINATION_AGENT_MEMORY_PREFIX = os.environ.get(
+    "COORDINATION_AGENT_MEMORY_PREFIX",
+    "coordination-agent-memory",
+)
+CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS = max(
+    1,
+    int(os.environ.get("CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS", "8")),
 )
 AUTH_TOKEN_POLICY_PREFIX = "service_token#"
 OAUTH_CLIENT_POLICY_PREFIX = "oauth_client#"
@@ -195,6 +286,11 @@ TERMINAL_COGNITO_DEFAULT_ORIGIN = os.environ.get(
 TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS = int(
     os.environ.get("TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS", "2592000")
 )
+# ENC-ISS-559: cookie names in the terminal-session bundle that carry raw
+# Cognito token material. When include_tokens=false these must be redacted
+# from cookies / playwright_cookies / set_cookie_headers, not just withheld
+# from the separate "tokens" object.
+_COGNITO_TOKEN_COOKIE_NAMES = frozenset({"enceladus_id_token", "enceladus_refresh_token"})
 COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
@@ -337,6 +433,21 @@ CALLBACK_SQS_QUEUE_URL = os.environ.get("CALLBACK_SQS_QUEUE_URL", "")
 CALLBACK_EVENT_SOURCE = os.environ.get("CALLBACK_EVENT_SOURCE", "enceladus.coordination")
 CALLBACK_EVENT_DETAIL_TYPE = os.environ.get("CALLBACK_EVENT_DETAIL_TYPE", "coordination.callback")
 FEED_SUBSCRIPTIONS_TABLE = os.environ.get("FEED_SUBSCRIPTIONS_TABLE", "feed-subscriptions")
+# ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91: master enable flag for
+# the scheduled agent-session idle-sweep. Threshold default lives in config.py and is the
+# default of agent_id_alloc.sweep_idle_sessions; only the enable flag is read here.
+AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
+)
+# ENC-ISS-441 / ENC-TSK-J94: master enable flag for the 10-minute unclaim TTL sweep
+# (ghost-registration reaper). TTL default lives in config.py and is the default of
+# agent_id_alloc.sweep_unclaimed_sessions; only the enable flag is read here.
+AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED", "true").lower() == "true"
+)
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier config.
+GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 FEED_PUSH_DEFAULT_EVENT_BUS = os.environ.get("FEED_PUSH_DEFAULT_EVENT_BUS", "default")
 FEED_PUSH_HTTP_TIMEOUT_SECONDS = float(os.environ.get("FEED_PUSH_HTTP_TIMEOUT_SECONDS", "5"))
 MCP_CONNECTIVITY_BACKOFF_SECONDS = (10, 30, 60)
@@ -410,6 +521,65 @@ _CLAUDE_CONTEXT_LIMITS = {
     "claude-opus-4-6": 200_000,
 }
 _CLAUDE_DEFAULT_CONTEXT_LIMIT = 200_000
+
+# --- Context-management beta (ENC-TSK-G17 / G60/G61/G62) -------------------
+# Anthropic's context-management beta evicts stale tool_use/tool_result blocks
+# once an input-token threshold is crossed, so long coordination loops stop
+# carrying thousands of tokens of dead context after 20+ tool calls.
+CLAUDE_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+_CLAUDE_CLEAR_TOOL_USES_EDIT_TYPE = "clear_tool_uses_20250919"
+_CLAUDE_CLEAR_THINKING_EDIT_TYPE = "clear_thinking_20251015"
+# clear_tool_uses config: trigger at 100k input tokens, keep the last 5 tool-use
+# records so the agent retains recent working context.
+_CLAUDE_CONTEXT_MANAGEMENT_TRIGGER_INPUT_TOKENS = 100_000
+_CLAUDE_CONTEXT_MANAGEMENT_KEEP_TOOL_USES = 5
+# Client-side memory tool (Anthropic-defined, schema-less) used to persist what
+# matters before eviction. The tool itself is excluded from clear_tool_uses so
+# the agent never loses its own memory writes/reads.
+_CLAUDE_MEMORY_TOOL_TYPE = "memory_20250818"
+_CLAUDE_MEMORY_TOOL_NAME = "memory"
+# Enceladus memory-file schema: what a coordination agent should preserve across
+# eviction. This documents the intended memory-file content shape; the actual
+# storage backend is a follow-up (see _dispatch_claude_api docstring / report).
+_ENCELADUS_MEMORY_FILE_SCHEMA = {
+    "type": "object",
+    "description": "Enceladus coordination-loop memory record preserved across "
+    "context-management tool-result eviction.",
+    "properties": {
+        "plan_anchors": {
+            "type": "array",
+            "description": "Stable ENC-PLN/ENC-TSK/DOC anchors and their intent.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
+        "active_governance_hash": {
+            "type": "string",
+            "description": "The governance_hash captured at session init.",
+        },
+        "active_task_state": {
+            "type": "object",
+            "description": "Checkout/lifecycle state for the task in flight.",
+            "properties": {
+                "task_id": {"type": "string"},
+                "status": {"type": "string"},
+                "transition_type": {"type": "string"},
+                "components": {"type": "array", "items": {"type": "string"}},
+                "cai": {"type": "string"},
+                "cci": {"type": "string"},
+                "commit_sha": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+    },
+    "additionalProperties": True,
+}
 _VALID_TERMINAL_STATES = {"succeeded", "failed", "cancelled", "dead_letter"}
 _VALID_PROVIDERS = {"claude_agent_sdk", "openai_codex", "aws_native", "aws_bedrock_agent"}
 _CLAUDE_PERMISSION_MODES = {"plan", "acceptEdits", "default"}
@@ -428,6 +598,7 @@ _ENCELADUS_ALLOWED_RAW_TOOLS = {
     "tracker_list",
     "tracker_pending_updates",
     "tracker_validation_rules",
+    "tracker_creation_rules",
     "tracker_set",
     "tracker_log",
     "tracker_create",
@@ -501,6 +672,7 @@ _DEFAULT_STATUS = {
     "issue": "open",
     "feature": "planned",
     "plan": "drafted",
+    "lesson": "draft",
 }
 
 
@@ -852,6 +1024,76 @@ def _get_cognito():
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-M27: GitHub App installation-token path (io-queue paused-approvals
+# read). Same App/JWT/installation-token flow as
+# backend/lambda/deploy_decide/lambda_function.py -- reused here rather than
+# duplicated-and-diverged; no new GitHub credential is minted for this Lambda.
+# ---------------------------------------------------------------------------
+
+_github_installation_token_cache: Optional[str] = None
+_github_installation_token_fetched_at: float = 0.0
+_GITHUB_INSTALLATION_TOKEN_TTL = 8 * 60  # installation tokens live ~1h; refresh well inside that
+
+
+def _get_github_private_key() -> str:
+    resp = _get_secretsmanager().get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
+    return resp["SecretString"]
+
+
+def _generate_github_app_jwt() -> str:
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT not available in Lambda package (ENC-ISS-198)")
+    now = int(time.time())
+    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
+    return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
+
+
+def _get_github_installation_token() -> str:
+    global _github_installation_token_cache, _github_installation_token_fetched_at
+    now = time.time()
+    if (
+        _github_installation_token_cache
+        and (now - _github_installation_token_fetched_at) < _GITHUB_INSTALLATION_TOKEN_TTL
+    ):
+        return _github_installation_token_cache
+    app_jwt = _generate_github_app_jwt()
+    url = f"https://api.github.com/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={"Authorization": f"Bearer {app_jwt}", "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+    _github_installation_token_cache = data["token"]
+    _github_installation_token_fetched_at = now
+    return _github_installation_token_cache
+
+
+def _github_queue_api_get(path: str) -> Tuple[int, Any]:
+    """Read-only GitHub REST GET with installation-token auth. Callers in this
+    module use this exclusively for GET paths (actions/runs, pending_deployments)
+    -- ENC-TSK-M27 AC3 adds no write-capable GitHub call."""
+    token = _get_github_installation_token()
+    url = f"https://api.github.com{path}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode())
+        except Exception:
+            return exc.code, {"error": str(exc)}
+    except Exception as exc:
+        return 0, {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Auth (same Cognito cookie validation pattern as existing Enceladus Lambdas)
 # ---------------------------------------------------------------------------
 
@@ -1095,6 +1337,8 @@ def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
             code = "NOT_FOUND"
         elif status_code == 409:
             code = "CONFLICT"
+        elif status_code == 422:
+            code = "INVALID_INPUT"
         elif status_code == 429:
             code = "RATE_LIMITED"
         elif status_code >= 500:
@@ -1518,12 +1762,54 @@ def _parse_mcp_result(result: Any) -> Dict[str, Any]:
     return {"result": data}
 
 
-def _compute_governance_hash_local() -> str:
-    """Compute hash from the MCP governance source (S3-backed) with fallback.
+def _get_canonical_governance_hash_ddb() -> str:
+    """Read governance_hash from the canonical governance-version DDB record (ENC-TSK-I27).
 
-    Keep coordination API hash aligned with MCP tool/resource reads to avoid
-    false GOVERNANCE_STALE rejections.
+    This record is the single authoritative source written by devops-recompute-governance Lambda,
+    which derives the hash from live S3 checksums (HeadObject). It is always consistent with
+    live S3 state and never returns a stale frozen hash after a governance/live/* change.
     """
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=GOVERNANCE_VERSION_TABLE,
+        Key={"version_id": {"S": GOVERNANCE_VERSION_RECORD_ID}},
+        ConsistentRead=True,
+    )
+    item = resp.get("Item", {})
+    h = str((item.get("governance_hash") or {}).get("S", "")).strip()
+    if not h:
+        raise RuntimeError(
+            f"Canonical governance-version record missing or empty "
+            f"(table={GOVERNANCE_VERSION_TABLE}, key={GOVERNANCE_VERSION_RECORD_ID})"
+        )
+    return h
+
+
+def _compute_governance_hash_local() -> str:
+    """Read governance hash from authoritative sources (ENC-TSK-I29).
+
+    Resolution order:
+      1) Canonical governance-version DDB record (devops-recompute-governance output).
+         NOTE (ENC-TSK-Q26 / ENC-ISS-799): live S3-consistent only once that recompute
+         has run. Callers on the governance WRITE path reach this helper microseconds
+         after their own S3 put, so they necessarily read the PRE-write value;
+         _handle_governance_update therefore reports it as governance_hash_pending
+         rather than as the post-write truth.
+      2) Direct S3 recomputation via MCP server module (live-derived; tie-breaks if DDB
+         temporarily behind).
+
+    The docstore-catalog fallback is intentionally removed: it could silently serve a
+    frozen hash after a governance/live/* change, violating the complete-mediation
+    guarantee (DOC-63420302EF65 §2.3). If both sources fail, callers receive "" which
+    propagates as GOVERNANCE_STALE rather than a silently wrong hash.
+    """
+    try:
+        return _get_canonical_governance_hash_ddb()
+    except Exception as exc:
+        logger.warning(
+            "Canonical governance-version DDB unavailable; falling back to live S3 computation: %s", exc
+        )
+
     try:
         module = _load_mcp_server_module()
         compute = getattr(module, "_compute_governance_hash", None)
@@ -1536,12 +1822,18 @@ def _compute_governance_hash_local() -> str:
             if text:
                 return text
     except Exception as exc:
-        logger.warning("MCP-backed governance hash failed; falling back to docstore: %s", exc)
+        logger.warning("MCP-backed live S3 governance hash computation failed: %s", exc)
 
-    return _compute_governance_hash_docstore_fallback()
+    logger.error("All governance hash sources failed (canonical DDB + MCP S3); returning empty hash")
+    return ""
 
 
 def _compute_governance_hash_docstore_fallback() -> str:
+    """Deprecated: reads from docstore DDB scan (stale after live S3 changes). No longer called.
+
+    Retained for any external callers or tests that reference it directly.
+    Use _get_canonical_governance_hash_ddb() or _compute_governance_hash_local() instead.
+    """
     ddb = _get_ddb()
     resp = ddb.query(
         TableName=DOCUMENTS_TABLE,
@@ -2052,6 +2344,11 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "task_complexity",
         "thinking",
         "stream",
+        "batch_eligible",
+        "batch_workload_type",
+        "deferred_tool_loading",
+        "mcp_server_name",
+        "eager_load_tools",
     }
     unknown = sorted(k for k in raw.keys() if k not in allowed)
     if unknown:
@@ -2239,6 +2536,39 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         if not isinstance(stream, bool):
             raise ValueError("'provider_preferences.stream' must be a boolean")
         out["stream"] = stream
+
+    batch_eligible = raw.get("batch_eligible")
+    if batch_eligible is not None:
+        if not isinstance(batch_eligible, bool):
+            raise ValueError("'provider_preferences.batch_eligible' must be a boolean")
+        out["batch_eligible"] = batch_eligible
+
+    batch_workload_type = raw.get("batch_workload_type")
+    if batch_workload_type not in (None, ""):
+        if not isinstance(batch_workload_type, str):
+            raise ValueError("'provider_preferences.batch_workload_type' must be a string")
+        workload = batch_workload_type.strip()
+        if len(workload) > 128:
+            raise ValueError("'provider_preferences.batch_workload_type' exceeds max length (128)")
+        out["batch_workload_type"] = workload
+
+    deferred_tool_loading = raw.get("deferred_tool_loading")
+    if deferred_tool_loading is not None:
+        if not isinstance(deferred_tool_loading, bool):
+            raise ValueError("'provider_preferences.deferred_tool_loading' must be a boolean")
+        out["deferred_tool_loading"] = deferred_tool_loading
+
+    mcp_server_name = raw.get("mcp_server_name")
+    if mcp_server_name not in (None, ""):
+        if not isinstance(mcp_server_name, str):
+            raise ValueError("'provider_preferences.mcp_server_name' must be a string")
+        out["mcp_server_name"] = mcp_server_name.strip()
+
+    eager_load_tools = raw.get("eager_load_tools")
+    if eager_load_tools is not None:
+        if not isinstance(eager_load_tools, list):
+            raise ValueError("'provider_preferences.eager_load_tools' must be a list")
+        out["eager_load_tools"] = [str(t).strip() for t in eager_load_tools if str(t).strip()]
 
     return out
 
@@ -5008,6 +5338,279 @@ def _parse_sse_stream(resp) -> Dict[str, Any]:
     return message
 
 
+def _get_claude_deferred_tool_loading_capabilities() -> Dict[str, Any]:
+    """Expose ENC-TSK-G15 defer_loading + BM25 policy for coordination capabilities."""
+    try:
+        from mcp_integration import _get_defer_loading_policy_summary
+
+        return _get_defer_loading_policy_summary(
+            deferred_tool_count=len(_ENCELADUS_ALLOWED_RAW_TOOLS),
+        )
+    except Exception as exc:
+        logger.warning("deferred_tool_loading capabilities unavailable: %s", exc)
+        return {"supported": False, "error": str(exc)}
+
+
+def _maybe_attach_deferred_tool_loading(
+    provider_session: Dict[str, Any],
+    request_body: Dict[str, Any],
+    request_headers: Dict[str, str],
+) -> bool:
+    """Attach BM25 tool search + mcp_toolset when provider_session requests defer_loading.
+
+    Returns True when toolset cache_control was attached.
+    """
+    if not provider_session.get("deferred_tool_loading"):
+        return False
+    try:
+        from mcp_integration import _load_tool_defer_loading_module
+
+        policy = _load_tool_defer_loading_module()
+        mcp_server_name = str(
+            provider_session.get("mcp_server_name") or policy.DEFAULT_MCP_SERVER_NAME
+        ).strip()
+        eager_tools = provider_session.get("eager_load_tools")
+        tools = policy.build_anthropic_deferred_tools_array(
+            mcp_server_name=mcp_server_name,
+            eager_tools=eager_tools if isinstance(eager_tools, list) else None,
+        )
+        request_body["tools"] = tools
+        request_headers["anthropic-beta"] = policy.anthropic_beta_headers()
+        return bool(
+            tools and isinstance(tools[-1], dict) and tools[-1].get("cache_control")
+        )
+    except Exception as exc:
+        logger.warning("deferred_tool_loading attach failed: %s", exc)
+        return False
+
+
+def _append_anthropic_beta(request_headers: Dict[str, str], *beta_values: str) -> None:
+    """Append beta flag(s) to the comma-separated ``anthropic-beta`` header.
+
+    Anthropic's beta header is a comma-joined list. This MUST NOT overwrite any
+    value another feature (e.g. _maybe_attach_deferred_tool_loading) already set
+    — it appends new flags, de-duplicated, preserving prior order. Composable
+    regardless of the order in which the two attach helpers run.
+    """
+    existing = str(request_headers.get("anthropic-beta", "") or "")
+    ordered: List[str] = []
+    seen = set()
+    for value in list(part.strip() for part in existing.split(",")) + list(beta_values):
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    if ordered:
+        request_headers["anthropic-beta"] = ",".join(ordered)
+
+
+def _build_claude_context_management_config() -> Dict[str, Any]:
+    """Build the ``context_management`` request-body block for coordination loops.
+
+    Wires a ``clear_tool_uses_20250919`` edit: trigger eviction at 100k input
+    tokens, keep the last 5 tool-use records, and exclude the memory tool so the
+    agent never loses its own memory writes/reads.
+
+    NOTE (verify against current Anthropic context-management docs before ship):
+    the field used to exempt a tool from clearing is assumed to be
+    ``exclude_tools`` (a list of tool_name strings). If Anthropic's current API
+    uses a different field name, only this key needs to change. Flagged in the
+    ENC-TSK-G17 report.
+    """
+    return {
+        "edits": [
+            {
+                "type": _CLAUDE_CLEAR_TOOL_USES_EDIT_TYPE,
+                "trigger": {
+                    "type": "input_tokens",
+                    "value": _CLAUDE_CONTEXT_MANAGEMENT_TRIGGER_INPUT_TOKENS,
+                },
+                "keep": {
+                    "type": "tool_uses",
+                    "value": _CLAUDE_CONTEXT_MANAGEMENT_KEEP_TOOL_USES,
+                },
+                # Exempt the memory tool from eviction (G61).
+                "exclude_tools": [_CLAUDE_MEMORY_TOOL_NAME],
+            }
+        ]
+    }
+
+
+def _maybe_attach_context_management(
+    provider_session: Dict[str, Any],
+    request_body: Dict[str, Any],
+    request_headers: Dict[str, str],
+    model: str,
+    thinking_param: Optional[Dict[str, Any]],
+) -> bool:
+    """Attach context-management beta (clear_tool_uses + memory tool) when enabled.
+
+    Gated behind ``provider_session["context_management_enabled"]`` — the caller
+    sets this for sessions expected to exceed ~20 tool calls (ENC-TSK-G17 AC).
+    Composes with _maybe_attach_deferred_tool_loading: appends the beta header
+    (never overwrites) and appends the memory tool (never clobbers an existing
+    tools array). Returns True when the context_management block was attached.
+    """
+    if not provider_session.get("context_management_enabled"):
+        return False
+    try:
+        context_management = _build_claude_context_management_config()
+
+        # G62 companion: clear_thinking is only valid/useful when the resolved
+        # model is an Opus model AND extended/adaptive thinking is active for
+        # this call. Reuse the existing thinking detection (thinking_param) —
+        # it is non-None exactly when thinking was constructed for this request.
+        if thinking_param and "opus" in str(model).lower():
+            context_management["edits"].append(
+                {"type": _CLAUDE_CLEAR_THINKING_EDIT_TYPE}
+            )
+
+        request_body["context_management"] = context_management
+
+        # Add the memory tool (G61) to the tools array, appending so we compose
+        # with the deferred-tool-loading toolset rather than overwriting it.
+        memory_tool = {
+            "type": _CLAUDE_MEMORY_TOOL_TYPE,
+            "name": _CLAUDE_MEMORY_TOOL_NAME,
+        }
+        tools = request_body.get("tools")
+        if not isinstance(tools, list):
+            tools = []
+        if not any(
+            isinstance(t, dict) and t.get("type") == _CLAUDE_MEMORY_TOOL_TYPE
+            for t in tools
+        ):
+            tools.append(memory_tool)
+        request_body["tools"] = tools
+
+        _append_anthropic_beta(request_headers, CLAUDE_CONTEXT_MANAGEMENT_BETA)
+        return True
+    except Exception as exc:
+        logger.warning("context_management attach failed: %s", exc)
+        return False
+
+
+def _merge_claude_usage(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (extra or {}).items():
+        if isinstance(value, (int, float)):
+            merged[key] = int(merged.get(key) or 0) + int(value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _post_claude_messages_request(
+    *,
+    api_key: str,
+    endpoint: str,
+    request_body: Dict[str, Any],
+    anthropic_headers: Dict[str, str],
+    timeout: int,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    request_json = json.dumps(request_body).encode("utf-8")
+    req = urllib.request.Request(
+        url=endpoint,
+        method="POST",
+        data=request_json,
+        headers=anthropic_headers,
+    )
+    context = ssl.create_default_context(cafile=_CERT_BUNDLE) if _CERT_BUNDLE else None
+    with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        status = int(getattr(resp, "status", 0) or 0)
+        response_headers = dict(resp.headers.items())
+        raw_body = resp.read().decode("utf-8", errors="replace")
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"Claude API request returned http_{status}")
+    payload = json.loads(raw_body)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Claude API response payload is not an object")
+    if isinstance(payload.get("error"), dict):
+        error_type = str(payload["error"].get("type") or "unknown")
+        error_message = str(payload["error"].get("message") or "Unknown Claude API error")
+        raise RuntimeError(f"Claude API error ({error_type}): {error_message}")
+    return payload, response_headers
+
+
+def _run_claude_memory_tool_loop(
+    *,
+    api_key: str,
+    endpoint: str,
+    anthropic_headers: Dict[str, str],
+    request_body: Dict[str, Any],
+    initial_payload: Dict[str, Any],
+    project_id: str,
+    memory_scope_id: str,
+    governance_hash: str,
+    task_id: str,
+    timeout: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
+    """Execute memory_20250818 tool_use blocks until Claude returns a terminal turn."""
+    from agent_session_memory import (
+        S3MemoryToolHandler,
+        build_memory_tool_results,
+        extract_memory_tool_uses,
+        memory_s3_root_key,
+        seed_enceladus_memory_file,
+    )
+
+    handler = S3MemoryToolHandler(
+        _get_s3(),
+        bucket=S3_BUCKET,
+        root_key=memory_s3_root_key(
+            COORDINATION_AGENT_MEMORY_PREFIX,
+            project_id,
+            memory_scope_id,
+        ),
+    )
+    seed_enceladus_memory_file(
+        handler,
+        governance_hash=governance_hash,
+        task_id=task_id,
+    )
+
+    payload = dict(initial_payload)
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    messages = list(request_body.get("messages") or [])
+    memory_iterations = 0
+
+    while memory_iterations < CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS:
+        stop_reason = str(payload.get("stop_reason") or "").strip().lower()
+        if stop_reason != "tool_use":
+            break
+        content = payload.get("content")
+        tool_uses = extract_memory_tool_uses(content)
+        if not tool_uses:
+            break
+
+        messages.append({"role": "assistant", "content": content})
+        messages.append(
+            {
+                "role": "user",
+                "content": build_memory_tool_results(handler, tool_uses),
+            }
+        )
+        loop_body = dict(request_body)
+        loop_body["messages"] = messages
+        payload, _headers = _post_claude_messages_request(
+            api_key=api_key,
+            endpoint=endpoint,
+            request_body=loop_body,
+            anthropic_headers=anthropic_headers,
+            timeout=timeout,
+        )
+        usage = _merge_claude_usage(
+            usage,
+            payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
+        )
+        memory_iterations += 1
+
+    if isinstance(payload.get("usage"), dict):
+        payload["usage"] = usage
+    else:
+        payload["usage"] = usage
+    return payload, usage, memory_iterations
+
+
 def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
     """Dispatch a request to the Anthropic Messages API with full feature support.
 
@@ -5018,6 +5621,10 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     - Streaming SSE support
     - Pre-flight token counting
     - Enhanced observability with token breakdown and cost attribution
+    - Context-management beta for long coordination loops (ENC-TSK-G17):
+      clear_tool_uses_20250919 eviction + memory_20250818 tool, gated on
+      provider_session["context_management_enabled"]. Memory tool requests are
+      executed against S3 via agent_session_memory.S3MemoryToolHandler.
     """
     provider_session = request.get("provider_session") or {}
 
@@ -5117,15 +5724,27 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     started_at = _now_z()
     started = time.perf_counter()
     timeout = ANTHROPIC_API_STREAM_TIMEOUT_SECONDS if use_streaming else ANTHROPIC_API_TIMEOUT_SECONDS
+    anthropic_headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+    toolset_cache_attached = _maybe_attach_deferred_tool_loading(
+        provider_session, request_body, anthropic_headers
+    )
+    # Context-management beta runs AFTER deferred tool loading so its beta-header
+    # append composes with (never overwrites) the deferred beta values, and the
+    # memory tool appends to any deferred toolset (ENC-TSK-G17 / G60/G61).
+    context_management_attached = _maybe_attach_context_management(
+        provider_session, request_body, anthropic_headers, model, thinking_param
+    )
+    if "tools" in request_body or "context_management" in request_body:
+        request_json = json.dumps(request_body).encode("utf-8")
     req = urllib.request.Request(
         url=endpoint,
         method="POST",
         data=request_json,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-            "content-type": "application/json",
-        },
+        headers=anthropic_headers,
     )
     context = ssl.create_default_context(cafile=_CERT_BUNDLE) if _CERT_BUNDLE else None
     try:
@@ -5178,6 +5797,29 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         error_message = str(payload["error"].get("message") or "Unknown Claude API error")
         raise RuntimeError(f"Claude API error ({error_type}): {error_message}")
 
+    memory_iterations = 0
+    if context_management_attached and not use_streaming:
+        from agent_session_memory import memory_scope_id as _memory_scope_id
+
+        payload, merged_usage, memory_iterations = _run_claude_memory_tool_loop(
+            api_key=api_key,
+            endpoint=endpoint,
+            anthropic_headers=anthropic_headers,
+            request_body=request_body,
+            initial_payload=payload,
+            project_id=str(request.get("project_id") or "enceladus"),
+            memory_scope_id=_memory_scope_id(
+                request_id=str(request.get("request_id") or ""),
+                dispatch_id=dispatch_id,
+                session_id=str(provider_session.get("session_id") or ""),
+            ),
+            governance_hash=str(governance_context.get("governance_hash") or ""),
+            task_id=str((request.get("task_ids") or [""])[0] if isinstance(request.get("task_ids"), list) else ""),
+            timeout=timeout,
+        )
+        if merged_usage:
+            payload["usage"] = merged_usage
+
     summary = _extract_claude_text_response(payload)
     thinking_summary = _extract_claude_thinking_response(payload)
     completed_at = _now_z()
@@ -5225,9 +5867,21 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "system_prompt": bool(system_blocks),
             "prompt_caching": bool(system_blocks),
             "cache_ttl": CLAUDE_PROMPT_CACHE_TTL if system_blocks else None,
+            "toolset_caching": toolset_cache_attached,
+            "toolset_cache_ttl": CLAUDE_PROMPT_CACHE_TTL if toolset_cache_attached else None,
             "extended_thinking": bool(thinking_param),
             "streaming": use_streaming,
             "preflight_token_count": preflight_token_count,
+            "context_management": context_management_attached,
+            "memory_tool": context_management_attached,
+            "memory_s3_backend": context_management_attached,
+            "memory_tool_iterations": memory_iterations,
+            "memory_s3_prefix": (
+                f"s3://{S3_BUCKET}/{COORDINATION_AGENT_MEMORY_PREFIX}/"
+                f"{str(request.get('project_id') or 'enceladus')}/"
+                if context_management_attached
+                else None
+            ),
         },
         "governance_context": {
             "loaded": bool(governance_context.get("loaded")),
@@ -5261,6 +5915,8 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
             "total_cost_usd": cost_attribution.get("total_cost_usd"),
             "cache_hit_ratio": cost_attribution.get("cache_hit_ratio"),
+            "toolset_cache_attached": toolset_cache_attached,
+            "context_management_attached": context_management_attached,
             "streaming": use_streaming,
             "thinking_enabled": bool(thinking_param),
             "preflight_token_count": preflight_token_count,
@@ -5283,6 +5939,370 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "status": "succeeded",
         "provider_result": provider_result,
     }
+
+
+_PROVIDER_ADAPTERS_WIRED = False
+
+
+def _ensure_provider_adapters_wired() -> None:
+    global _PROVIDER_ADAPTERS_WIRED
+    if _PROVIDER_ADAPTERS_WIRED:
+        return
+    wire_default_provider_adapters(
+        claude_dispatch=_dispatch_claude_api,
+        codex_dispatch=_dispatch_openai_codex_api,
+        bedrock_dispatch=_dispatch_bedrock_api,
+    )
+    _PROVIDER_ADAPTERS_WIRED = True
+
+
+def _dispatch_claude_batch_api(
+    request: Dict[str, Any],
+    prompt: Optional[str],
+    dispatch_id: str,
+) -> Dict[str, Any]:
+    """Submit a Claude Messages request via Anthropic Batch API (ENC-TSK-G19)."""
+    from anthropic_batch import (
+        NON_INTERACTIVE_WORKLOADS,
+        submit_messages_batch,
+    )
+
+    provider_session = request.get("provider_session") or {}
+    model = _resolve_claude_model(provider_session)
+    task_complexity = str(provider_session.get("task_complexity") or "standard").strip().lower()
+    workload_type = str(
+        provider_session.get("batch_workload_type")
+        or (request.get("batch_context") or {}).get("workload_type")
+        or ""
+    ).strip()
+    if workload_type and workload_type not in NON_INTERACTIVE_WORKLOADS:
+        logger.warning("Unknown batch_workload_type=%s; proceeding anyway", workload_type)
+
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
+    if not resolved_prompt:
+        raise RuntimeError("Missing prompt for claude_agent_sdk batch dispatch")
+    resolved_prompt, governance_context = _build_managed_session_prompt(
+        resolved_prompt,
+        str(request.get("project_id") or ""),
+    )
+
+    max_tokens = _coerce_claude_max_tokens((request.get("constraints") or {}).get("max_tokens"))
+    api_key = _fetch_provider_api_key("anthropic", ANTHROPIC_API_KEY_SECRET_ID)
+    batch_endpoint = f"{ANTHROPIC_API_BASE_URL.rstrip('/')}/v1/messages/batches"
+
+    system_prompt = provider_session.get("system_prompt")
+    system_blocks = None
+    if system_prompt:
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral", "ttl": CLAUDE_PROMPT_CACHE_TTL},
+            }
+        ]
+
+    message_params: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": resolved_prompt}],
+    }
+    if system_blocks:
+        message_params["system"] = system_blocks
+
+    thinking_param = _build_claude_thinking_param(provider_session, model)
+    if thinking_param:
+        message_params["thinking"] = thinking_param
+        budget = thinking_param.get("budget_tokens")
+        if budget is not None and max_tokens <= budget:
+            max_tokens = budget + max(budget, CLAUDE_API_MAX_TOKENS_DEFAULT)
+            message_params["max_tokens"] = max_tokens
+
+    preflight_token_count = _count_claude_tokens(
+        api_key=api_key,
+        model=model,
+        messages=message_params["messages"],
+        system=system_blocks,
+    )
+    context_limit = _CLAUDE_CONTEXT_LIMITS.get(model, _CLAUDE_DEFAULT_CONTEXT_LIMIT)
+    if preflight_token_count is not None and preflight_token_count > context_limit:
+        raise RuntimeError(
+            f"Estimated input tokens ({preflight_token_count}) exceed model context "
+            f"window ({context_limit}) for {model}"
+        )
+
+    anthropic_headers: Dict[str, str] = {}
+    toolset_cache_attached = _maybe_attach_deferred_tool_loading(
+        provider_session, message_params, anthropic_headers
+    )
+
+    started_at = _now_z()
+    started = time.perf_counter()
+    try:
+        batch_payload = submit_messages_batch(
+            api_key=api_key,
+            requests=[{"custom_id": dispatch_id, "params": message_params}],
+            cert_bundle=_CERT_BUNDLE,
+            extra_headers=anthropic_headers or None,
+        )
+    except Exception as exc:
+        _emit_structured_observability(
+            component="coordination_api",
+            event="dispatch_claude_batch_api",
+            request_id=str(request.get("request_id") or ""),
+            dispatch_id=dispatch_id,
+            tool_name="anthropic.messages.batches.create",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_code="batch_submit_failed",
+            extra={"execution_mode": "claude_agent_sdk", "model": model, "reason": str(exc)},
+        )
+        raise
+
+    batch_id = str(batch_payload.get("id") or "").strip()
+    processing_status = str(batch_payload.get("processing_status") or "in_progress").strip().lower()
+    if not batch_id:
+        raise RuntimeError("Anthropic batch API response missing batch id")
+
+    batch_context = dict(request.get("batch_context") or {})
+    batch_context.update(
+        {
+            "batch_eligible": True,
+            "batch_id": batch_id,
+            "batch_submitted_at": started_at,
+            "processing_status": processing_status,
+            "batch_max_timeout_hours": 24,
+            "cost_savings_estimate": "50%",
+            "poll_interval_seconds": 60,
+            "workload_type": workload_type or None,
+            "features_used": {
+                "prompt_caching": bool(system_blocks),
+                "cache_ttl": CLAUDE_PROMPT_CACHE_TTL if system_blocks else None,
+                "toolset_caching": toolset_cache_attached,
+                "toolset_cache_ttl": CLAUDE_PROMPT_CACHE_TTL if toolset_cache_attached else None,
+                "preflight_token_count": preflight_token_count,
+            },
+        }
+    )
+    request["batch_context"] = batch_context
+
+    _emit_structured_observability(
+        component="coordination_api",
+        event="dispatch_claude_batch_api",
+        request_id=str(request.get("request_id") or ""),
+        dispatch_id=dispatch_id,
+        tool_name="anthropic.messages.batches.create",
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        error_code="",
+        extra={
+            "execution_mode": "claude_agent_sdk",
+            "model": model,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "task_complexity": task_complexity,
+            "workload_type": workload_type,
+            "toolset_cache_attached": toolset_cache_attached,
+            "preflight_token_count": preflight_token_count,
+            "governance_loaded": bool(governance_context.get("loaded")),
+        },
+    )
+    return {
+        "dispatch_id": dispatch_id,
+        "execution_id": batch_id,
+        "execution_mode": "claude_agent_sdk",
+        "provider": "claude_agent_sdk",
+        "transport": "anthropic_messages_batches_api",
+        "api_endpoint": batch_endpoint,
+        "project_id": request.get("project_id"),
+        "coordination_request_id": request.get("request_id"),
+        "provider_secret_refs": [ANTHROPIC_API_KEY_SECRET_ID] if ANTHROPIC_API_KEY_SECRET_ID else [],
+        "sent_at": started_at,
+        "status": "running",
+        "batch_context": batch_context,
+    }
+
+
+def _find_pending_batch_requests(limit: int = 25) -> List[Dict[str, Any]]:
+    """Scan for running coordination requests awaiting Anthropic batch completion."""
+    ddb = _get_ddb()
+    pending: List[Dict[str, Any]] = []
+    last_evaluated_key = None
+    while len(pending) < limit:
+        kwargs: Dict[str, Any] = {
+            "TableName": COORDINATION_TABLE,
+            "FilterExpression": "#s = :running AND attribute_exists(batch_context.#bid)",
+            "ExpressionAttributeNames": {"#s": "state", "#bid": "batch_id"},
+            "ExpressionAttributeValues": {
+                ":running": _serialize(_STATE_RUNNING),
+            },
+            "Limit": min(50, limit - len(pending)),
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        try:
+            resp = ddb.scan(**kwargs)
+        except (BotoCoreError, ClientError) as exc:
+            logger.warning("batch poller scan failed: %s", exc)
+            break
+        for raw in resp.get("Items", []):
+            item = _deserialize(raw)
+            batch_ctx = item.get("batch_context") or {}
+            if not isinstance(batch_ctx, dict):
+                continue
+            batch_id = str(batch_ctx.get("batch_id") or "").strip()
+            if not batch_id:
+                continue
+            if str(batch_ctx.get("processing_status") or "").lower() == "ended":
+                if batch_ctx.get("results_processed"):
+                    continue
+            pending.append(item)
+            if len(pending) >= limit:
+                break
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+    return pending
+
+
+def _poll_single_anthropic_batch_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Poll one batch-backed request; finalize via batch-results callback when ended."""
+    from anthropic_batch import (
+        alert_batch_subrequest_failure,
+        batch_processing_ended,
+        download_batch_results,
+        get_messages_batch,
+    )
+
+    request_id = str(request.get("request_id") or "").strip()
+    batch_context = dict(request.get("batch_context") or {})
+    batch_id = str(batch_context.get("batch_id") or "").strip()
+    if not request_id or not batch_id:
+        return {"request_id": request_id, "skipped": True, "reason": "missing_batch_id"}
+
+    from anthropic_batch import BATCH_POLL_INTERVAL_SECONDS
+
+    last_polled_epoch = int(batch_context.get("last_polled_epoch") or 0)
+    now_epoch = _unix_now()
+    if last_polled_epoch and (now_epoch - last_polled_epoch) < BATCH_POLL_INTERVAL_SECONDS:
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "skipped": True,
+            "reason": "poll_interval_not_elapsed",
+            "seconds_until_next_poll": BATCH_POLL_INTERVAL_SECONDS - (now_epoch - last_polled_epoch),
+        }
+
+    api_key = _fetch_provider_api_key("anthropic", ANTHROPIC_API_KEY_SECRET_ID)
+    status_payload = get_messages_batch(
+        api_key=api_key,
+        batch_id=batch_id,
+        cert_bundle=_CERT_BUNDLE,
+    )
+    processing_status = str(status_payload.get("processing_status") or "").strip().lower()
+    batch_context["processing_status"] = processing_status
+    batch_context["last_polled_at"] = _now_z()
+    batch_context["last_polled_epoch"] = now_epoch
+    request["batch_context"] = batch_context
+    request["updated_at"] = _now_z()
+    request["updated_epoch"] = _unix_now()
+    _update_request(request)
+
+    if not batch_processing_ended(status_payload):
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "finalized": False,
+        }
+
+    results_url = str(status_payload.get("results_url") or "").strip()
+    if not results_url:
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "finalized": False,
+            "error": "missing_results_url",
+        }
+
+    results_jsonl = download_batch_results(
+        api_key=api_key,
+        results_url=results_url,
+        cert_bundle=_CERT_BUNDLE,
+    )
+    for line in results_jsonl.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            item = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        result_obj = item.get("result") if isinstance(item.get("result"), dict) else {}
+        result_type = str(result_obj.get("type") or "").strip().lower()
+        if result_type == "errored":
+            error_payload = result_obj.get("error") if isinstance(result_obj.get("error"), dict) else {}
+            alert_batch_subrequest_failure(
+                _emit_structured_observability,
+                request_id=request_id,
+                dispatch_id=str(item.get("custom_id") or ""),
+                batch_id=batch_id,
+                custom_id=str(item.get("custom_id") or ""),
+                error_type=str(error_payload.get("type") or "batch_error"),
+                error_message=str(error_payload.get("message") or "batch sub-request failed"),
+            )
+
+    callback_event = {
+        "headers": {"x-coordination-callback-token": str(request.get("callback_token") or "")},
+        "body": json.dumps(
+            {
+                "batch_id": batch_id,
+                "results_jsonl": results_jsonl,
+                "model": ((request.get("provider_session") or {}).get("model") or DEFAULT_CLAUDE_AGENT_MODEL),
+            }
+        ),
+    }
+    callback_resp = _handle_anthropic_batch_results_callback(callback_event, request_id)
+    latest = _get_request(request_id) or request
+    latest_batch = dict(latest.get("batch_context") or {})
+    latest_batch["results_processed"] = True
+    latest_batch["processing_status"] = "ended"
+    latest["batch_context"] = latest_batch
+    _update_request(latest)
+
+    return {
+        "request_id": request_id,
+        "batch_id": batch_id,
+        "processing_status": "ended",
+        "finalized": True,
+        "callback_status": int(callback_resp.get("statusCode") or 0),
+    }
+
+
+def _handle_coordination_batch_poll(_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled poller: check Anthropic batch status every 60s (via rate(1 minute) rule)."""
+    pending = _find_pending_batch_requests()
+    outcomes: List[Dict[str, Any]] = []
+    for request in pending:
+        try:
+            outcomes.append(_poll_single_anthropic_batch_request(request))
+        except Exception as exc:
+            logger.exception("batch poll failed request_id=%s", request.get("request_id"))
+            outcomes.append(
+                {
+                    "request_id": request.get("request_id"),
+                    "error": str(exc),
+                    "finalized": False,
+                }
+            )
+    return _response(
+        200,
+        {
+            "success": True,
+            "polled_count": len(outcomes),
+            "outcomes": outcomes,
+        },
+    )
 
 
 def _build_mcp_connectivity_check_commands() -> List[str]:
@@ -7658,12 +8678,24 @@ def _dispatch_mcp_jsonrpc_method(method: str, params: Dict[str, Any]) -> Dict[st
     module = _load_mcp_server_module()
 
     if method_name == "initialize":
+        server_info: Dict[str, Any] = {
+            "name": "enceladus",
+            "version": "0.4.1",
+        }
+        try:
+            from mcp_integration import _get_defer_loading_policy_summary
+
+            policy = _get_defer_loading_policy_summary(
+                deferred_tool_count=len(_ENCELADUS_ALLOWED_RAW_TOOLS),
+            )
+            instructions = str(policy.get("server_instructions") or "").strip()
+            if instructions:
+                server_info["instructions"] = instructions
+        except Exception as exc:
+            logger.warning("MCP initialize: defer-loading server instructions unavailable: %s", exc)
         return {
             "protocolVersion": "2024-11-05",
-            "serverInfo": {
-                "name": "enceladus",
-                "version": "0.4.1",
-            },
+            "serverInfo": server_info,
             "capabilities": {
                 "tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
@@ -7815,8 +8847,35 @@ _COMPONENT_CATEGORIES = frozenset({
     "lambda", "frontend", "infrastructure", "library", "workflow", "external"
 })
 _COMPONENT_TRANSITION_TYPES = frozenset({
-    "github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"
+    "code", "external_deploy", "documentation"
 })
+_LEGACY_COMPONENT_TRANSITION_TYPE_MAP = {
+    "github_pr_deploy": "code",
+    "lambda_deploy": "code",
+    "web_deploy": "code",
+    "code_only": "code",
+    "data_only": "code",
+    # no_code was split by authorship in DOC-157A790F9E8B. New writes must use
+    # v3 values; read-time compatibility defaults governance-only rows to docs.
+    "no_code": "documentation",
+}
+_COMPONENT_ADDRESS_CLASSES = frozenset({
+    "aws_arn",
+    "https_url",
+    "cloudflare_resource",
+    "neo4j_auradb",
+    "external_manifest",
+    "meta",
+})
+_COMPONENT_CLASSES = frozenset({"physical", "external", "meta"})
+_COMPONENT_ADDRESS_CLASS_DEFAULT_TRANSITION_TYPE = {
+    "aws_arn": "code",
+    "https_url": "code",
+    "cloudflare_resource": "external_deploy",
+    "neo4j_auradb": "external_deploy",
+    "external_manifest": "external_deploy",
+    "meta": "documentation",
+}
 _COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
 # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability-declaration fields accepted on
 # components_create / components_update / components_propose. All optional
@@ -7835,11 +8894,9 @@ _COMPONENT_CAPABILITY_FIELDS = (
     "deploy_targets",
 )
 _COMPONENT_STRICTNESS_RANK = {
-    "github_pr_deploy": 0,
-    "lambda_deploy": 1,
-    "web_deploy": 1,
-    "code_only": 2,
-    "no_code": 3,
+    "code": 0,
+    "external_deploy": 1,
+    "documentation": 2,
 }
 
 
@@ -7878,6 +8935,276 @@ def _component_validation_error(
         details["example_fix"] = example_fix
     return _error(status_code, message, **details)
 
+
+def _normalize_component_transition_type(value: Any) -> str:
+    """Return the v3 component transition type for legacy read compatibility."""
+    raw = str(value or "").strip().lower()
+    if raw in _COMPONENT_TRANSITION_TYPES:
+        return raw
+    return _LEGACY_COMPONENT_TRANSITION_TYPE_MAP.get(raw, "")
+
+
+def _component_record_with_v3_compat(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose legacy component rows through the v3 enum without mutating DDB."""
+    out = dict(record)
+    for field in (
+        "transition_type",
+        "required_transition_type",
+        "requested_minimum_transition_type",
+    ):
+        raw = str(out.get(field) or "").strip().lower()
+        mapped = _normalize_component_transition_type(raw)
+        if raw and mapped and raw != mapped:
+            out[f"legacy_{field}"] = raw
+            out[field] = mapped
+    return out
+
+
+def _component_repo_dir_overlaps(left: str, right: str) -> bool:
+    lval = left.rstrip("/")
+    rval = right.rstrip("/")
+    return lval == rval or lval.startswith(rval + "/") or rval.startswith(lval + "/")
+
+
+def _scan_component_registry_claims() -> list[Dict[str, Any]]:
+    ddb = _get_ddb()
+    items: list[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {"TableName": COMPONENTS_TABLE}
+    while True:
+        resp = ddb.scan(**kwargs)
+        items.extend([_ddb_to_py(i) for i in resp.get("Items", [])])
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return items
+
+
+def _validate_component_registry_claims(
+    *,
+    component_id: str,
+    component_address: str = "",
+    component_repo_dir: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Enforce I1 address injection plus I2/I3 source injection/non-overlap."""
+    for existing in _scan_component_registry_claims():
+        existing_id = str(existing.get("component_id") or "").strip()
+        if existing_id == component_id:
+            continue
+
+        existing_address = str(existing.get("component_address") or "").strip()
+        if component_address and existing_address and existing_address == component_address:
+            return _component_validation_error(
+                409,
+                (
+                    "component_address must be unique across the component registry "
+                    f"(conflicts with {existing_id})."
+                ),
+                field="component_address",
+                component_id=component_id,
+                expected_type="unique string",
+                example_fix={"component_address": f"meta:{component_id}"},
+            )
+
+        lifecycle_status = str(existing.get("lifecycle_status") or existing.get("status") or "").strip().lower()
+        if lifecycle_status == "archived":
+            continue
+        existing_repo_dir = str(existing.get("component_repo_dir") or "").strip()
+        if component_repo_dir and existing_repo_dir and _component_repo_dir_overlaps(existing_repo_dir, component_repo_dir):
+            return _component_validation_error(
+                409,
+                (
+                    "component_repo_dir must be unique and non-overlapping under "
+                    f"the repo prefix order (conflicts with {existing_id}: {existing_repo_dir})."
+                ),
+                field="component_repo_dir",
+                component_id=component_id,
+                expected_type="repo-relative non-overlapping path",
+                example_fix={"component_repo_dir": f"infrastructure/external/{component_id.removeprefix('comp-')}.yaml"},
+            )
+    return None
+
+
+def _validate_component_hardening_fields(
+    body: Dict[str, Any],
+    component_id: str,
+    *,
+    require_all: bool,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, str]]:
+    """Validate DOC-157A790F9E8B v3 hardening fields for create/propose/update."""
+    parsed: Dict[str, str] = {}
+    required_fields = (
+        "component_address",
+        "component_repo_dir",
+        "component_address_class",
+        "component_class",
+    )
+    for field in required_fields:
+        if require_all and not str(body.get(field) or "").strip():
+            return (
+                _component_validation_error(
+                    400,
+                    f"{field} is required by the v3 component registry schema.",
+                    field=field,
+                    component_id=component_id,
+                    expected_type="string" if field in {"component_address", "component_repo_dir"} else "enum",
+                    allowed_values=(
+                        sorted(_COMPONENT_ADDRESS_CLASSES)
+                        if field == "component_address_class"
+                        else sorted(_COMPONENT_CLASSES)
+                        if field == "component_class"
+                        else None
+                    ),
+                ),
+                parsed,
+            )
+        if field in body and (body.get(field) is None or not str(body.get(field) or "").strip()):
+            return (
+                _component_validation_error(
+                    400,
+                    f"{field} cannot be unset to null/empty.",
+                    field=field,
+                    component_id=component_id,
+                    expected_type="string" if field in {"component_address", "component_repo_dir"} else "enum",
+                ),
+                parsed,
+            )
+        if field in body and body.get(field) is not None:
+            parsed[field] = str(body.get(field) or "").strip()
+
+    address_class = parsed.get("component_address_class", "")
+    if address_class:
+        address_class = address_class.lower()
+        if address_class not in _COMPONENT_ADDRESS_CLASSES:
+            return (
+                _component_validation_error(
+                    400,
+                    f"Invalid component_address_class '{address_class}'. Allowed: {sorted(_COMPONENT_ADDRESS_CLASSES)}",
+                    field="component_address_class",
+                    component_id=component_id,
+                    expected_type="enum",
+                    allowed_values=sorted(_COMPONENT_ADDRESS_CLASSES),
+                ),
+                parsed,
+            )
+        parsed["component_address_class"] = address_class
+
+    component_class = parsed.get("component_class", "")
+    if component_class:
+        component_class = component_class.lower()
+        if component_class not in _COMPONENT_CLASSES:
+            return (
+                _component_validation_error(
+                    400,
+                    f"Invalid component_class '{component_class}'. Allowed: {sorted(_COMPONENT_CLASSES)}",
+                    field="component_class",
+                    component_id=component_id,
+                    expected_type="enum",
+                    allowed_values=sorted(_COMPONENT_CLASSES),
+                ),
+                parsed,
+            )
+        parsed["component_class"] = component_class
+
+    address = parsed.get("component_address", "")
+    repo_dir = parsed.get("component_repo_dir", "")
+    if repo_dir:
+        if repo_dir.startswith("/") or any(part == ".." for part in repo_dir.split("/")):
+            return (
+                _component_validation_error(
+                    400,
+                    "component_repo_dir must be a repository-relative path without '..' segments.",
+                    field="component_repo_dir",
+                    component_id=component_id,
+                    expected_type="repo-relative path",
+                ),
+                parsed,
+            )
+        parsed["component_repo_dir"] = repo_dir.rstrip("/") if not repo_dir.startswith("meta:") else repo_dir
+
+    if address_class and address:
+        if address_class == "aws_arn" and not address.startswith("arn:aws:"):
+            return (
+                _component_validation_error(422, "component_address_class=aws_arn requires component_address to start with arn:aws:", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "https_url" and not address.startswith("https://"):
+            return (
+                _component_validation_error(422, "component_address_class=https_url requires an https:// component_address.", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "neo4j_auradb" and not address.startswith("neo4j+s://"):
+            return (
+                _component_validation_error(422, "component_address_class=neo4j_auradb requires a neo4j+s:// component_address.", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "meta" and address != f"meta:{component_id}":
+            return (
+                _component_validation_error(422, "component_address_class=meta requires component_address=meta:{component_id}.", field="component_address", component_id=component_id, example_fix={"component_address": f"meta:{component_id}"}),
+                parsed,
+            )
+
+    if component_class or address_class:
+        if (component_class == "meta") != (address_class == "meta"):
+            return (
+                _component_validation_error(
+                    422,
+                    "component_class=meta and component_address_class=meta must be used together.",
+                    field="component_class",
+                    component_id=component_id,
+                    expected_type="compatible enum pair",
+                ),
+                parsed,
+            )
+        if component_class == "external" and address_class == "aws_arn":
+            return (
+                _component_validation_error(
+                    422,
+                    "component_class=external cannot use component_address_class=aws_arn.",
+                    field="component_address_class",
+                    component_id=component_id,
+                    expected_type="compatible enum pair",
+                ),
+                parsed,
+            )
+
+    if component_class == "meta" and repo_dir and repo_dir != f"meta:{component_id}":
+        return (
+            _component_validation_error(
+                422,
+                "component_class=meta requires component_repo_dir=meta:{component_id}.",
+                field="component_repo_dir",
+                component_id=component_id,
+                example_fix={"component_repo_dir": f"meta:{component_id}"},
+            ),
+            parsed,
+        )
+
+    required_type = str(body.get("required_transition_type") or body.get("requested_minimum_transition_type") or "").strip().lower()
+    if address_class == "aws_arn" and required_type == "external_deploy":
+        return (
+            _component_validation_error(
+                422,
+                "component_address_class=aws_arn must not combine with required_transition_type=external_deploy; AWS-owned resources transition via code.",
+                field="required_transition_type",
+                component_id=component_id,
+                expected_type="compatible enum pair",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES - {"external_deploy"}),
+            ),
+            parsed,
+        )
+
+    if address or repo_dir:
+        conflict = _validate_component_registry_claims(
+            component_id=component_id,
+            component_address=address,
+            component_repo_dir=parsed.get("component_repo_dir", repo_dir),
+        )
+        if conflict:
+            return conflict, parsed
+
+    return None, parsed
+
 # Checkout-assistant key — allows updating transition_type without Cognito session
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 
@@ -7899,6 +9226,131 @@ def _is_assistant_request(event: Dict[str, Any]) -> bool:
         or ""
     )
     return key == CHECKOUT_ASSISTANT_KEY
+
+
+# ENC-TSK-L92 / ENC-ISS-501: escalation approve/deny decider allowlist.
+# _is_cognito_session is a fail-open blocklist (excludes only auth_mode in
+# {"internal-key", "managed-token"} -- any other or absent auth_mode passes),
+# which let a non-human Cognito-authenticated identity self-approve
+# governance-bypass escalations. This adds a positive allowlist on top: the
+# decider's claims.email must appear in a human-Console-only S3 document that
+# no Lambda role (including this one) has write access to -- only s3:GetObject.
+ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get(
+    "ESCALATION_APPROVER_ALLOWLIST_BUCKET", "enceladus-356364570033-us-west-2-an"
+)
+ESCALATION_APPROVER_ALLOWLIST_KEY = os.environ.get(
+    "ESCALATION_APPROVER_ALLOWLIST_KEY", "security/escalation-approvers.md"
+)
+_ESCALATION_ALLOWLIST_CACHE_TTL = 60.0
+_escalation_allowlist_cache: Dict[str, Any] = {"emails": None, "fetched_at": 0.0}
+
+
+def _load_escalation_approver_allowlist() -> Set[str]:
+    """Fetch and parse the escalation-approver allowlist S3 document, cached 60s.
+
+    Fails CLOSED: any fetch or parse error returns an empty set (nobody is
+    authorized) rather than silently falling back to "allow everyone" the way
+    the previous blocklist-only check did.
+    """
+    now = time.time()
+    cached = _escalation_allowlist_cache.get("emails")
+    fetched_at = _escalation_allowlist_cache.get("fetched_at") or 0.0
+    if cached is not None and (now - fetched_at) < _ESCALATION_ALLOWLIST_CACHE_TTL:
+        return cached
+    try:
+        s3 = boto3.client("s3", region_name=os.environ.get("SECRETS_REGION") or os.environ.get("AWS_REGION"))
+        obj = s3.get_object(Bucket=ESCALATION_APPROVER_ALLOWLIST_BUCKET, Key=ESCALATION_APPROVER_ALLOWLIST_KEY)
+        body = obj["Body"].read().decode("utf-8")
+        emails: Set[str] = set()
+        # Parsed without a yaml dependency: the document's fenced yaml block
+        # uses `- email: "..."` list entries; pull the value off any such
+        # line regardless of the leading "- " list marker.
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                stripped = stripped[2:].strip()
+            if stripped.startswith("email:"):
+                value = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                if value:
+                    emails.add(value.lower())
+        _escalation_allowlist_cache["emails"] = emails
+        _escalation_allowlist_cache["fetched_at"] = now
+        return emails
+    except Exception as exc:  # noqa: BLE001 — fail closed on any fetch/parse error
+        logger.error(
+            "escalation approver allowlist fetch failed (fail-closed, denying all deciders): %s", exc
+        )
+        return set()
+
+
+def _is_allowlisted_escalation_decider(claims: Dict[str, Any]) -> bool:
+    email = str((claims or {}).get("email") or "").strip().lower()
+    if not email:
+        return False
+    return email in _load_escalation_approver_allowlist()
+
+
+# ENC-TSK-M12 / ENC-ISS-501: structural human-principal enforcement.
+# The email allowlist above authorizes WHICH identities may decide; this
+# predicate enforces WHAT KIND of token may decide at all. _verify_token in
+# this module deliberately accepts Cognito ACCESS tokens (token_use=access,
+# client_id match) for the general API surface, and machine-operated Cognito
+# users in the human pool (e.g. terminal-agent@enceladus.internal, mintable
+# via coordination auth.cognito_session) carry genuine ID tokens. Neither may
+# ever decide an escalation, regardless of allowlist contents: escalations
+# exist specifically to route FSM-forbidden mutations through io's explicit
+# HUMAN approval. Fail-closed on every absent or unrecognized claim.
+def _escalation_human_client_ids() -> Set[str]:
+    """App clients whose ID tokens may represent a human escalation decider.
+
+    ESCALATION_HUMAN_CLIENT_IDS (comma-separated) when set; otherwise the
+    interactive PWA client (COGNITO_CLIENT_ID). Read per-call so tests and
+    live config changes take effect without module reload.
+    """
+    raw = os.environ.get("ESCALATION_HUMAN_CLIENT_IDS", "") or COGNITO_CLIENT_ID or ""
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _escalation_machine_email_domains() -> Set[str]:
+    """Email domains that mark a machine-operated Cognito principal."""
+    raw = os.environ.get("ESCALATION_MACHINE_EMAIL_DOMAINS", "enceladus.internal")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
+    """True only for an interactive human Cognito ID-token principal.
+
+    Rejects (fail-closed, in order):
+      - anything but a Cognito ID token (token_use != "id"): access tokens,
+        client_credentials/M2M grants, internal-key and managed-token modes
+        (which carry no token_use at all);
+      - bare machine-client shapes (client_id claim without an aud claim);
+      - ID tokens minted for an app client outside the human-client allowlist
+        (e.g. the agent M2M client) or when no allowlist is configured;
+      - identities whose email is absent or under a machine principal domain
+        (e.g. *@enceladus.internal).
+    """
+    claims = claims or {}
+    if str(claims.get("token_use") or "").strip().lower() != "id":
+        return False
+    if claims.get("client_id") and not claims.get("aud"):
+        return False
+    aud = claims.get("aud")
+    if isinstance(aud, (list, tuple, set)):
+        aud_values = {str(a or "").strip() for a in aud}
+    else:
+        aud_values = {str(aud or "").strip()}
+    aud_values.discard("")
+    allowed_clients = _escalation_human_client_ids()
+    if not allowed_clients or not (aud_values & allowed_clients):
+        return False
+    email = str(claims.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[1]
+    if domain in _escalation_machine_email_domains():
+        return False
+    return True
 
 
 def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -7983,6 +9435,7 @@ def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 kwargs["ExclusiveStartKey"] = last
 
+        items = [_component_record_with_v3_compat(item) for item in items]
         return _response(200, {"success": True, "components": items, "count": len(items)})
     except Exception as exc:
         logger.exception("components_list failed")
@@ -8005,7 +9458,7 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
         ls = _ddb_to_py(item).get("lifecycle_status", "")
         if ls in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
             return _error(404, f"Component '{component_id}' not found")
-        return _response(200, {"success": True, "component": _ddb_to_py(item)})
+        return _response(200, {"success": True, "component": _component_record_with_v3_compat(_ddb_to_py(item))})
     except Exception as exc:
         logger.exception("components_get failed")
         return _error(500, f"Failed to get component: {exc}")
@@ -8014,7 +9467,7 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
 def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/components — create a new component.
 
-    transition_type defaults to github_pr_deploy for non-Cognito callers.
+    transition_type defaults to code for non-Cognito callers.
     """
     try:
         body = json.loads(event.get("body") or "{}")
@@ -8057,7 +9510,13 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             allowed_values=sorted(_COMPONENT_CATEGORIES),
         )
 
-    # transition_type: Cognito/assistant can set any value; internal key defaults to github_pr_deploy
+    # Build component_id from provided slug or derive from name. The v3 identity
+    # fields use this for meta sentinels, so compute it before schema validation.
+    component_id = (body.get("component_id") or "").strip()
+    if not component_id:
+        component_id = _component_slug(component_name)
+
+    # transition_type: Cognito/assistant can set any v3 value; internal key defaults to code
     requested_type = (body.get("transition_type") or "").strip().lower()
     if requested_type and requested_type not in _COMPONENT_TRANSITION_TYPES:
         return _component_validation_error(
@@ -8074,19 +9533,20 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             (
                 "Setting transition_type at create time requires Cognito authentication "
                 "(PWA session) or checkout-service-assistant key. "
-                "Internal API key callers receive the default 'github_pr_deploy'."
+                "Internal API key callers receive the default 'code'."
             ),
             field="transition_type",
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             example_fix={
-                "transition_type": "github_pr_deploy",
+                "transition_type": "code",
                 "note": "Retry without transition_type, or use a Cognito session / checkout-service-assistant key to set a less strict component type.",
             },
         )
-    transition_type = requested_type or "github_pr_deploy"
+    transition_type = requested_type or "code"
 
-    # F50/AC-6 (Option A, strict — see ENC-TSK-F50 and DOC-240A67973B13):
+    # ENC-TSK-L77 / DOC-157A790F9E8B: required_transition_type is the v3
+    # component policy enum. New writes must use code|external_deploy|documentation.
     # required_transition_type is a first-class invariant field. Absent field
     # returns 400 with a descriptive error envelope. No auto-fill from
     # transition_type — the governance intent must be stated explicitly at
@@ -8100,21 +9560,20 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             400,
             (
                 "required_transition_type is required and must be one of "
-                f"{sorted(_COMPONENT_TRANSITION_TYPES)} (ENC-TSK-F50 / ENC-ISS-270). "
+                f"{sorted(_COMPONENT_TRANSITION_TYPES)} (ENC-TSK-L77 / DOC-157A790F9E8B). "
                 "This field governs the minimum task strictness enforced by "
                 "checkout_service for tasks modifying this component. See "
-                "DOC-240A67973B13 for per-component selection rationale."
+                "DOC-157A790F9E8B for the v3 component policy rationale."
             ),
             field="required_transition_type",
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             example_fix={
-                "required_transition_type": "github_pr_deploy",
+                "required_transition_type": "code",
                 "hint": (
-                    "For Lambda code use github_pr_deploy; for frontend/PWA use "
-                    "web_deploy; for CFN / governance docs / admin-managed "
-                    "externals use no_code. Match the existing transition_type "
-                    "unless you have a deliberate reason to diverge."
+                    "Use code for repo-produced components, external_deploy for "
+                    "third-party or admin-managed resources, and documentation "
+                    "for governed docstore/meta components."
                 ),
             },
         )
@@ -8131,11 +9590,6 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         )
     required_transition_type = requested_required_type
 
-    # Build component_id from provided slug or derive from name
-    component_id = (body.get("component_id") or "").strip()
-    if not component_id:
-        component_id = _component_slug(component_name)
-
     status_val = (body.get("status") or "active").strip().lower()
     if status_val not in _COMPONENT_STATUSES:
         return _component_validation_error(
@@ -8145,6 +9599,14 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_STATUSES),
         )
+
+    hardening_error, hardening_fields = _validate_component_hardening_fields(
+        body,
+        component_id,
+        require_all=True,
+    )
+    if hardening_error:
+        return hardening_error
 
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -8160,6 +9622,7 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         "status": status_val,
         "created_at": now,
         "updated_at": now,
+        **hardening_fields,
     }
     if body.get("description"):
         item["description"] = str(body["description"]).strip()
@@ -8212,7 +9675,11 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
       project_id: str
       source_paths: list[str]
       description: str
-      requested_minimum_transition_type: str (must be in STRICTNESS_RANK)
+      requested_minimum_transition_type: str (v3 enum: code|external_deploy|documentation)
+      component_address: str
+      component_repo_dir: str
+      component_address_class: str
+      component_class: str
       proposing_agent_session_id: str (optional; falls back to auth claims sub / write_source provider)
     """
     if not ENABLE_COMPONENT_PROPOSAL:
@@ -8293,6 +9760,14 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
             field="proposing_agent_session_id", expected_type="string",
         )
 
+    hardening_error, hardening_fields = _validate_component_hardening_fields(
+        {**body, "required_transition_type": requested_type},
+        component_id,
+        require_all=True,
+    )
+    if hardening_error:
+        return hardening_error
+
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     component_item: Dict[str, Any] = {
@@ -8314,6 +9789,7 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         "created_at": now,
         "updated_at": now,
         "proposed_at": now,
+        **hardening_fields,
     }
 
     # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability declarations at proposal
@@ -8365,31 +9841,19 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
 
     ddb = _get_ddb()
     try:
-        ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": COMPONENTS_TABLE,
-                        "Item": _py_to_ddb(component_item),
-                        "ConditionExpression": "attribute_not_exists(component_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": forward_rel,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": inverse_rel,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
-        )
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
+        transact_items = [
+            {
+                "Put": {
+                    "TableName": COMPONENTS_TABLE,
+                    "Item": _py_to_ddb(component_item),
+                    "ConditionExpression": "attribute_not_exists(component_id)",
+                }
+            },
+            *build_create_transact_puts(TRACKER_TABLE, forward_rel, inverse_rel),
+        ]
+        ddb.transact_write_items(TransactItems=transact_items)
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
         if any((r or {}).get("Code") == "ConditionalCheckFailed" for r in reasons):
@@ -8762,6 +10226,153 @@ def _handle_components_reject(
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate curation (approve/reject)
+# ---------------------------------------------------------------------------
+
+_LESSON_REQUIRED_PILLARS = {"efficiency", "human_protection", "intention", "alignment"}
+_LESSON_VALID_PROVENANCE = ("agent", "human", "mining", "system")
+
+
+def _validate_lesson_pillar_scores(raw: Any) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+    """Validate a pillar_scores payload, mirroring tracker_mutation's ENC-FTR-054 check."""
+    if not isinstance(raw, dict):
+        return None, (
+            "pillar_scores is required: an object with efficiency, human_protection, "
+            "intention, alignment, each a number in [0.0, 1.0]."
+        )
+    missing = _LESSON_REQUIRED_PILLARS - set(raw.keys())
+    if missing:
+        return None, f"pillar_scores missing required keys: {sorted(missing)}."
+    parsed: Dict[str, float] = {}
+    for pillar in _LESSON_REQUIRED_PILLARS:
+        try:
+            val = float(raw[pillar])
+        except (TypeError, ValueError):
+            return None, f"pillar_scores.{pillar} must be a number in [0.0, 1.0]. Got: {raw[pillar]!r}"
+        if not (0.0 <= val <= 1.0):
+            return None, f"pillar_scores.{pillar} must be in [0.0, 1.0]. Got: {val}"
+        parsed[pillar] = val
+    return parsed, None
+
+
+def _create_lesson_record(
+    project_id: str,
+    prefix: str,
+    title: str,
+    observation: str,
+    insight: str,
+    evidence_chain: List[str],
+    pillar_scores: Dict[str, float],
+    *,
+    provenance: str = "human",
+    category: Optional[str] = None,
+    confidence: Optional[float] = None,
+    description: Optional[str] = None,
+) -> str:
+    """Create a governed ENC-LSN record directly against TRACKER_TABLE.
+
+    Mirrors tracker_mutation's ENC-FTR-052 tracker.create_lesson validation
+    (observation/insight/evidence_chain/provenance/pillar_scores) so a lesson
+    created here is indistinguishable from one created through that surface.
+    evidence_chain entries become LEARNED_FROM edges at graph_sync time
+    (backend/lambda/graph_sync/lambda_function.py), so passing the source
+    lesson-candidate document_id there is what stamps its provenance.
+    """
+    ddb = _get_ddb()
+    now = _now_z()
+    for _ in range(5):
+        seq = _next_tracker_sequence(project_id, "lesson")
+        record_id = _build_record_id(prefix, "lesson", seq)
+        item: Dict[str, Any] = {
+            "project_id": project_id,
+            "record_id": f"lesson#{record_id}",
+            "record_type": "lesson",
+            "item_id": record_id,
+            "title": title,
+            "description": description or "",
+            "observation": observation,
+            "insight": insight,
+            "evidence_chain": evidence_chain,
+            "provenance": provenance,
+            # DynamoDB's TypeSerializer rejects native float (Number values must be
+            # Decimal) -- str() round-trip avoids the binary-float precision drift
+            # Decimal(float) would introduce.
+            "pillar_scores": {k: Decimal(str(v)) for k, v in pillar_scores.items()},
+            "status": _DEFAULT_STATUS["lesson"],
+            "created_at": now,
+            "updated_at": now,
+            "sync_version": 1,
+            "last_update_note": "Created via coordination API: lesson-candidate approval (ENC-TSK-J46)",
+            "history": [
+                {
+                    "timestamp": now,
+                    "status": "created",
+                    "description": f"Created via coordination API: {title}",
+                }
+            ],
+        }
+        if category:
+            item["category"] = category
+        if confidence is not None:
+            item["confidence"] = Decimal(str(confidence))
+
+        try:
+            ddb.put_item(
+                TableName=TRACKER_TABLE,
+                Item={k: _serialize(v) for k, v in item.items()},
+                ConditionExpression="attribute_not_exists(record_id)",
+            )
+            return record_id
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                continue
+            raise
+
+    raise RuntimeError("Failed allocating lesson record id after retries")
+
+
+def _finalize_lesson_candidate_decision(
+    document_id: str, new_handoff_status: str, decider: str, note: str
+) -> None:
+    """Atomically transition a lesson-candidate's handoff_status and append a
+    structured decision_log entry, directly against DOCUMENTS_TABLE.
+
+    Written directly (DocumentsTableCandidateDecisionWrite in 02-compute.yaml)
+    rather than proxied through document_api's PATCH: that endpoint's
+    internal-key auth is shared with the MCP server's agent-facing
+    documents.patch relay, so it cannot distinguish an already-Cognito-verified
+    coordination_api call from a bare agent session -- routing through it would
+    silently reopen the exact autonomous-promotion hole AC4 forbids. Writing
+    here keeps the Cognito gate solely at this Lambda's own HTTP layer (checked
+    by the caller before this function runs), where it is actually enforceable.
+    Raises botocore.exceptions.ClientError (ConditionalCheckFailedException) if
+    the candidate is no longer pending (race with a concurrent decision).
+    """
+    ddb = _get_ddb()
+    now = _now_z()
+    entry = [{"status": new_handoff_status, "note": note, "by": decider, "at": now}]
+    ddb.update_item(
+        TableName=DOCUMENTS_TABLE,
+        Key={"document_id": _serialize(document_id)},
+        UpdateExpression=(
+            "SET handoff_status = :new, updated_at = :now, "
+            "decision_log = list_append(if_not_exists(decision_log, :empty), :entry)"
+        ),
+        ConditionExpression=(
+            "attribute_exists(document_id) AND document_subtype = :subtype AND handoff_status = :pending"
+        ),
+        ExpressionAttributeValues={
+            ":new": _serialize(new_handoff_status),
+            ":now": _serialize(now),
+            ":empty": _serialize([]),
+            ":entry": _serialize(entry),
+            ":subtype": _serialize("lesson-candidate"),
+            ":pending": _serialize("pending"),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # ENC-FTR-121 Ph3 / ENC-TSK-J70 — Escalations approval surface (DOC-5B888FCA43B8
 # §5.7 + §6). Approval is non-delegable by construction: every route here
 # verifies a genuine Cognito human session server-side; internal-key, SCI, and
@@ -8927,6 +10538,128 @@ def _render_escalation_diff(
     return diff
 
 
+def _handle_queue_paused_approvals(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/queue/paused-approvals -- ENC-TSK-M27 AC1.
+
+    Surfaces GitHub Actions workflow runs currently blocked on a required
+    reviewer for the v3-prod Environment (the promote-gamma-to-prod lane's
+    manual approval gate). Cognito-only, same as the escalations feed --
+    this is the human "Requires io" queue view, not an agent surface.
+    Read-only: two GitHub GET calls per request (list + pending_deployments
+    per candidate run), no mutation path.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, "The io-queue requires a Cognito session (PWA, human-only).")
+
+    if not (GITHUB_APP_ID and GITHUB_INSTALLATION_ID):
+        return _response(200, {
+            "success": True, "runs": [], "count": 0,
+            "note": "GitHub App credentials not configured in this environment",
+        })
+
+    status, runs_payload = _github_queue_api_get(
+        f"/repos/{GITHUB_QUEUE_REPO}/actions/runs?status=waiting&per_page=20"
+    )
+    if status != 200:
+        logger.error(
+            "queue/paused-approvals: GitHub runs list failed status=%s body=%s",
+            status, runs_payload,
+        )
+        return _error(502, "Failed to read paused GitHub Actions runs.")
+
+    paused: List[Dict[str, Any]] = []
+    for run in (runs_payload or {}).get("workflow_runs", [])[:20]:
+        run_id = run.get("id")
+        environments: List[str] = []
+        dep_status, deployments = _github_queue_api_get(
+            f"/repos/{GITHUB_QUEUE_REPO}/actions/runs/{run_id}/pending_deployments"
+        )
+        if dep_status == 200 and isinstance(deployments, list):
+            environments = [
+                str((dep.get("environment") or {}).get("name") or "")
+                for dep in deployments
+            ]
+        # Only surface runs actually paused on the v3-prod Environment gate;
+        # if pending_deployments couldn't be read, fall back to including the
+        # run rather than silently dropping a real approval need.
+        if environments and not any(env.lower() == "v3-prod" for env in environments):
+            continue
+        paused.append({
+            "id": run_id,
+            "run_url": run.get("html_url"),
+            "requesting_workflow": run.get("name") or run.get("path"),
+            "environments": environments,
+            "head_sha": run.get("head_sha"),
+            "created_at": run.get("created_at"),
+        })
+
+    return _response(200, {"success": True, "runs": paused, "count": len(paused)})
+
+
+def _handle_queue_stale_locks(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/queue/stale-locks -- ENC-TSK-M27 AC1.
+
+    Read-only Scan of the projects table for checked-out task records past
+    STALE_CHECKOUT_THRESHOLD_MINUTES, mirroring the detection core in
+    backend/lambda/stale_checkout_monitor/lambda_function.py (DOC-476D273C6566)
+    so the PWA queue agrees with the scheduled monitor's CloudWatch signal.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, "The io-queue requires a Cognito session (PWA, human-only).")
+
+    ddb = _get_ddb()
+    kwargs: Dict[str, Any] = {
+        "TableName": PROJECTS_TABLE,
+        "FilterExpression": "#rt = :task AND #cs = :checked_out",
+        "ExpressionAttributeNames": {"#rt": "record_type", "#cs": "checkout_state"},
+        "ExpressionAttributeValues": {
+            ":task": _serialize("task"),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+    items: List[Dict[str, Any]] = []
+    try:
+        while True:
+            page = ddb.scan(**kwargs)
+            items.extend(_deserialize(raw) for raw in page.get("Items", []))
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key or len(items) >= 500:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("queue/stale-locks scan failed: %s", exc)
+        return _error(500, "Failed to read stale-checkout locks.")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    threshold = STALE_CHECKOUT_THRESHOLD_MINUTES
+    stale: List[Dict[str, Any]] = []
+    for item in items:
+        raw_ts = item.get("checked_out_at")
+        if not isinstance(raw_ts, str) or not raw_ts.strip():
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(raw_ts.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        age_minutes = int((now - ts).total_seconds() // 60)
+        if age_minutes < threshold:
+            continue
+        stale.append({
+            "record_id": item.get("item_id") or item.get("record_id"),
+            "holder_session": item.get("checked_out_by"),
+            "held_since": raw_ts,
+            "age_minutes": age_minutes,
+        })
+
+    stale.sort(key=lambda r: r["age_minutes"], reverse=True)
+    return _response(200, {
+        "success": True, "locks": stale, "count": len(stale),
+        "threshold_minutes": threshold,
+    })
+
+
 def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/coordination/escalations — io's approval queue (§5.7).
 
@@ -9051,6 +10784,39 @@ def _handle_escalation_decision(
         return _error(403, (
             "Escalation approval/denial requires a Cognito session (human-only). "
             "Agent, SCI, and internal-key credentials are structurally rejected."
+        ))
+
+    # ENC-TSK-M12 / ENC-ISS-501: structural principal-type gate. Only an
+    # interactive human Cognito ID token (token_use=id, human app client,
+    # non-machine email domain) may reach the allowlist check at all --
+    # access tokens, client_credentials/M2M grants, and machine-operated
+    # Cognito users (e.g. terminal-agent@enceladus.internal) are rejected
+    # here regardless of allowlist contents.
+    if not _is_human_cognito_principal(claims):
+        logger.warning(
+            "escalation decision rejected: non-human principal "
+            "(token_use=%r, aud=%r, client_id=%r, email=%r, escalation_id=%s, project_id=%s)",
+            claims.get("token_use"), claims.get("aud"), claims.get("client_id"),
+            claims.get("email"), escalation_id, project_id,
+        )
+        return _error(403, (
+            "Escalation approval/denial requires an interactive human Cognito "
+            "ID token. Machine principals (access tokens, client_credentials/M2M "
+            "grants, machine-operated Cognito users) are structurally rejected."
+        ))
+
+    # ENC-TSK-L92 / ENC-ISS-501: _is_cognito_session alone is insufficient --
+    # it is a fail-open blocklist, not a positive human check. Require the
+    # decider's email to be explicitly present in the Console-only allowlist.
+    if not _is_allowlisted_escalation_decider(claims):
+        logger.warning(
+            "escalation decision rejected: decider email %r not on approver allowlist "
+            "(escalation_id=%s, project_id=%s)",
+            claims.get("email"), escalation_id, project_id,
+        )
+        return _error(403, (
+            "Escalation approval/denial requires an explicitly allowlisted decider "
+            "email. This identity is not on the escalation approver allowlist."
         ))
 
     try:
@@ -9233,7 +10999,7 @@ def _handle_escalation_watch(event: Dict[str, Any], claims: Dict[str, Any]) -> D
     new_events.sort(key=lambda item: (str(item.get("at") or ""), str(item["escalation_id"])))
     session_touched = False
     try:
-        session_touched = _agent_alloc.touch_session_activity(session_id)
+        session_touched = _agent_id_alloc.touch_session_activity(session_id)
     except Exception as exc:  # noqa: BLE001 — heartbeat failure must not fail the poll
         logger.error("watch heartbeat touch failed for %s: %s", session_id, exc)
 
@@ -9246,6 +11012,185 @@ def _handle_escalation_watch(event: Dict[str, Any], claims: Dict[str, Any]) -> D
         "next_cursor": _encode_watch_cursor(next_counts),
         "session_touched": session_touched,
     })
+
+
+def _handle_lesson_candidate_approve(
+    document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/lesson-candidates/{documentId}/approve
+
+    ENC-TSK-J46 / ENC-FTR-096 Ph2. Promotes a pending lesson-candidate document
+    (drafted by the I84 memory_consolidation Lambda) to a governed ENC-LSN
+    record via the same creation surface as tracker.create_lesson, stamping the
+    candidate document_id into evidence_chain for LEARNED_FROM provenance, then
+    marks the candidate handoff_status='approved'. Cognito session required —
+    no agent session may promote a lesson candidate autonomously.
+    """
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Approving a lesson candidate requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    candidate = _invoke_document_api("GET", document_id)
+    if candidate.get("_status_code") != 200:
+        return _error(404, f"Lesson candidate '{document_id}' not found or unreadable.")
+    if candidate.get("document_subtype") != "lesson-candidate":
+        return _error(400, f"Document '{document_id}' is not a lesson-candidate.")
+    if candidate.get("handoff_status") != "pending":
+        return _error(
+            409,
+            f"Lesson candidate '{document_id}' is not pending (handoff_status="
+            f"{candidate.get('handoff_status')!r}); it may already have been decided.",
+        )
+
+    title = str(body.get("title") or candidate.get("title") or "").strip()
+    observation = str(body.get("observation") or "").strip()
+    insight = str(body.get("insight") or "").strip()
+    if not title:
+        return _error(400, "title is required (candidate title was empty).")
+    if not observation:
+        return _error(400, "observation is required: what was observed in the candidate data.")
+    if not insight:
+        return _error(400, "insight is required: what was learned from the observation.")
+
+    pillar_scores, pillar_err = _validate_lesson_pillar_scores(body.get("pillar_scores"))
+    if pillar_err:
+        return _error(400, pillar_err)
+
+    provenance = str(body.get("provenance") or "human").strip()
+    if provenance not in _LESSON_VALID_PROVENANCE:
+        return _error(400, f"Invalid provenance '{provenance}'. Allowed: {list(_LESSON_VALID_PROVENANCE)}")
+
+    evidence_chain = [document_id]
+    extra_evidence = body.get("evidence_chain")
+    if isinstance(extra_evidence, list):
+        evidence_chain.extend(str(e).strip() for e in extra_evidence if str(e).strip())
+
+    project_id = str(candidate.get("project_id") or GOVERNANCE_PROJECT_ID)
+    try:
+        meta = _load_project_meta(project_id)
+    except (ValueError, RuntimeError) as exc:
+        return _error(400, str(exc))
+
+    try:
+        lesson_id = _create_lesson_record(
+            project_id,
+            meta.prefix,
+            title,
+            observation,
+            insight,
+            evidence_chain,
+            pillar_scores,
+            provenance=provenance,
+            category=body.get("category"),
+            confidence=body.get("confidence"),
+            description=body.get("description"),
+        )
+    except ClientError as exc:
+        logger.exception("lesson_candidate_approve: lesson create failed")
+        return _error(500, f"Failed to create lesson record: {exc}")
+
+    approved_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        _finalize_lesson_candidate_decision(
+            document_id,
+            "approved",
+            approved_by,
+            f"Promoted to {lesson_id} (ENC-TSK-J46 lesson-candidate curation).",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "lesson_candidate_approve: %s created but candidate %s was decided "
+                "concurrently -- candidate handoff_status left unchanged.",
+                lesson_id, document_id,
+            )
+        else:
+            logger.exception(
+                "lesson_candidate_approve: %s created but candidate patch failed", lesson_id
+            )
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "document_id": document_id,
+            "lesson_id": lesson_id,
+            "handoff_status": "approved",
+            "approved_by": approved_by,
+            "approved_at": now,
+        },
+    )
+
+
+def _handle_lesson_candidate_reject(
+    document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/lesson-candidates/{documentId}/reject
+
+    ENC-TSK-J46 / ENC-FTR-096 Ph2. Marks a pending lesson-candidate document
+    handoff_status='stale' and appends the rejection reason to its append-only
+    decision_log (list_append; the document itself is never deleted or
+    overwritten). Cognito session required.
+    """
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Rejecting a lesson candidate requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    rejection_reason = str(body.get("rejection_reason") or "").strip()
+    if len(rejection_reason) < 10:
+        return _error(400, "rejection_reason is required and must be at least 10 characters")
+
+    candidate = _invoke_document_api("GET", document_id)
+    if candidate.get("_status_code") != 200:
+        return _error(404, f"Lesson candidate '{document_id}' not found or unreadable.")
+    if candidate.get("document_subtype") != "lesson-candidate":
+        return _error(400, f"Document '{document_id}' is not a lesson-candidate.")
+    if candidate.get("handoff_status") != "pending":
+        return _error(
+            409,
+            f"Lesson candidate '{document_id}' is not pending (handoff_status="
+            f"{candidate.get('handoff_status')!r}); it may already have been decided.",
+        )
+
+    rejected_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        _finalize_lesson_candidate_decision(document_id, "stale", rejected_by, rejection_reason)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return _error(
+                409,
+                f"Lesson candidate '{document_id}' was decided concurrently by another request.",
+            )
+        logger.exception("lesson_candidate_reject: candidate write failed")
+        return _error(500, f"Failed to reject lesson candidate: {exc}")
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "document_id": document_id,
+            "handoff_status": "stale",
+            "rejected_by": rejected_by,
+            "rejected_at": now,
+            "rejection_reason": rejection_reason,
+        },
+    )
 
 
 def _handle_components_cloudwatch_event(
@@ -9828,23 +11773,10 @@ def _handle_components_add_edge(
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": forward,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": inverse,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_create_transact_puts(TRACKER_TABLE, forward, inverse)
         )
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
@@ -9952,29 +11884,15 @@ def _handle_components_remove_edge(
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_delete_transact_deletes
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Delete": {
-                        "TableName": TRACKER_TABLE,
-                        "Key": {
-                            "project_id": {"S": project_id},
-                            "record_id": {"S": forward_sk},
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-                {
-                    "Delete": {
-                        "TableName": TRACKER_TABLE,
-                        "Key": {
-                            "project_id": {"S": project_id},
-                            "record_id": {"S": inverse_sk},
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_delete_transact_deletes(
+                TRACKER_TABLE,
+                project_id_attr={"S": project_id},
+                forward_sk=forward_sk,
+                inverse_sk=inverse_sk,
+            )
         )
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
@@ -10724,7 +12642,7 @@ def _handle_components_update(
                 allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             )
 
-    # F50/AC-7 (ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13):
+    # ENC-TSK-L77 / DOC-157A790F9E8B:
     # required_transition_type can be updated to any valid enum value but
     # NEVER unset back to null/empty/absent. Once populated, the field
     # remains a first-class governance invariant that checkout_service reads
@@ -10780,29 +12698,41 @@ def _handle_components_update(
         # the clean enum, not whatever case/whitespace the caller sent.
         body["required_transition_type"] = new_required
 
+    hardening_patch_fields = {
+        "component_address",
+        "component_repo_dir",
+        "component_address_class",
+        "component_class",
+    }
+    if hardening_patch_fields & set(body.keys()):
+        if not (_is_cognito_session(claims) or _is_assistant_request(event)):
+            return _component_validation_error(
+                403,
+                (
+                    "Updating component identity fields requires Cognito "
+                    "authentication (PWA session) or checkout-service-assistant key."
+                ),
+                field="component_address",
+                component_id=component_id,
+                expected_type="governed identity field",
+            )
+        hardening_error, hardening_fields = _validate_component_hardening_fields(
+            body,
+            component_id,
+            require_all=False,
+        )
+        if hardening_error:
+            return hardening_error
+        body.update(hardening_fields)
+
     # Build update expression
     updatable_fields = {
         "component_name", "project_id", "category", "transition_type",
         # F50/AC-7: include required_transition_type so validated PATCHes persist.
         "required_transition_type",
+        "component_address", "component_repo_dir", "component_address_class",
+        "component_class", "required_transition_type_rationale",
         "description", "github_repo", "status", "assistant_reason",
-        # DVP-TSK-621 / ENC-TSK-N86: traceability fields. Without these the
-        # I1-I5 invariants of DOC-157A790F9E8B §2.2 are UNDEFINED rather than
-        # satisfied — the invariants are properties of maps instantiated FROM
-        # the registry row, so an unset component_repo_dir means the map
-        # c -> component_repo_dir(c) does not exist and I2 has nothing to
-        # evaluate. comp-devops-trino and comp-devops-superset sat blocked on
-        # exactly this with the values already derived and published in
-        # NX-2021-L/devops docs/component-traceability-DVP-TSK-699.md.
-        #
-        # These are TRACEABILITY METADATA, not enforcement inputs, so they take
-        # the same auth path as description/github_repo. Only transition_type
-        # keeps the Cognito/assistant gate above, because that one drives
-        # checkout strictness (ENC-FTR-041); widening the gate to cover these
-        # would block the very write they exist to enable.
-        "component_repo", "component_repo_dir", "component_repo_branch",
-        "component_deploy_workflow", "component_deploy_target",
-        "component_address", "lifecycle_status",
     }
     # source_paths is a nested map — serialized via TypeSerializer, not as plain string
     updatable_map_fields = {"source_paths"}
@@ -10902,7 +12832,7 @@ def _handle_components_update(
             ConditionExpression="attribute_exists(component_id)",
             ReturnValues="ALL_NEW",
         )
-        updated = _ddb_to_py(resp.get("Attributes", {}))
+        updated = _component_record_with_v3_compat(_ddb_to_py(resp.get("Attributes", {})))
         return _response(200, {"success": True, "component": updated})
     except ddb.exceptions.ConditionalCheckFailedException:
         return _error(404, f"Component '{component_id}' not found")
@@ -11017,6 +12947,9 @@ def _handle_capabilities() -> Dict[str, Any]:
                             "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
                             "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
                             "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
+                            "server_instructions": _get_claude_deferred_tool_loading_capabilities().get(
+                                "server_instructions", ""
+                            ),
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
                             "compatibility": {
                                 "chatgpt_custom_gpt": True,
@@ -11057,6 +12990,7 @@ def _handle_capabilities() -> Dict[str, Any]:
                                 "budget_range": [CLAUDE_THINKING_BUDGET_MIN, CLAUDE_THINKING_BUDGET_MAX],
                                 "default_budget": CLAUDE_THINKING_BUDGET_DEFAULT,
                             },
+                            "deferred_tool_loading": _get_claude_deferred_tool_loading_capabilities(),
                             "streaming": True,
                             "token_counting": True,
                             "cost_attribution": True,
@@ -11393,6 +13327,26 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         logger.exception("put request failed")
         return _error(500, f"Failed persisting coordination request: {exc}")
 
+    # ENC-FTR-083 Ph1 (ENC-TSK-I86) — Budget Hierarchy Controller. Log the
+    # per-session budget allocation (four-scale token budgets + cognitive
+    # temperature tuple) at DEBUG on every session init. Best-effort: never let
+    # budget logging break request intake.
+    try:
+        log_session_budget_allocation(logger, request_id=request_id, project_id=project_id)
+    except Exception:  # noqa: BLE001 — budget telemetry must never break session init
+        logger.debug("budget allocation logging skipped (non-fatal)", exc_info=True)
+
+    # ENC-FTR-083 Ph2 (ENC-TSK-I87) — corpus-budget alert ladder + corpus
+    # token-usage telemetry. No-op unless a corpus-usage signal is configured
+    # (BUDGET_CORPUS_USED_TOKENS env / AppConfig), so this stays silent in the
+    # common case; when present it classifies the five-level ladder, publishes
+    # NOTICE+ alerts to SNS, and emits the CorpusTokenUsage CloudWatch metric.
+    # Best-effort: never let budget telemetry break request intake.
+    try:
+        evaluate_corpus_budget(logger, request_id=request_id, project_id=project_id)
+    except Exception:  # noqa: BLE001 — budget telemetry must never break session init
+        logger.debug("corpus budget evaluation skipped (non-fatal)", exc_info=True)
+
     if decomposition.get("feature_id"):
         _append_tracker_history(
             decomposition["feature_id"],
@@ -11698,26 +13652,31 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 request.get("related_record_ids") or []
             )
 
+        dispatch_meta: Optional[Dict[str, Any]] = None
         if execution_mode == "claude_agent_sdk":
-            dispatch_meta = _dispatch_claude_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
+            is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
+            if is_batch:
+                request["batch_context"] = {
+                    **(request.get("batch_context") or {}),
+                    "batch_eligible": True,
+                    "batch_submitted_at": now,
+                    "batch_max_timeout_hours": 24,
+                    "cost_savings_estimate": "50%",
+                }
+                dispatch_meta = _dispatch_claude_batch_api(
+                    request=request,
+                    prompt=prompt,
+                    dispatch_id=dispatch_id,
+                )
+        if dispatch_meta is None:
+            _ensure_provider_adapters_wired()
+            dispatch_meta = dispatch_via_provider_adapter(
+                execution_mode,
+                request,
+                prompt,
+                dispatch_id,
             )
-        elif execution_mode in {"codex_app_server", "codex_full_auto"}:
-            dispatch_meta = _dispatch_openai_codex_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-                execution_mode=execution_mode,
-            )
-        elif execution_mode == "bedrock_agent":
-            dispatch_meta = _dispatch_bedrock_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-            )
-        else:
+        if dispatch_meta is None:
             dispatch_meta = _send_dispatch(
                 request,
                 execution_mode=execution_mode,
@@ -11796,6 +13755,21 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         if execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto", "bedrock_agent"}:
             provider_result = dispatch_meta.get("provider_result") or {}
             terminal_state = str(dispatch_meta.get("status") or "succeeded").strip().lower()
+
+            if terminal_state == "running":
+                request["updated_at"] = now
+                request["updated_epoch"] = now_epoch
+                _update_request(request)
+                return _response(
+                    202,
+                    {
+                        "success": True,
+                        "request": _redact_request(request),
+                        "dispatch": dispatch_meta,
+                        "plan_status": _compute_plan_status(request),
+                    },
+                )
+
             if terminal_state not in _VALID_TERMINAL_STATES:
                 terminal_state = "succeeded"
 
@@ -12774,6 +14748,46 @@ def _handle_governance_hash() -> Dict[str, Any]:
         return _error(500, f"Failed to compute governance hash: {exc}")
 
 
+_S3_METADATA_TRANSLITERATIONS = {
+    "\u00a7": "section ",   # § — by far the most common offender in a §13 summary
+    "\u2014": "-",          # em dash
+    "\u2013": "-",          # en dash
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
+    "\u00a0": " ",          # non-breaking space
+    "\u2192": "->",
+}
+
+
+def _s3_metadata_safe(value: str, limit: int = 256) -> str:
+    """Render a caller-supplied string safe for an S3 object-metadata value (ENC-ISS-800).
+
+    S3 object metadata is ASCII-only and rejects control characters, so passing a
+    change_summary straight through makes a perfectly valid governance write fail
+    botocore validation and abort as an opaque HTTP 500 — a §13 summary naturally
+    contains "§". This transliterates the common typographic offenders, drops any
+    remaining non-ASCII, collapses whitespace (newlines are not legal in a metadata
+    value), and only then truncates.
+
+    Truncating after the ASCII reduction is what makes the length limit byte-safe:
+    the result is pure ASCII, so `[:limit]` can never split a multi-byte sequence.
+    The caller's original string is never mutated — it is preserved verbatim
+    everywhere it is stored outside S3 metadata (worklogs, responses, DDB).
+    """
+    if not value:
+        return ""
+    text = str(value)
+    for bad, good in _S3_METADATA_TRANSLITERATIONS.items():
+        text = text.replace(bad, good)
+    # Drop anything still outside printable ASCII, including control chars and newlines.
+    text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
 def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     fn = str(file_name or "").strip()
     if fn == "agents.md":
@@ -12806,10 +14820,6 @@ def _load_governance_dictionary() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     scan branch is retired; the bundled file is now the sole and always-
     authoritative source. check_governance_dictionary_sync.py remains the
     deploy-coupling enforcement (repo -> bundle -> deploy).
-
-    Backported from v4/main by ENC-TSK-N82 (ENC-ISS-599 / ENC-ISS-600):
-    prod's DDB mirror froze at 2026-06-30.09 once the document outgrew the
-    400KB item limit, silently serving a five-week-stale dictionary.
     """
     dictionary = _load_governance_dictionary_fallback()
     return dictionary, {
@@ -12926,6 +14936,171 @@ def _handle_governance_dictionary(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, result)
 
 
+# ENC-TSK-M66: universal record fields predate the governed per-type field
+# dictionary and are enforced by tracker_mutation for every record type
+# regardless of entity.fields declarations (record has no title -> 400 in
+# _handle_create_record). This is the one contract fact NOT derivable from
+# an entities["tracker.<type>"].fields scan, so it is named explicitly here
+# rather than silently baked into a per-type table.
+_CREATION_RULES_UNIVERSAL_REQUIRED_FIELDS = ("title",)
+
+
+def _handle_tracker_creation_rules(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/tracker/creation_rules — type-keyed pre-creation contract surface (ENC-TSK-M66).
+
+    Derives the required-fields, valid-initial-status, and attachment contract
+    for a tracker record_type entirely from governance_data_dictionary.json
+    (entities["tracker.<type>"] and entities["tracker.<type>.composition"]),
+    with no record_id / no hardcoded per-type contract table. Required fields
+    beyond the universal 'title' are discovered by scanning each type's field
+    definitions for constraints that make the field non-optional at create
+    time (constraints.min_items >= 1 or constraints.min_length >= 1), which
+    matches the acceptance_criteria / user_story / evidence gates enforced in
+    tracker_mutation's _handle_create_record.
+    """
+    qs = event.get("queryStringParameters") or {}
+    record_type = str(qs.get("record_type") or "").strip().lower()
+    parent_type = str(qs.get("parent_type") or "").strip().lower() or None
+
+    if not record_type:
+        return _error(400, "Query parameter 'record_type' is required.", code="VALIDATION_ERROR")
+
+    dictionary, source_meta = _load_governance_dictionary()
+    entities = dictionary.get("entities")
+    if not isinstance(entities, dict):
+        return _error(500, "Governance dictionary payload missing 'entities' object.", code="INTERNAL_ERROR")
+
+    entity_key = f"tracker.{record_type}"
+    entity_def = entities.get(entity_key)
+    if not isinstance(entity_def, dict):
+        valid_types = sorted(
+            k.split(".", 1)[1]
+            for k in entities
+            if k.startswith("tracker.") and "." not in k.split(".", 1)[1]
+            and isinstance(entities[k], dict) and "fields" in entities[k]
+        )
+        return _error(
+            404,
+            f"Unknown tracker record_type '{record_type}'.",
+            code="NOT_FOUND",
+            valid_record_types=valid_types,
+        )
+
+    fields = entity_def.get("fields") if isinstance(entity_def.get("fields"), dict) else {}
+
+    status_def = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    status_enum = status_def.get("enum") if isinstance(status_def.get("enum"), list) else []
+    valid_initial_status = status_enum[0] if status_enum else None
+
+    required_fields = list(_CREATION_RULES_UNIVERSAL_REQUIRED_FIELDS)
+    required_field_detail: Dict[str, Any] = {
+        f: {"reason": "universal base record field (enforced for all record types)"}
+        for f in required_fields
+    }
+    for field_name, field_def in fields.items():
+        if not isinstance(field_def, dict):
+            continue
+        constraints = field_def.get("constraints")
+        if not isinstance(constraints, dict):
+            continue
+        min_items = constraints.get("min_items")
+        min_length = constraints.get("min_length")
+        if (isinstance(min_items, (int, float)) and min_items >= 1) or (
+            isinstance(min_length, (int, float)) and min_length >= 1
+        ):
+            required_fields.append(field_name)
+            required_field_detail[field_name] = {
+                "reason": f"governance dictionary {entity_key}.fields.{field_name}.constraints requires a non-empty value",
+                "constraints": constraints,
+            }
+
+    # Attachment contract: what THIS type composes (its own <type>.composition
+    # entry, e.g. plan/feature), and — when parent_type is supplied — how this
+    # type attaches under that parent (parent's <type>.composition entry).
+    attachment_contract: Dict[str, Any] = {}
+    own_composition = entities.get(f"{entity_key}.composition")
+    if isinstance(own_composition, dict):
+        attachment_contract["composes"] = own_composition.get("fields", own_composition)
+
+    if parent_type:
+        parent_key = f"tracker.{parent_type}.composition"
+        parent_composition = entities.get(parent_key)
+        if not isinstance(parent_composition, dict):
+            attachment_contract["as_child_of"] = {
+                "parent_type": parent_type,
+                "valid": False,
+                "reason": f"No composition contract found for parent_type '{parent_type}' ({parent_key} not in governance dictionary).",
+            }
+        else:
+            parent_fields = parent_composition.get("fields", {}) if isinstance(parent_composition.get("fields"), dict) else {}
+            child_types_def = parent_fields.get("child_record_types", {}) if isinstance(parent_fields.get("child_record_types"), dict) else {}
+            allowed_children = child_types_def.get("enum") if isinstance(child_types_def.get("enum"), list) else []
+            attachment_contract["as_child_of"] = {
+                "parent_type": parent_type,
+                "valid": record_type in allowed_children,
+                "allowed_child_record_types": allowed_children,
+                "attachment_mechanism": parent_fields.get("attachment_mechanism"),
+                "cardinality": parent_fields.get("cardinality"),
+            }
+
+    return _response(
+        200,
+        {
+            "source": source_meta,
+            "dictionary_version": dictionary.get("version"),
+            "record_type": record_type,
+            "parent_type": parent_type,
+            "valid_initial_status": valid_initial_status,
+            "status_enum": status_enum,
+            "required_fields": required_fields,
+            "required_field_detail": required_field_detail,
+            "attachment_contract": attachment_contract,
+        },
+    )
+
+
+def _trigger_governance_recompute_push(s3_key: str) -> None:
+    """Fire-and-forget nudge so the bundle-root hash converges now, not in an hour.
+
+    ENC-TSK-Q26 / ENC-ISS-799. The prod bucket's governance/live/ ObjectCreated
+    notification relays through a cross-region SNS topic whose only subscriber is the
+    GAMMA recompute function, so the prod devops-recompute-governance has no event
+    trigger at all - its sole trigger is the hourly devops-recompute-governance-backstop
+    rule. That left the canonical governance-version record lagging a governance write by
+    up to 60 minutes and made the "backstop" load-bearing.
+
+    The payload deliberately mirrors the synthetic S3-shaped Input that the backstop rule
+    already supplies, so the recompute's own _extract_s3_record contract is unchanged.
+    Failures are warnings only: the backstop remains the authoritative fallback, exactly
+    as the on-demand sync backs up _trigger_governance_doc_sync_push.
+    """
+    fn_name = RECOMPUTE_GOVERNANCE_LAMBDA_NAME
+    if not fn_name:
+        logger.info(
+            "[GOVERNANCE] RECOMPUTE_GOVERNANCE_LAMBDA_NAME unset; relying on the hourly "
+            "backstop for the bundle-root recompute after %s", s3_key,
+        )
+        return
+    payload = json.dumps({
+        "Records": [{
+            "eventSource": "aws:governance-update-push",
+            "s3": {"object": {"key": s3_key, "sequencer": "", "versionId": ""}},
+        }]
+    }).encode("utf-8")
+    try:
+        _get_lambda_client().invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",
+            Payload=payload,
+        )
+        logger.info("[GOVERNANCE] recompute nudge triggered: %s -> %s", s3_key, fn_name)
+    except Exception as exc:  # noqa: BLE001 - best-effort; backstop is the fallback
+        logger.warning(
+            "[GOVERNANCE] recompute nudge failed for %s (%s); hourly backstop still applies: %s",
+            s3_key, fn_name, exc,
+        )
+
+
 def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None:
     """Fire-and-forget Lambda invocation to push-sync a governance file to the document store.
 
@@ -12966,6 +15141,216 @@ def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None
             "On-demand sync via document_api search will serve as fallback.",
             file_name, exc,
         )
+
+
+# ---------------------------------------------------------------------------
+# ADE Component C: Cursor Cloud Agents completion webhook
+#   Route: POST /api/v1/cursor/webhook
+#   Pure logic lives in cursor_webhook.py; this section only wires the real
+#   side-effecting dependencies (document create, issue create, governance hash)
+#   and delegates to cursor_webhook.handle().
+# ---------------------------------------------------------------------------
+
+_CURSOR_WEBHOOK_MODULE = None
+
+
+def _load_cursor_webhook_module():
+    """Load the cursor_webhook sibling module (mirrors _load_mcp_server_module).
+
+    Tries a normal import first (Lambda packages siblings flat), then falls back
+    to a file-path spec load so the monolith works regardless of sys.path.
+    """
+    global _CURSOR_WEBHOOK_MODULE
+    if _CURSOR_WEBHOOK_MODULE is not None:
+        return _CURSOR_WEBHOOK_MODULE
+
+    try:
+        import cursor_webhook as _cw  # type: ignore
+
+        _CURSOR_WEBHOOK_MODULE = _cw
+        return _CURSOR_WEBHOOK_MODULE
+    except ModuleNotFoundError:
+        pass
+
+    module_path = pathlib.Path(__file__).with_name("cursor_webhook.py")
+    spec = importlib.util.spec_from_file_location("coordination_cursor_webhook", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load cursor_webhook module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CURSOR_WEBHOOK_MODULE = module
+    return _CURSOR_WEBHOOK_MODULE
+
+
+def _cursor_create_document_via_api(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a document via the SAME internal mechanism existing code uses.
+
+    Invokes the document API Lambda (DOCUMENT_API_LAMBDA_NAME) synchronously with
+    a synthetic API Gateway v2 event, authenticating service-to-service via the
+    X-Coordination-Internal-Key header (same key the MCP/document tier uses).
+    Returns the parsed response body, which contains the server-assigned
+    'document_id' (IDs are never predicted — read from the response).
+    """
+    fn_name = DOCUMENT_API_LAMBDA_NAME
+    if not fn_name:
+        raise RuntimeError("DOCUMENT_API_LAMBDA_NAME not configured")
+
+    body = {
+        "project_id": GOVERNANCE_PROJECT_ID,
+        **payload,
+    }
+    headers = {"Content-Type": "application/json"}
+    internal_key = (COORDINATION_INTERNAL_API_KEY or "").strip()
+    if internal_key:
+        headers["X-Coordination-Internal-Key"] = internal_key
+
+    invoke_event = {
+        "version": "2.0",
+        "routeKey": "PUT /api/v1/documents",
+        "rawPath": "/api/v1/documents",
+        "requestContext": {"http": {"method": "PUT", "path": "/api/v1/documents"}},
+        "httpMethod": "PUT",
+        "headers": headers,
+        "isBase64Encoded": False,
+        "body": json.dumps(body),
+    }
+
+    resp = _get_lambda_client().invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(invoke_event).encode("utf-8"),
+    )
+    raw = resp.get("Payload")
+    payload_text = raw.read().decode("utf-8") if raw is not None else ""
+    envelope = json.loads(payload_text) if payload_text else {}
+    if resp.get("FunctionError"):
+        raise RuntimeError(f"document API invoke error: {envelope}")
+
+    status_code = int(envelope.get("statusCode") or 0)
+    inner_raw = envelope.get("body")
+    inner: Dict[str, Any] = {}
+    if isinstance(inner_raw, str) and inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except json.JSONDecodeError:
+            inner = {}
+    elif isinstance(inner_raw, dict):
+        inner = inner_raw
+
+    if status_code not in (200, 201) or not inner.get("document_id"):
+        raise RuntimeError(
+            f"document API returned status={status_code} body={inner or inner_raw}"
+        )
+    return inner
+
+
+def _invoke_document_api(
+    method: str, document_id: str, body: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """GET/PATCH a single document via the SAME internal Lambda-invoke mechanism as
+    _cursor_create_document_via_api, generalized past PUT. Used by the ENC-TSK-J46
+    lesson-candidate approve/reject handlers to read and update the candidate
+    document without direct DynamoDB/S3 access to the document store.
+    """
+    fn_name = DOCUMENT_API_LAMBDA_NAME
+    if not fn_name:
+        raise RuntimeError("DOCUMENT_API_LAMBDA_NAME not configured")
+
+    path = f"/api/v1/documents/{document_id}"
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    internal_key = (COORDINATION_INTERNAL_API_KEY or "").strip()
+    if internal_key:
+        headers["X-Coordination-Internal-Key"] = internal_key
+
+    invoke_event = {
+        "version": "2.0",
+        "routeKey": f"{method.upper()} {path}",
+        "rawPath": path,
+        "requestContext": {"http": {"method": method.upper(), "path": path}},
+        "httpMethod": method.upper(),
+        "headers": headers,
+        "isBase64Encoded": False,
+        "body": json.dumps(body) if body is not None else None,
+    }
+
+    resp = _get_lambda_client().invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(invoke_event).encode("utf-8"),
+    )
+    raw = resp.get("Payload")
+    payload_text = raw.read().decode("utf-8") if raw is not None else ""
+    envelope = json.loads(payload_text) if payload_text else {}
+    if resp.get("FunctionError"):
+        raise RuntimeError(f"document API invoke error: {envelope}")
+
+    status_code = int(envelope.get("statusCode") or 0)
+    inner_raw = envelope.get("body")
+    inner: Dict[str, Any] = {}
+    if isinstance(inner_raw, str) and inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except json.JSONDecodeError:
+            inner = {}
+    elif isinstance(inner_raw, dict):
+        inner = inner_raw
+    inner["_status_code"] = status_code
+    return inner
+
+
+def _cursor_create_issue(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a tracker issue via the SAME internal mechanism existing handlers use.
+
+    Mirrors _decompose_and_create_tracker_artifacts: resolves project prefix and
+    calls _create_tracker_record_auto(record_type='issue'). The server assigns
+    the record id (returned). The spec's 'technical_notes' content is folded into
+    the issue description because _create_tracker_record_auto persists a
+    'description' (not a separate technical_notes attribute).
+    """
+    project_id = GOVERNANCE_PROJECT_ID
+    meta = _load_project_meta(project_id)
+    governance_hash = str(payload.get("governance_hash") or "")
+
+    hypothesis = str(payload.get("hypothesis") or "")
+    technical_notes = str(payload.get("technical_notes") or "")
+    description_parts = [hypothesis]
+    if technical_notes:
+        description_parts.append(f"Technical notes: {technical_notes}")
+    description = "\n\n".join(p for p in description_parts if p) or "Auto-filed by Enceladus Cursor webhook handler."
+
+    record_id = _create_tracker_record_auto(
+        project_id=project_id,
+        prefix=meta.prefix,
+        record_type="issue",
+        title=str(payload.get("title") or "")[:MAX_TITLE_LENGTH],
+        description=description,
+        priority=str(payload.get("priority") or "P2"),
+        assigned_to="AGENT-003",
+        severity="high",
+        hypothesis=hypothesis,
+        governance_hash=governance_hash,
+    )
+    return {"record_id": record_id}
+
+
+def _handle_cursor_webhook(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/cursor/webhook — ADE Component C entry point.
+
+    Reads the RAW body (decoding base64 if API Gateway encoded it) inside
+    cursor_webhook.handle so the HMAC is computed over the exact signed bytes.
+    Always returns 200 on a valid-signature request even if an internal create
+    fails (Cursor retries non-2xx); 401 on bad signature, 400 on bad body.
+    """
+    module = _load_cursor_webhook_module()
+    deps = module.CursorWebhookDeps(
+        create_document=_cursor_create_document_via_api,
+        create_issue=_cursor_create_issue,
+        resolve_governance_hash=_compute_governance_hash_local,
+    )
+    status_code, body = module.handle(event, None, deps, secret=CURSOR_WEBHOOK_SECRET)
+    return _response(status_code, body)
 
 
 def _handle_governance_get(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -13069,8 +15454,12 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
                 Key=archive_key,
                 Body=existing_content,
                 ContentType="text/markdown; charset=utf-8",
+                # ENC-TSK-Q26 (ENC-ISS-799): devops-recompute-governance derives the bundle
+                # root from each object's SHA256 additional checksum and raises if one is
+                # absent, so a write without this silently bricks every later recompute.
+                ChecksumAlgorithm="SHA256",
                 Metadata={
-                    "change_summary": change_summary[:256],
+                    "change_summary": _s3_metadata_safe(change_summary),
                     "archived_at": _now_z(),
                     "previous_hash": hashlib.sha256(existing_content).hexdigest(),
                 },
@@ -13089,8 +15478,11 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
             Key=live_key,
             Body=content_bytes,
             ContentType="text/markdown; charset=utf-8",
+            # ENC-TSK-Q26 (ENC-ISS-799): required by devops-recompute-governance; omitting it
+            # freezes the canonical governance-version record for the WHOLE bundle.
+            ChecksumAlgorithm="SHA256",
             Metadata={
-                "change_summary": change_summary[:256],
+                "change_summary": _s3_metadata_safe(change_summary),
                 "updated_at": _now_z(),
                 "content_sha256": new_hash,
             },
@@ -13099,9 +15491,20 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         logger.exception("Failed to write governance file to S3")
         return _error(500, f"Failed to write governance file to S3: {exc}")
 
-    # Recompute governance hash after update
-    new_governance_hash = _compute_governance_hash_local()
-    logger.info("[GOVERNANCE] Updated %s — new governance_hash: %s", uri, new_governance_hash)
+    # ENC-TSK-Q26 (ENC-ISS-799): nudge the bundle-root recompute so the canonical record
+    # converges in seconds instead of waiting up to an hour for the backstop rule.
+    _trigger_governance_recompute_push(live_key)
+
+    # The canonical governance-version record is written BY that recompute, so reading it
+    # here necessarily returns the PRE-write value. Report it as pending rather than
+    # presenting a known-stale hash as the post-write truth. If it still equals the hash
+    # the caller supplied as its precondition, it demonstrably has not converged yet.
+    canonical_hash = _compute_governance_hash_local()
+    governance_hash_pending = (not canonical_hash) or canonical_hash == governance_hash
+    logger.info(
+        "[GOVERNANCE] Updated %s — content_hash=%s canonical=%s pending=%s",
+        uri, new_hash, canonical_hash or "(unavailable)", governance_hash_pending,
+    )
 
     result = {
         "status": "updated",
@@ -13109,7 +15512,16 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         "s3_key": live_key,
         "content_hash": new_hash,
         "content_size_bytes": len(content_bytes),
-        "governance_hash": new_governance_hash,
+        "governance_hash": canonical_hash,
+        "governance_hash_pending": governance_hash_pending,
+        "governance_hash_note": (
+            "content_hash is this object's SHA256 and is final. governance_hash is the "
+            "canonical bundle root maintained by devops-recompute-governance; when "
+            "governance_hash_pending is true it has not yet absorbed this write. Re-read "
+            "connection_health() or GET /api/v1/governance/hash before the next governed "
+            "write, and do not read a lagging value as drift."
+        ),
+        "canonical_recompute_backstop_seconds": 3600,
         "updated_at": _now_z(),
     }
     if archive_key:
@@ -13332,6 +15744,297 @@ def _handle_auth_tokens_list() -> Dict[str, Any]:
         logger.exception("Failed to list managed auth tokens")
         return _error(500, f"Failed to list managed auth tokens: {exc}")
     return _response(200, {"tokens": tokens, "count": len(tokens)})
+
+
+def _handle_agent_credential_issue(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials — issue a credential for an identity.
+
+    Body: {"agent_identity_id": "ENC-AGT-NNN", "rotated_from": "<optional parent CRED>"}.
+    The credential id is minted server-side (callers may never supply it). The persisted
+    row streams to graph_sync, which projects the :AgentCredential node + OWNED_BY edge
+    (and DERIVED_FROM when rotated_from is set) asynchronously — NO synchronous Neo4j call.
+    """
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    agent_identity_id = str(body.get("agent_identity_id") or "").strip()
+    if not agent_identity_id:
+        return _error(400, "agent_identity_id is required")
+    rotated_from = str(body.get("rotated_from") or "").strip()
+    try:
+        item = _agent_id_alloc.issue_credential(
+            agent_identity_id=agent_identity_id,
+            rotated_from=rotated_from,
+            caller_payload=body,
+        )
+    except _agent_id_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to issue agent credential")
+        return _error(500, f"Failed to issue agent credential: {exc}")
+    return _response(201, {"success": True, "credential": item})
+
+
+def _handle_agent_credential_rotate(credential_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials/{id}/rotate — rotate a credential.
+
+    Issues a successor credential (rotated_from={id}) then revokes the parent
+    (reason='rotated', NON-cascading). Returns {new_credential, revoked_parent}.
+    """
+    try:
+        result = _agent_id_alloc.rotate_credential(credential_id)
+    except ValueError as exc:
+        return _error(404 if "not found" in str(exc).lower() else 409, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to rotate agent credential %s", credential_id)
+        return _error(500, f"Failed to rotate agent credential: {exc}")
+    return _response(200, {"success": True, **result})
+
+
+def _handle_agent_credential_revoke(credential_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials/{id}/revoke — revoke + cascade.
+
+    Body: {"reason": "<optional>"}. Revokes the credential and cascades (DynamoDB-side):
+    retires bound sessions and recursively revokes rotation descendants. The graph edges
+    reflect the cascade asynchronously once the stream events flow through graph_sync.
+    """
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    reason = str(body.get("reason") or "revoked").strip() or "revoked"
+    try:
+        summary = _agent_id_alloc.revoke_credential(credential_id, reason)
+    except ValueError as exc:
+        return _error(404, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to revoke agent credential %s", credential_id)
+        return _error(500, f"Failed to revoke agent credential: {exc}")
+    return _response(200, {"success": True, **summary})
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I38 — Agent identity handlers (agent.*) — ported to v4/main by ENC-TSK-J43
+# ---------------------------------------------------------------------------
+
+def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions — mint a new ENC-SES-NNN session."""
+    body = _json_body(event) or {}
+    if body.get("session_id"):
+        return _error(400, "session_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
+    agent_type_id = str(body.get("agent_type_id") or "").strip()
+    runtime = str(body.get("runtime") or "").strip()
+    parent_session_id = str(body.get("parent_session_id") or "root").strip()
+    status = str(body.get("status") or "allocated").strip()
+    # ENC-TSK-J43: optional credential binding (ENC-FTR-074 Ph3). Omitting it is fully
+    # backward-compatible — the session is minted credential-less exactly as before.
+    credential_id = str(body.get("credential_id") or "").strip()
+    if not agent_type_id:
+        return _error(400, "agent_type_id is required", retryable=False)
+    if not runtime:
+        return _error(400, "runtime is required", retryable=False)
+    if status not in _agent_id_alloc.SESSION_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_id_alloc.SESSION_STATUSES)}", retryable=False)
+    try:
+        item = _agent_id_alloc.mint_session_id(
+            agent_type_id=agent_type_id,
+            runtime=runtime,
+            parent_session_id=parent_session_id,
+            status=status,
+            credential_id=credential_id,
+            caller_payload=body,
+        )
+    except _agent_id_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc), retryable=False)
+    except ValueError as exc:
+        # Invalid status or invalid/inactive credential_id (ENC-TSK-J43).
+        return _error(400, str(exc), retryable=False)
+    except _agent_id_alloc.IdAllocationError as exc:
+        logger.exception("[ERROR] mint_session_id failed: %s", exc)
+        return _error(500, "Failed to allocate session id — see Lambda logs")
+    return _response(201, {"session": item})
+
+
+def _handle_agent_session_claim(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/claim — flip allocated → claimed."""
+    body = _json_body(event) or {}
+    session_id = str(body.get("session_id") or "").strip()
+    expected_agent_type_id = str(body.get("expected_agent_type_id") or "").strip() or None
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        item = _agent_id_alloc.claim_session(session_id, expected_agent_type_id=expected_agent_type_id)
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] claim_session failed: %s", exc)
+        return _error(500, "DynamoDB error during session claim")
+    # ENC-ISS-441 / ENC-TSK-J92: a successful claim mints the session's SCI. A claim
+    # without an SCI would wedge the session at the Ph3 enforcement gate, so a mint
+    # failure is a hard error — the caller should retire this session and register anew.
+    try:
+        sci = _agent_id_alloc.mint_sci(item)
+    except (ValueError, BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] mint_sci failed after claim of %s: %s", session_id, exc)
+        return _error(
+            500,
+            "Session claimed but SCI mint failed — retire this session (agent.retire) "
+            "and register a new one",
+        )
+    item["sci_token_id"] = sci["token_id"]
+    return _response(
+        200,
+        {
+            "session": item,
+            "sci": sci["token_id"],
+            "sci_issued_at": sci["issued_at"],
+            "sci_ttl_seconds": _agent_id_alloc.SCI_TTL_SECONDS,
+        },
+    )
+
+
+def _handle_agent_session_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/sessions — live session directory."""
+    params = event.get("queryStringParameters") or {}
+    status = str(params.get("status") or "").strip() or None
+    agent_type_id = str(params.get("agent_type_id") or "").strip() or None
+    if status and status not in _agent_id_alloc.SESSION_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_id_alloc.SESSION_STATUSES)}", retryable=False)
+    try:
+        sessions = _agent_id_alloc.list_sessions(status=status, agent_type_id=agent_type_id)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] list_sessions failed: %s", exc)
+        return _error(500, "Failed to list sessions")
+    return _response(200, {"sessions": sessions, "count": len(sessions)})
+
+
+def _handle_agent_session_get(session_id: str) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/sessions/{id} — single session detail
+    (ENC-TSK-L35: B67 PWA2.0 session detail + worklog mirroring).
+
+    Returns the full session item exactly as persisted (SESSION_NODE_PROPERTIES
+    plus post-mint attributes: last_activity_at, updated_at, sci_token_id,
+    credential_id, and — as of ENC-TSK-L35 — the mirrored ``history`` list
+    populated by tracker_mutation._mirror_worklog_to_session whenever this
+    session appends a worklog entry to any record).
+    """
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        session = _agent_id_alloc.get_session(session_id)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] get_session failed for %s: %s", session_id, exc)
+        return _error(500, "Failed to fetch session")
+    if session is None:
+        return _error(404, f"Session not found: {session_id}", retryable=False)
+    return _response(200, {"session": session})
+
+
+def _handle_agent_session_retire(
+    session_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/{id}/retire — graceful close."""
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        result = _agent_id_alloc.retire_session_with_checkout_release(
+            session_id, reason="explicit_retire"
+        )
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] retire_session failed: %s", exc)
+        return _error(500, "DynamoDB error during session retire")
+    payload: Dict[str, Any] = {
+        "session": result["session"],
+        "sci_revoked": bool(result.get("sci_revoked")),
+        "released_task_count": int(result.get("released_task_count") or 0),
+        "released_tasks": result.get("released_tasks", []),
+    }
+    if result.get("sci_token_id"):
+        payload["sci_token_id"] = result["sci_token_id"]
+    return _response(200, payload)
+
+
+def _handle_agent_session_checkout_release_backfill(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/checkout-release-backfill.
+
+    One-time operational repair for tasks whose checkout owner is an already-retired
+    ENC-SES session. It is status-neutral: only checkout ownership fields are released.
+    """
+    body = _json_body(event) or {
+        key: event[key] for key in ("dry_run", "session_ids") if key in event
+    }
+    raw_session_ids = body.get("session_ids")
+    session_ids = None
+    if raw_session_ids is not None:
+        if not isinstance(raw_session_ids, list):
+            return _error(400, "session_ids must be a list when supplied", retryable=False)
+        session_ids = [str(sid).strip() for sid in raw_session_ids if str(sid).strip()]
+    try:
+        summary = _agent_id_alloc.release_checkouts_for_retired_sessions(
+            dry_run=bool(body.get("dry_run", False)),
+            session_ids=session_ids,
+        )
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] checkout-release backfill failed: %s", exc)
+        return _error(500, "DynamoDB error during checkout-release backfill")
+    return _response(200, summary)
+
+
+def _handle_agent_type_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/types — agent-type directory."""
+    params = event.get("queryStringParameters") or {}
+    status = str(params.get("status") or "").strip() or None
+    if status and status not in _agent_id_alloc.AGENT_TYPE_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_id_alloc.AGENT_TYPE_STATUSES)}", retryable=False)
+    try:
+        types = _agent_id_alloc.list_agent_types(status=status)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] list_agent_types failed: %s", exc)
+        return _error(500, "Failed to list agent types")
+    return _response(200, {"agent_types": types, "count": len(types)})
+
+
+def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/types — idempotent agent-type registration."""
+    body = _json_body(event) or {}
+    if body.get("agent_type_id"):
+        return _error(400, "agent_type_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
+    surface = str(body.get("surface") or "").strip()
+    model = str(body.get("model") or "").strip()
+    cost_tier = str(body.get("cost_tier") or "").strip()
+    if not surface:
+        return _error(400, "surface is required", retryable=False)
+    if not model:
+        return _error(400, "model is required", retryable=False)
+    if not cost_tier:
+        return _error(400, "cost_tier is required", retryable=False)
+    try:
+        existing = _agent_id_alloc.find_agent_type(surface=surface, model=model)
+        if existing:
+            return _response(200, {"agent_type": existing, "created": False})
+        item = _agent_id_alloc.mint_agent_type_id(
+            surface=surface,
+            model=model,
+            cost_tier=cost_tier,
+            caller_payload=body,
+        )
+    except _agent_id_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc), retryable=False)
+    except _agent_id_alloc.IdAllocationError as exc:
+        logger.exception("[ERROR] mint_agent_type_id failed: %s", exc)
+        return _error(500, "Failed to allocate agent type id — see Lambda logs")
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] agent_type register DDB error: %s", exc)
+        return _error(500, "DynamoDB error during agent type registration")
+    return _response(201, {"agent_type": item, "created": True})
 
 
 def _handle_auth_tokens_create(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -13897,6 +16600,16 @@ def _handle_auth_cognito_terminal_session(event: Dict[str, Any], claims: Dict[st
             }
         )
 
+    # ENC-ISS-559: include_tokens=false must suppress token values everywhere
+    # a token could leak — not just the dedicated "tokens" object below, but
+    # also the cookie bundle (cookies / playwright_cookies / set_cookie_headers).
+    # Only cookie entries that actually carry token material are redacted;
+    # non-token cookies (e.g. the session timestamp) keep their real value.
+    if not include_tokens:
+        for c in cookies:
+            if c["name"] in _COGNITO_TOKEN_COOKIE_NAMES:
+                c["value"] = ""
+
     payload: Dict[str, Any] = {
         "success": True,
         "session": {
@@ -13971,6 +16684,21 @@ def _handle_health() -> Dict[str, Any]:
     except Exception as exc:
         health["governance_hash"] = f"error: {exc}"
 
+    # ENC-TSK-Q14 (O2.5/D9): feature-detectable tracker capability flags,
+    # mirroring the mcp_server docstore_capabilities pattern (ENC-TSK-P73)
+    # -- a caller checks this block instead of probing with a throwaway
+    # mode=census / next_cursor call. Static (not registry-derived, unlike
+    # docstore_capabilities) because these ship as one Q13/Q14 pair, not an
+    # independently-togglable action registry. tools/enceladus-mcp-server's
+    # connection_health() merges this whole /api/v1/health response
+    # (_health_api_request()) as-is, so this key passes through
+    # automatically with no server.py change; ELR reads /api/v1/health
+    # directly and sees it the same way.
+    health["tracker_capabilities"] = {
+        "census": True,          # ENC-TSK-Q14: GET /{project}?mode=census
+        "list_cursor_v2": True,  # ENC-TSK-Q13: value-based next_cursor codec
+    }
+
     health["checked_at"] = _now_z()
     return _response(200, health)
 
@@ -14036,167 +16764,147 @@ def _handle_chat_message(
 
 
 # ---------------------------------------------------------------------------
-# ENC-TSK-I38 — Agent identity handlers (agent.*)
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier
 # ---------------------------------------------------------------------------
 
-def _agent_alloc_unavailable() -> Dict[str, Any]:
-    return _error(503, "agent_id_alloc module not available in this deployment")
 
+def _handle_session_init_classify_intent(
+    event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/session-init/classify-intent (ENC-FTR-084 Ph1).
 
-def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
-    """POST /api/v1/coordination/agents/sessions — mint a new ENC-SES-NNN session."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    body = _json_body(event) or {}
-    if body.get("session_id"):
-        return _error(400, "session_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
-    agent_type_id = str(body.get("agent_type_id") or "").strip()
-    runtime = str(body.get("runtime") or "").strip()
-    parent_session_id = str(body.get("parent_session_id") or "root").strip()
-    status = str(body.get("status") or "allocated").strip()
-    if not agent_type_id:
-        return _error(400, "agent_type_id is required", retryable=False)
-    if not runtime:
-        return _error(400, "runtime is required", retryable=False)
-    if status not in _agent_alloc.SESSION_STATUSES:
-        return _error(400, f"status must be one of {list(_agent_alloc.SESSION_STATUSES)}", retryable=False)
+    Accepts the first-turn request text + session metadata and returns the
+    predicted_entelechy {node_ids, confidence} via Titan V2 nearest-neighbor
+    inference. Honors applied_entelechy_override (override wins; the classifier
+    prediction is still computed and logged). Inference-only: no governed
+    mutation, no training, no weight writes.
+    """
     try:
-        item = _agent_alloc.mint_session_id(
-            agent_type_id=agent_type_id,
-            runtime=runtime,
-            parent_session_id=parent_session_id,
-            status=status,
-            caller_payload=body,
+        raw_body = event.get("body") or "{}"
+        body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        return _error(400, "Request body must be a JSON object")
+
+    first_turn_text = str(body.get("first_turn_text") or body.get("request_text") or "").strip()
+    if not first_turn_text:
+        return _error(400, "Missing required field: first_turn_text")
+
+    session_metadata = body.get("session_metadata")
+    if session_metadata is not None and not isinstance(session_metadata, dict):
+        return _error(400, "'session_metadata' must be an object when provided")
+
+    project_id = str(body.get("project_id") or "enceladus").strip() or "enceladus"
+    top_k = body.get("top_k", _intent_classifier.DEFAULT_TOP_K)
+
+    try:
+        result = _intent_classifier.classify_session_intent(
+            first_turn_text,
+            session_metadata or {},
+            applied_entelechy_override=body.get("applied_entelechy_override"),
+            top_k=top_k,
+            project_id=project_id,
         )
-    except _agent_alloc.CallerSuppliedIdError as exc:
-        return _error(400, str(exc), retryable=False)
-    except _agent_alloc.IdAllocationError as exc:
-        logger.exception("[ERROR] mint_session_id failed: %s", exc)
-        return _error(500, "Failed to allocate session id — see Lambda logs")
-    return _response(201, {"session": item})
+    except Exception as exc:  # noqa: BLE001 — inference must never 500 session-init
+        logger.exception("session-init classify-intent failed")
+        return _error(500, f"Intent classification failed: {exc}")
+
+    return _response(200, {"success": True, **result})
 
 
-def _handle_agent_session_claim(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
-    """POST /api/v1/coordination/agents/sessions/claim — flip allocated → claimed."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    body = _json_body(event) or {}
-    session_id = str(body.get("session_id") or "").strip()
-    expected_agent_type_id = str(body.get("expected_agent_type_id") or "").strip() or None
-    if not session_id:
-        return _error(400, "session_id is required", retryable=False)
+def _handle_session_init_intent_drift(
+    event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/session-init/intent-centroid-drift (ENC-FTR-084 Ph1, AC-3).
+
+    Computes the rolling intent vector for a wave (mean of the supplied FTR-089
+    embeddings for dispatched records), derives the scalar intent_centroid_drift
+    against the previous wave centroid, and best-effort persists that new nullable
+    column into enceladus-drift-telemetry alongside the FTR-087 d_centroid field.
+    """
     try:
-        item = _agent_alloc.claim_session(session_id, expected_agent_type_id=expected_agent_type_id)
-    except ValueError as exc:
-        return _error(400, str(exc), retryable=False)
-    except (BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] claim_session failed: %s", exc)
-        return _error(500, "DynamoDB error during session claim")
-    # ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44: a
-    # successful claim mints the session's SCI. A claim without an SCI would wedge the
-    # session at the Ph3 enforcement gate, so a mint failure is a hard error — the caller
-    # should retire this session and register anew.
+        raw_body = event.get("body") or "{}"
+        body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        return _error(400, "Request body must be a JSON object")
+
+    wave_id = str(body.get("wave_id") or "").strip()
+    if not wave_id:
+        return _error(400, "Missing required field: wave_id")
+
+    embeddings = body.get("embeddings") or body.get("dispatched_record_embeddings") or []
+    if not isinstance(embeddings, list):
+        return _error(400, "'embeddings' must be a list of embedding vectors")
+
+    previous_centroid = body.get("previous_centroid")
+    if previous_centroid is not None and not isinstance(previous_centroid, list):
+        return _error(400, "'previous_centroid' must be a list when provided")
+
+    persist = body.get("persist", True)
+
     try:
-        sci = _agent_alloc.mint_sci(item)
-    except (ValueError, BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] mint_sci failed after claim of %s: %s", session_id, exc)
-        return _error(
-            500,
-            "Session claimed but SCI mint failed — retire this session (agent.retire) "
-            "and register a new one",
+        centroid = _intent_drift.compute_intent_centroid(embeddings)
+        drift = _intent_drift.compute_intent_centroid_drift(previous_centroid, centroid)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intent-centroid-drift computation failed")
+        return _error(500, f"Centroid drift computation failed: {exc}")
+
+    persistence: Dict[str, Any] = {"persisted": False, "reason": "persist_disabled"}
+    if persist:
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        persistence = _intent_drift.persist_intent_centroid_drift(
+            wave_id,
+            drift,
+            now_iso=now_iso,
+            table_name=DRIFT_TELEMETRY_TABLE or None,
+            ddb=_get_ddb(),
         )
-    item["sci_token_id"] = sci["token_id"]
+
     return _response(
         200,
         {
-            "session": item,
-            "sci": sci["token_id"],
-            "sci_issued_at": sci["issued_at"],
-            "sci_ttl_seconds": _agent_alloc.SCI_TTL_SECONDS,
+            "success": True,
+            "wave_id": wave_id,
+            "intent_centroid_dim": len(centroid) if centroid else 0,
+            "intent_centroid_drift": drift,
+            "record_count": len([e for e in embeddings if isinstance(e, (list, tuple)) and e]),
+            "persistence": persistence,
         },
     )
-
-
-def _handle_agent_session_list(event: Dict[str, Any]) -> Dict[str, Any]:
-    """GET /api/v1/coordination/agents/sessions — live session directory."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    params = event.get("queryStringParameters") or {}
-    status = str(params.get("status") or "").strip() or None
-    agent_type_id = str(params.get("agent_type_id") or "").strip() or None
-    if status and status not in _agent_alloc.SESSION_STATUSES:
-        return _error(400, f"status must be one of {list(_agent_alloc.SESSION_STATUSES)}", retryable=False)
-    try:
-        sessions = _agent_alloc.list_sessions(status=status, agent_type_id=agent_type_id)
-    except (BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] list_sessions failed: %s", exc)
-        return _error(500, "Failed to list sessions")
-    return _response(200, {"sessions": sessions, "count": len(sessions)})
-
-
-def _handle_agent_session_retire(
-    session_id: str, event: Dict[str, Any], claims: Dict[str, Any]
-) -> Dict[str, Any]:
-    """POST /api/v1/coordination/agents/sessions/{id}/retire — graceful close."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    if not session_id:
-        return _error(400, "session_id is required", retryable=False)
-    try:
-        item = _agent_alloc.retire_session(session_id)
-    except ValueError as exc:
-        return _error(400, str(exc), retryable=False)
-    except (BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] retire_session failed: %s", exc)
-        return _error(500, "DynamoDB error during session retire")
-    # ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44:
-    # retirement revokes the session's SCI. The retire itself is already durable
-    # (append-only flip above); a revocation failure is surfaced but non-fatal.
-    payload: Dict[str, Any] = {"session": item}
-    try:
-        revoked = _agent_alloc.revoke_sci_for_session(session_id, reason="explicit_retire")
-    except (ValueError, BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] SCI revocation failed on retire of %s: %s", session_id, exc)
-        payload["sci_revoked"] = False
-        payload["sci_revocation_error"] = "SCI revocation failed"
-    else:
-        payload["sci_revoked"] = bool(revoked)
-        if revoked:
-            payload["sci_token_id"] = revoked.get("token_id") or revoked.get("pk")
-    return _response(200, payload)
 
 
 def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
     """Scheduled backstop reaper for abandoned agent sessions (ENC-TSK-I71 / ENC-FTR-117 AC#8).
 
-    Invoked by the AgentSessionIdleSweepSchedule EventBridge rule, NOT an HTTP route — there
-    is no API Gateway envelope, auth, or claims on this path. Flips sessions left in a live
-    status (allocated/claimed) past the configured idle threshold to 'retired' via the
-    append-only conditional update in agent_id_alloc.sweep_idle_sessions (NOT a delete; NOT
-    native DynamoDB TTL). Returns a plain summary dict for CloudWatch.
+    Backported to v4 by ENC-TSK-J91 (ENC-ISS-441 Ph1). Invoked by the
+    AgentSessionIdleSweepSchedule EventBridge rule, NOT an HTTP route — there is no API
+    Gateway envelope, auth, or claims on this path. Flips sessions left in a live status
+    (allocated/claimed) past the configured idle threshold to 'retired' via the append-only
+    conditional update in agent_id_alloc.sweep_idle_sessions (NOT a delete; NOT native
+    DynamoDB TTL). On v4 the idle reference prefers last_activity_at (ENC-TSK-J71/J83
+    heartbeat) over claimed_at/created_at. Returns a plain summary dict for CloudWatch.
     """
-    if not _AGENT_ALLOC_AVAILABLE:
-        logger.error("[ERROR] idle-sweep invoked but agent_id_alloc module unavailable")
-        return {"enabled": False, "reason": "agent_id_alloc_unavailable", "retired_count": 0}
     if not AGENT_SESSIONS_IDLE_SWEEP_ENABLED:
         logger.info("[INFO] idle-sweep skipped — AGENT_SESSIONS_IDLE_SWEEP_ENABLED is false")
         return {"enabled": False, "reason": "disabled", "retired_count": 0}
     # The schedule delivers the rule's Input JSON verbatim; allow an optional per-invoke
     # threshold/dry_run override, else fall back to the configured default.
     raw_threshold = event.get("idle_threshold_seconds")
+    sweep_kwargs: Dict[str, Any] = {"dry_run": bool(event.get("dry_run", False))}
+    if raw_threshold is not None:
+        try:
+            sweep_kwargs["idle_threshold_seconds"] = int(raw_threshold)
+        except (TypeError, ValueError):
+            return {
+                "enabled": True,
+                "error": "idle_threshold_seconds must be an integer",
+                "retired_count": 0,
+            }
     try:
-        threshold = (
-            int(raw_threshold)
-            if raw_threshold is not None
-            else AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS
-        )
-    except (TypeError, ValueError):
-        return {"enabled": True, "error": "idle_threshold_seconds must be an integer", "retired_count": 0}
-    dry_run = bool(event.get("dry_run", False))
-    try:
-        summary = _agent_alloc.sweep_idle_sessions(
-            idle_threshold_seconds=threshold, dry_run=dry_run
-        )
+        summary = _agent_id_alloc.sweep_idle_sessions(**sweep_kwargs)
     except ValueError as exc:
         return {"enabled": True, "error": str(exc), "retired_count": 0}
     except (BotoCoreError, ClientError) as exc:
@@ -14206,57 +16914,145 @@ def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-def _handle_agent_type_list(event: Dict[str, Any]) -> Dict[str, Any]:
-    """GET /api/v1/coordination/agents/types — agent-type directory."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    params = event.get("queryStringParameters") or {}
-    status = str(params.get("status") or "").strip() or None
-    if status and status not in _agent_alloc.AGENT_TYPE_STATUSES:
-        return _error(400, f"status must be one of {list(_agent_alloc.AGENT_TYPE_STATUSES)}", retryable=False)
-    try:
-        types = _agent_alloc.list_agent_types(status=status)
-    except (BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] list_agent_types failed: %s", exc)
-        return _error(500, "Failed to list agent types")
-    return _response(200, {"agent_types": types, "count": len(types)})
+def _handle_agent_session_unclaim_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled ghost-registration reaper (ENC-ISS-441 / ENC-TSK-J94).
 
-
-def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
-    """POST /api/v1/coordination/agents/types — idempotent agent-type registration."""
-    if not _AGENT_ALLOC_AVAILABLE:
-        return _agent_alloc_unavailable()
-    body = _json_body(event) or {}
-    if body.get("agent_type_id"):
-        return _error(400, "agent_type_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
-    surface = str(body.get("surface") or "").strip()
-    model = str(body.get("model") or "").strip()
-    cost_tier = str(body.get("cost_tier") or "").strip()
-    if not surface:
-        return _error(400, "surface is required", retryable=False)
-    if not model:
-        return _error(400, "model is required", retryable=False)
-    if not cost_tier:
-        return _error(400, "cost_tier is required", retryable=False)
-    try:
-        existing = _agent_alloc.find_agent_type(surface=surface, model=model)
-        if existing:
-            return _response(200, {"agent_type": existing, "created": False})
-        item = _agent_alloc.mint_agent_type_id(
-            surface=surface,
-            model=model,
-            cost_tier=cost_tier,
-            caller_payload=body,
+    Invoked by the AgentSessionUnclaimSweepSchedule EventBridge rule (rate(10 minutes)),
+    NOT an HTTP route — no API Gateway envelope, auth, or claims on this path. Flips
+    'allocated' sessions never claimed within AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of
+    created_at to 'retired' via the append-only conditional update in
+    agent_id_alloc.sweep_unclaimed_sessions, revoking any bound SCI. Returns a plain
+    summary dict for CloudWatch.
+    """
+    if not AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED:
+        logger.info(
+            "[INFO] unclaim-sweep skipped — AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED is false"
         )
-    except _agent_alloc.CallerSuppliedIdError as exc:
-        return _error(400, str(exc), retryable=False)
-    except _agent_alloc.IdAllocationError as exc:
-        logger.exception("[ERROR] mint_agent_type_id failed: %s", exc)
-        return _error(500, "Failed to allocate agent type id — see Lambda logs")
+        return {"enabled": False, "reason": "disabled", "retired_count": 0}
+    raw_ttl = event.get("unclaim_ttl_minutes")
+    sweep_kwargs: Dict[str, Any] = {"dry_run": bool(event.get("dry_run", False))}
+    if raw_ttl is not None:
+        try:
+            sweep_kwargs["unclaim_ttl_minutes"] = int(raw_ttl)
+        except (TypeError, ValueError):
+            return {
+                "enabled": True,
+                "error": "unclaim_ttl_minutes must be an integer",
+                "retired_count": 0,
+            }
+    try:
+        summary = _agent_id_alloc.sweep_unclaimed_sessions(**sweep_kwargs)
+    except ValueError as exc:
+        return {"enabled": True, "error": str(exc), "retired_count": 0}
     except (BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] agent_type register DDB error: %s", exc)
-        return _error(500, "DynamoDB error during agent type registration")
-    return _response(201, {"agent_type": item, "created": True})
+        logger.exception("[ERROR] unclaim-sweep DynamoDB failure: %s", exc)
+        return {"enabled": True, "error": "DynamoDB error during unclaim-sweep", "retired_count": 0}
+    logger.info(
+        "[SUCCESS] unclaim-sweep retired %d session(s), revoked %d SCI(s)",
+        summary.get("retired_count", 0),
+        summary.get("revoked_sci_count", 0),
+    )
+    return summary
+
+
+def _intent_training_s3_get(key: str) -> str:
+    import boto3
+
+    bucket = _intent_training.INTENT_TRAINING_BUCKET
+    if not bucket:
+        raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
+    resp = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    return resp["Body"].read().decode("utf-8")
+
+
+def _intent_training_s3_put(key: str, body: str) -> None:
+    import boto3
+
+    bucket = _intent_training.INTENT_TRAINING_BUCKET
+    if not bucket:
+        raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
+    boto3.client("s3").put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _build_training_rank_fn(labels: List[Dict[str, Any]]):
+    """Build a rank_fn that NN-searches a corpus derived from labeled embeddings."""
+    corpus: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in labels:
+        emb = row.get("embedding")
+        if not isinstance(emb, list):
+            continue
+        for rid in row.get("label_node_ids") or []:
+            rid_s = str(rid).strip()
+            if rid_s and rid_s not in seen:
+                corpus.append({"record_id": rid_s, "embedding": emb})
+                seen.add(rid_s)
+
+    def _rank(row: Dict[str, Any]) -> List[str]:
+        emb = row.get("embedding")
+        if not isinstance(emb, list) or not corpus:
+            return list(row.get("label_node_ids") or [])[:1]
+        neighbors = _intent_classifier.rank_neighbors(emb, corpus, top_k=5)
+        boosted = _intent_training.apply_record_boosts_to_neighbors(
+            [{"record_id": n["record_id"], "score": n["score"]} for n in neighbors],
+            row.get("record_boosts") or {},
+        )
+        return [str(n.get("record_id") or "") for n in boosted if n.get("record_id")]
+
+    return _rank
+
+
+def _hydrate_label_embeddings(labels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in labels:
+        item = dict(row)
+        if not isinstance(item.get("embedding"), list) and item.get("first_turn_text"):
+            item["embedding"] = _intent_classifier.embed_query_text(item["first_turn_text"])
+        out.append(item)
+    return out
+
+
+def _handle_intent_classifier_training(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled intent-classifier training (ENC-TSK-K02 / FTR-084 Ph2)."""
+    dry_run = bool(event.get("dry_run", False))
+    if _intent_training.is_training_hard_disabled():
+        logger.info("[INFO] intent training skipped — TRAINING_HARD_DISABLED")
+        return {
+            "enabled": False,
+            "reason": "TRAINING_HARD_DISABLED",
+            "cost_preflight_monthly_usd": _intent_training.COST_PREFLIGHT_MONTHLY_USD,
+        }
+    try:
+        labels_raw = _intent_training_s3_get(
+            _intent_training._prefix_key(_intent_training.LABELS_SUFFIX)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("intent training: labels unavailable: %s", exc)
+        return {"enabled": True, "trained": False, "reason": "labels_unavailable"}
+    labels = _hydrate_label_embeddings(_intent_training.parse_labels_jsonl(labels_raw))
+    rank_fn = _build_training_rank_fn(labels)
+    return _intent_training.run_training_cycle(
+        get_object=_intent_training_s3_get,
+        put_object=_intent_training_s3_put,
+        rank_fn=rank_fn,
+        dry_run=dry_run,
+        labels=labels,
+    )
+
+
+def _handle_intent_classifier_training_rollback(event: Dict[str, Any]) -> Dict[str, Any]:
+    """One-call rollback for versioned intent training weights (ENC-TSK-K02)."""
+    version_id = str(event.get("version_id") or "").strip() or None
+    return _intent_training.run_rollback(
+        get_object=_intent_training_s3_get,
+        put_object=_intent_training_s3_put,
+        requested_version_id=version_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -14281,6 +17077,30 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if event.get("action") == "agent_session_idle_sweep":
         logger.info("[INFO] Scheduled agent-session idle-sweep invoked")
         return _handle_agent_session_idle_sweep(event)
+
+    # --- ENC-TSK-G19: Anthropic batch status poller (60s via rate(1 minute) rule) ---
+    if event.get("action") == "coordination_batch_poll":
+        logger.info("[INFO] Scheduled Anthropic batch poller invoked")
+        return _handle_coordination_batch_poll(event)
+
+    # --- ENC-ISS-441 / ENC-TSK-J94: scheduled unclaim TTL sweep (ghost registrations) ---
+    # The AgentSessionUnclaimSweepSchedule rule delivers its Input JSON verbatim as the event.
+    if event.get("action") == "agent_session_unclaim_sweep":
+        logger.info("[INFO] Scheduled agent-session unclaim-sweep invoked")
+        return _handle_agent_session_unclaim_sweep(event)
+
+    if event.get("action") == "agent_session_checkout_release_backfill":
+        logger.info("[INFO] Agent-session checkout-release backfill invoked")
+        return _handle_agent_session_checkout_release_backfill(event)
+
+    # --- ENC-TSK-K02 / FTR-084 Ph2: weekly intent-classifier training ---
+    if event.get("action") == "intent_classifier_training":
+        logger.info("[INFO] Scheduled intent-classifier training invoked")
+        return _handle_intent_classifier_training(event)
+
+    if event.get("action") == "intent_classifier_training_rollback":
+        logger.info("[INFO] Intent-classifier training rollback invoked")
+        return _handle_intent_classifier_training_rollback(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.
@@ -14324,6 +17144,13 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         request_id = match_batch_results.group(1)
         return _handle_anthropic_batch_results_callback(event, request_id)
 
+    # POST /api/v1/cursor/webhook  (ADE Component C)
+    # Authenticated via Cursor HMAC-SHA256 signature over the raw body (verified
+    # inside _handle_cursor_webhook), NOT Cognito/internal key — so it is matched
+    # before the generic auth gate below.
+    if method == "POST" and path.endswith("/api/v1/cursor/webhook"):
+        return _handle_cursor_webhook(event)
+
     # Auth all other routes.
     claims, auth_err = _authenticate(event)
     if auth_err:
@@ -14338,6 +17165,19 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # GET /api/v1/governance/dictionary
     if method == "GET" and path == "/api/v1/governance/dictionary":
         return _handle_governance_dictionary(event)
+
+    # GET /api/v1/coordination/tracker/creation_rules (ENC-TSK-M66: type-keyed
+    # pre-creation contract surface, dictionary-derived, no record_id required).
+    # NOTE: the public /api/v1/tracker/* prefix is CloudFront-routed to the
+    # tracker query API, NOT this Lambda -- the reachable path is under the
+    # /api/v1/coordination prefix (COORDINATION_API_BASE + /tracker/creation_rules,
+    # matching how the MCP server's _coordination_api_request builds URLs).
+    # The bare /api/v1/tracker/... form is kept for direct API Gateway callers.
+    if method == "GET" and path in (
+        "/api/v1/coordination/tracker/creation_rules",
+        "/api/v1/tracker/creation_rules",
+    ):
+        return _handle_tracker_creation_rules(event)
 
     # GET/PUT /api/v1/governance/{file_name...}  (ENC-FTR-040: GET added for MCP server)
     match_gov_file = re.fullmatch(r"/api/v1/governance/(.+)", path)
@@ -14374,16 +17214,34 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             return _handle_components_approve(comp_id, event, claims or {})
         return _handle_components_reject(comp_id, event, claims or {})
 
+    # POST /api/v1/coordination/lesson-candidates/{documentId}/approve|reject
+    # (ENC-TSK-J46 / ENC-FTR-096 Ph2). Cognito-gated inside the handlers.
+    match_candidate_decision = re.fullmatch(
+        r"/api/v1/coordination/lesson-candidates/([A-Za-z0-9_\-]+)/(approve|reject)", path
+    )
+    if method == "POST" and match_candidate_decision:
+        candidate_doc_id = match_candidate_decision.group(1)
+        decision = match_candidate_decision.group(2)
+        if decision == "approve":
+            return _handle_lesson_candidate_approve(candidate_doc_id, event, claims or {})
+        return _handle_lesson_candidate_reject(candidate_doc_id, event, claims or {})
+
     # ENC-FTR-121 Ph4 (ENC-TSK-J71): session-scoped escalation event polling —
     # the AGENT side of the loop (approval stays Cognito-only).
     if method == "GET" and path == "/api/v1/coordination/escalations/watch":
         return _handle_escalation_watch(event, claims or {})
 
-
     # ENC-FTR-121 Ph3 (ENC-TSK-J70): Escalations — io approval queue + decisions
     # (DOC-5B888FCA43B8 §5.7). Cognito-gated inside the handlers; no agent path.
     if method == "GET" and path == "/api/v1/coordination/escalations":
         return _handle_escalations_feed(event, claims or {})
+
+    # ENC-TSK-M27 (ENC-FTR-130): io-queue completeness — paused v3-prod
+    # Environment approvals + stale-checkout locks. Read-only, Cognito-gated.
+    if method == "GET" and path == "/api/v1/coordination/queue/paused-approvals":
+        return _handle_queue_paused_approvals(event, claims or {})
+    if method == "GET" and path == "/api/v1/coordination/queue/stale-locks":
+        return _handle_queue_stale_locks(event, claims or {})
     match_escalation_decision = re.fullmatch(
         r"/api/v1/coordination/escalations/([a-z0-9_\-]+)/([A-Za-z0-9\-]+)/(approve|deny)", path
     )
@@ -14395,7 +17253,6 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             event,
             claims or {},
         )
-
 
     # POST /api/v1/coordination/components/{componentId}/{action} where action is
     # one of the ENC-FTR-076 v2 / ENC-TSK-F40 state-machine actions.
@@ -14449,6 +17306,66 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return _handle_projects_get(match_project.group(1))
 
     # --- Unified auth token management (auth required) ---
+
+    # --- Agent-credential lifecycle (ENC-TSK-J04 / ENC-FTR-074 Ph3) ---
+
+    # POST /api/v1/coordination/agents/credentials — issue
+    if method == "POST" and path == "/api/v1/coordination/agents/credentials":
+        return _handle_agent_credential_issue(event)
+
+    # POST /api/v1/coordination/agents/credentials/{id}/rotate
+    match_cred_rotate = re.fullmatch(
+        r"/api/v1/coordination/agents/credentials/(CRED-[0-9a-fA-F]+)/rotate", path
+    )
+    if method == "POST" and match_cred_rotate:
+        return _handle_agent_credential_rotate(match_cred_rotate.group(1), event)
+
+    # POST /api/v1/coordination/agents/credentials/{id}/revoke
+    match_cred_revoke = re.fullmatch(
+        r"/api/v1/coordination/agents/credentials/(CRED-[0-9a-fA-F]+)/revoke", path
+    )
+    if method == "POST" and match_cred_revoke:
+        return _handle_agent_credential_revoke(match_cred_revoke.group(1), event)
+
+    # --- ENC-TSK-I38: Agent identity routes (ported to v4/main by ENC-TSK-J43) ---
+
+    # GET /api/v1/coordination/agents/sessions
+    if method == "GET" and path == "/api/v1/coordination/agents/sessions":
+        return _handle_agent_session_list(event)
+
+    # POST /api/v1/coordination/agents/sessions
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions":
+        return _handle_agent_session_register(event, claims or {})
+
+    # POST /api/v1/coordination/agents/sessions/claim
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions/claim":
+        return _handle_agent_session_claim(event, claims or {})
+
+    # POST /api/v1/coordination/agents/sessions/checkout-release-backfill
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions/checkout-release-backfill":
+        return _handle_agent_session_checkout_release_backfill(event)
+
+    # GET /api/v1/coordination/agents/sessions/{id} (ENC-TSK-L35 session detail page)
+    match_session_get = re.fullmatch(
+        r"/api/v1/coordination/agents/sessions/([A-Za-z0-9_\-]+)", path
+    )
+    if method == "GET" and match_session_get:
+        return _handle_agent_session_get(match_session_get.group(1))
+
+    # POST /api/v1/coordination/agents/sessions/{id}/retire
+    match_session_retire = re.fullmatch(
+        r"/api/v1/coordination/agents/sessions/([A-Za-z0-9_\-]+)/retire", path
+    )
+    if method == "POST" and match_session_retire:
+        return _handle_agent_session_retire(match_session_retire.group(1), event, claims or {})
+
+    # GET /api/v1/coordination/agents/types
+    if method == "GET" and path == "/api/v1/coordination/agents/types":
+        return _handle_agent_type_list(event)
+
+    # POST /api/v1/coordination/agents/types
+    if method == "POST" and path == "/api/v1/coordination/agents/types":
+        return _handle_agent_type_register(event, claims or {})
 
     # GET /api/v1/coordination/auth/tokens
     if method == "GET" and path == "/api/v1/coordination/auth/tokens":
@@ -14526,33 +17443,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         session_id = match_session_msg.group(1)
         return _handle_chat_message(event, session_id, claims or {})
 
-    # --- ENC-TSK-I38: Agent identity routes ---
+    # POST /api/v1/coordination/session-init/classify-intent (ENC-FTR-084 Ph1 / ENC-TSK-I93)
+    if method == "POST" and path == "/api/v1/coordination/session-init/classify-intent":
+        return _handle_session_init_classify_intent(event, claims or {})
 
-    # GET /api/v1/coordination/agents/sessions
-    if method == "GET" and path == "/api/v1/coordination/agents/sessions":
-        return _handle_agent_session_list(event)
-
-    # POST /api/v1/coordination/agents/sessions
-    if method == "POST" and path == "/api/v1/coordination/agents/sessions":
-        return _handle_agent_session_register(event, claims or {})
-
-    # POST /api/v1/coordination/agents/sessions/claim
-    if method == "POST" and path == "/api/v1/coordination/agents/sessions/claim":
-        return _handle_agent_session_claim(event, claims or {})
-
-    # POST /api/v1/coordination/agents/sessions/{id}/retire
-    match_session_retire = re.fullmatch(
-        r"/api/v1/coordination/agents/sessions/([A-Za-z0-9_\-]+)/retire", path
-    )
-    if method == "POST" and match_session_retire:
-        return _handle_agent_session_retire(match_session_retire.group(1), event, claims or {})
-
-    # GET /api/v1/coordination/agents/types
-    if method == "GET" and path == "/api/v1/coordination/agents/types":
-        return _handle_agent_type_list(event)
-
-    # POST /api/v1/coordination/agents/types
-    if method == "POST" and path == "/api/v1/coordination/agents/types":
-        return _handle_agent_type_register(event, claims or {})
+    # POST /api/v1/coordination/session-init/intent-centroid-drift (ENC-FTR-084 Ph1, AC-3)
+    if method == "POST" and path == "/api/v1/coordination/session-init/intent-centroid-drift":
+        return _handle_session_init_intent_drift(event, claims or {})
 
     return _error(404, f"Unsupported route: {method} {path}")

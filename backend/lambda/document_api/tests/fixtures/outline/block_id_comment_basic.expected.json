@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "line_start": 3,
+    "line_end": 10,
+    "section_bytes": 143
+  },
+  {
+    "heading_path": [
+      "Section With Block Id"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": "01BX5ZZKBKACTAV9WEVGEMMVRY",
+    "line_start": 8,
+    "line_end": 10,
+    "section_bytes": 15
+  }
+]

@@ -1,11 +1,11 @@
 {
   "source_of_truth": "infrastructure/cloudformation/02-compute.yaml",
   "expected_architecture": {
-    "prod": "x86_64",
+    "prod": "arm64",
     "gamma": "arm64"
   },
   "expected_runtime": {
-    "prod": "python3.11",
+    "prod": "python3.12",
     "gamma": "python3.12"
   },
   "functions": [
@@ -16,10 +16,17 @@
       "deploy_script": "backend/lambda/auth_refresh/deploy.sh"
     },
     {
-      "function_name": "escalation-decision-authorizer",
-      "lambda_dir": "backend/lambda/escalation_decision_authorizer",
+      "function_name": "devops-appsync-feed-publisher",
+      "lambda_dir": "backend/lambda/appsync_feed_publisher",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
+      "deploy_script": "backend/lambda/appsync_feed_publisher/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "devops-changelog-api",
+      "lambda_dir": "backend/lambda/changelog_api",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/changelog_api/deploy.sh"
     },
     {
       "function_name": "devops-coordination-api",
@@ -32,12 +39,6 @@
       "lambda_dir": "backend/lambda/coordination_monitor_api",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/coordination_monitor_api/deploy.sh"
-    },
-    {
-      "function_name": "devops-changelog-api",
-      "lambda_dir": "backend/lambda/changelog_api",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/changelog_api/deploy.sh"
     },
     {
       "function_name": "devops-deploy-decide",
@@ -64,6 +65,12 @@
       "deploy_script": "backend/lambda/deploy_orchestrator/deploy.sh"
     },
     {
+      "function_name": "devops-deploy-parity-validator",
+      "lambda_dir": "backend/lambda/deploy_parity_validator",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
+    },
+    {
       "function_name": "devops-doc-prep",
       "lambda_dir": "backend/lambda/doc_prep",
       "workflow_file": ".github/workflows/_deploy.yml",
@@ -74,6 +81,12 @@
       "lambda_dir": "backend/lambda/document_api",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/document_api/deploy.sh"
+    },
+    {
+      "function_name": "devops-env-drift-auditor",
+      "lambda_dir": "backend/lambda/env_drift_auditor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/env_drift_auditor/deploy.sh"
     },
     {
       "function_name": "devops-feed-publisher",
@@ -91,40 +104,29 @@
       "deploy_script": "backend/lambda/feed_query/deploy.sh"
     },
     {
-      "function_name": "devops-project-service",
-      "lambda_dir": "backend/lambda/project_service",
+      "function_name": "devops-github-integration",
+      "lambda_dir": "backend/lambda/github_integration",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/project_service/deploy.sh"
+      "deploy_script": "backend/lambda/github_integration/deploy.sh",
+      "cfn_managed": false
     },
     {
-      "function_name": "devops-reference-search",
-      "lambda_dir": "backend/lambda/reference_search",
+      "function_name": "devops-governance-drift-check",
+      "lambda_dir": "backend/lambda/governance_drift_check",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/reference_search/deploy.sh"
+      "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
     },
     {
-      "function_name": "devops-tracker-mutation-api",
-      "lambda_dir": "backend/lambda/tracker_mutation",
+      "function_name": "devops-governance-mart",
+      "lambda_dir": "backend/lambda/governance_mart",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-bedrock-agent-actions",
-      "lambda_dir": "backend/lambda/bedrock_agent_actions",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/bedrock_agent_actions/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-governance-audit",
-      "lambda_dir": "backend/lambda/governance_audit",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/governance_audit/deploy.sh"
-    },
-    {
-      "function_name": "devops-graph-sync",
-      "lambda_dir": "backend/lambda/graph_sync",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/graph_sync/deploy.sh"
+      "deploy_script": "backend/lambda/governance_mart/deploy.sh",
+      "package_extra_files": [
+        "mart_schema.py",
+        "mart_source.py",
+        "mart_project.py",
+        "mart_refresh.py"
+      ]
     },
     {
       "function_name": "devops-graph-query-api",
@@ -133,10 +135,115 @@
       "deploy_script": "backend/lambda/graph_query_api/deploy.sh"
     },
     {
-      "function_name": "enceladus-neo4j-backup",
-      "lambda_dir": "backend/lambda/neo4j_backup",
+      "function_name": "devops-graph-sync",
+      "lambda_dir": "backend/lambda/graph_sync",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
+      "deploy_script": "backend/lambda/graph_sync/deploy.sh"
+    },
+    {
+      "function_name": "devops-opensearch-backfill",
+      "lambda_dir": "backend/lambda/opensearch_backfill",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/opensearch_backfill/deploy.sh"
+    },
+    {
+      "function_name": "devops-opensearch-indexer",
+      "lambda_dir": "backend/lambda/opensearch_indexer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/opensearch_indexer/deploy.sh"
+    },
+    {
+      "function_name": "devops-project-service",
+      "lambda_dir": "backend/lambda/project_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/project_service/deploy.sh"
+    },
+    {
+      "function_name": "devops-recompute-governance",
+      "lambda_dir": "backend/lambda/recompute_governance",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
+    },
+    {
+      "function_name": "devops-reference-search",
+      "lambda_dir": "backend/lambda/reference_search",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/reference_search/deploy.sh"
+    },
+    {
+      "function_name": "devops-titan-embedding-backfill",
+      "lambda_dir": "backend/lambda/titan_embedding_backfill",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/titan_embedding_backfill/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "devops-tracker-mutation-api",
+      "lambda_dir": "backend/lambda/tracker_mutation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-arc-walk-metrics",
+      "lambda_dir": "backend/lambda/arc_walk_metrics",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/arc_walk_metrics/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-bedrock-agent-actions",
+      "lambda_dir": "backend/lambda/bedrock_agent_actions",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/bedrock_agent_actions/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-checkout-service",
+      "lambda_dir": "backend/lambda/checkout_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+      "cfn_managed": true
+    },
+    {
+      "function_name": "enceladus-checkout-service-auto",
+      "lambda_dir": "backend/lambda/checkout_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+      "cfn_managed": false,
+      "_note": "ENC-TSK-P16 / ENC-ISS-656: enceladus-checkout-service-auto (prod) and enceladus-checkout-service-auto-gamma are live, plane-correct (arch/runtime match expected_architecture), and the gamma twin is deployed by this same Gen2 _deploy.yml lane via envs/v4-gamma.yaml's checkout_service function_name_map fan-out (checkout_service: enceladus-checkout-service-gamma,enceladus-checkout-service-auto-gamma; v3-prod mirrors this with enceladus-checkout-service,enceladus-checkout-service-auto). Declared here as ours, not excepted -- our own build-and-deploy lane already ships it. cfn_managed:false because CheckoutAutoScheduleRule in 02-compute.yaml names this function only as an EventBridge target ARN string, never as an AWS::Lambda::Function FunctionName; the function itself is not a CFN resource (same pattern as devops-appsync-feed-publisher above). The bare function_name here covers both planes for tools/verify_lambda_arch_parity.py's cross-source reconciliation (_enceladus_declared_function_names unions manifest functions[] with every infrastructure/cloudformation/*.yaml FunctionName, then _validate_cross_source_reconciliation adds the implicit '-gamma' variant of every bare declared name) -- no second manifest entry is needed or wanted for the gamma twin."
+    },
+    {
+      "function_name": "enceladus-convergence-telemetry",
+      "lambda_dir": "backend/lambda/convergence_telemetry",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/convergence_telemetry/deploy.sh",
+      "package_extra_files": [
+        "canonicalize.py",
+        "counter_store.py"
+      ]
+    },
+    {
+      "function_name": "enceladus-corpus-entropy-engine",
+      "lambda_dir": "backend/lambda/corpus_entropy_engine",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/corpus_entropy_engine/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-corpus-entropy-gdmp-remediation",
+      "lambda_dir": "backend/lambda/corpus_entropy_gdmp_remediation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/corpus_entropy_gdmp_remediation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-deploy-capability-auditor",
+      "lambda_dir": "backend/lambda/deploy_capability_auditor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/deploy_capability_auditor/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-governance-audit",
+      "lambda_dir": "backend/lambda/governance_audit",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/governance_audit/deploy.sh"
     },
     {
       "function_name": "enceladus-graph-health-metrics",
@@ -145,18 +252,22 @@
       "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
     },
     {
-      "function_name": "devops-github-integration",
-      "lambda_dir": "backend/lambda/github_integration",
+      "function_name": "enceladus-handoff-consolidation-engine",
+      "lambda_dir": "backend/lambda/handoff_consolidation_engine",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/github_integration/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/handoff_consolidation_engine/deploy.sh"
     },
     {
-      "function_name": "enceladus-checkout-service",
-      "lambda_dir": "backend/lambda/checkout_service",
+      "function_name": "enceladus-id-service",
+      "lambda_dir": "backend/lambda/id_service",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/id_service/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-lifecycle-service",
+      "lambda_dir": "backend/lambda/lifecycle_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
     },
     {
       "function_name": "enceladus-mcp-code",
@@ -173,55 +284,111 @@
       "cfn_managed": false
     },
     {
-      "function_name": "devops-titan-embedding-backfill",
-      "lambda_dir": "backend/lambda/titan_embedding_backfill",
+      "function_name": "enceladus-mcp-streaming-gateway",
+      "lambda_dir": "backend/lambda/mcp_streaming_gateway",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/titan_embedding_backfill/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/mcp_streaming_gateway/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-memory-consolidation",
+      "lambda_dir": "backend/lambda/memory_consolidation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-neo4j-backup",
+      "lambda_dir": "backend/lambda/neo4j_backup",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-percolation-monitor",
+      "lambda_dir": "backend/lambda/percolation_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/percolation_monitor/deploy.sh"
     },
     {
       "function_name": "enceladus-prod-health-monitor",
       "lambda_dir": "backend/lambda/prod_health_monitor",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh",
-      "cfn_managed": false
+      "cfn_managed": true
     },
     {
-      "function_name": "enceladus-deploy-capability-auditor",
-      "lambda_dir": "backend/lambda/deploy_capability_auditor",
+      "function_name": "enceladus-rhythm-cycle",
+      "lambda_dir": "backend/lambda/rhythm_cycle",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/deploy_capability_auditor/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/rhythm_cycle/deploy.sh"
     },
     {
-      "function_name": "devops-env-drift-auditor",
-      "lambda_dir": "backend/lambda/env_drift_auditor",
+      "function_name": "enceladus-scoring-service",
+      "lambda_dir": "backend/lambda/scoring_service",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/env_drift_auditor/deploy.sh"
+      "deploy_script": "backend/lambda/scoring_service/deploy.sh"
     },
     {
-      "function_name": "devops-deploy-parity-validator",
-      "lambda_dir": "backend/lambda/deploy_parity_validator",
+      "function_name": "enceladus-stale-checkout-monitor",
+      "lambda_dir": "backend/lambda/stale_checkout_monitor",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
+      "deploy_script": "backend/lambda/stale_checkout_monitor/deploy.sh",
+      "cfn_managed": true
     },
     {
-      "function_name": "devops-recompute-governance",
-      "lambda_dir": "backend/lambda/recompute_governance",
+      "function_name": "enceladus-unlearning",
+      "lambda_dir": "backend/lambda/unlearning",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
+      "deploy_script": "backend/lambda/unlearning/deploy.sh"
     },
     {
-      "function_name": "devops-governance-mart",
-      "lambda_dir": "backend/lambda/governance_mart",
+      "function_name": "enceladus-user-preferences-api",
+      "lambda_dir": "backend/lambda/user_preferences_api",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/governance_mart/deploy.sh",
-      "package_extra_files": [
-        "mart_schema.py",
-        "mart_source.py",
-        "mart_project.py",
-        "mart_refresh.py"
-      ]
+      "deploy_script": "backend/lambda/user_preferences_api/deploy.sh"
+    },
+    {
+      "function_name": "escalation-decision-authorizer",
+      "lambda_dir": "backend/lambda/escalation_decision_authorizer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
     }
-  ]
+  ],
+  "architecture_exceptions": {
+    "prod": {
+      "temporary": {
+        "x86_64": [],
+        "rationale": "ENC-TSK-P38 (ENC-PLN-082 cutover commit, io GO 2026-08-26): expected_architecture.prod flipped to arm64 in this same commit under io's 2026-08-24 ONE-APPLY ruling, which superseded the earlier tranched design (the prior rationale here described a Phase-5 tranche populate that no longer exists -- ENC-TSK-P36 superseded/closed via ENC-ESC-099). A single apply has no later tranches, so this class is empty by construction and the key stays PRESENT (P38 AC-8). Additions would mean a function could not run arm64/py3.12 and require an io ruling.",
+        "terminal_state": "empty",
+        "ratchet": "may only shrink"
+      },
+      "permanent": {
+        "x86_64": [],
+        "rationale": "SnapStart-retained functions per BRD section 4.4. The earlier claim here that 'arm64 SnapStart is Java-only' is WITHDRAWN AS FALSE (ENC-TSK-P38 AC-8): 02-compute.yaml:180-186 and envs/v4-prod.yaml both record that in this repo's framing SnapStart is supported ONLY on arm64/py3.12. The class is empty for a stronger reason -- it has NO MEMBER. Seeded empty per ENC-TSK-O72's closed ruling: ENC-TSK-O70's census (28/28 in-scope production functions, cross-verified against an account-wide scan -- 231 functions at O70 time, 233 at the 2026-08-25 pass-2 re-census -- corroborated by a 3-leg positive control) found 0 functions with SnapStart.ApplyOn != \"None\", and EnableSnapStart is stored \"false\" on both stacks and never passed in --parameter-overrides. Disposition counts: drop_and_flip=0, retain_and_hold=0, not_applicable=28. This is a positive proof of emptiness, not an absence of evidence.",
+        "terminal_state": "stable",
+        "ratchet": "additions require an io ruling",
+        "_families_doc": "ENC-TSK-P15 / ENC-ISS-669: the permanent class is not one exception, it is a CLASS of exceptions -- a function belongs here when the deviation from expected_architecture is a standing decision, not a migration-in-progress tranche (that's the temporary class, above). 'families' below names each standing decision individually, each with its own scoped rationale/terminal_state/ratchet, so a future addition to one family's reasoning can never be misread as also justifying the other's. The flat x86_64 list and the rationale/terminal_state/ratchet fields directly above are left untouched for backward compatibility with tools/verify_lambda_arch_parity.py's existing per-resource exceptions check (_validate_architecture_exceptions) and the ENC-TSK-O84 ratchet diff (_class_name_sets / diff_architecture_exceptions), both of which read this flat shape and must keep passing unmodified; 'families' is additive, read only by the newer cross-source reconciliation (AC-6, _validate_cross_source_reconciliation) and by humans.",
+        "families": {
+          "snapstart_retained": {
+            "description": "Functions that would be permanently retained on x86_64 for SnapStart reasons. The old 'SnapStart is Java-only on arm64' rationale is withdrawn as false (ENC-TSK-P38 AC-8; this repo records SnapStart as supported only on arm64/py3.12) -- the family is empty because zero account functions carry SnapStart.ApplyOn at all. Mirrors the flat x86_64 list above verbatim -- this is the same family, named, not a second one.",
+            "members_by_architecture": {
+              "x86_64": []
+            },
+            "member_source": "this file, architecture_exceptions.prod.permanent.x86_64 (the flat list above) -- authoritative, not duplicated data",
+            "rationale": "See architecture_exceptions.prod.permanent.rationale above (ENC-TSK-O72 / ENC-TSK-O70 census). Restated here only so both permanent-class families are enumerable in one place.",
+            "terminal_state": "stable",
+            "ratchet": "additions require an io ruling"
+          },
+          "devops_owned": {
+            "description": "ENC-ISS-669: Lambda functions owned and deployed by NX-2021-L/devops, a sibling repository that shares this AWS account and, for a subset of its functions, this repo's 'devops-' naming prefix. These functions have NEVER been in scope for enceladus's arm64 architecture contract or any enceladus deploy-validation check -- lambda_workflow_manifest.json's source_of_truth names ONE enceladus template (infrastructure/cloudformation/02-compute.yaml), and devops's Lambdas were never declared there because they are not enceladus's to declare. This is a CENSUS BOUNDARY ruling, not an architecture-migration exception: the arm64 contract does not extend to the whole AWS fleet, and this family says so explicitly rather than leaving the boundary implicit (which is exactly how ENC-ISS-669 went four functions deep before anyone noticed a fifth).",
+            "owning_repo": "NX-2021-L/devops",
+            "member_source": "infrastructure/devops_lambda_ownership_snapshot.json#/functions[].function_name -- a pinned, hash-verified snapshot (see that file's own _doc and tools/verify_devops_ownership_snapshot.py), NOT a hand-copied list here. Membership is read from the snapshot at check time by tools/verify_lambda_arch_parity.py's _validate_cross_source_reconciliation (AC-6); this entry deliberately does not repeat the function names, so there is exactly one place they can drift out of sync with their provenance.",
+            "ownership_predicate": "any live Lambda function whose FunctionName exactly matches a functions[].function_name entry in the pinned snapshot is owned by NX-2021-L/devops and resolves to NOT_APPLICABLE_ON_PLANE on every enceladus architecture-parity and deploy-validation check that would otherwise evaluate it. This is a name-match predicate against a governed, provenanced snapshot -- never a 'devops-' prefix heuristic, because dozens of enceladus's OWN functions (devops-changelog-api, devops-coordination-api, devops-graph-sync, ...) carry that same historical prefix from before the two repos split; a prefix match would misclassify them as devops-owned.",
+            "deploy_path_constraint": "AC-7: the four functions.yaml-declared devops functions (devops-json-to-parquet-transformer, devops-glue-crawler-launcher, devops-adhoc-promotion, devops-platform-health) deploy exclusively through devops's 'Deploy Analytics Stack' workflow (GitHub Actions workflow id 245543976), which is disabled_manually under DVP-TSK-700. The fifth, devops-io-devops-mcp, deploys through its own separate, ACTIVE workflow (deploy-io-devops.yml) and is already arm64/python3.12. With workflow 245543976 disabled, the four functions.yaml functions have NO LIVE DEPLOY CHANNEL in either repo today -- 'just upgrade them to arm64' is not an available remediation, which is precisely why this is the permanent exception and not the temporary (migration-tranche) one. Re-enabling workflow 245543976 as a side effect of this task, or of any future arm64 migration work, is explicitly OUT OF SCOPE and PROHIBITED here -- that decision belongs to DVP-TSK-700 and whatever devops-side work eventually resolves it, not to an enceladus architecture-contract task.",
+            "rationale": "io ruling: ENC-TSK-P15 (ENC-ISS-669). The organisational census-boundary ruling this family encodes: gamma-plane arm64 governance in this repo applies to functions this repo owns and declares; it was never meant to, and does not now, reach into a sibling repository's own estate. That boundary held for four functions by accident (nobody had occasion to invoke it) and broke for a fifth (devops-io-devops-mcp, declared nowhere in devops's own functions.yaml either) purely because no one had written the boundary down. This family is that boundary, written down.",
+            "terminal_state": "permanent -- this is an organisational boundary (a different owning repository), not a migration state, so unlike the temporary class it does not shrink toward zero as work completes. It changes only if ownership itself changes (e.g. a function is formally transferred into this repo, at which point it leaves the snapshot and this family loses a member) or if devops's own estate grows (at which point the pinned snapshot gains a member via a reviewed pin-bump, per infrastructure/devops_lambda_ownership_snapshot.json's own refresh discipline).",
+            "ratchet": "additions require BOTH an io ruling AND a corresponding reviewed edit to infrastructure/devops_lambda_ownership_snapshot.json (new pinned commit, new source digest(s), new functions[] entry with real provenance) -- a name cannot become exempt here by editing this manifest alone. Removals require the snapshot to stop naming the function (ownership transferred, or the function decommissioned)."
+          }
+        }
+      }
+    }
+  }
 }

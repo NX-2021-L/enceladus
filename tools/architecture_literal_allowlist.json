@@ -1,0 +1,23 @@
+[
+  {
+    "path": "infrastructure/cloudformation/02-compute.yaml",
+    "retired_by": "ENC-TSK-Q22",
+    "reason": "Primary compute stack; every Lambda still selects Runtime/Architectures via the IsArm64 !If conditional pending Phase D literalization."
+  },
+  {
+    "path": "infrastructure/cloudformation/03-api.yaml",
+    "retired_by": "ENC-TSK-Q22",
+    "reason": "References the IsArm64 condition but carries no literal x86_64/python3.11 text today.",
+    "vacuous": true
+  },
+  {
+    "path": "infrastructure/cloudformation/06-appsync-events.yaml",
+    "retired_by": "ENC-TSK-Q22",
+    "reason": "AppSync Lambda resolvers still select arch/runtime via the IsArm64 !If conditional pending Phase D literalization."
+  },
+  {
+    "path": "infrastructure/component_dependency_closure.json",
+    "retired_by": "ENC-TSK-Q22",
+    "reason": "appconfig-extension-x86 external layer entry: the x86 AppConfig Extension layer is only reachable through the IsArm64 false branch of 02-compute.yaml; Phase D literalization drops that branch and this entry with it."
+  }
+]

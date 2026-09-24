@@ -1,0 +1,230 @@
+name: CloudFormation Rhythm Tenants Stack Deploy
+
+# ENC-TSK-N18: 11-appconfig-rhythm-tenants.yaml is a new, additive AppConfig
+# configuration profile (rhythm-tenants) under the existing Application/
+# Environment from 06-feature-flags.yaml. Mirrors
+# cloudformation-appconfig-governance-stack-deploy.yml (09-appconfig-
+# governance.yaml's workflow) exactly — same plan/apply split with a GitHub
+# Environment gate (ENC-TSK-J63 / ENC-FTR-120).
+#
+# Bootstrap note: on first CREATE for a given stack, AppConfigApplicationId /
+# AppConfigEnvironmentId must be supplied (no stored prior value to reuse —
+# same gap 09's workflow docstring calls out). Pass them once via
+# workflow_dispatch inputs; subsequent pushes reuse the stack's stored values.
+
+on:
+  push:
+    branches:
+      - main
+      - 'v4/**'
+    paths:
+      - "infrastructure/cloudformation/11-appconfig-rhythm-tenants.yaml"
+      - ".github/workflows/cloudformation-rhythm-tenants-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 11-appconfig-rhythm-tenants template"
+        type: string
+        required: false
+        default: "enceladus-rhythm-tenants"
+      appconfig_application_id:
+        description: "AppConfig Application ID (06-feature-flags Outputs.ApplicationId) — required on first CREATE only"
+        type: string
+        required: false
+        default: ""
+      appconfig_environment_id:
+        description: "AppConfig Environment ID (06-feature-flags Outputs.EnvironmentId) — required on first CREATE only"
+        type: string
+        required: false
+        default: ""
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual rhythm-tenants stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: cloudformation-rhythm-tenants-stack-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/11-appconfig-rhythm-tenants.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  DEFAULT_STACK_NAME: enceladus-rhythm-tenants
+
+jobs:
+  plan:
+    name: Plan Rhythm Tenants stack change-set
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      stack_name: ${{ steps.params.outputs.stack_name }}
+      has_changes: ${{ steps.changeset.outputs.has_changes }}
+      changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        run: |
+          set -euo pipefail
+          stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clean up ROLLBACK_COMPLETE stack if present (gamma self-heal, prod fail-closed)
+        run: |
+          set -euo pipefail
+          stack_name="${{ steps.params.outputs.stack_name }}"
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${stack_name}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
+            if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
+              echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy (gamma self-heal)"
+              aws cloudformation delete-stack \
+                --region "${AWS_REGION}" \
+                --stack-name "${stack_name}"
+              aws cloudformation wait stack-delete-complete \
+                --region "${AWS_REGION}" \
+                --stack-name "${stack_name}"
+              echo "Stack deleted successfully"
+            else
+              echo "::error::Prod stack ${stack_name} is in ROLLBACK_COMPLETE — refusing to auto-delete a prod stack; remediate manually."
+              exit 1
+            fi
+          fi
+
+      - name: Create Rhythm Tenants stack change-set (no execute)
+        id: changeset
+        run: |
+          set -euo pipefail
+
+          param_overrides="EnvironmentSuffix=${ENVIRONMENT_SUFFIX}"
+          if [ -n "${{ github.event.inputs.appconfig_application_id }}" ]; then
+            param_overrides="${param_overrides} AppConfigApplicationId=${{ github.event.inputs.appconfig_application_id }}"
+          fi
+          if [ -n "${{ github.event.inputs.appconfig_environment_id }}" ]; then
+            param_overrides="${param_overrides} AppConfigEnvironmentId=${{ github.event.inputs.appconfig_environment_id }}"
+          fi
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --no-execute-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 11-appconfig-rhythm-tenants/ \
+            --parameter-overrides ${param_overrides} 2>&1 | tee /tmp/plan.log
+
+          if grep -q "No changes to deploy" /tmp/plan.log; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "changeset_arn=" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Rhythm Tenants stack plan — ${{ steps.params.outputs.stack_name }}"
+              echo "No changes to deploy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changeset_arn=$(grep -oE 'arn:aws:cloudformation:[^ "]*changeSet/[^ "]*' /tmp/plan.log | head -1)
+          if [ -z "${changeset_arn}" ]; then
+            echo "::error::Change-set creation output did not contain a change-set ARN."
+            exit 1
+          fi
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "changeset_arn=${changeset_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write change-set summary for the approval screen
+        if: steps.changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Rhythm Tenants stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo ""
+            echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set \
+              --region "${AWS_REGION}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_arn }}" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply Rhythm Tenants stack change-set
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
+    # none. A main-branch run therefore pauses here as a rejectable request.
+    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+
+    steps:
+      - name: Configure AWS credentials (environment-scoped OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute reviewed change-set
+        id: deploy
+        run: |
+          set -euo pipefail
+          changeset_type=$(aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
+            --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+          if [ "${changeset_type}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          fi
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
+
+      - name: Report deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table

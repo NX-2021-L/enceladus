@@ -1,0 +1,47 @@
+<!-- @dsCard group="v2 · Layout" viewport="960x600" name="AppLayout" subtitle="The cockpit shell — top nav + side nav + content + tools + split" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>html,body{height:100%}body{background:var(--enc-void);margin:0;font-family:var(--font-body)}#root{height:600px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const NS = window.EnceladusDesignSystem_7eb1fe;
+const { AppLayout, TopNavigation, SideNavigation, BreadcrumbGroup, ContentLayout, Header, Container, Table, Badge, StatusIndicator, Link, HelpPanel, SplitPanel, ColumnLayout, Box } = NS;
+const e = React.createElement;
+const rows=[
+  {id:'ENC-TSK-A57',title:'Lesson primitive lifecycle gates',status:'in-progress',priority:'P1'},
+  {id:'ENC-ISS-041',title:'Tracker API JWT library missing',status:'error',priority:'P0'},
+  {id:'ENC-LSN-004',title:'Never build Lambda on macOS',status:'success',priority:'P2'},
+];
+const st={'in-progress':'in-progress',error:'blocked',success:'closed'};
+const cols=[
+  {id:'id',header:'Record',cell:(r)=>e(Link,{variant:'record'},r.id)},
+  {id:'title',header:'Title',cell:(r)=>r.title},
+  {id:'status',header:'Status',cell:(r)=>e(StatusIndicator,{type:r.status},st[r.status])},
+  {id:'pri',header:'Priority',cell:(r)=>e(Badge,{color:r.priority==='P0'?'crimson':r.priority==='P1'?'amber':'dust'},r.priority)},
+];
+const kv=(l,v)=>e('div',null,e(Box,{variant:'label'},l),e(Box,{variant:'mono'},v));
+function Demo(){
+  const [href,setHref]=React.useState('/tasks');
+  return e(AppLayout,{
+    topNavigation:e(TopNavigation,{identity:{title:'ENCELADUS',iconSrc:'../../../assets/logos/enceladus-mark-64.png'},utilities:[{type:'badge',text:'v0.20.12'},{type:'avatar',initials:'JR'}]}),
+    navigation:e(SideNavigation,{header:{text:'ENCELADUS',iconSrc:'../../../assets/logos/enceladus-mark-64.png'},activeHref:href,onFollow:(ev)=>setHref(ev.detail.href),items:[
+      {type:'link',text:'Dashboard',href:'/'},{type:'link',text:'Projects',href:'/projects',count:20},
+      {type:'section',text:'Tracker'},{type:'link',text:'Tasks',href:'/tasks',count:14},
+      {type:'link',text:'Issues',href:'/issues',count:3},{type:'link',text:'Lessons',href:'/lessons',count:17}
+    ]}),
+    breadcrumbs:e(BreadcrumbGroup,{items:[{text:'Enceladus',href:'#'},{text:'Tasks'}]}),
+    tools:e(HelpPanel,{header:'About tasks'},e('p',{style:{marginTop:0}},'Evidence-gated work items. Only the owning session can advance status.')),
+    toolsOpen:true,
+    splitPanel:e(SplitPanel,{header:'ENC-TSK-A57 — details',defaultOpen:true},
+      e(ColumnLayout,{columns:3,borders:'vertical'},kv('Status','in-progress'),kv('Owner','claude-code'),kv('Checklist','3/5'))),
+    content:e(ContentLayout,{header:e(Header,{variant:'h1',counter:'(14)',description:'Governed work across all active projects'},'Tasks')},
+      e(Container,{header:e(Header,{variant:'h2'},'Open tasks')},
+        e(Table,{columnDefinitions:cols,items:rows,trackBy:'id'})))
+  });
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

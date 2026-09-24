@@ -33,6 +33,26 @@ on:
         description: "40-char hex SHA to deploy (must be pre-built by _build.yml)"
         type: string
         required: true
+      gamma_sha:
+        # ENC-TSK-Q21 FR-8 (DOC-5368FE6515ED): the v4/main head_sha the promote
+        # PR was cut from (github.event.pull_request.head.sha in
+        # promote-merged-dispatch.yml). Optional: only carried on a v3-prod
+        # promote dispatch. When present, promote_preflight asserts it is an
+        # ancestor of commit_sha and that the delta between them touches no
+        # deployable path (a promote is code gamma already validated, not a
+        # vehicle for new runtime changes) — see tools/promote_preflight.py.
+        description: "v4/main head_sha the promote PR was cut from (v3-prod promote only)"
+        type: string
+        required: false
+      merged_at:
+        # ENC-TSK-Q21 FR-10: promote-merged-dispatch.yml passes the promote
+        # PR's actual github.event.pull_request.merged_at here, since this
+        # path has no head_commit (workflow_dispatch, not push) for
+        # record_deploy to read a timestamp from. Optional: only carried on
+        # a v3-prod promote dispatch.
+        description: "PR merged_at timestamp (ISO 8601) for the promote PR being deployed (v3-prod promote only)"
+        type: string
+        required: false
   workflow_call:
     inputs:
       target_environment:
@@ -41,6 +61,12 @@ on:
       commit_sha:
         type: string
         required: true
+      gamma_sha:
+        type: string
+        required: false
+      merged_at:
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -59,6 +85,56 @@ env:
 jobs:
 
   # ---------------------------------------------------------------------------
+  # PROMOTE PREFLIGHT — ENC-TSK-Q21 FR-8 (DOC-5368FE6515ED): "promote is a
+  # merge". Every run passes through this job (build needs it). For any run
+  # that is NOT a v3-prod dispatch it is a trivial no-op success — the push
+  # (gamma) path and non-prod dispatch/call paths are unaffected. For a
+  # v3-prod workflow_dispatch/workflow_call it fails closed unless commit_sha
+  # is a commit that has actually landed on origin/main (the promote PR
+  # merged for real, not a hand-crafted dispatch), and — when gamma_sha is
+  # carried — that gamma_sha is an ancestor of commit_sha with no deployable-
+  # path delta between them (see tools/promote_preflight.py). build's `if:`
+  # explicitly requires this job to have succeeded, so a failed preflight
+  # blocks build (and therefore resolve/deploy) for that dispatch.
+  # ---------------------------------------------------------------------------
+  promote_preflight:
+    name: Promote preflight (${{ inputs.target_environment || 'v4-gamma' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip (not a v3-prod promote)
+        if: inputs.target_environment != 'v3-prod'
+        run: echo "not a v3-prod promote -- skipped"
+
+      - name: Checkout (full history for ancestry check)
+        if: inputs.target_environment == 'v3-prod'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: v3-prod ancestry + deployable-delta preflight (ENC-TSK-Q21 FR-8)
+        if: inputs.target_environment == 'v3-prod'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          GAMMA_SHA: ${{ inputs.gamma_sha }}
+        run: |
+          set -euo pipefail
+          # ENC-TSK-Q21 review fix: the preceding actions/checkout@v4 with
+          # fetch-depth:0 already gives full history reachable from the
+          # checked-out ref (which includes gamma_sha via the merge commit's
+          # second parent). A follow-up `git fetch --depth=1` here would
+          # re-shallow an already-unshallow repo down to a single commit,
+          # pruning gamma_sha and making `git merge-base --is-ancestor`
+          # silently report "not an ancestor" (exit 1, no stderr) for every
+          # legitimate promote -- a fail-closed but unusable outcome. Fetch
+          # without --depth as a safety net only; never shallow here.
+          git fetch origin main --quiet
+          python3 tools/promote_preflight.py \
+            --commit-sha "${COMMIT_SHA}" \
+            --gamma-sha "${GAMMA_SHA}" \
+            --main-ref origin/main
+
+  # ---------------------------------------------------------------------------
   # BUILD — produces the Gen2 artifacts the deploy consumes.
   # Runs on: push-to-v4/main (gamma path, builds github.sha), AND
   #          workflow_dispatch / workflow_call (builds the caller-supplied SHA).
@@ -69,12 +145,20 @@ jobs:
   # the target SHA here makes a dispatched deploy self-contained (build -> resolve
   # -> deploy) with zero out-of-band S3 artifact population.
   # push-to-main stays a no-op (build skipped -> resolve/deploy skipped).
+  # ENC-TSK-Q21: build now additionally needs promote_preflight, and its `if:`
+  # explicitly checks that job's result so a failed v3-prod preflight blocks
+  # build rather than running anyway (a plain `if:` replaces the implicit
+  # success() gate GitHub Actions would otherwise apply from `needs:`).
   # ---------------------------------------------------------------------------
   build:
+    needs: [promote_preflight]
     if: |
-      (github.event_name == 'push' && github.ref_name == 'v4/main') ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call'
+      needs.promote_preflight.result == 'success' &&
+      (
+        (github.event_name == 'push' && github.ref_name == 'v4/main') ||
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_call'
+      )
     uses: ./.github/workflows/_build.yml
     with:
       commit_sha: ${{ inputs.commit_sha || github.sha }}
@@ -85,7 +169,7 @@ jobs:
   # ---------------------------------------------------------------------------
   resolve:
     name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
-    needs: [build]
+    needs: [build, promote_preflight]
     # ENC-TSK-I60: build now runs on every deploy path (push-to-v4/main,
     # workflow_dispatch, workflow_call), so resolve simply requires it to have
     # succeeded. push-to-main is preserved as a no-op: build is skipped there, so
@@ -110,6 +194,7 @@ jobs:
       function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
       environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
+      enable_snapstart:      ${{ steps.manifest.outputs.enable_snapstart }}
       full_scope:            ${{ steps.affected.outputs.full_scope }}
       affected_functions_json: ${{ steps.affected.outputs.affected_functions_json }}
 
@@ -142,27 +227,35 @@ jobs:
 
           ROLE=$(_parse deploy_role_arn)
           ENV=$(_parse environment)
+
+          # ENC-TSK-Q19 FR-1: envs/architecture.yaml is now the ONE canonical
+          # architecture declaration; envs/<env>.yaml no longer carries
+          # `architecture:`/`runtime:` literals (see architecture_plane
+          # instead). The two `_parse` reads below are a backward-compat
+          # first read for any manifest that still has the literal keys.
+          # `_parse` is `grep -E ... | head | sed | tr`, and grep exits
+          # non-zero when the key is absent -- `|| true` stops that from
+          # aborting this step under `set -euo pipefail`; the resulting
+          # empty string is what triggers the declaration fallback below.
           ARCH=$(_parse architecture || true)
           RUNTIME=$(_parse runtime || true)
-          # ENC-TSK-Q19 / DOC-5368FE6515ED FR-1 compat: v4/main envs/*.yaml no
-          # longer restate architecture/runtime; they name an architecture_plane
-          # declared once in envs/architecture.yaml of the SAME commit tree.
-          # Literal keys win when present, so older shas resolve unchanged.
           if [[ -z "$ARCH" || -z "$RUNTIME" ]]; then
-            PLANE=$(_parse architecture_plane || true)
-            DECL="envs/architecture.yaml"
-            [[ -n "$PLANE" && -f "$DECL" ]] || { echo "::error::$MANIFEST has no architecture/runtime and no architecture_plane + $DECL"; exit 1; }
-            DECL_LINE=$(grep -E "^[[:space:]]+${PLANE}:[[:space:]]*[{]" "$DECL" | head -1 || true)
-            ARCH=$(sed -nE 's/.*[{ ,]arch:[[:space:]]*([a-z0-9_]+).*/\1/p' <<<"$DECL_LINE")
-            RUNTIME=$(sed -nE 's/.*[{ ,]runtime:[[:space:]]*(python[0-9.]+).*/\1/p' <<<"$DECL_LINE")
-            [[ -n "$ARCH" && -n "$RUNTIME" ]] || { echo "::error::could not resolve plane '$PLANE' from $DECL"; exit 1; }
-            echo "Resolved architecture from $DECL plane=$PLANE: $ARCH/$RUNTIME"
+            ARCH=$(python3 tools/arch_declaration.py --env "$TARGET" --field arch)
+            RUNTIME=$(python3 tools/arch_declaration.py --env "$TARGET" --field runtime)
           fi
+          [[ -n "$ARCH" ]] || { echo "::error::Could not resolve architecture for $TARGET (checked $MANIFEST literal and envs/architecture.yaml)"; exit 1; }
+          [[ -n "$RUNTIME" ]] || { echo "::error::Could not resolve runtime for $TARGET (checked $MANIFEST literal and envs/architecture.yaml)"; exit 1; }
           PY="${RUNTIME#python}"
           CANARY=$(_parse canary_preference)
           # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy fields
           ENV_SUFFIX=$(_parse environment_suffix)
           CODEDEPLOY_APP=$(_parse codedeploy_app_name)
+          # ENC-TSK-N79 / ENC-ISS-591: SnapStart intent from the manifest, enforced at
+          # deploy time. Empty/missing defaults to "false" — snapshot cache bills per
+          # retained published version with zero invocations, so absent intent must
+          # fail toward no-cache.
+          SNAPSTART=$(_parse enable_snapstart)
+          [[ -n "$SNAPSTART" ]] || SNAPSTART="false"
 
           [[ -n "$ROLE" ]] || { echo "::error::deploy_role_arn missing in $MANIFEST"; exit 1; }
 
@@ -194,6 +287,7 @@ jobs:
             echo "function_name_map_json=$FNMAP_JSON"
             echo "environment_suffix=${ENV_SUFFIX}"
             echo "codedeploy_app_name=${CODEDEPLOY_APP}"
+            echo "enable_snapstart=${SNAPSTART}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Target=$TARGET  Arch=$ARCH  Runtime=$RUNTIME  Role=$ROLE"
@@ -232,6 +326,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          TARGET="${{ inputs.target_environment || 'v4-gamma' }}"
           SHA="${{ steps.sha.outputs.commit_sha }}"
           ARCH="${{ steps.manifest.outputs.arch }}"
           PY="${{ steps.manifest.outputs.py_version }}"
@@ -242,10 +337,6 @@ jobs:
 
           mapfile -t ALL_FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
             | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
-
-          # mcp_code (enceladus-mcp-code) has no lambda_function.py — it is packaged
-          # by _build.yml build-mcp-code from tools/enceladus-mcp-server/ (ENC-TSK-I39).
-          ALL_FNS+=("mcp_code")
 
           # ENC-TSK-J40 AC-1/AC-4: narrow to the affected set unless full_scope
           # (no prior deployment, cross-cutting change, or diff failure --
@@ -276,17 +367,43 @@ jobs:
             fi
           fi
 
-          # ENC-ISS-494: mcp_code's live v3-prod Lambda runtime genuinely diverges
-          # from envs/v3-prod.yaml's environment-wide arch/py (that manifest's
-          # x86_64/python3.11 predates the ARM64 cutover and was never updated) --
-          # enceladus-mcp-code has been arm64/python3.12 since the cutover, like
-          # every other function. ENC-ISS-778 retired the BAD hardcoded pre-
-          # cutover value here (which caused the mcp.jreese.net P0 502 by
-          # shipping an x86_64 artifact to the arm64-only function) but kept the
-          # per-function override, now pointed at the correct prefix.
+          # ENC-ISS-494 / ENC-ISS-778 (forward-ported from main during
+          # ENC-TSK-Q21): mcp_code's key prefix is kept as an explicit
+          # per-function override -- on v4/main this now equals KEY_PREFIX
+          # exactly (the whole fleet is arm64/python3.12 since the Q20
+          # cutover), but the FN_KEY_PREFIX conditional below is shared code
+          # that expects this variable to be set whenever mcp_code is probed.
           MCP_CODE_KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/arm64-py3.12"
 
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
+
+          # ENC-TSK-Q20 FR-7 / DOC-5368FE6515ED: independently re-derive the
+          # declared arch/runtime for this plane straight from
+          # tools/arch_declaration.py -- NOT via the "Parse environment
+          # manifest" step's _parse/fallback path -- and assert every
+          # resolved key's arch segment matches it, BEFORE the S3
+          # head-object existence probe and therefore before the deploy job
+          # can ever run. This catches drift if a manifest still carries a
+          # stale literal architecture:/runtime: value that the fallback in
+          # that earlier step didn't need to reach.
+          DECL_ARCH=$(python3 tools/arch_declaration.py --env "$TARGET" --field arch)
+          DECL_RUNTIME=$(python3 tools/arch_declaration.py --env "$TARGET" --field runtime)
+          DECL_PY="${DECL_RUNTIME#python}"
+          DECL_SEGMENT="${DECL_ARCH}-py${DECL_PY}"
+          PLANE_NAME=$(python3 -c "import sys; sys.path.insert(0, 'tools'); from arch_declaration import load_declaration; print(load_declaration().plane_for_env('$TARGET'))")
+
+          assert_mismatch=0
+          for fn in "${FNS[@]}"; do
+            segment="${ARCH}-py${PY}"
+            if [[ "$segment" != "$DECL_SEGMENT" ]]; then
+              echo "::error::resolve arch assertion FAILED for fn=$fn: key segment=$segment declared=$DECL_SEGMENT (envs/architecture.yaml plane=$PLANE_NAME)"
+              assert_mismatch=1
+            fi
+          done
+          if [[ "$assert_mismatch" -eq 1 ]]; then
+            exit 1
+          fi
+          echo "resolve arch assertion: ${#FNS[@]} keys == ${DECL_SEGMENT} (envs/architecture.yaml plane=${PLANE_NAME}) -- OK"
 
           MISSING=()
           > /tmp/vid_map.txt
@@ -506,6 +623,8 @@ jobs:
           # Empty string → direct alias update (AllAtOnce). Non-empty → CodeDeploy traffic shift.
           CANARY_PREFERENCE: ${{ needs.resolve.outputs.canary_preference }}
           ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
+          # ENC-TSK-N79 / ENC-ISS-591: manifest SnapStart intent, enforced pre-publish.
+          ENABLE_SNAPSTART: ${{ needs.resolve.outputs.enable_snapstart }}
         run: |
           set -euo pipefail
           python3 -u - <<'PY'
@@ -537,6 +656,21 @@ jobs:
           region = 'us-west-2'
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
+          # ENC-TSK-N79 / ENC-ISS-591: manifest SnapStart intent. Anything but the
+          # literal "true" means no snapshots (fail toward no-cache).
+          enable_snapstart = os.environ.get('ENABLE_SNAPSTART', 'false').strip().lower() == 'true'
+
+          # ENC-TSK-N80: hygiene must never re-approach the 1h OIDC credential
+          # lifetime (run 30974760724: 3,939 denied deletes stretched the job to
+          # 65 min and user_preferences_api died on ExpiredToken). Three bounds:
+          # deny-trip breakers (a missing IAM verb is role-wide — one denial
+          # proves every later attempt futile this run), a per-function delete
+          # cap, and a global prune wall-clock budget measured from script start.
+          _script_t0 = time.monotonic()
+          PRUNE_MAX_PER_FN = 25
+          PRUNE_TIME_BUDGET_S = 300
+          _prune_denied = threading.Event()
+          _heal_denied = threading.Event()
 
           CODEDEPLOY_CONFIG_MAP = {
               'Canary10Percent5Minutes':        'CodeDeployDefault.LambdaCanary10Percent5Minutes',
@@ -577,6 +711,8 @@ jobs:
               'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
               'devops-changelog-api':           'changelog-api',
               'devops-graph-sync':              'graph-sync',
+              'devops-opensearch-indexer':      'opensearch-indexer',
+              'devops-opensearch-backfill':     'opensearch-backfill',
               'enceladus-neo4j-backup':         'neo4j-backup',
               'enceladus-graph-health-metrics': 'graph-health-metrics',
               'devops-env-drift-auditor':       'env-drift-auditor',
@@ -619,6 +755,70 @@ jobs:
                   time.sleep(back)
               return last
 
+          def prune_versions(mapped_name, keep_explicit):
+              """ENC-TSK-N79 / ENC-ISS-591: delete stale published versions after the
+              :live alias advances, so SnapStart snapshot cache and version clutter
+              cannot accumulate (each retained version bills cache per GB-second with
+              zero invocations). Keeps the three highest version numbers plus every
+              explicitly-kept version (newly published; pre-deploy alias target /
+              CodeDeploy CurrentVersion, so in-flight canaries stay intact). Versions
+              referenced by any alias are additionally protected server-side — Lambda
+              rejects their deletion, which lands in the warn path. Strictly
+              non-fatal: cost hygiene must never fail a deploy.
+              ENC-TSK-N80: deny-tripped, capped at PRUNE_MAX_PER_FN deletions per
+              function, and skipped entirely once PRUNE_TIME_BUDGET_S has elapsed
+              since script start — the backlog drains across deploys instead of
+              one run racing the credential lifetime."""
+              if _prune_denied.is_set():
+                  return
+              if time.monotonic() - _script_t0 > PRUNE_TIME_BUDGET_S:
+                  log(f'  ~ {mapped_name}: prune skipped (run past {PRUNE_TIME_BUDGET_S}s prune budget)')
+                  return
+              try:
+                  r = subprocess.run(
+                      ['aws', 'lambda', 'list-versions-by-function',
+                       '--function-name', mapped_name, '--region', region,
+                       '--query', "Versions[?Version!='$LATEST'].Version",
+                       '--output', 'json'],
+                      capture_output=True, text=True)
+                  if r.returncode != 0:
+                      log(f'  [warn] prune {mapped_name}: list-versions failed: {(r.stderr or "").strip().splitlines()[-1] if r.stderr else r.returncode}')
+                      return
+                  versions = sorted((int(v) for v in json.loads(r.stdout)), reverse=True)
+                  keep = {str(v) for v in versions[:3]}
+                  keep |= {v for v in keep_explicit if v and v != '$LATEST'}
+                  stale = [str(v) for v in versions if str(v) not in keep]
+                  if not stale:
+                      return
+                  # ENC-TSK-N80: bounded drain — at most PRUNE_MAX_PER_FN per run.
+                  deferred = max(0, len(stale) - PRUNE_MAX_PER_FN)
+                  stale = stale[:PRUNE_MAX_PER_FN]
+                  deleted = 0
+                  for v in stale:
+                      if _prune_denied.is_set():
+                          return
+                      d = subprocess.run(
+                          ['aws', 'lambda', 'delete-function',
+                           '--function-name', mapped_name, '--qualifier', v,
+                           '--region', region],
+                          capture_output=True, text=True)
+                      if d.returncode == 0:
+                          deleted += 1
+                      elif 'AccessDeniedException' in (d.stderr or ''):
+                          # Role-wide gap: one denial proves all later attempts futile.
+                          _prune_denied.set()
+                          log(f'::warning::prune disabled for this run — deploy role lacks lambda:DeleteFunction '
+                              f'(version-qualified). Apply the grant via iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml '
+                              f'(durable fix: 04-github-roles.yaml V4GammaLambdaLifecycle). First denial: {mapped_name}:{v}')
+                          return
+                      else:
+                          log(f'  [warn] prune {mapped_name}: version {v} not deleted: {(d.stderr or "").strip().splitlines()[-1] if d.stderr else d.returncode}')
+                  log(f'  ~ {mapped_name}: pruned {deleted}/{len(stale)} stale version(s)'
+                      + (f' ({deferred} deferred to later runs)' if deferred else '')
+                      + f'; kept {{{", ".join(sorted(keep, key=int))}}}')
+              except Exception as e:
+                  log(f'  [warn] prune {mapped_name}: {e}')
+
           def deploy_one(fn, mapped_name, version_id):
               """Per-target pipeline: download artifact, update code, publish version,
               kick off CodeDeploy canary (or fall back to direct alias). Returns:
@@ -632,6 +832,42 @@ jobs:
               fn_prefix = mcp_code_prefix if fn == 'mcp_code' else prefix
               s3_key = f"{fn_prefix}/{fn}-{sha}.zip"
               log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id} (stage->{staging_bucket})')
+
+              # ENC-TSK-N79 / ENC-ISS-591: enforce manifest SnapStart intent BEFORE
+              # publish — update-function-code --publish bakes $LATEST's config into
+              # the new version, and a SnapStart version bills snapshot cache per
+              # GB-second continuously with zero invocations (the $13/day Aug-2026
+              # incident: 209 drifted versions on enceladus-mcp-code-gamma). Heals
+              # out-of-band drift on every deploy. Non-fatal: a failed heal costs one
+              # bounded version-cache until the next prune, never a blocked deploy.
+              if not enable_snapstart and not _heal_denied.is_set():
+                  cfg = subprocess.run(
+                      ['aws', 'lambda', 'get-function-configuration',
+                       '--function-name', mapped_name, '--region', region,
+                       '--query', 'SnapStart.ApplyOn', '--output', 'text'],
+                      capture_output=True, text=True)
+                  if cfg.returncode == 0 and cfg.stdout.strip() == 'PublishedVersions':
+                      log(f'  ! {mapped_name}: SnapStart drift vs manifest enable_snapstart=false — healing to ApplyOn=None')
+                      heal = run_with_retry(
+                          ['aws', 'lambda', 'update-function-configuration',
+                           '--function-name', mapped_name, '--region', region,
+                           '--snap-start', 'ApplyOn=None'],
+                          what=f'snapstart-heal {mapped_name}')
+                      if heal is None or heal.returncode != 0:
+                          detail = (heal.stderr.strip().splitlines()[-1] if heal and heal.stderr else 'skip marker')
+                          if heal is not None and 'AccessDeniedException' in (heal.stderr or ''):
+                              # ENC-TSK-N80: role-wide gap — trip once, warn once.
+                              _heal_denied.set()
+                              log(f'::warning::SnapStart heal disabled for this run — deploy role lacks '
+                                  f'lambda:UpdateFunctionConfiguration. Apply the grant via '
+                                  f'iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml. First denial: {mapped_name}')
+                          else:
+                              log(f'  [warn] {mapped_name}: SnapStart heal failed ({detail}) — new version will snapshot, bounded by prune')
+                      else:
+                          subprocess.run(
+                              ['aws', 'lambda', 'wait', 'function-updated-v2',
+                               '--region', region, '--function-name', mapped_name],
+                              check=False)
 
               # ENC-ISS-454: stage the exact same-run artifact version into the
               # us-west-2 staging bucket (server-side cross-region copy), then deploy
@@ -737,6 +973,9 @@ jobs:
                               dep_id = json.loads(cd_r.stdout).get('deploymentId', '')
                               log(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
                               if dep_id:
+                                  # ENC-TSK-N79: prune keeps Current+Target, so the
+                                  # in-flight canary shift is untouched.
+                                  prune_versions(mapped_name, {new_version, current_version})
                                   return {'fn': fn, 'mapped_name': mapped_name,
                                           'status': 'codedeploy', 'dep_id': dep_id}
                               use_cd_succeeded = False
@@ -754,13 +993,27 @@ jobs:
                   capture_output=True, text=True,
               )
               if alias_r.returncode != 0:
-                  subprocess.run(
+                  create_r = subprocess.run(
                       ['aws', 'lambda', 'create-alias',
                        '--function-name', mapped_name, '--name', 'live',
                        '--function-version', new_version, '--region', region],
                       capture_output=True, text=True, check=False,
                   )
+                  if create_r.returncode != 0:
+                      # ENC-ISS-418: fail loud — do NOT swallow alias errors. The V4Gamma
+                      # deploy role previously lacked lambda:UpdateAlias/CreateAlias, so both
+                      # the update and the create silently AccessDenied while we still logged a
+                      # false 'live:N (direct)' success — freezing gamma :live at v81 for ~2
+                      # days (published-but-not-served). Raise so the worker records an error
+                      # and the deploy exits non-zero.
+                      err = ((alias_r.stderr or '').strip() + ' || ' + (create_r.stderr or '').strip()).strip()
+                      log(f'  [ERROR] {mapped_name}: could not advance :live to {new_version} '
+                          f'(update-alias AND create-alias both failed): {err}', err=True)
+                      raise RuntimeError(
+                          f'{mapped_name}: failed to advance :live alias to {new_version}: {err}'
+                      )
               log(f'  + {mapped_name} → live:{new_version} (direct)')
+              prune_versions(mapped_name, {new_version})
               return {'fn': fn, 'mapped_name': mapped_name, 'status': 'direct'}
 
           # ============================================================
@@ -915,6 +1168,35 @@ jobs:
             --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
             --region "${{ env.AWS_REGION }}"
 
+      # ENC-ISS-663 / ENC-TSK-P03: CloudFormation owns the function resource and
+      # deploy.sh owns its code, and until now nothing reconciled the two. On
+      # 2026-08-23 a template-only change created three gamma functions carrying
+      # 02-compute.yaml's placeholder body; the deploy narrowed to an empty
+      # affected-set, logged "nothing to deploy" and went GREEN, and all three
+      # returned Runtime.ImportModuleError on every invocation while the stack
+      # read UPDATE_COMPLETE and every other guard passed.
+      #
+      # compute_affected_targets.py now widens to full scope when 02-compute.yaml
+      # changes, which prevents that CAUSE. This asserts the STATE, so a stuck
+      # deploy, a rollback, a manual replacement, or a future edit that removes
+      # the widening rule is still caught. Needs only lambda:GetFunction -- no
+      # invoke permission -- so it runs on every gamma deploy unconditionally.
+      #
+      # It reads the deploy's OWN function_name_map rather than enumerating the
+      # account: the deploy role has no lambda:ListFunctions (confirmed live, run
+      # 32624487071 -- the guard's first version died on exactly that), and
+      # checking the functions this deploy was responsible for is the more precise
+      # question anyway. Requesting a ListFunctions grant to satisfy a guard would
+      # have been the wrong trade, and is the ENC-ISS-660 pattern in miniature.
+      - name: Assert no placeholder Lambdas (ENC-ISS-663)
+        if: contains(needs.resolve.outputs.environment, 'gamma')
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+        run: |
+          set -euo pipefail
+          python3 tools/assert_no_placeholder_lambdas.py \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --region "${{ env.AWS_REGION }}"
       # ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): probe each deployed function's
       # public endpoint (data-driven PROBE_TABLE, seeded with
       # enceladus-mcp-code / mcp.jreese.net -- the incident surface, which
@@ -964,3 +1246,158 @@ jobs:
             "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state=failure \
             -f description="Deploy failed — ${{ needs.resolve.outputs.environment }}"
+
+  # ---------------------------------------------------------------------------
+  # RECORD_DEPLOY — write a DPL record so deploy.history stays current (ENC-ISS-451).
+  # The Gen2 pipeline previously had zero DynamoDB writes for deploy state (AC-2),
+  # leaving deploy.history frozen at April 2026. This job closes that gap by POSTing
+  # to the tracker deploy submit endpoint after every successful v4/main gamma deploy.
+  #
+  # continue-on-error: true — telemetry failure MUST NEVER block or fail the deploy.
+  # Only runs on push to v4/main (actual gamma deploys); skipped on workflow_dispatch
+  # and workflow_call which already have their own deploy-submit flows.
+  # ---------------------------------------------------------------------------
+  record_deploy:
+    name: Record deploy → DPL (ENC-ISS-451)
+    needs: [resolve, deploy]
+    # ENC-TSK-Q21 FR-10: also record a v3-prod promote deploy (dispatched by
+    # promote-merged-dispatch.yml after the promote PR merges to main), not
+    # only the gamma push path. The gamma DPL behaviour below is unchanged.
+    if: >-
+      always() && needs.deploy.result == 'success' &&
+      (
+        (github.event_name == 'push' && github.ref_name == 'v4/main') ||
+        (github.event_name == 'workflow_dispatch' && inputs.target_environment == 'v3-prod')
+      )
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+
+    steps:
+      - name: Fetch current governance hash
+        id: govhash
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          HASH=$(curl -sf \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "https://jreese.net/api/v1/health" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('governance_hash',''))" 2>/dev/null || true)
+          echo "governance_hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Governance hash: ${HASH:-(fetch failed)}"
+
+      - name: Extract PR number for merge commit
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # Primary: GitHub API — find PR(s) associated with this merge commit
+          PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
+            --jq '.[0].number // empty' 2>/dev/null || true)
+
+          # Fallback: parse "(#NNN)" or "Merge pull request #NNN" from commit message
+          if [ -z "$PR_NUMBER" ]; then
+            MSG="$HEAD_COMMIT_MESSAGE"
+            PR_NUMBER=$(echo "$MSG" | grep -oE '(^Merge pull request #|#)[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+          fi
+
+          echo "pr_number=${PR_NUMBER:-0}" >> "$GITHUB_OUTPUT"
+          echo "PR number: ${PR_NUMBER:-(not found, using 0)}"
+
+      - name: Submit DPL deploy record
+        id: submit
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          GOVERNANCE_HASH: ${{ steps.govhash.outputs.governance_hash }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          DEPLOY_ROLE_ARN: ${{ needs.resolve.outputs.deploy_role_arn }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          # ENC-TSK-Q21 FR-10: github.event.head_commit only exists on the
+          # push-to-v4/main (gamma) path. On the v3-prod workflow_dispatch
+          # promote path it is undefined, so prefer the caller-supplied
+          # inputs.merged_at (the promote PR's real merge time, passed by
+          # promote-merged-dispatch.yml) over head_commit.timestamp.
+          MERGED_AT: ${{ inputs.merged_at || github.event.head_commit.timestamp }}
+          # ENC-TSK-Q21 FR-10: only set on the v3-prod promote-dispatch path
+          # (empty on the gamma push path -- the python below treats "" as
+          # "not carried").
+          GAMMA_SHA: ${{ inputs.gamma_sha }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+        run: |
+          BODY=$(python3 - <<'PY'
+          import json, os
+          pr_raw = os.environ.get('PR_NUMBER', '0')
+          pr_id = int(pr_raw) if pr_raw.isdigit() else 0
+          sha = os.environ['COMMIT_SHA']
+          env = os.environ['ENVIRONMENT']
+          gamma_sha = os.environ.get('GAMMA_SHA', '') or ''
+          # ENC-TSK-Q21 FR-8/FR-10: the gamma push path deploys github.sha
+          # straight off v4/main; the v3-prod promote path deploys a main
+          # merge commit that was dispatched (never pushed) -- record which
+          # lane this DPL record came from.
+          branch = 'main' if os.environ.get('TRIGGER_EVENT') == 'workflow_dispatch' else 'v4/main'
+          changes = [
+              f"commit_sha: {sha}",
+              f"branch: {branch}",
+              f"environment: {env}",
+              "workflow: _deploy.yml / Deploy Lambda Artifacts (Gen2)",
+          ]
+          if gamma_sha:
+              changes.append(f"gamma_sha: {gamma_sha}")
+          print(json.dumps({
+              "project_id": "enceladus",
+              "change_type": "patch",
+              "deployment_type": "lambda_update",
+              "summary": f"Gen2 Lambda deploy to {env} @ {sha[:7]} (PR #{pr_id})",
+              "changes": changes,
+              "pr_id": pr_id,
+              "merged_at": os.environ['MERGED_AT'],
+              "pr_owner": "NX-2021-L",
+              "pr_repo": "enceladus",
+              "submitted_by": "gha-deploy-pipeline",
+              "non_ui_config": {
+                  "service_group": "lambda",
+                  "target_arn": f"arn:aws:lambda:us-west-2:356364570033:function:devops-tracker-mutation-api{'-gamma' if 'gamma' in env else ''}",
+              },
+              "governance_hash": os.environ['GOVERNANCE_HASH'],
+              # ENC-TSK-Q21 FR-10 (DOC-5368FE6515ED): free-form fields beyond
+              # the ones the API reads today -- the main merge sha (commit_sha
+              # above), the gamma head sha this promote traces back to, and
+              # the target environment, so DPL carries full promote lineage.
+              "commit_sha": sha,
+              "gamma_sha": gamma_sha or None,
+              "target_environment": env,
+          }))
+          PY
+          )
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$BODY" \
+            "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy/submit")
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            DEPLOY_ID=$(echo "$HTTP_BODY" | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(d.get('deploy_id') or d.get('request_id') or d.get('spec_id') or 'unknown')" \
+              2>/dev/null || echo "unknown")
+            echo "deploy_id=${DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+            echo "✅ DPL record written: ${DEPLOY_ID}"
+          else
+            echo "deploy_id=failed-http-${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            echo "⚠️ DPL record submit failed (HTTP ${HTTP_CODE}) — deploy succeeded, telemetry gap only"
+            # Exit 1 so the step shows as failed in the UI, but continue-on-error: true
+            # at job level means the overall workflow is not affected.
+            exit 1
+          fi

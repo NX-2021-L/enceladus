@@ -1,3 +1,9 @@
 PyJWT>=2.8.0,<3.0
 cryptography>=41.0,<44.0
 certifi
+
+# ENC-TSK-O91 AC-1: pin the AWS SDK in the shared layer so a Lambda managed-runtime
+# update cannot silently change SDK behaviour underneath the fleet. The layer is
+# attached ahead of the runtime's bundled copy on sys.path, so these versions win.
+boto3==1.35.99
+botocore==1.35.99

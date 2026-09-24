@@ -1,5 +1,6 @@
 # ENC-FTR-090 / ENC-TSK-F65 Phase 7
-# v3 production environment manifest (x86_64 / python3.11).
+# v3 production environment manifest (arm64 / python3.12 since ENC-TSK-P38,
+# the ENC-PLN-082 cutover commit — io GO 2026-08-26).
 # Schema validated by tools/cfn-guard/manifest-shape.guard.
 #
 # Gen2 is now the SOLE deploy path for v3-prod. All 31 legacy deploy.sh scripts
@@ -7,8 +8,10 @@
 # This manifest is the canonical state declaration for v3-prod post-cutover.
 
 env_name: v3-prod
-architecture: x86_64
-runtime: python3.11
+# ENC-TSK-Q19 FR-1: architecture/runtime are no longer declared per-env.
+# See envs/architecture.yaml (the ONE declaration) -- this env resolves to
+# the "prod" plane there.
+architecture_plane: prod
 
 stack_name: enceladus-compute
 deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V3Prod-DeployRole
@@ -24,9 +27,10 @@ required_reviewers:
 # observation window before the CloudWatch alarm_arn auto-rollback lands (F63 Phase 5).
 canary_preference: Canary10Percent5Minutes
 
-# GitHub Actions runner label. ubuntu-latest is the x86_64 row in the _build.yml
-# matrix (F59 Phase 1).
-runner_label: ubuntu-latest
+# GitHub Actions runner label. ubuntu-24.04-arm is the arm64 row in the _build.yml
+# matrix (F59 Phase 1; flipped with architecture in ENC-TSK-P38 — cfn-guard
+# manifest-shape.guard requires the arm runner for arm64 manifests).
+runner_label: ubuntu-24.04-arm
 
 # GitHub Environment name. The environment's required-reviewer rule is the
 # human approval gate; OIDC trust policy
@@ -42,7 +46,9 @@ appconfig_application_id: ""
 appconfig_environment_id: ""
 
 # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy settings.
-# v3-prod uses x86_64/py3.11 -- SnapStart NOT supported. Canary via CodeDeploy.
+# v3-prod is arm64/py3.12 (SnapStart-eligible territory per 02-compute.yaml), but
+# SnapStart intent remains "false" — zero account functions carry SnapStart.ApplyOn
+# and enabling it is a separate io decision (ENC-TSK-P38 AC-8). Canary via CodeDeploy.
 enable_snapstart: "false"
 environment_suffix: ""
 codedeploy_app_name: "enceladus-lambda"
@@ -62,11 +68,19 @@ artifact_version_ids: {}
 #           shared_layer (Lambda Layer -- not a function).
 # deploy_parity_validator: provisioned by CFN stack update; included here so
 # Gen2 covers it immediately post-provision without a manifest update.
+# ENC-TSK-P48: 12 entries added for the prod-rendered functions Gen2 previously
+# could not reach — the 9 new v4 functions the ENC-PLN-082 cutover apply creates
+# (deployable post-provision; not-provisioned skip applies before that) and the
+# 3 legacy prod functions that were never mapped (escalation_decision_authorizer,
+# governance_mart, recompute_governance). Keys mirror envs/v4-gamma.yaml minus
+# the -gamma suffix on values.
 function_name_map:
+  arc_walk_metrics: enceladus-arc-walk-metrics
   auth_refresh: auth-refresh
   bedrock_agent_actions: enceladus-bedrock-agent-actions
   changelog_api: devops-changelog-api
   checkout_service: enceladus-checkout-service,enceladus-checkout-service-auto
+  convergence_telemetry: enceladus-convergence-telemetry
   coordination_api: devops-coordination-api
   coordination_monitor_api: devops-coordination-monitor-api
   deploy_decide: devops-deploy-decide
@@ -83,16 +97,24 @@ function_name_map:
   github_integration: devops-github-integration
   glue_crawler_launcher: devops-glue-crawler-launcher
   governance_audit: enceladus-governance-audit
+  governance_drift_check: devops-governance-drift-check
   governance_mart: devops-governance-mart
   graph_health_metrics: enceladus-graph-health-metrics
   graph_query_api: devops-graph-query-api
   graph_sync: devops-graph-sync
+  handoff_consolidation_engine: enceladus-handoff-consolidation-engine
+  id_service: enceladus-id-service
   json_to_parquet_transformer: devops-json-to-parquet-transformer
+  lifecycle_service: enceladus-lifecycle-service
   mcp_code: enceladus-mcp-code
   mcp_streamable: enceladus-mcp-streamable
+  memory_consolidation: enceladus-memory-consolidation
   neo4j_backup: enceladus-neo4j-backup
   prod_health_monitor: enceladus-prod-health-monitor
   project_service: devops-project-service
+  recompute_governance: devops-recompute-governance
   reference_search: devops-reference-search
+  scoring_service: enceladus-scoring-service
+  stale_checkout_monitor: enceladus-stale-checkout-monitor
   titan_embedding_backfill: devops-titan-embedding-backfill
   tracker_mutation: devops-tracker-mutation-api

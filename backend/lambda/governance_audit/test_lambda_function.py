@@ -116,3 +116,50 @@ def test_sqs_wrapped_unknown_channel_detected(monkeypatch):
     assert result == {"processed": 1, "clean": 0, "anomalies": 1}
     assert len(seen) == 1
     assert seen[0][0]["type"] == "UNKNOWN_CHANNEL"
+
+
+def test_pipe_direct_stream_record_detected(monkeypatch):
+    seen = []
+    monkeypatch.setattr(mod, "_publish_alert", lambda anomaly, image, event_name: seen.append((anomaly, image, event_name)))
+
+    event = _stream_record(
+        "INSERT",
+        _attr_map(
+            {
+                "project_id": "enceladus",
+                "record_id": "task#ENC-TSK-L14-TEST",
+                "item_id": "ENC-TSK-L14-TEST",
+                "record_type": "task",
+                "status": "open",
+            }
+        ),
+    )
+
+    result = mod.handler(event, None)
+
+    assert result == {"processed": 1, "clean": 0, "anomalies": 1}
+    assert len(seen) == 1
+
+
+def test_pipe_batch_list_detected(monkeypatch):
+    monkeypatch.setattr(mod, "_publish_alert", lambda anomaly, image, event_name: None)
+
+    event = [
+        _stream_record(
+            "MODIFY",
+            _attr_map(
+                {
+                    "project_id": "enceladus",
+                    "record_id": "task#ENC-TSK-L14-TEST-B",
+                    "item_id": "ENC-TSK-L14-TEST-B",
+                    "record_type": "task",
+                    "status": "open",
+                    "write_source": {"channel": "mcp_server"},
+                }
+            ),
+        )
+    ]
+
+    result = mod.handler(event, None)
+
+    assert result == {"processed": 1, "clean": 1, "anomalies": 0}

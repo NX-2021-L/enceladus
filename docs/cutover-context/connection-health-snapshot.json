@@ -1,0 +1,27 @@
+{
+  "dynamodb": "ok",
+  "s3": "ok",
+  "governance_hash": "e04f7eda77c472a49717d6f0e6107da208712f8d79f296a3c479675fdde85152",
+  "checked_at": "2026-08-21T18:44:10Z",
+  "server_version": "1.0.0",
+  "auth_config": {
+    "common_internal_api_key_configured": true,
+    "coordination_api_internal_api_key_configured": true,
+    "deploy_api_internal_api_key_configured": true,
+    "document_api_internal_api_key_configured": true,
+    "tracker_api_internal_api_key_configured": true
+  },
+  "graph_index": {
+    "status": "healthy",
+    "response_ms": 584,
+    "signals": {
+      "vector": true,
+      "graph": false,
+      "keyword": true
+    },
+    "graph_projection": {
+      "configured": false,
+      "name": null
+    }
+  }
+}

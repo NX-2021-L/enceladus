@@ -32,6 +32,37 @@ def _make_s3_event(key: str, sequencer: str = "AAAA", version_id: str = "v1") ->
     }
 
 
+def _make_sns_wrapped_event(key: str, sequencer: str = "AAAA", version_id: str = "v1") -> dict:
+    """Wrap a raw S3 event in an SNS Notification envelope (the real gamma delivery shape)."""
+    s3_event = _make_s3_event(key, sequencer=sequencer, version_id=version_id)
+    return {
+        "Records": [
+            {
+                "EventSource": "aws:sns",
+                "EventVersion": "1.0",
+                "Sns": {
+                    "Type": "Notification",
+                    "MessageId": "msg-1",
+                    "TopicArn": "arn:aws:sns:us-west-1:356364570033:enceladus-governance-live-relay-gamma",
+                    "Message": json.dumps(s3_event),
+                },
+            }
+        ]
+    }
+
+
+def _make_sns_test_event() -> dict:
+    """An s3:TestEvent relayed via SNS — Message has no S3 Records."""
+    return {
+        "Records": [
+            {
+                "EventSource": "aws:sns",
+                "Sns": {"Type": "Notification", "Message": json.dumps({"Service": "Amazon S3", "Event": "s3:TestEvent"})},
+            }
+        ]
+    }
+
+
 def _stub_canonical(monkeypatch, files=None):
     """Monkeypatch _list_canonical_files + _get_file_checksum + _read_governance_revision."""
     if files is None:
@@ -185,3 +216,60 @@ def test_bundle_hash_matches_spec():
     expected = h.hexdigest()
 
     assert mod._compute_bundle_hash(entries) == expected
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I53: SNS-relay envelope unwrapping (real gamma delivery topology)
+# ---------------------------------------------------------------------------
+
+def test_extract_s3_record_handles_raw_and_sns():
+    raw = _make_s3_event("governance/live/agents.md", sequencer="R1")
+    rec_raw = mod._extract_s3_record(raw)
+    assert rec_raw["s3"]["object"]["sequencer"] == "R1"
+
+    wrapped = _make_sns_wrapped_event("governance/live/agents.md", sequencer="S1")
+    rec_sns = mod._extract_s3_record(wrapped)
+    assert rec_sns["s3"]["object"]["sequencer"] == "S1"
+    assert rec_sns["s3"]["object"]["key"] == "governance/live/agents.md"
+
+
+def test_sns_wrapped_event_increments_like_raw(monkeypatch):
+    """A real SNS-delivered governance/live/* event must recompute (regression for the KeyError 's3' defect)."""
+    _stub_canonical(monkeypatch)
+    monkeypatch.setattr(mod, "_read_current_record", lambda: None)
+
+    written = {}
+    monkeypatch.setattr(
+        mod,
+        "_cas_write",
+        lambda *, governance_revision, governance_hash, generation, file_entries, source_event, expected_cas: (
+            written.update({"generation": generation, "expected_cas": expected_cas, "seq": source_event["s3_sequencer"]}) or True
+        ),
+    )
+
+    mod.handler(_make_sns_wrapped_event("governance/live/agents.md", sequencer="SNSSEQ1"), None)
+
+    assert written["generation"] == 1
+    assert written["expected_cas"] is None
+    assert written["seq"] == "SNSSEQ1"
+
+
+def test_sns_test_event_skipped(monkeypatch):
+    """s3:TestEvent relayed through SNS carries no S3 Records and must be a no-op."""
+    read_calls = []
+    monkeypatch.setattr(mod, "_read_current_record", lambda: read_calls.append(1) or None)
+
+    mod.handler(_make_sns_test_event(), None)
+
+    assert not read_calls, "s3:TestEvent should bail before touching DDB"
+
+
+def test_malformed_sns_message_does_not_raise(monkeypatch):
+    """A non-JSON SNS Message must be skipped gracefully, not crash the handler."""
+    read_calls = []
+    monkeypatch.setattr(mod, "_read_current_record", lambda: read_calls.append(1) or None)
+
+    event = {"Records": [{"EventSource": "aws:sns", "Sns": {"Message": "not-json{{"}}]}
+    mod.handler(event, None)  # must not raise
+
+    assert not read_calls

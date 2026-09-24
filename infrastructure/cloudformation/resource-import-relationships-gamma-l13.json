@@ -1,0 +1,7 @@
+[
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "RelationshipsTable",
+    "ResourceIdentifier": { "TableName": "enceladus-relationships-gamma" }
+  }
+]

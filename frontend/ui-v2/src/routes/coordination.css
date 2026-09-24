@@ -1,0 +1,63 @@
+.coordination-route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: calc(var(--space-16) * 56);
+  /* ENC-TSK-M38 route sweep: same auto-minimum floor as feed/docs. */
+  min-width: var(--space-0);
+}
+
+.coordination-route__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.coordination-route__eyebrow {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+.coordination-route__title {
+  margin: var(--space-0);
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-3xl);
+  line-height: var(--lh-tight);
+  color: var(--fg-display);
+}
+
+.coordination-route__subtitle {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--lh-relaxed);
+  color: var(--fg-muted);
+}
+
+.coordination-route__empty {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* ENC-TSK-O40 — the Escalations tab is a monitor view; this points io at the
+   decision surface instead of leaving a tab that looks like a destination. */
+.ev2-coord__escalation-cta {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.ev2-coord__escalation-cta a {
+  color: var(--enc-teal, #3d9ba8);
+  text-decoration: none;
+}
+
+.ev2-coord__escalation-cta a:hover {
+  text-decoration: underline;
+}

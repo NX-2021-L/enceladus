@@ -1,0 +1,4 @@
+# Handoff Consolidation Engine (ENC-TSK-C08).
+# Runtime deps only — boto3 is provided by the Lambda runtime. The engine reads
+# documents via DynamoDB and writes via the governed Document API Lambda invoke,
+# so it needs no graph driver or third-party packages.

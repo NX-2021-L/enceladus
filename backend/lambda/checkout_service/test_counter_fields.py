@@ -24,6 +24,7 @@ from unittest import mock
 
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 _SPEC = importlib.util.spec_from_file_location(
     "checkout_lambda",
     os.path.join(os.path.dirname(__file__), "lambda_function.py"),
@@ -76,7 +77,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-901",
-                {"active_agent_session_id": "ENC-SES-001"},
+                {"active_agent_session_id": "claude-code-f41-test"},
             )
         return resp
 
@@ -118,7 +119,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-902",
-                {"active_agent_session_id": "ENC-SES-001"},
+                {"active_agent_session_id": "legacy-agent"},
             )
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
@@ -139,7 +140,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-903",
-                {"active_agent_session_id": "ENC-SES-001"},
+                {"active_agent_session_id": "agent"},
             )
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])

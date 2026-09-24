@@ -348,5 +348,79 @@ class DeployOrchestratorStructuredErrorTests(unittest.TestCase):
         self.assertIn("spec_id", err)
 
 
+class DeployOrchestratorPrefixResolutionO47Tests(unittest.TestCase):
+    """ENC-TSK-O47: alias_prefixes-aware resolution in _load_prefix_map()/
+    _infer_project_id(). Lighter than the project_utils/server.py suites --
+    this Lambda's prefix cache is a flat str->str dict built from a single
+    Scan call (no pagination, no dataclass), so one mocked ddb.scan per case
+    is enough to exercise the same normalize/skip/collision-surfacing rules.
+    Related: ENC-TSK-O47, ENC-TSK-O45, ENC-ISS-538.
+    """
+
+    def setUp(self) -> None:
+        deploy_orchestrator._prefix_to_project.clear()
+        deploy_orchestrator._PREFIX_COLLISIONS.clear()
+
+    def tearDown(self) -> None:
+        deploy_orchestrator._prefix_to_project.clear()
+        deploy_orchestrator._PREFIX_COLLISIONS.clear()
+
+    @staticmethod
+    def _row(project_id, prefix=None, alias_prefixes=None):
+        item = {"project_id": {"S": project_id}}
+        if prefix is not None:
+            item["prefix"] = {"S": prefix}
+        if alias_prefixes is not None:
+            item["alias_prefixes"] = {"L": [{"S": a} for a in alias_prefixes]}
+        return item
+
+    def test_alias_prefix_resolves_to_project_id(self) -> None:
+        """(a) A legacy alias_prefixes entry resolves to the owning project_id,
+        and alias_prefixes is actually projected (not just prefix)."""
+        ddb = MagicMock()
+        ddb.scan.return_value = {"Items": [self._row("gamma", prefix="MNT", alias_prefixes=["enc"])]}
+        with patch.object(deploy_orchestrator, "_get_ddb", return_value=ddb):
+            self.assertEqual(deploy_orchestrator._infer_project_id("ENC-TSK-001"), "gamma")
+        self.assertIn("alias_prefixes", ddb.scan.call_args.kwargs["ProjectionExpression"])
+
+    def test_mint_prefix_resolves_to_same_project_id(self) -> None:
+        """(b) The project's new MINT prefix resolves to that same project_id."""
+        ddb = MagicMock()
+        ddb.scan.return_value = {"Items": [self._row("gamma", prefix="MNT", alias_prefixes=["ENC"])]}
+        with patch.object(deploy_orchestrator, "_get_ddb", return_value=ddb):
+            self.assertEqual(deploy_orchestrator._infer_project_id("MNT-TSK-001"), "gamma")
+
+    def test_unknown_prefix_returns_none(self) -> None:
+        """(c) A prefix present in neither `prefix` nor `alias_prefixes` still
+        yields no match (this Lambda's resolver returns None, not ValueError --
+        callers treat a None project_id as best-effort skip)."""
+        ddb = MagicMock()
+        ddb.scan.return_value = {"Items": [self._row("gamma", prefix="MNT", alias_prefixes=["ENC"])]}
+        with patch.object(deploy_orchestrator, "_get_ddb", return_value=ddb):
+            self.assertIsNone(deploy_orchestrator._infer_project_id("ZZZ-TSK-001"))
+
+    def test_mint_vs_alias_collision_resolves_to_mint_and_is_surfaced(self) -> None:
+        """(d) MINT always wins a mint-vs-alias collision, and the collision is
+        never silently resolved: it is logged and recorded in _PREFIX_COLLISIONS."""
+        ddb = MagicMock()
+        ddb.scan.return_value = {
+            "Items": [
+                self._row("legacy-holder", prefix="OTH", alias_prefixes=["ENC"]),
+                self._row("gamma", prefix="ENC", alias_prefixes=[]),
+            ]
+        }
+        with patch.object(deploy_orchestrator, "_get_ddb", return_value=ddb), \
+                self.assertLogs(deploy_orchestrator.logger, level="WARNING") as logs:
+            resolved = deploy_orchestrator._infer_project_id("ENC-TSK-001")
+
+        self.assertEqual(resolved, "gamma")
+        self.assertEqual(
+            deploy_orchestrator._PREFIX_COLLISIONS.get("ENC"),
+            {"mint_project_id": "gamma", "alias_project_id": "legacy-holder"},
+        )
+        self.assertTrue(any("PREFIX-COLLISION" in msg for msg in logs.output))
+
+
+
 if __name__ == "__main__":
     unittest.main()

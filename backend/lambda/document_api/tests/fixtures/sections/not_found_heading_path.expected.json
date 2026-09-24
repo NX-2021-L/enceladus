@@ -1,0 +1,21 @@
+{
+  "name": "not_found_heading_path",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Nonexistent",
+        "Nested"
+      ]
+    },
+    "op": "replace",
+    "body": "x"
+  },
+  "error": {
+    "status": 404,
+    "code": "ANCHOR_NOT_FOUND",
+    "details_keys": [
+      "outline"
+    ],
+    "outline_length": 3
+  }
+}

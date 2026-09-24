@@ -4,8 +4,27 @@ Triggered by SQS FIFO queue (devops-graph-sync-queue.fifo) which receives
 events from an EventBridge Pipe connected to the devops-project-tracker
 DynamoDB Stream.
 
-Flow:
+ENC-TSK-L85: EventBridge Pipes with a DynamoDB Streams source were confirmed
+account-wide non-functional (StateReason=No records processed, zero
+throughput -- see ENC-ISS-497, same root cause already fixed for
+search-index via ENC-TSK-L84). On gamma, CDC now runs via direct
+AWS::Lambda::EventSourceMapping on the tracker and documents DynamoDB
+streams (GraphSyncTrackerStreamTrigger / GraphSyncDocumentsStreamTrigger).
+This handler accepts BOTH event shapes so the old SQS-fed path
+(GraphSyncSqsTrigger, disabled on gamma but left enabled on prod/v3, not
+deleted) and the new direct-stream path can coexist during rollback windows:
+  - SQS-wrapped: event.Records[].body is a JSON string containing the raw
+    DynamoDB stream record. Failure identifier = SQS messageId.
+  - Direct DynamoDB Streams ESM: event.Records[] IS the raw stream record
+    (eventName/dynamodb at the top level, no body/messageId). Failure
+    identifier = dynamodb.SequenceNumber per the DynamoDB Streams
+    ReportBatchItemFailures contract (NOT eventID).
+
+Flow (prod/v3, unchanged):
   DynamoDB Streams -> EventBridge Pipe -> SQS FIFO -> This Lambda
+  -> MERGE/DELETE Cypher operations against AuraDB Free
+Flow (gamma):
+  DynamoDB Streams -> Lambda EventSourceMapping (direct) -> This Lambda
   -> MERGE/DELETE Cypher operations against AuraDB Free
 
 The graph is a READ-ONLY derived index. DynamoDB remains the sole source
@@ -29,6 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ENC-TSK-B94: Incremental Titan V2 embedding helpers. build_embedding_text,
@@ -63,6 +83,12 @@ logger.setLevel(logging.INFO)
 
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", "us-west-2")
+# ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2 ("...and verified on projection"): the same shared
+# HMAC secret the ID Service signs item_id_provenance with. Empty by default (inert) so a
+# gamma/prod environment that hasn't wired this env var yet degrades to "verification
+# skipped, not attempted" rather than erroring — this is an observability/quarantine-flag
+# feature, never a hard MERGE gate (existing pre-L06 records have no provenance at all).
+ID_SERVICE_HMAC_SECRET_ARN = os.environ.get("ID_SERVICE_HMAC_SECRET_ARN", "")
 
 # ---------------------------------------------------------------------------
 # Lazy singletons (cold-start cached)
@@ -89,6 +115,72 @@ def _get_neo4j_credentials() -> Dict[str, str]:
     sm = _get_secretsmanager()
     resp = sm.get_secret_value(SecretId=NEO4J_SECRET_NAME)
     return json.loads(resp["SecretString"])
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2 — provenance verification on projection.
+# ---------------------------------------------------------------------------
+
+_id_hmac_key_cache: Optional[bytes] = None
+
+
+def _get_id_hmac_key() -> Optional[bytes]:
+    """Fetch the ID Service's HMAC signing secret, cached for the life of the execution
+    environment. Returns None (never raises) when ID_SERVICE_HMAC_SECRET_ARN is unset or
+    the fetch fails — verification is a best-effort observability feature, not a hard
+    dependency of the sync pipeline."""
+    global _id_hmac_key_cache
+    if _id_hmac_key_cache is not None:
+        return _id_hmac_key_cache
+    if not ID_SERVICE_HMAC_SECRET_ARN:
+        return None
+    try:
+        sm = _get_secretsmanager()
+        resp = sm.get_secret_value(SecretId=ID_SERVICE_HMAC_SECRET_ARN)
+        secret_string = resp.get("SecretString", "")
+        try:
+            parsed = json.loads(secret_string)
+            if isinstance(parsed, dict) and "hmac_key" in parsed:
+                secret_string = parsed["hmac_key"]
+        except (ValueError, TypeError):
+            pass
+        _id_hmac_key_cache = secret_string.encode("utf-8")
+        return _id_hmac_key_cache
+    except Exception:  # noqa: BLE001 — best-effort; never blocks the sync pipeline
+        logger.warning("[ID-PROVENANCE] could not fetch ID Service HMAC secret; verification skipped")
+        return None
+
+
+def _verify_item_id_provenance(record: Dict[str, Any]) -> None:
+    """Recompute + compare item_id_provenance for a record about to be MERGEd into the
+    graph. Logs (never raises, never blocks the MERGE) on mismatch or absence — pre-L06
+    records have no provenance at all (expected, not an error; see AC-5 backfill/
+    quarantine), and this check must stay proportionate: a warning/metric signal, not a
+    hard gate that would break ingestion for the entire pre-existing dataset."""
+    provenance = record.get("item_id_provenance")
+    if not provenance:
+        return  # No provenance stamped (pre-L06 record, or flag was OFF at create time) — silent, expected.
+    key = _get_id_hmac_key()
+    if key is None:
+        return  # Secret not wired in this environment — verification not attempted.
+    record_id = str(record.get("item_id") or _bare_id(record.get("record_id", "")))
+    created_at = str(record.get("created_at") or "")
+    record_type = str(record.get("record_type") or "")
+    if not (record_id and created_at and record_type):
+        return
+    try:
+        import hashlib
+        import hmac as _hmac
+        message = f"{record_id}||{created_at}||{record_type}".encode("utf-8")
+        expected = _hmac.new(key, message, hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, str(provenance)):
+            logger.warning(
+                "[ID-PROVENANCE] MISMATCH for %s (record_type=%s) — stamped provenance does not "
+                "match recomputed signature. Flagging for quarantine review (AC-5), not blocking sync.",
+                record_id, record_type,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the sync pipeline
+        logger.warning("[ID-PROVENANCE] verification error for %s: %s", record_id, exc)
 
 
 def _get_neo4j_driver():
@@ -153,19 +245,44 @@ def _normalize_record_for_graph(record: Dict[str, Any]) -> Dict[str, Any]:
     if record_type == "document" and not normalized.get("record_id"):
         normalized["record_id"] = normalized.get("document_id", "")
 
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity stores carry no record_type column and
+    # key on their own id field. Synthesize record_type + record_id from the id field so
+    # the graph dispatch can route them. Order matters: probe each type's OWN partition-key
+    # field before any foreign-key field another type might also carry. ENC-TSK-J43 added an
+    # optional credential_id FK onto agent-session rows, so session_id (a session's own PK)
+    # MUST be probed before credential_id (a session row now has both) -- checking
+    # credential_id first misclassified every credential-bound session as an agent_credential
+    # record, corrupting the real credential's Neo4j node via SET n += $props on shared field
+    # names (e.g. status). Credential rows have no session_id, so this ordering is safe for
+    # them; agent-type rows have neither session_id nor credential_id, so they fall through
+    # correctly regardless of position.
+    if not record_type:
+        for id_field, synthetic_type in (
+            ("session_id", "agent_session"),
+            ("credential_id", "agent_credential"),
+            ("agent_type_id", "agent_identity"),
+        ):
+            id_val = str(normalized.get(id_field) or "").strip()
+            if id_val:
+                normalized["record_type"] = synthetic_type
+                normalized["record_id"] = id_val
+                break
+
     return normalized
 
 
 def _extract_remove_record_id(keys: Dict[str, Any], old_record: Optional[Dict[str, Any]] = None) -> str:
     """Resolve the primary ID for REMOVE events across tracker + document tables."""
-    for key_name in ("record_id", "document_id", "item_id"):
+    id_fields = ("record_id", "document_id", "item_id",
+                 "session_id", "agent_type_id", "credential_id")
+    for key_name in id_fields:
         typed = keys.get(key_name) or {}
         value = str(typed.get("S") or "").strip()
         if value:
             return value
 
     if old_record:
-        for key_name in ("record_id", "document_id", "item_id"):
+        for key_name in id_fields:
             value = str(old_record.get(key_name) or "").strip()
             if value:
                 return value
@@ -187,6 +304,47 @@ RECORD_TYPE_TO_LABEL = {
     "generation": "Generation",  # GMF DOC-63420302EF65
 }
 
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. The three identity
+# stores (agent-types / agent-sessions / agent-credentials) key on their own id field and
+# carry NO record_type column, so _normalize_record_for_graph synthesizes a record_type
+# from the presence of the id field (see below). These are kept in a SEPARATE map from
+# RECORD_TYPE_TO_LABEL so the generic tracker/document dispatch (which assumes project_id,
+# title, embeddings) never accidentally picks up an agent row.
+AGENT_RECORD_TYPE_TO_LABEL = {
+    "agent_identity": "AgentIdentity",   # <- agent-types stream (ENC-AGT-NNN)
+    "agent_session": "AgentSession",     # <- agent-sessions stream (ENC-SES-NNN)
+    "agent_credential": "AgentCredential",  # <- agent-credentials stream (CRED-<hex>)
+}
+
+# The partition-key field for each agent store (the graph node's record_id).
+AGENT_ID_FIELD = {
+    "agent_identity": "agent_type_id",
+    "agent_session": "session_id",
+    "agent_credential": "credential_id",
+}
+
+# Node property sets copied onto each :Agent* node. Value-identical to the persisted
+# DynamoDB item shapes in coordination_api/agent_id_alloc.py (SESSION_NODE_PROPERTIES,
+# AGENT_TYPE_NODE_PROPERTIES, CREDENTIAL_NODE_PROPERTIES) plus the optional session
+# credential_id binding (ENC-TSK-J04 AC#4). record_id is set separately.
+AGENT_NODE_PROPERTIES = {
+    "agent_identity": (
+        "agent_type_id", "surface", "model", "cost_tier", "status", "usage_count",
+    ),
+    "agent_session": (
+        "session_id", "agent_type_id", "parent_session_id", "runtime",
+        "created_at", "claimed_at", "status", "credential_id",
+    ),
+    "agent_credential": (
+        "credential_id", "agent_identity_id", "issued_at", "status",
+        "revoked_at", "revoked_reason", "rotated_from",
+    ),
+}
+
+# A governed tracker write stamps write_source.provider = the acting session id
+# (e.g. "ENC-SES-029"). This pattern gates the generic MUTATED edge hook.
+_SESSION_PROVIDER_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
+
 # ENC-TSK-E01 / ENC-ISS-184: ID-prefix to Neo4j label mapping for placeholder
 # node creation. When a plan emits a PLAN_CONTAINS edge to an objective task
 # that has not yet been projected (race window after plan.add_objective is
@@ -204,6 +362,11 @@ ID_PREFIX_TO_LABEL = {
     "DOC": "Document",
     "GEN": "Generation",
     "DPL": "DeploymentDecision",
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. ENC-SES / ENC-AGT are
+    # 3-segment ids (ENC-SES-029) so the parts[1] type_code resolves them here; CRED-<hex>
+    # is a 2-segment id handled by the dedicated branch in _infer_label_from_id below.
+    "SES": "AgentSession",
+    "AGT": "AgentIdentity",
 }
 
 
@@ -233,48 +396,86 @@ def _infer_label_from_id(record_id: str) -> str:
     # ENC-TSK-F45: Component IDs use 'comp-<name>' prefix (not the 3-segment ENC-TYPE-XXX form)
     if parts[0].lower() == "comp":
         return "Component"
+    # ENC-TSK-J04: Credential IDs use 'CRED-<uuid4hex>' (2-segment, no project prefix).
+    if parts[0].upper() == "CRED":
+        return "AgentCredential"
     if len(parts) < 2:
         return ""
     type_code = parts[1].upper()
     return ID_PREFIX_TO_LABEL.get(type_code, "")
 
 
-# ENC-TSK-C72 / ENC-ISS-191: candidate DynamoDB attribute names a task's parent
-# reference may be stored under. `parent` is the canonical name written by
-# tracker_mutation._handle_create_record (ENC-FTR-056 hierarchical sub-task
-# path) and tracker_mutation tracker.set (field='parent'); the alternative
-# names are tolerated as a defense-in-depth read-side compatibility shim for
-# any historically-mixed records imported from legacy paths so the CHILD_OF
-# projection cannot silently zero out again if a legacy writer slips in.
-TASK_PARENT_ATTRIBUTE_CANDIDATES: Tuple[str, ...] = (
-    "parent",
-    "parent_task_id",
-    "parent_id",
-)
-
-
-def _extract_task_parent_id(record: Dict[str, Any]) -> str:
-    """Return the bare parent task ID from a tracker record, or '' if none.
-
-    Reads the canonical `parent` attribute first; falls back to the
-    historically-mixed `parent_task_id` / `parent_id` aliases so legacy
-    records still project CHILD_OF. The first non-empty candidate wins.
-    """
-    for key in TASK_PARENT_ATTRIBUTE_CANDIDATES:
-        raw = record.get(key)
-        if raw is None:
-            continue
-        parent_id = _bare_id(str(raw).strip())
-        if parent_id:
-            return parent_id
-    return ""
-
-
 # Properties to copy from DynamoDB record to Neo4j node
 NODE_PROPERTIES = [
     "record_id", "project_id", "title", "status", "priority",
     "category", "updated_at", "created_at",
+    # ENC-TSK-I07 (Dedup P3): canonical pointer on a superseded node, so
+    # retrieval/triage can exclude superseded records and surface the survivor.
+    "superseded_by",
+    # ENC-TSK-L06 / B63 Phase 2 AC-6: projected so the signature is queryable in the graph
+    # (e.g. for an operator to spot-check or for a future dashboard read), even though
+    # verification itself happens in _verify_item_id_provenance before the MERGE below.
+    "item_id_provenance",
 ]
+
+# ENC-ISS-543: terminal lifecycle values that MUST project to Neo4j on close paths.
+# Matches tracker/checkout terminal sets (task->closed, feature->production/deprecated,
+# plan->complete, issue->closed, etc.).
+TERMINAL_STATUSES = frozenset({
+    "closed", "completed", "complete", "production", "deprecated", "archived",
+    "superseded",
+})
+
+
+def _is_terminal_status(value: Any) -> bool:
+    return str(value or "").strip().lower() in TERMINAL_STATUSES
+
+
+def _typed_string_field(image: Dict[str, Any], field: str) -> str:
+    """Read a DynamoDB stream String ('S') field directly from a typed image."""
+    typed = (image or {}).get(field) or {}
+    if isinstance(typed, dict) and "S" in typed:
+        return str(typed["S"]).strip()
+    return ""
+
+
+def _coalesce_status_for_projection(
+    record: Dict[str, Any],
+    old_record: Dict[str, Any],
+    new_image: Dict[str, Any],
+    old_image: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ensure ``status`` is present for Neo4j MERGE on close / checkout-release paths.
+
+    ENC-ISS-543: close transitions are often followed within seconds by a
+    checkout-release MODIFY. Neo4j uses ``SET n += $props`` which never clears
+    stale properties — if ``status`` is absent from the deserialized projection
+    record, the node keeps the pre-close status (one write behind canonical).
+    Recover ``status`` from the typed NewImage first, then OldImage.
+    """
+    merged = dict(record)
+    status = str(merged.get("status") or "").strip()
+    if not status:
+        status = _typed_string_field(new_image, "status")
+    old_status = str(old_record.get("status") or _typed_string_field(old_image, "status") or "").strip()
+    if not status and _is_terminal_status(old_status):
+        # ENC-ISS-543 mechanism 3: checkout-release MODIFY immediately after close —
+        # OldImage already reflects the terminal status even when the deserialized
+        # NewImage omits ``status``.
+        status = old_status
+    if not status:
+        status = old_status
+    if status:
+        merged["status"] = status
+
+    new_status = str(merged.get("status") or "").strip()
+    if new_status and (_is_terminal_status(new_status) or new_status != old_status):
+        logger.info(
+            "[INFO] Status projection %s -> %s (record_id=%s)",
+            old_status or "<none>", new_status,
+            _bare_id(str(merged.get("record_id") or merged.get("item_id") or "")),
+        )
+    return merged
 
 
 PlaceholderRef = Tuple[str, str]
@@ -296,14 +497,6 @@ def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderR
     """
     refs: Set[PlaceholderRef] = set()
     record_type = str(record.get("record_type") or "").strip()
-
-    if record_type == "task":
-        # ENC-TSK-C72: CHILD_OF emission MERGEs a placeholder parent Task so
-        # the edge lands across the projection race window. Register the
-        # placeholder ref so MODIFY/REMOVE prune cleans it up when the parent
-        # link is detached and no other edges keep the placeholder alive.
-        parent_id = _extract_task_parent_id(record)
-        _add_placeholder_ref(refs, "Task", parent_id)
 
     if record_type == "plan":
         for objective_id in record.get("objectives_set", []) or []:
@@ -330,6 +523,12 @@ def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderR
             _add_placeholder_ref(refs, _infer_label_from_id(rid), rid)
         for source_id in record.get("informed_by", []) or []:
             _add_placeholder_ref(refs, "Document", source_id)
+        # ENC-TSK-C08 / ENC-FTR-064: HCE provenance placeholder targets.
+        for source_id in record.get("consolidated_from", []) or []:
+            _add_placeholder_ref(refs, "Document", source_id)
+        proposed_by = _bare_id(str(record.get("proposed_by") or "").strip())
+        if proposed_by:
+            _add_placeholder_ref(refs, _infer_label_from_id(proposed_by), proposed_by)
 
         doc_subtype = str(record.get("document_subtype") or "").strip()
         if doc_subtype == "coe":
@@ -388,15 +587,28 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
     if not record_id:
         return
 
+    # ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2: verify (never block on) item_id_provenance
+    # before projecting. Logs a warning on mismatch/absence for AC-5 quarantine review;
+    # the MERGE below always proceeds regardless of the verification outcome.
+    _verify_item_id_provenance(record)
+
     props = {k: record.get(k) for k in NODE_PROPERTIES if record.get(k) is not None}
     props["record_id"] = record_id
 
+    # ENC-ISS-543: ``SET n += $props`` alone leaves stale ``status`` when a later
+    # checkout-release MODIFY omits the field from the deserialized dict. Always
+    # bind terminal / lifecycle status explicitly so close transitions MERGE.
+    status_val = props.get("status")
     cypher = (
         f"MERGE (n:{label} {{record_id: $record_id}}) "
         "SET n += $props "
         "SET n.is_placeholder = false"
     )
-    tx.run(cypher, record_id=record_id, props=props)
+    params: Dict[str, Any] = {"record_id": record_id, "props": props}
+    if status_val is not None and str(status_val).strip() != "":
+        cypher += " SET n.status = $status_val"
+        params["status_val"] = str(status_val).strip()
+    tx.run(cypher, **params)
 
 
 def _upsert_project_node(tx, project_id: str) -> None:
@@ -404,6 +616,159 @@ def _upsert_project_node(tx, project_id: str) -> None:
     tx.run(
         "MERGE (p:Project {project_id: $pid})",
         pid=project_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent-identity node + edge projection (ENC-TSK-J04 / ENC-FTR-074 Ph3)
+# ---------------------------------------------------------------------------
+
+def _merge_placeholder(tx, label: str, record_id: str) -> None:
+    """MERGE a labeled placeholder node (ENC-TSK-E01 pattern) so an edge lands even when
+    the target's own stream event has not yet projected it."""
+    if not label or not record_id:
+        return
+    tx.run(
+        f"MERGE (n:{label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true",
+        rid=record_id,
+    )
+
+
+def _upsert_agent_node(tx, record: Dict[str, Any]) -> None:
+    """MERGE an :AgentIdentity / :AgentSession / :AgentCredential node by its id."""
+    record_type = record.get("record_type", "")
+    label = AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    if not label:
+        return
+
+    id_field = AGENT_ID_FIELD[record_type]
+    raw_id = str(record.get("record_id") or record.get(id_field, "")).strip()
+    if not raw_id or raw_id.startswith("counter#"):
+        return  # reserved monotonic-counter sentinel row
+    record_id = _bare_id(raw_id)
+    if not record_id:
+        return
+
+    prop_keys = AGENT_NODE_PROPERTIES[record_type]
+    props = {k: record.get(k) for k in prop_keys if record.get(k) is not None}
+    props["record_id"] = record_id
+
+    tx.run(
+        f"MERGE (n:{label} {{record_id: $record_id}}) "
+        "SET n += $props "
+        "SET n.is_placeholder = false",
+        record_id=record_id, props=props,
+    )
+
+
+def _reconcile_agent_edges(tx, record: Dict[str, Any]) -> None:
+    """Project the typed lifecycle edges for an agent record (ENC-TSK-J04 AC#3).
+
+    AgentSession -> AUTHENTICATED_AS -> AgentIdentity   (session.agent_type_id)
+    AgentSession -> TRIGGERED_BY     -> parent session  (session.parent_session_id)
+    AgentCredential -> OWNED_BY      -> AgentIdentity    (credential.agent_identity_id)
+    AgentCredential -> DERIVED_FROM  -> parent credential (credential.rotated_from)
+
+    The source-endpoint fields are immutable across a record's lifetime (only status /
+    revoked_* / claimed_at change), so idempotent MERGE is sufficient — no delete-and-
+    recreate reconcile is needed.
+    """
+    record_type = record.get("record_type", "")
+    label = AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    raw_id = str(record.get("record_id") or "").strip()
+    if not label or not raw_id or raw_id.startswith("counter#"):
+        return
+    record_id = _bare_id(raw_id)
+    if not record_id:
+        return
+
+    if record_type == "agent_session":
+        # AUTHENTICATED_AS -> AgentIdentity
+        agent_type_id = _bare_id(str(record.get("agent_type_id") or "").strip())
+        if agent_type_id:
+            _merge_placeholder(tx, "AgentIdentity", agent_type_id)
+            tx.run(
+                "MATCH (s:AgentSession {record_id: $sid}), (i:AgentIdentity {record_id: $aid}) "
+                "MERGE (s)-[:AUTHENTICATED_AS]->(i)",
+                sid=record_id, aid=agent_type_id,
+            )
+        # TRIGGERED_BY -> the triggering session/routine (parent_session_id). "root" and
+        # self-references are skipped. The parent is usually another AgentSession, but the
+        # placeholder is created on the label inferred from the id so a non-session trigger
+        # (e.g. a Routine id with a known prefix) still lands.
+        parent = _bare_id(str(record.get("parent_session_id") or "").strip())
+        if parent and parent.lower() != "root" and parent != record_id:
+            parent_label = _infer_label_from_id(parent) or "AgentSession"
+            _merge_placeholder(tx, parent_label, parent)
+            tx.run(
+                f"MATCH (s:AgentSession {{record_id: $sid}}), (p:{parent_label} {{record_id: $pid}}) "
+                "MERGE (s)-[:TRIGGERED_BY]->(p)",
+                sid=record_id, pid=parent,
+            )
+
+    elif record_type == "agent_credential":
+        # OWNED_BY -> AgentIdentity
+        owner = _bare_id(str(record.get("agent_identity_id") or "").strip())
+        if owner:
+            _merge_placeholder(tx, "AgentIdentity", owner)
+            tx.run(
+                "MATCH (c:AgentCredential {record_id: $cid}), (i:AgentIdentity {record_id: $oid}) "
+                "MERGE (c)-[:OWNED_BY]->(i)",
+                cid=record_id, oid=owner,
+            )
+        # DERIVED_FROM -> parent credential (rotation lineage)
+        parent_cred = _bare_id(str(record.get("rotated_from") or "").strip())
+        if parent_cred and parent_cred != record_id:
+            _merge_placeholder(tx, "AgentCredential", parent_cred)
+            tx.run(
+                "MATCH (c:AgentCredential {record_id: $cid}), (p:AgentCredential {record_id: $pid}) "
+                "MERGE (c)-[:DERIVED_FROM]->(p)",
+                cid=record_id, pid=parent_cred,
+            )
+
+
+def _project_mutated_edge(session, record: Dict[str, Any]) -> None:
+    """Generic MUTATED-edge hook (ENC-TSK-J04 AC#3, "the clever one").
+
+    Every governed tracker write stamps ``write_source.provider`` = the acting session id
+    (e.g. "ENC-SES-029") on the mutated record. When that provider matches the ENC-SES
+    pattern AND differs from the record's own id, MERGE a MUTATED edge from that session
+    node (placeholder if not yet projected) to this record's node. Runs for ALL record
+    types (tracker, document, and agent rows alike)."""
+    record_id = _bare_id(str(record.get("record_id") or "").strip())
+    if not record_id:
+        return
+    write_source = record.get("write_source")
+    provider = ""
+    if isinstance(write_source, dict):
+        provider = str(write_source.get("provider") or "").strip()
+    if not provider or not _SESSION_PROVIDER_RE.match(provider):
+        return
+    if provider == record_id:  # a session mutating its own row is not an interesting edge
+        return
+
+    record_type = record.get("record_type", "")
+    target_label = (
+        _infer_label_from_id(record_id)
+        or RECORD_TYPE_TO_LABEL.get(record_type)
+        or AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    )
+    if not target_label:
+        return
+
+    session.execute_write(
+        lambda tx: _merge_mutated_edge(tx, provider, target_label, record_id)
+    )
+
+
+def _merge_mutated_edge(tx, provider: str, target_label: str, record_id: str) -> None:
+    """MERGE (:AgentSession {provider})-[:MUTATED]->(:target_label {record_id})."""
+    _merge_placeholder(tx, "AgentSession", provider)
+    _merge_placeholder(tx, target_label, record_id)
+    tx.run(
+        f"MATCH (s:AgentSession {{record_id: $sid}}), (t:{target_label} {{record_id: $rid}}) "
+        "MERGE (s)-[:MUTATED]->(t)",
+        sid=provider, rid=record_id,
     )
 
 
@@ -453,10 +818,14 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     if not label or not record_id:
         return
 
-    # Remove all outgoing relationships so we can re-create from current state
+    # Remove all outgoing relationships so we can re-create from current state.
+    # ENC-TSK-I07 (Dedup P3): preserve the SUPERSEDED_BY tombstone so a superseded
+    # node is never transiently orphaned from its canonical between reconciles.
+    # The tombstone is removed only when its `superseded-by` rel-record is archived
+    # (un-supersession) via _delete_relationship_edge.
     tx.run(
         f"MATCH (n:{label}) WHERE n.record_id = $rid "
-        "OPTIONAL MATCH (n)-[r]->() DELETE r",
+        "OPTIONAL MATCH (n)-[r]->() WHERE type(r) <> 'SUPERSEDED_BY' DELETE r",
         rid=record_id,
     )
     # Also remove incoming RELATED_TO since we'll re-create from current state
@@ -477,62 +846,70 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             rid=record_id, pid=project_id,
         )
 
-    # CHILD_OF -> parent Task (ENC-TSK-C72 / ENC-ISS-191)
-    # Read parent from the canonical `parent` attribute with read-side
-    # compatibility for legacy `parent_task_id` / `parent_id` aliases, and
-    # MERGE a label-correct placeholder parent Task before MERGEing the edge
-    # so CHILD_OF lands even when the parent has not yet been projected
-    # (mirrors the ENC-TSK-E01 / ENC-TSK-E06 placeholder pattern used for
-    # PLAN_CONTAINS / typed relationships). The prior Cartesian MATCH
-    # silently produced zero rows when the parent node was absent, which is
-    # the projection gap ENC-ISS-191 observed across all probed anchors.
-    if record_type == "task":
-        parent = _extract_task_parent_id(record)
-        if parent:
-            tx.run(
-                "MERGE (p:Task {record_id: $parent_id}) "
-                "ON CREATE SET p.is_placeholder = true",
-                parent_id=parent,
-            )
-            tx.run(
-                "MATCH (child:Task), (parent:Task) "
-                "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
-                "MERGE (child)-[:CHILD_OF]->(parent)",
-                child_id=record_id, parent_id=parent,
-            )
+    # ENC-TSK-I07 (Dedup P3): a superseded record is retired from the active
+    # graph — its field-derived edges are NOT re-projected. Only BELONGS_TO
+    # (audit membership) and the preserved SUPERSEDED_BY tombstone remain.
+    # Inbound field edges from other records are redirected onto the canonical
+    # when those records reconcile (the coalesce redirect below). Reversible:
+    # un-supersession clears status, and B's next reconcile re-creates its edges.
+    if record.get("status") == "superseded":
+        return
 
-    # RELATED_TO from related_task_ids (single directed edge, not bidirectional)
+    # CHILD_OF -> parent Task
+    parent = _bare_id(record.get("parent", ""))
+    if parent and record_type == "task":
+        tx.run(
+            "MATCH (child:Task), (parent:Task) "
+            "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
+            "MERGE (child)-[:CHILD_OF]->(parent)",
+            child_id=record_id, parent_id=parent,
+        )
+
+    # RELATED_TO from related_task_ids (single directed edge, not bidirectional).
+    # ENC-TSK-I07 (Dedup P3): redirect onto the canonical when the target is
+    # superseded (coalesce over the in-graph SUPERSEDED_BY tombstone), so inbound
+    # field edges migrate to the survivor without mutating this record's stored
+    # ids — idempotent and reversible (target un-supersede restores the direct
+    # edge on next reconcile). The tgt<>a guard drops degenerate self-loops.
     for related_id in record.get("related_task_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label}), (b:Task) "
-            "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b)",
+            f"MATCH (a:{label}) WHERE a.record_id = $aid "
+            "MATCH (b:Task) WHERE b.record_id = $bid "
+            "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
+            "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
+            "MERGE (a)-[:RELATED_TO]->(tgt)",
             aid=record_id, bid=related_id,
         )
 
-    # RELATED_TO from related_issue_ids + ADDRESSES (Task->Issue)
+    # RELATED_TO from related_issue_ids + ADDRESSES (Task->Issue) — with the same
+    # ENC-TSK-I07 canonical redirect on superseded targets.
     for related_id in record.get("related_issue_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label}), (b:Issue) "
-            "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b)",
+            f"MATCH (a:{label}) WHERE a.record_id = $aid "
+            "MATCH (b:Issue) WHERE b.record_id = $bid "
+            "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
+            "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
+            "MERGE (a)-[:RELATED_TO]->(tgt)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
             tx.run(
-                "MATCH (t:Task), (i:Issue) "
-                "WHERE t.record_id = $tid AND i.record_id = $iid "
-                "MERGE (t)-[:ADDRESSES]->(i)",
+                "MATCH (t:Task) WHERE t.record_id = $tid "
+                "MATCH (i:Issue) WHERE i.record_id = $iid "
+                "OPTIONAL MATCH (i)-[:SUPERSEDED_BY]->(canon) "
+                "WITH t, coalesce(canon, i) AS tgt WHERE tgt.record_id <> t.record_id "
+                "MERGE (t)-[:ADDRESSES]->(tgt)",
                 tid=record_id, iid=related_id,
             )
 
     # RELATED_TO from related_feature_ids + IMPLEMENTS (Task->Feature)
+    # (features are not supersedable, so no canonical redirect is needed here)
     for related_id in record.get("related_feature_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
@@ -876,6 +1253,51 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                         doc_id, source_record_id,
                     )
 
+        # ENC-TSK-C08 / ENC-FTR-064 (OGTM): HCE provenance edges.
+        # CONSOLIDATED_FROM -> each source Handoff document a Lesson candidate was
+        # consolidated from; CONSOLIDATES is the inverse. Placeholder MERGE so the
+        # edge lands even if a source document has not yet been projected.
+        for source_id in record.get("consolidated_from", []) or []:
+            source_id = _bare_id(source_id) if source_id else ""
+            if not source_id:
+                continue
+            tx.run(
+                "MERGE (s:Document {record_id: $sid}) "
+                "ON CREATE SET s.is_placeholder = true",
+                sid=source_id,
+            )
+            tx.run(
+                "MATCH (d:Document), (s:Document) "
+                "WHERE d.record_id = $did AND s.record_id = $sid "
+                "MERGE (d)-[:CONSOLIDATED_FROM]->(s) "
+                "MERGE (s)-[:CONSOLIDATES]->(d)",
+                did=doc_id, sid=source_id,
+            )
+
+        # PROPOSED_BY -> the proposer record (HCE feature / agent); PROPOSES inverse.
+        proposed_by = _bare_id(str(record.get("proposed_by") or "").strip())
+        if proposed_by:
+            target_label = _infer_label_from_id(proposed_by)
+            if target_label:
+                tx.run(
+                    f"MERGE (t:{target_label} {{record_id: $pid}}) "
+                    "ON CREATE SET t.is_placeholder = true",
+                    pid=proposed_by,
+                )
+                tx.run(
+                    f"MATCH (d:Document), (t:{target_label}) "
+                    "WHERE d.record_id = $did AND t.record_id = $pid "
+                    "MERGE (d)-[:PROPOSED_BY]->(t) "
+                    "MERGE (t)-[:PROPOSES]->(d)",
+                    did=doc_id, pid=proposed_by,
+                )
+            else:
+                logger.warning(
+                    "[WARNING] Document %s proposed_by %s has unrecognised ID prefix; "
+                    "skipping PROPOSED_BY edge",
+                    doc_id, proposed_by,
+                )
+
     # ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extraction from prose.
     # For every governed record_type with prose fields, strip fenced code
     # blocks, regex-extract Enceladus ID tokens via the Unit 2 extractor,
@@ -1058,6 +1480,26 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     # must stay byte-identical to graph_query_api _ALLOWED_EDGE_TYPES (ENC-ISS-178).
     "pathway-traversed": "PATHWAY_TRAVERSED",          # observed retrieval traversal
     "traversed-by": "TRAVERSED_BY",                    # inverse
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential lifecycle edges.
+    # Registered here (and byte-identically in graph_query_api._ALLOWED_EDGE_TYPES per
+    # ENC-ISS-178) for OGTM traversability. These edges are emitted directly by
+    # _reconcile_agent_edges / _project_mutated_edge from the agent-store streams (NOT via
+    # the ENC-FTR-049 relationship-record path), but the registry keeps them queryable via
+    # tracker.graphsearch and enforces the two-lambda drift guard.
+    "authenticated-as": "AUTHENTICATED_AS",            # AgentSession -> AgentIdentity
+    "owned-by": "OWNED_BY",                            # AgentCredential -> AgentIdentity
+    "derived-from": "DERIVED_FROM",                    # AgentCredential -> parent AgentCredential
+    "triggered-by": "TRIGGERED_BY",                    # AgentSession -> triggering session/routine
+    "mutated": "MUTATED",                              # AgentSession -> any mutated record
+    # ENC-TSK-C08 / ENC-FTR-064 (OGTM): Handoff Consolidation Engine provenance.
+    # The operational path is field-projection from the candidate Document's
+    # consolidated_from / proposed_by fields (see _reconcile_edges document
+    # branch); these mapping entries also register the typed relationship-record
+    # path for parity. Labels stay byte-identical to graph_query_api.
+    "consolidated-from": "CONSOLIDATED_FROM",          # candidate -> source handoff
+    "consolidates": "CONSOLIDATES",                    # inverse
+    "proposed-by": "PROPOSED_BY",                      # candidate -> proposer
+    "proposes": "PROPOSES",                            # inverse
 }
 
 
@@ -1121,7 +1563,10 @@ def _delete_relationship_edge(tx, record_id_sk: str) -> None:
 
 def _delete_node(tx, record_id: str) -> None:
     """DETACH DELETE a node by record_id across all labels."""
-    for label in RECORD_TYPE_TO_LABEL.values():
+    # ENC-TSK-J04: include the agent-identity labels so hard-deleted agent rows (rare —
+    # the stores are append-only, retire/revoke are MODIFYs) also detach cleanly.
+    all_labels = list(RECORD_TYPE_TO_LABEL.values()) + list(AGENT_RECORD_TYPE_TO_LABEL.values())
+    for label in all_labels:
         tx.run(
             f"MATCH (n:{label} {{record_id: $rid}}) DETACH DELETE n",
             rid=record_id,
@@ -1131,6 +1576,18 @@ def _delete_node(tx, record_id: str) -> None:
 # ---------------------------------------------------------------------------
 # SQS event processing
 # ---------------------------------------------------------------------------
+
+def _record_source_and_identifier(raw_record: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Classify a Records[] entry as 'sqs' or 'ddb_stream' and return its
+    ReportBatchItemFailures identifier (messageId for SQS, SequenceNumber for
+    a direct DynamoDB Streams ESM). See ENC-TSK-L85 / ENC-TSK-L84."""
+    if "body" in raw_record or "messageId" in raw_record or "messageID" in raw_record:
+        message_id = raw_record.get("messageId") or raw_record.get("messageID")
+        return "sqs", message_id
+    # Direct DynamoDB Streams ESM: the record itself has eventName/dynamodb.
+    sequence_number = (raw_record.get("dynamodb") or {}).get("SequenceNumber")
+    return "ddb_stream", sequence_number
+
 
 def _extract_stream_record(sqs_body: Dict) -> Optional[Dict]:
     """Extract the DynamoDB stream record from an SQS message body."""
@@ -1156,10 +1613,12 @@ def _process_record(driver, stream_record: Dict) -> None:
         if not new_image:
             return
 
-        record = _normalize_record_for_graph(_deser_image(new_image))
-        record_type = record.get("record_type", "")
         old_image = dynamodb.get("OldImage", {})
         old_record = _normalize_record_for_graph(_deser_image(old_image)) if old_image else {}
+        record = _normalize_record_for_graph(_deser_image(new_image))
+        if event_name == "MODIFY":
+            record = _coalesce_status_for_projection(record, old_record, new_image, old_image)
+        record_type = record.get("record_type", "")
         stale_placeholder_refs = _collect_placeholder_target_refs(old_record) - _collect_placeholder_target_refs(record)
 
         # ENC-FTR-049: Handle typed relationship records
@@ -1188,6 +1647,26 @@ def _process_record(driver, stream_record: Dict) -> None:
                         record.get("source_id", ""), record.get("target_id", ""),
                         record.get("relationship_type", ""), event_name,
                     )
+            return
+
+        # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity node + edge projection.
+        # Agent rows ride the same async pipe; they carry no project_id / title / embedding
+        # so they take a dedicated branch ahead of the generic tracker/document path.
+        if record_type in AGENT_RECORD_TYPE_TO_LABEL:
+            agent_raw_id = str(record.get("record_id") or "").strip()
+            if not agent_raw_id or agent_raw_id.startswith("counter#"):
+                return  # skip the reserved monotonic-counter sentinel rows
+            agent_record_id = _bare_id(agent_raw_id)
+            with driver.session() as session:
+                session.execute_write(lambda tx: _upsert_agent_node(tx, record))
+                session.execute_write(lambda tx: _reconcile_agent_edges(tx, record))
+                # Generic MUTATED hook applies to agent rows too (a session may mutate
+                # another agent record and stamp write_source.provider).
+                _project_mutated_edge(session, record)
+            logger.info(
+                "[INFO] Synced agent %s %s (event=%s)",
+                record_type, agent_record_id, event_name,
+            )
             return
 
         # Skip non-entity records
@@ -1248,6 +1727,12 @@ def _process_record(driver, stream_record: Dict) -> None:
                         record_type, record_id,
                     )
 
+            # ENC-TSK-J04 / ENC-FTR-074 Ph3: generic MUTATED-edge hook. If this record was
+            # written by an agent session (write_source.provider = ENC-SES-NNN), MERGE a
+            # MUTATED edge from that session to this node. Runs after node upsert so the
+            # target node already exists.
+            _project_mutated_edge(session, record)
+
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",
             record_type, record_id, event_name, record.get("project_id", ""),
@@ -1291,40 +1776,80 @@ def _process_record(driver, stream_record: Dict) -> None:
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """SQS-triggered handler. Processes DynamoDB stream records from EventBridge Pipe."""
+    """Processes DynamoDB stream records, from either the legacy SQS-fed path
+    (GraphSyncSqsTrigger, prod/v3) or the direct DynamoDB Streams
+    EventSourceMapping (GraphSyncTrackerStreamTrigger /
+    GraphSyncDocumentsStreamTrigger, gamma -- ENC-TSK-L85). See
+    _record_source_and_identifier for the shape-classification contract.
+
+    ENC-TSK-L74: reports the Lambda partial-batch-failure contract
+    (batchItemFailures) so the source retries only the records that actually
+    failed. Without this, a batch response of plain HTTP 200 -- which is what
+    a bare `except Exception: continue` produces regardless of per-record
+    errors -- tells the source the WHOLE batch succeeded, so it deletes every
+    message/record in it, including the ones that raised. Those records'
+    MENTIONS edges (and any other graph writes from _process_record) are then
+    silently and permanently lost, with no retry and no DLQ delivery, despite
+    this function's prior comments claiming otherwise. Requires
+    FunctionResponseTypes: [ReportBatchItemFailures] on the event source
+    mapping (infrastructure/cloudformation/02-compute.yaml
+    GraphSyncSqsTrigger / GraphSyncTrackerStreamTrigger /
+    GraphSyncDocumentsStreamTrigger) for batchItemFailures to actually take
+    effect."""
     records = event.get("Records", [])
     if not records:
         return {"statusCode": 200, "body": "no records"}
 
     driver = _get_neo4j_driver()
     if driver is None:
-        logger.error("[ERROR] Neo4j driver unavailable; returning success to avoid infinite SQS retry")
-        return {"statusCode": 200, "body": "neo4j unavailable - skipping"}
+        logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
+        # Report every record as failed so the source retries the whole batch
+        # once Neo4j is reachable again, instead of deleting it and losing
+        # every record's graph write. Identifier depends on event shape
+        # (ENC-TSK-L85): SQS messageId, or direct-ESM SequenceNumber.
+        failures = []
+        for r in records:
+            _source, identifier = _record_source_and_identifier(r)
+            if identifier:
+                failures.append({"itemIdentifier": identifier})
+        return {"batchItemFailures": failures}
 
     processed = 0
     errors = 0
+    failed_identifiers: List[str] = []
 
-    for sqs_record in records:
+    for raw_record in records:
+        source, identifier = _record_source_and_identifier(raw_record)
         try:
-            body = sqs_record.get("body", "{}")
-            if isinstance(body, str):
-                body = json.loads(body)
+            if source == "sqs":
+                body = raw_record.get("body", "{}")
+                if isinstance(body, str):
+                    body = json.loads(body)
+                stream_record = _extract_stream_record(body)
+            else:
+                stream_record = raw_record
 
-            stream_record = _extract_stream_record(body)
             if stream_record and "dynamodb" in stream_record:
                 _process_record(driver, stream_record)
                 processed += 1
         except Exception:
             errors += 1
-            logger.exception("[ERROR] Failed to process SQS record")
-            # Don't re-raise; let the batch continue.
-            # Failed messages will be retried via SQS visibility timeout
-            # and eventually land in DLQ after maxReceiveCount.
+            logger.exception("[ERROR] Failed to process %s record identifier=%s", source, identifier)
+            if identifier:
+                failed_identifiers.append(identifier)
+            else:
+                # ENC-ISS-543: a missing failure identifier silently drops the
+                # record (Lambda returns 200, source deletes it). Fail closed.
+                logger.error(
+                    "[ERROR] %s record failed but has no batchItemFailures identifier; "
+                    "raising to avoid silent graph drift",
+                    source,
+                )
+                raise
 
     logger.info("[INFO] Batch complete: processed=%d, errors=%d, total=%d", processed, errors, len(records))
 
-    # If ALL records failed, raise to trigger SQS retry for the batch
-    if errors > 0 and processed == 0:
-        raise RuntimeError(f"All {errors} records in batch failed")
+    if failed_identifiers:
+        return {"batchItemFailures": [{"itemIdentifier": fid} for fid in failed_identifiers]}
 
     return {"statusCode": 200, "body": json.dumps({"processed": processed, "errors": errors})}

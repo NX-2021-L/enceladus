@@ -290,6 +290,51 @@ class TestRunMentionsDriftAudit:
         assert result["mismatch_ratio"] == 1.0
         assert result["threshold_breached"] is True
 
+    def test_threads_record_project_id_to_current_mentions(self):
+        # ENC-TSK-L87: _sample_recent_records draws from the shared tracker
+        # table across ALL projects (type-updated-index has no project_id
+        # key). A record belonging to a non-"enceladus" project must have
+        # its OWN project_id passed to _current_mentions_for, or graphsearch
+        # queries the wrong project scope and every such record reads back
+        # as a false-positive full mismatch.
+        sample = [
+            ("task", "DVP-TSK-001", {
+                "title": "see ENC-TSK-B01", "description": "", "intent": "",
+                "project_id": "devops",
+            }),
+        ]
+        seen_calls = []
+
+        def fake_current(rid, *args, **kwargs):
+            project_id = args[0] if args else kwargs.get("project_id")
+            seen_calls.append((rid, project_id))
+            return {"ENC-TSK-B01"}
+
+        with patch.object(lf, "_sample_recent_records", _make_sample(sample)), \
+             patch.object(lf, "_current_mentions_for", side_effect=fake_current), \
+             patch.object(lf, "_emit_drift_iss") as emit:
+            result = lf._run_mentions_drift_audit()
+        assert seen_calls == [("DVP-TSK-001", "devops")]
+        assert result["mismatch_count"] == 0
+        emit.assert_not_called()
+
+    def test_missing_project_id_falls_back_to_enceladus(self):
+        sample = [
+            ("task", "ENC-TSK-A01", {"title": "see ENC-TSK-B01", "description": "", "intent": ""}),
+        ]
+        seen_calls = []
+
+        def fake_current(rid, *args, **kwargs):
+            project_id = args[0] if args else kwargs.get("project_id")
+            seen_calls.append((rid, project_id))
+            return {"ENC-TSK-B01"}
+
+        with patch.object(lf, "_sample_recent_records", _make_sample(sample)), \
+             patch.object(lf, "_current_mentions_for", side_effect=fake_current), \
+             patch.object(lf, "_emit_drift_iss"):
+            lf._run_mentions_drift_audit()
+        assert seen_calls == [("ENC-TSK-A01", "enceladus")]
+
     def test_records_first_10_divergent_in_response(self):
         sample = [
             ("task", f"ENC-TSK-D01{i:02d}",

@@ -1,0 +1,26 @@
+<!-- @dsCard group="v2 · Layout" viewport="820x340" name="Wizard" subtitle="Numbered rail · teal done markers" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { Wizard, FormField, Input, Select } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+const opts=[{value:'feature',label:'Feature'},{value:'lesson',label:'Lesson'}];
+function Demo(){
+  const [i,setI]=React.useState(1);
+  const [t,setT]=React.useState(opts[1]);
+  return e(Wizard,{activeStepIndex:i,onNavigate:(ev)=>setI(ev.detail.requestedStepIndex),
+    steps:[
+      {title:'Choose primitive',content:e(FormField,{label:'Type'},e(Select,{selectedOption:t,options:opts,onChange:(ev)=>setT(ev.detail.selectedOption)}))},
+      {title:'Define contract',content:e(FormField,{label:'Title',constraintText:'immutable after creation'},e(Input,{value:'Governed Lesson Primitive',ariaLabel:'title'}))},
+      {title:'Evidence gates',content:e('div',{style:{color:'#6B8A94',fontSize:14}},'Attach the required evidence fields for each lifecycle transition.')},
+      {title:'Review',content:e('div',{style:{color:'#6B8A94',fontSize:14}},'Confirm and create the governed record.')}
+    ]});
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

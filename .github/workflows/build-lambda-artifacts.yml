@@ -85,9 +85,9 @@ jobs:
       fail-fast: false
       max-parallel: 10
       matrix:
-        # Full cross-product: every packageable function builds for every arch.
-        arch_tag: [x86_64-py311, arm64-py312]
-        function: ${{ fromJson(needs.setup-matrix.outputs.functions) }}
+        # ENC-TSK-Q20: legacy x86 build target retired -- arm64-py312 only.
+        arch_tag: [arm64-py312]
+        include: ${{ fromJson(needs.setup-matrix.outputs.matrix).include }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -111,8 +111,11 @@ jobs:
         id: arch
         run: |
           case "${{ matrix.arch_tag }}" in
-            x86_64-py311) echo "expected=x86_64" >> "$GITHUB_OUTPUT" ;;
-            arm64-py312)  echo "expected=arm64"  >> "$GITHUB_OUTPUT" ;;
+            arm64-py312) echo "expected=arm64" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::Unknown arch_tag '${{ matrix.arch_tag }}'. ENC-TSK-Q20 retired the legacy build target -- only arm64-py312 is supported." >&2
+              exit 1
+              ;;
           esac
 
       - name: Verify package architecture
@@ -133,15 +136,15 @@ jobs:
   # (ENC-TSK-I39). See _build.yml build-mcp-code for rationale.
   # ---------------------------------------------------------------------------
   build-mcp-code:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm  # ENC-TSK-Q21 C1: legacy mcp-code build moved to the declared arm64 target (ENC-TSK-Q20)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Package enceladus-mcp-code
         run: |
@@ -152,9 +155,9 @@ jobs:
           cp tools/enceladus-mcp-server/dispatch_plan_generator.py "$BUILD/"
           cp backend/lambda/shared_layer/python/enceladus_shared/appconfig_flags.py "$BUILD/"
           python -m pip install \
-            --platform manylinux2014_x86_64 \
+            --platform manylinux2014_aarch64 \
             --implementation cp \
-            --python-version 3.11 \
+            --python-version 3.12 \
             --only-binary=:all: \
             --upgrade \
             --target "$BUILD" \
@@ -168,7 +171,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lambda-enceladus-mcp-code-x86_64-py311
+          name: lambda-enceladus-mcp-code-arm64-py312
           path: /tmp/enceladus-mcp-code.zip
           retention-days: 7
 
@@ -202,7 +205,7 @@ jobs:
             artifact_name=$(basename "${dir}")
             # artifact_name is lambda-<function_name>-<arch_tag>
             # Extract arch_tag (last segment after the last hyphen-group matching an arch pattern)
-            arch_tag=$(echo "${artifact_name}" | grep -oE '(x86_64-py311|arm64-py312)$')
+            arch_tag=$(echo "${artifact_name}" | grep -oE '(arm64-py312)$')
             function_name=$(echo "${artifact_name}" | sed "s/^lambda-//" | sed "s/-${arch_tag}$//")
 
             zip_file=$(find "${dir}" -name '*.zip' | head -1)

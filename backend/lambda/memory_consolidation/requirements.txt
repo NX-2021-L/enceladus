@@ -1,0 +1,3 @@
+# Runtime dependencies for the Memory Consolidation Lambda.
+# boto3 is provided by the AWS Lambda Python runtime; no third-party packages
+# are required. Pin here only if a dependency is added.

@@ -1,0 +1,2815 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus API Layer ? API Gateway HTTP API, routes, integrations.
+  Part of ENC-TSK-532: IaC templates for Enceladus AWS resources.
+
+  NOTE: API Gateway already exists. Use resource import to adopt it.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Appended to Lambda function name references in integration URIs.
+      Production uses "" (zero drift), gamma uses "-gamma".
+  CorsOrigin:
+    Type: String
+    Default: "https://jreese.net"
+    Description: >
+      CORS AllowOrigins value. Override for gamma environment.
+  ComputeStackName:
+    Type: String
+    Default: enceladus-compute
+  ApiName:
+    Type: String
+    Default: devops-tracker-api
+
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  IsProduction: !Equals [!Ref EnvironmentSuffix, ""]
+
+Resources:
+  # ENC-TSK-P01 / ENC-ISS-657 -- IMPORT-ONLY STAGING TEMPLATE. NOT FOR MERGE.
+  #
+  # This file is the enceladus-api-gamma stack's OWN stored template, taken
+  # verbatim from `aws cloudformation get-template` on 2026-08-23, with exactly
+  # one resource added: EscalationDecisionAuthorizer, below. Nothing else is
+  # touched, because an IMPORT change-set admits no Add and no Modify -- the
+  # template it consumes must be precisely (resources already in the stack) plus
+  # (resources being imported).
+  #
+  # WHY THE FULL 03-api.yaml CANNOT BE USED HERE. The rollback also dropped
+  # EscalationDecisionAuthorizerInvokePermission and RouteProjectsUpdate from
+  # CloudFormation's bookkeeping. Both are present in 03-api.yaml, so passing it
+  # to an import would compute two Adds and be rejected by
+  # tools/assert_changeset_safe.py before execute. They re-land afterwards, as
+  # ordinary Adds, on the next normal API stack deploy.
+  #
+  # PROPERTIES ARE COPIED FROM 03-api.yaml VERBATIM and match the live object
+  # property-for-property (verified 2026-08-23T06:09Z): REQUEST, payload 2.0,
+  # EnableSimpleResponses true, AuthorizerResultTtlInSeconds 0, identity source
+  # $request.header.Cookie. The TTL of 0 is a deliberate override of the 300s
+  # default and is preserved here BY CONSTRUCTION rather than by remembering to
+  # preserve it. The adoption therefore carries zero drift.
+  #
+  # DeletionPolicy: Retain is required by CloudFormation on an imported resource
+  # -- and is what it should carry anyway: routes 3wkrc4q and 8cm015g are live-
+  # bound to this authorizer, and it is the only thing keeping the ENC-FTR-121
+  # approve/deny path on AuthorizationType=CUSTOM.
+  EscalationDecisionAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      AuthorizerType: REQUEST
+      AuthorizerPayloadFormatVersion: '2.0'
+      EnableSimpleResponses: true
+      AuthorizerResultTtlInSeconds: 0
+      IdentitySource:
+        - "$request.header.Cookie"
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:escalation-decision-authorizer${EnvironmentSuffix}/invocations"
+
+  # ---------------------------------------------------------------------------
+  # HTTP API
+  # ---------------------------------------------------------------------------
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Ref ApiName
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref CorsOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - Cookie
+          - X-Coordination-Internal-Key
+          - X-Checkout-Assistant-Key
+        AllowCredentials: true
+
+  # NOTE: Production $default stage was created manually and cannot be imported
+  # into CloudFormation. For non-production environments (gamma), the stage is
+  # created by CFn directly. AutoDeploy eliminates the need for a separate
+  # AWS::ApiGatewayV2::Deployment resource.
+  ApiDefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      Description: !Sub "Default stage for ${EnvironmentSuffix} environment"
+
+  # ---------------------------------------------------------------------------
+  # Integrations (Lambda proxy)
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  TrackerMutationIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  DocumentApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ProjectServiceIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-project-service${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  FeedQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-query-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  CoordinationMonitorIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-monitor-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  DeployIntakeIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-intake${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # GMF: Deploy Decide Integration (DOC-63420302EF65)
+  DeployDecideIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-decide${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ReferenceSearchIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-reference-search${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # NOTE: ChangelogApiIntegration and routes are provisioned by
+  # backend/lambda/changelog_api/deploy.sh to avoid route-key ownership conflicts.
+
+  DocPrepIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  AuthRefreshIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:auth-refresh${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  GitHubIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # ---------------------------------------------------------------------------
+  # Routes ? Coordination API
+  # ---------------------------------------------------------------------------
+
+  RouteCoordinationCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/requests/{requestId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationDispatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests/{requestId}/dispatch
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests/{requestId}/callback
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ADE Component C: Cursor Cloud Agents completion webhook. Authenticated via
+  # Cursor HMAC-SHA256 signature (X-Webhook-Signature), verified inside the
+  # coordination API Lambda. Integrated to the same CoordinationApiIntegration.
+  RouteCursorWebhook:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/cursor/webhook
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationCapabilities:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/capabilities
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationMcpGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationMcpPost:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # Component Registry routes (ENC-FTR-041)
+  RouteComponentsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/components
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-M66: tracker.creation_rules -- type-keyed pre-creation contract
+  # surface (dictionary-derived; no record_id). Handler lives in
+  # coordination_api lambda_function.py (_handle_tracker_creation_rules);
+  # the MCP server passthrough calls COORDINATION_API_BASE
+  # + /tracker/creation_rules, which needs this explicit HTTP API route.
+  RouteTrackerCreationRules:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/tracker/creation_rules
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-L34 (B67 PWA2.0 Coordination monitor page): these two GET routes were
+  # implemented server-side by ENC-TSK-I38/J43 (_handle_agent_session_list /
+  # _handle_agent_type_list in coordination_api/lambda_function.py, backed by
+  # agent_id_alloc.list_sessions / list_agent_types over the agent-sessions /
+  # agent-types tables) but were never wired to API Gateway. Wiring them here is
+  # the "NEW coordination-api list route" this task's AC calls for -- no new
+  # Lambda handler code was needed, only this CFN gap-fill. ENC-TSK-L36 (Agent
+  # detail page) depends on RouteAgentSessionsList with ?agent_type_id=<id>&status=claimed.
+  RouteAgentSessionsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentTypesList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/types
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-L89 / ENC-FTR-122: agent session mutation routes were implemented in
+  # coordination_api (ENC-TSK-I38/J43) but only list GET routes were wired (L34).
+  # Gamma MCP embeds server.py inside CoordinationApiFunction and HTTP-loopbacks
+  # agent.retire / checkout-release-backfill ? these routes must exist on the
+  # same gateway the function targets via ENCELADUS_COORDINATION_API_BASE.
+  RouteAgentSessionsRegister:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionsClaim:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/claim
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionsCheckoutReleaseBackfill:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/checkout-release-backfill
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/sessions/{sessionId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionRetire:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/{sessionId}/retire
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/components/{componentId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsUpdate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/components/{componentId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/components/{componentId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-FTR-076 v2 / ENC-TSK-F40 ? state machine + edge + lifecycle routes.
+  # advance/add_edge/remove_edge are agent+io (handler checks Cognito only for
+  # io-required paths); deprecate/restore/revert are io-only per DOC-546B896390EA ?3.3.
+  # revert's prior sibling _handle_components_propose + _handle_components_approve
+  # registered under existing CFN routes; these six are additive.
+
+  # ENC-TSK-F75 / ENC-ISS-278 Mitigation A: RouteComponentsAdvance was provisioned
+  # out-of-band on API 8nkzqkmxqc (pre-F40 H-PREREQ) and exists as an orphan not
+  # managed by this stack. Leaving it unmanaged was chosen over deleting it (the
+  # route actively serves prod traffic).
+  # ENC-TSK-F85 / ENC-ISS-294: The five sibling routes below were also provisioned
+  # out-of-band. DeletionPolicy: Retain required for IMPORT change set adoption and
+  # retained permanently to protect live traffic routes from accidental deletion.
+
+  RouteComponentsAddEdge:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/add_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRemoveEdge:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/remove_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsDeprecate:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/deprecate
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRestore:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/restore
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRevert:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/revert
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes ? Tracker Mutation
+  # ---------------------------------------------------------------------------
+
+  RouteTrackerMutationLegacy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteTrackerMutationV1:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Gamma tracker plane ? full mutation + read route set (ENC-ISS-410 / ENC-TSK-I14)
+  #
+  # The 'enceladus gamma' MCP front-end (enceladus-mcp-streamable-gamma) proxies
+  # every tracker read+write to ENCELADUS_TRACKER_API_BASE =
+  # https://enceladus-gamma.jreese.net/api/v1/tracker. ENC-ISS-410 round-1 (write)
+  # and round-2 (read) added the full tracker mutation+read route set on
+  # devops-tracker-api-gamma (hi0dzmvqrc), wired to the devops-tracker-mutation-api
+  # **:live** alias (so the gamma supersession / I07 generalized domain is reachable
+  # instead of the prod pre-I07 backend). Those were live console edits and drift on
+  # the next gamma stack deploy ? codified here so they survive.
+  #
+  # Condition: IsGamma keeps prod (EnvironmentSuffix="") untouched: prod's equivalent
+  # tracker-mutation routes are provisioned out-of-band by the per-Lambda deploy
+  # scripts (same pattern as the Changelog / GitHub / Checkout-task notes below), so
+  # adding them unconditionally would collide on a prod deploy. DeletionPolicy: Retain
+  # protects the live routes during IMPORT adoption into enceladus-api-gamma.
+  # The two PATCH routes above already target devops-tracker-mutation-api-gamma (bare,
+  # bssof7u) via TrackerMutationIntegration and match the live gamma gateway ? left
+  # unchanged.
+  # ---------------------------------------------------------------------------
+
+  TrackerMutationGammaLiveIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # Typed relationship edges (incl. ENC-TSK-I07 superseded-by) ? POST / GET / DELETE
+  RouteTrackerRelationshipCreateGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerRelationshipGetGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerRelationshipDeleteGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Dedup tier-review surface (ENC-TSK-I08 / FTR-115 P4) ? POST op=propose|approve.
+  # Makes the deploy-success dedup-review Lambda HTTP-reachable on v4-gamma.
+  RouteTrackerDedupReviewGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/dedup-review
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Create record (POST {recordType})
+  RouteTrackerCreateRecordGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Worklog append
+  RouteTrackerLogGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Acceptance evidence
+  RouteTrackerAcceptanceEvidenceGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Checkout ? POST (acquire) / DELETE (release)
+  RouteTrackerCheckoutGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerCheckoutReleaseGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Checkout extend
+  RouteTrackerExtendGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET single record (also serves validation_rules + plan-get on the same Lambda)
+  RouteTrackerGetRecordGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET list by project
+  RouteTrackerListGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET pending PWA updates
+  RouteTrackerPendingUpdatesGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes ? Document API
+  # ---------------------------------------------------------------------------
+
+  RouteDocumentsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/search
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsPatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes ? Project Service
+  # ---------------------------------------------------------------------------
+
+  RouteProjectsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteProjectsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/projects/{projectName}
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteProjectsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes ? Feed, Monitor, Deploy, Reference, DocPrep, Auth
+  # ---------------------------------------------------------------------------
+
+  RouteFeedQuery:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  # ENC-TSK-K98 ? authenticated cold-start snapshot; replaces the public
+  # /mobile/v1/tasks.json S3 object. JWT-gated by the feed_query handler.
+  RouteFeedTasksJson:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/tasks.json
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteFeedCorpus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/corpus
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteFeedDelta:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/delta
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteFeedRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/feed/refresh
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteMonitorList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/monitor
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteMonitorGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/monitor/{requestId}
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteSessionsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/sessions
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteSessionTurns:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/sessions/{sessionId}/turns
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteSessionMessage:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/sessions/{sessionId}/message
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteDeploySubmit:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/submit
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/status/{specId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/history/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStateGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStatePatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployPending:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/pending/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployTrigger:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/trigger/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  # ENC-TSK-E57/E62: Deploy approval validation route for enceladus-approval-gate
+  # Supersedes CLI-created route zmra44n; makes the route IaC-managed.
+  RouteDeployValidateApproval:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/validate/approval/{prNumber}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  # GMF routes (DOC-63420302EF65)
+  RouteDeployQueue:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/queue
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployDecide:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/decide
+      Target: !Sub integrations/${DeployDecideIntegration}
+
+  RouteReferenceSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/reference/search
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  RouteDocPrep:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/doc-prep/{projectName}
+      AuthorizationType: AWS_IAM
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  RouteAuthRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/auth/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  # ENC-TSK-K95: Cognito Hosted-UI OAuth2 authorization-code callback for the
+  # v4 cockpit (frontend/ui-v2). Same-origin login exchange handled by
+  # auth_refresh ? no Lambda@Edge. Public (no authorizer): it receives an
+  # opaque one-time code and sets the session cookie itself.
+  RouteAuthCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/callback
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteAuthGitHubToken:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/github-token
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  # NOTE: Changelog API routes (GET /api/v1/changelog/*) are provisioned by
+  # backend/lambda/changelog_api/deploy.sh.
+  # Keeping them out of this stack avoids route-key ownership conflicts.
+
+  # NOTE: GitHub routes are provisioned by backend/lambda/github_integration/deploy.sh.
+  # Keeping them out of this stack avoids route-key ownership conflicts when the
+  # integration deploy script has already created those API Gateway routes.
+
+  # ---------------------------------------------------------------------------
+  # Checkout Service ? Plan routes (ENC-ISS-166)
+  # Task routes remain in backend/lambda/checkout_service/deploy.sh.
+  # Plan routes are added here to close the API Gateway gap for /plan/* paths.
+  # ---------------------------------------------------------------------------
+
+  CheckoutServiceIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+
+  RoutePlanCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/checkout
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanCheckoutRelease:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/checkout/{project}/plan/{planId}/checkout
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/advance
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/log
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/{project}/plan/{planId}/status
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Graph Query API ? graphsearch ingress (ENC-TSK-H57 / ENC-PLN-050)
+  # Added gamma-first by ENC-TSK-H64 and live on enceladus-api-gamma; reconciled
+  # into the canonical template here (ENC-TSK-I14) so a gamma stack deploy no longer
+  # DELETES the gamma graph plane. Condition: IsGamma ? prod (EnvironmentSuffix="")
+  # serves graphsearch out-of-band; gating keeps prod untouched. EnvironmentSuffix
+  # resolves the integration to devops-graph-query-api-gamma (the gamma AuraDB).
+  # Logical IDs match the deployed enceladus-api-gamma stack (in-place update).
+  # ---------------------------------------------------------------------------
+  GraphQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  GraphQueryApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/tracker/graphsearch*"
+
+  RouteGraphSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch/health
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchOptions:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  # ==================================================================
+  # ENC-TSK-J13 (ENC-ISS-455): out-of-band prod API surface adopted via
+  # change-set IMPORT (resource-import-api.json). 3 integrations + 98 routes.
+  # STAGED ? do NOT plain-deploy before IMPORT (EarlyValidation wedge).
+  # All 98 routes classified KEEP-IMPORT (every one backs a live Lambda
+  # AWS_PROXY integration; zero stray/orphan routes).
+  # ==================================================================
+
+  GitHubProxyIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
+    # ENC-TSK-J13: out-of-band integration (physical 0nmjqw3) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: GitHubIntegration/gwha2wd targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  CheckoutApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
+    # ENC-TSK-J13: out-of-band integration (physical oi4kfbn) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: CheckoutServiceIntegration/reizplt targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ChangelogApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
+    # ENC-TSK-J13: out-of-band integration (physical w6ey7lp) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: none (no CFN changelog integration existed) targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-changelog-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # ENC-TSK-L65: neither prod nor gamma ever had an AWS::Lambda::Permission for
+  # this integration -- discovered when GET /api/v1/changelog/history returned
+  # a generic API-Gateway 500 with zero Lambda invocations (no resource policy
+  # existed at all). Applies unconditionally (both envs), matching the
+  # unconditional ChangelogApiIntegration above.
+  ChangelogApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/changelog/*"
+
+  # ENC-ISS-635 / ENC-ISS-631 AC-6 (io codify-now ruling 2026-08-22): five
+  # integrations' invoke permissions existed only as out-of-band
+  # `aws lambda add-permission` grants (Sid AllowAPIGatewayInvoke-gamma) --
+  # auth-refresh from the ENC-TSK-O31 sitting, the other four from the
+  # ENC-ISS-635 remediation sitting. A stack rebuild would silently drop them
+  # (checkout / deploy-decide / github / doc-prep routes 500 with integration
+  # 403, auth callback breaks). Codified per the ENC-TSK-L65 precedent above.
+  # The broad /*/* SourceArn deliberately matches the live manual grants;
+  # route-scoped tightening + manual-statement cleanup ride ENC-PLN-082.
+  # CloudFormation mints its own statement ids, so these coexist with the
+  # manual statements without conflict.
+  AuthRefreshInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  CheckoutServiceInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  DeployDecideInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  GithubIntegrationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-github-integration${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  DocPrepInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-L10 (B64 Ph3): REST API Gateway (v1) for Lambda response streaming.
+  # A SEPARATE API from HttpApi above -- HTTP API v2 (AWS::ApiGatewayV2) does not
+  # support responseTransferMode=STREAM; only REST API (AWS::ApiGateway) does,
+  # via the InvokeWithResponseStream Lambda API. Gamma-only (Condition: IsGamma):
+  # McpStreamingGatewayFunction (02-compute.yaml) only exists on gamma.
+  # HttpApi (v2) is retained unchanged as the non-streaming fallback (AC-3).
+  # ---------------------------------------------------------------------------
+  McpStreamingRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-mcp-streaming${EnvironmentSuffix}"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  McpStreamingResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ParentId: !GetAtt McpStreamingRestApi.RootResourceId
+      PathPart: mcp
+
+  McpStreamingProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ParentId: !Ref McpStreamingResource
+      PathPart: "{proxy+}"
+
+  # ANY on /mcp and /mcp/{proxy+} ? the MCP Streamable HTTP transport handles its
+  # own sub-paths (GET/POST/DELETE on the same endpoint); AWS_PROXY + STREAM only
+  # needs one method per resource, not one per verb.
+  McpStreamingMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ResourceId: !Ref McpStreamingResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: 29000
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streaming-gateway${EnvironmentSuffix}/response-streaming-invocations"
+
+  McpStreamingProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ResourceId: !Ref McpStreamingProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: 29000
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streaming-gateway${EnvironmentSuffix}/response-streaming-invocations"
+
+  McpStreamingGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "enceladus-mcp-streaming-gateway${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${McpStreamingRestApi}/*/*/mcp*"
+
+  McpStreamingDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: IsGamma
+    DependsOn:
+      - McpStreamingMethod
+      - McpStreamingProxyMethod
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+
+  McpStreamingStage:
+    Type: AWS::ApiGateway::Stage
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      DeploymentId: !Ref McpStreamingDeployment
+      StageName: v1
+
+  # ENC-TSK-L25 / ENC-FTR-127 AC-10/16/17: per-user preferences service.
+  # Gamma-only (Condition: IsGamma) ? function only exists on gamma.
+  UserPreferencesApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-user-preferences-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # NOTE: 02-compute.yaml (UserPreferencesApiFunction) and 03-api.yaml are
+  # separate stacks ? cross-stack Lambda references here use the literal
+  # function name (same convention as ChangelogApiIntegration's IntegrationUri
+  # above), not !Ref.
+  UserPreferencesApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "enceladus-user-preferences-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/user/preferences"
+
+  RouteGetUserPreferences:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/user/preferences
+      Target: !Sub integrations/${UserPreferencesApiIntegration}
+
+  RoutePutUserPreferences:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/user/preferences
+      Target: !Sub integrations/${UserPreferencesApiIntegration}
+
+  RouteDeleteCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteDeleteCoordinationAuthOauthClientsByClientId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/auth/oauth-clients/{clientId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteDeleteCoordinationAuthTokensByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/auth/tokens/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteDeleteTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteDeleteTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetChangelogHistory:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogHistoryByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogVersionByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/version/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogVersions:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/versions
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetCheckoutValidateCommitCompleteByCciId:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/validate/commit-complete/{cciId}
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteGetCheckoutByProjectTaskByTaskIdStatus:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/{project}/task/{taskId}/status
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteGetCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/projects
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationProjectsByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/projects/{projectId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGithubCommitsValidate:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/github/commits/validate
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteGetGithubProjects:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/github/projects
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteGetGovernanceDictionary:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/dictionary
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGovernanceHash:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/hash
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/health
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetTrackerPendingUpdates:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptAuthRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/auth/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteOptCheckoutValidateCommitCompleteByCciId:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/validate/commit-complete/{cciId}
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/advance
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/log
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdStatus:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/status
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCoordinationAuthCognitoSession:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/cognito/session
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientIdPermissions:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientIdUsage:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthPermissionsByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/permissions/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthTokensByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/tokens/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationCapabilities:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/capabilities
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationMcp:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationMonitor:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/monitor
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteOptCoordinationProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/projects
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationProjectsByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/projects/{projectId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequests:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestIdCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/callback
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestIdDispatch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/dispatch
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptDeployHistoryByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/history/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeployStateByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeployStatusBySpecId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/status/{specId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeploySubmit:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/submit
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDocPrepByProjectName:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/doc-prep/{projectName}
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  RouteOptDocuments:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptDocumentsByDocumentId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptFeed:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/feed
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteOptGithubByProxy:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/github/{proxy+}
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteOptGovernanceDictionary:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/dictionary
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptGovernanceHash:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/hash
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/health
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteOptProjectsByProjectName:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/projects/{projectName}
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteOptReferenceSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/reference/search
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  RouteOptTrackerPendingUpdates:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordType:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdExtend:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePatchCoordinationAuthOauthClientsByClientIdPermissions:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePatchCoordinationAuthOauthClientsByClientIdUsage:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePatchCoordinationAuthPermissionsByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/permissions/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/advance
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  # ENC-TSK-O49: the recovery endpoint route. Created LIVE during the ENC-TSK-O37 /
+  # ENC-ISS-640 remediation on 2026-08-22 and codified in no template, which put
+  # audit_cfn_drift.py (pre-deploy-health-gate CHECK 7/7) into permanent failure and
+  # blocked the gamma compute deploy lane for EVERY agent until an unrelated push
+  # tripped it.
+  #
+  # This declaration is paired with an IMPORT (resource-import-api-gamma-recover.json).
+  # Declaring it WITHOUT importing would be actively unsafe, not merely incomplete:
+  # cloudformation-api-stack-deploy.yml triggers on push to v4/** for this exact path
+  # and runs execute-change-set, so CloudFormation would try to CREATE a RouteKey that
+  # already exists live on hi0dzmvqrc. API Gateway rejects duplicate RouteKeys, and the
+  # API stack -- which fronts every governed write path -- would roll back.
+  #
+  # Verified live 2026-08-22: RouteId bd1r2f8 targets integration 7lr9qw7, which is
+  # AWS_PROXY / POST / payload 2.0 -> enceladus-checkout-service-gamma. That is the same
+  # integration CheckoutApiIntegration resolves to, so this declaration matches reality
+  # rather than asserting a new wiring.
+  RoutePostCheckoutByProjectTaskByTaskIdRecover:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/recover
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/log
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCoordinationAuthCognitoSession:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/cognito/session
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsPropose:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/propose
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/advance
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/approve
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdCloudwatchEvent:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/cloudwatch_event
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdReject:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/reject
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostGithubDeployGammaSuccessByPrnumber:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/deploy/gamma-success/{pr_number}
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubIssues:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/issues
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubProjectsSync:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/projects/sync
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubWebhook:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/webhook
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostTrackerByProjectIdByRecordType:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdExtend:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePutGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ==================================================================
+  # ENC-TSK-J27 / ENC-ISS-455 (gamma half): 65 live-only gamma routes
+  # adopted into enceladus-api-gamma via change-set IMPORT (batches j27-b1..b7).
+  # Logical ids MATCH the imported stack resources so a deploy is a no-op.
+  # Condition: IsGamma (prod excludes) + DeletionPolicy: Retain.
+  # ==================================================================
+  ImportedGammaRoute0101:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/auth/oauth-clients/{clientId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0102:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/auth/tokens/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0103:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0104:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0105:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/projects"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0106:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/projects/{projectId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0107:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/dictionary"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0108:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/hash"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0109:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRoute0110:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/health"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0201:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/auth/refresh"
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  ImportedGammaRouteB0202:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/cognito/session"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0203:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0204:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0205:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0206:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0207:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/permissions/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0208:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0209:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/tokens/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0210:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/capabilities"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0301:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/mcp"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0302:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/monitor"
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  ImportedGammaRouteB0303:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/projects"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0304:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/projects/{projectId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0305:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0306:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0307:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}/callback"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0308:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0309:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/history/{projectId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  ImportedGammaRouteB0310:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/state/{projectId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  ImportedGammaRouteB0401:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/status/{specId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  ImportedGammaRouteB0402:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/submit"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  ImportedGammaRouteB0403:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/doc-prep/{projectName}"
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  ImportedGammaRouteB0404:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  ImportedGammaRouteB0405:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  ImportedGammaRouteB0406:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/feed"
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  ImportedGammaRouteB0407:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/dictionary"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0408:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/hash"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0409:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0410:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/health"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0501:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/projects"
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  ImportedGammaRouteB0502:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/projects/{projectName}"
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  ImportedGammaRouteB0503:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/reference/search"
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  ImportedGammaRouteB0504:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/pending-updates"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0505:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0506:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/relationship"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0507:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0508:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0509:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0510:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0601:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0602:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0603:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /{projectId}/{recordType}/{recordId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  ImportedGammaRouteB0604:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0605:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0606:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/permissions/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0607:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/cognito/session"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0608:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0609:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0610:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/propose"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0701:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/advance"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0702:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0703:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/cloudwatch_event"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0704:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/reject"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  ImportedGammaRouteB0705:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate curation (gamma-only per
+  # DOC-499FA089EC30 -- v3-prod is frozen pending the io-gated cutover).
+  RouteLessonCandidatesApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/lesson-candidates/{documentId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteLessonCandidatesReject:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/lesson-candidates/{documentId}/reject"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-J70 / ENC-FTR-121 Ph3: Escalations approval surface (gamma-only per
+  # DOC-499FA089EC30 -- v3-prod promotion is io-gated per DOC-B716E8FB10B6).
+  # GET feed + Cognito-gated approve/deny on coordination_api; the tracker apply
+  # route is the HTTP lane to applyEscalatedMutation (ENC-TSK-J69) -- idempotent,
+  # only actionable while the escalation is io-approved and unapplied.
+  RouteEscalationsFeed:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ENC-TSK-J71 / ENC-FTR-121 Ph4: session-scoped escalation event polling.
+  RouteEscalationsWatch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations/watch"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsDeny:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteTrackerEscalationApply:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  # ENC-TSK-M27 (ENC-FTR-130): io-queue completeness ? paused v3-prod Environment
+  # approvals + stale-checkout locks. Read-only, Cognito-gated inside the
+  # handlers (same posture as the Escalations feed above). Gamma-only for now,
+  # matching this task's scope; a v3-prod promotion of this surface would need
+  # its own io-gated follow-up, same as escalations' DOC-B716E8FB10B6 note.
+  RouteQueuePausedApprovals:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/queue/paused-approvals"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteQueueStaleLocks:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/queue/stale-locks"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+Outputs:
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+  ApiId:
+    Value: !Ref HttpApi
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiId

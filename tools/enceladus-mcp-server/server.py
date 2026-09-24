@@ -158,6 +158,9 @@ GOVERNANCE_RESOURCE_BODY_TTL_SECONDS = float(
 )
 S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
+# ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
+GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
+GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -705,8 +708,16 @@ def _ser_value(val: Any) -> Dict:
     return _ser_s(str(val))
 
 
-# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+# Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic).
+# ESC/GEN mirror backend/lambda/tracker_mutation/lambda_function.py
+# _ID_SEGMENT_TO_TYPE (ENC-ISS-699) so tracker.get / get_compact_context
+# (mode="record") resolve an ENC-ESC-NNN or ENC-GEN-NNN id instead of
+# raising "Unknown type segment". Escalations stay OUT of any generic
+# record-type allow-list on the write side (see that file's ENC-FTR-121
+# comment) -- this addition only affects ID parsing / key-building on the
+# read path.
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson",
+                       "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
 _DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
 _RELATION_ID_FIELDS = {
@@ -721,10 +732,29 @@ _COORDINATION_REQUEST_ID_RE = re.compile(r"^(CRQ|DSP)-[A-Z0-9-]{3,64}$", re.IGNO
 _TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN"}
 _TRACKER_COUNTER_PREFIX = "counter#"
 _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
+# Populated on every _get_prefix_map() build with any prefix that appears as
+# both one project's MINT `prefix` and another project's `alias_prefixes`
+# entry. Mint always wins the resolution (see _get_prefix_map docstring), but
+# the collision is kept here — in addition to a logger.warning — so it stays
+# programmatically detectable instead of silently resolving (ENC-TSK-O47;
+# guards against re-creating the ENC-ISS-538 collision class inside the fix).
+_PREFIX_COLLISIONS: Dict[str, Dict[str, str]] = {}
 
 
 def _get_prefix_map(*, _refresh: bool = False) -> Dict[str, str]:
-    """Build prefix -> project_name map via projects HTTP API.
+    """Build prefix -> project_id map via projects HTTP API.
+
+    Maps each row's canonical (MINT) `prefix` AND every entry of its optional
+    `alias_prefixes` list (ENC-TSK-O47) to that row's project_id, so legacy
+    record IDs minted under a prefix a project has since moved off of (e.g.
+    gamma's ENC-* records after ENC-TSK-O45 repoints gamma's mint prefix)
+    keep resolving.
+
+    Resolution is additive, never destructive: if a prefix is simultaneously
+    one project's MINT prefix and a different project's alias, the MINT
+    prefix always wins, deterministically, regardless of row iteration
+    order. Such a collision is never resolved silently — it is logged and
+    recorded in `_PREFIX_COLLISIONS` for callers/tests to inspect.
 
     On cache miss for a specific prefix, callers should retry with
     _refresh=True to pick up newly created projects (ENC-ISS-123).
@@ -734,12 +764,42 @@ def _get_prefix_map(*, _refresh: bool = False) -> Dict[str, str]:
         return _PREFIX_MAP_CACHE
     resp = _projects_api_request("GET")
     projects = resp.get("projects", [])
-    mapping = {}
+
+    mint_mapping: Dict[str, str] = {}
+    alias_mapping: Dict[str, str] = {}
     for proj in projects:
         pid = str(proj.get("project_id") or proj.get("name") or "").strip()
+        if not pid:
+            continue
         pfx = str(proj.get("prefix") or "").strip().upper()
-        if pid and pfx:
-            mapping[pfx] = pid
+        if pfx:
+            mint_mapping[pfx] = pid
+        for alias in proj.get("alias_prefixes") or []:
+            alias_pfx = str(alias or "").strip().upper()
+            if not alias_pfx:
+                continue
+            alias_mapping[alias_pfx] = pid
+
+    # Start from aliases, then let mint prefixes overwrite — mint always
+    # wins, applied last/over aliases so the outcome is independent of the
+    # order projects came back from the API.
+    mapping: Dict[str, str] = dict(alias_mapping)
+    collisions: Dict[str, Dict[str, str]] = {}
+    for pfx, mint_pid in mint_mapping.items():
+        alias_pid = alias_mapping.get(pfx)
+        if alias_pid is not None and alias_pid != mint_pid:
+            collisions[pfx] = {"mint_project_id": mint_pid, "alias_project_id": alias_pid}
+            logger.warning(
+                "[PREFIX-COLLISION] prefix %r is project %r's MINT prefix but also project %r's "
+                "alias_prefixes entry; MINT wins (ENC-ISS-538 collision class)",
+                pfx,
+                mint_pid,
+                alias_pid,
+            )
+        mapping[pfx] = mint_pid
+
+    _PREFIX_COLLISIONS.clear()
+    _PREFIX_COLLISIONS.update(collisions)
     _PREFIX_MAP_CACHE = mapping
     return mapping
 
@@ -774,6 +834,22 @@ def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
     if not record_type:
         raise ValueError(f"Unknown type segment {type_seg!r} in {record_id!r}")
     return project_id, record_type, record_id
+
+
+def _unwrap_tracker_envelope(resp: Dict[str, Any], record_type: str) -> Dict[str, Any]:
+    """Unwrap the tracker-mutation backend's per-record-type response envelope.
+
+    Every record type's GET response nests the record under a top-level
+    "record" key -- except escalation: _handle_escalation_get (backend
+    tracker_mutation lambda) nests it under "escalation" instead. Plain
+    ``resp.get("record", resp)`` found no "record" key for an escalation
+    response and fell through to the whole ``{"success": ..., "escalation":
+    {...}}`` wrapper, leaving every field (status/title/priority/...) empty.
+    See ENC-ISS-699 / ENC-TSK-P89.
+    """
+    if record_type == "escalation":
+        return resp.get("escalation", resp)
+    return resp.get("record", resp)
 
 
 def _tracker_key(record_id: str) -> Dict[str, Dict]:
@@ -1502,13 +1578,36 @@ _governance_hash_api_cache_at: float = 0.0
 _GOVERNANCE_HASH_API_TTL = 60.0  # seconds
 
 
+def _get_canonical_governance_hash_ddb() -> str:
+    """Read governance_hash from the canonical governance-version DDB record (ENC-TSK-I27).
+
+    Uses GOVERNANCE_VERSION_TABLE env var (default: "governance-version"). Bypasses HTTP
+    entirely — valid even when coordination API is unreachable.
+    """
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=GOVERNANCE_VERSION_TABLE,
+        Key={"version_id": {"S": GOVERNANCE_VERSION_RECORD_ID}},
+        ConsistentRead=True,
+    )
+    item = resp.get("Item", {})
+    h = str((item.get("governance_hash") or {}).get("S", "")).strip()
+    if not h:
+        raise RuntimeError(
+            f"Canonical governance-version record missing or empty "
+            f"(table={GOVERNANCE_VERSION_TABLE}, key={GOVERNANCE_VERSION_RECORD_ID})"
+        )
+    return h
+
+
 def _get_governance_hash_via_api() -> str:
     """Fetch governance hash from HTTP API with short TTL cache.
 
-    Resolution order:
-      1) governance API /hash (authoritative)
-      2) health API governance_hash (auth-safe fallback)
-      3) local computation from governance resources
+    Resolution order (ENC-TSK-I29):
+      1) governance API /hash (canonical DDB-backed after I29 coordination_api cutover)
+      2) health API governance_hash (auth-safe HTTP fallback)
+      3) canonical governance-version DDB direct read (bypasses HTTP entirely)
+      4) local computation from S3 catalog (last resort; no docstore path)
     """
     global _governance_hash_api_cache, _governance_hash_api_cache_at
     now = time.time()
@@ -1539,7 +1638,15 @@ def _get_governance_hash_via_api() -> str:
     except Exception:
         pass
 
-    # Final fallback to local computation.
+    # Canonical DDB direct read — bypasses HTTP auth and coordination API dependency.
+    try:
+        h = _get_canonical_governance_hash_ddb()
+        if h:
+            return _cache_and_return(h)
+    except Exception:
+        pass
+
+    # Final fallback: local S3 catalog computation (no docstore path).
     return _compute_governance_hash()
 
 
@@ -1722,15 +1829,25 @@ def _normalize_legacy_error_payload(
                 if key in {"success", "error", "error_envelope"}:
                     continue
                 merged_details.setdefault(key, value)
-            return {
-                "success": False,
-                "error": message,
-                "error_envelope": {
+            # ENC-TSK-H50 (ENC-ISS-142 gate #2): preserve any additional structured
+            # fields the upstream service attached to its error_envelope — notably the
+            # checkout-service escalation fields failure_classification and
+            # recommended_next_actions (ENC-TSK-H49) — instead of flattening to the
+            # canonical four keys. Start from the incoming envelope so unknown/future
+            # keys survive the MCP boundary, then overlay the normalized fields.
+            normalized_envelope = dict(envelope)
+            normalized_envelope.update(
+                {
                     "code": code,
                     "message": message,
                     "retryable": retryable,
                     "details": merged_details,
-                },
+                }
+            )
+            return {
+                "success": False,
+                "error": message,
+                "error_envelope": normalized_envelope,
                 **merged_details,
             }
         existing = response_body.get("error")
@@ -2015,6 +2132,7 @@ def _document_api_request(
     path: str = "",
     payload: Optional[Dict[str, Any]] = None,
     query: Optional[Dict[str, Any]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     base = DOCUMENT_API_BASE.rstrip("/")
     route = path if path.startswith("/") else (f"/{path}" if path else "")
@@ -2030,6 +2148,12 @@ def _document_api_request(
     }
     if DOCUMENT_API_INTERNAL_API_KEY:
         headers["X-Coordination-Internal-Key"] = DOCUMENT_API_INTERNAL_API_KEY
+    # ENC-TSK-P73: allows callers (e.g. documents_patch_section) to set the
+    # If-Match precondition header from a body-supplied if_match value.
+    if extra_headers:
+        for key, value in extra_headers.items():
+            if value:
+                headers[key] = str(value)
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
@@ -2693,12 +2817,33 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     name = str(file_name or "").strip()
     if not name:
         return None
-    if name == "agents.md":
+    # ENC-TSK-I30: the legacy nested key ``agents/agents.md`` is an alias of the
+    # canonical top-level ``agents.md`` — both resolve to ``governance://agents.md``
+    # so the content-hash input (``_governance_catalog_from_s3``) and the resource
+    # read path (``read_resource``) never bind ``governance://agents.md`` to divergent
+    # bytes, and no phantom ``governance://agents/agents.md`` URI is created.
+    if name in ("agents.md", "agents/agents.md"):
         return "governance://agents.md"
     if name.startswith("agents/"):
         return f"governance://{name}"
     if name == "governance_data_dictionary.json":
         return "governance://governance_data_dictionary.json"
+    return None
+
+
+def _governance_canonical_rel_for_uri(uri_text: str) -> Optional[str]:
+    """ENC-TSK-I30: the single canonical S3 rel-path for a governance URI.
+
+    Used to deterministically resolve governance catalog collisions — notably the
+    top-level ``agents.md`` versus the legacy ``agents/agents.md`` alias — so that
+    ``_governance_catalog_from_s3`` and ``read_resource`` resolve the identical
+    canonical key for ``governance://agents.md`` (no last-writer-wins dedup mask).
+    """
+    uri = str(uri_text or "").strip()
+    if uri == "governance://agents.md":
+        return "agents.md"
+    if uri.startswith("governance://"):
+        return uri.replace("governance://", "", 1)
     return None
 
 
@@ -2741,6 +2886,30 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
 
         last_modified = obj.get("LastModified")
         updated_at = last_modified.isoformat() if hasattr(last_modified, "isoformat") else str(last_modified or "")
+
+        # ENC-TSK-I30: deterministic canonical-key precedence. Multiple S3 keys can
+        # resolve to one governance URI (the top-level ``agents.md`` and the legacy
+        # ``agents/agents.md`` alias both map to ``governance://agents.md``). Resolve
+        # to the canonical key instead of last-writer-wins so the hash input matches
+        # the bytes ``read_resource`` serves, independent of S3 listing order.
+        existing = catalog.get(uri)
+        if existing is not None:
+            canonical_rel = _governance_canonical_rel_for_uri(uri)
+            existing_rel = str(existing.get("file_name") or "")
+            incoming_is_canonical = rel_path == canonical_rel and existing_rel != canonical_rel
+            if not incoming_is_canonical:
+                if existing_rel != rel_path:
+                    logger.warning(
+                        "[GOV-I30] governance URI %s resolved from multiple S3 keys "
+                        "(keeping %s, ignoring %s)",
+                        uri, existing_rel, rel_path,
+                    )
+                continue
+            logger.warning(
+                "[GOV-I30] governance URI %s resolved from multiple S3 keys "
+                "(replacing %s with canonical %s)",
+                uri, existing_rel, rel_path,
+            )
 
         catalog[uri] = {
             "file_name": rel_path,
@@ -2854,6 +3023,12 @@ def _governance_s3_keys_from_uri(uri_text: str) -> List[str]:
     uri = str(uri_text or "").strip()
     if uri == "governance://agents.md":
         prefix = S3_GOVERNANCE_PREFIX.rstrip("/")
+        # ENC-TSK-I30: canonical key FIRST. ``read_resource`` returns the first key
+        # that exists, so the top-level ``agents.md`` must precede the legacy
+        # ``agents/agents.md`` alias. This is the same canonical key that
+        # ``_governance_catalog_from_s3`` binds to ``governance://agents.md``, so the
+        # bytes served by ``governance.get('agents.md')`` equal the bytes the content
+        # hash folds in (no dedup mask).
         return [
             f"{prefix}/agents.md",
             f"{prefix}/agents/agents.md",
@@ -3233,9 +3408,9 @@ def _code_mode_tool_catalog() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "Read action identifier such as projects.list, tracker.get, "
-                            "tracker.graphsearch, documents.search, deploy.history, "
-                            "changelog.version, governance.dictionary, reference.search, "
-                            "or system.connection_health."
+                            "tracker.graphsearch, tracker.sheaf_cohomology, documents.search, "
+                            "deploy.history, changelog.version, governance.dictionary, "
+                            "reference.search, or system.connection_health."
                         ),
                     },
                     "arguments": {
@@ -3262,8 +3437,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
                             "Coordination action identifier. Orchestration: capabilities.get, "
                             "request.get, dispatch_plan.generate, dispatch_plan.dry_run, "
                             "auth.cognito_session. Agent identity (ENC-TSK-I38): agent.register, "
-                            "agent.claim, agent.list, agent.retire, agent.type.list, "
-                            "agent.type.register."
+                            "agent.claim, agent.list, agent.retire, "
+                            "agent.checkout_release_backfill, agent.type.list, agent.type.register."
                         ),
                     },
                     "arguments": {
@@ -3383,7 +3558,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
                                     "type": "string",
                                     "description": (
                                         "Action identifier such as tracker.create, documents.patch, "
-                                        "deploy.submit, checkout.advance, or github.create_issue."
+                                        "documents.patch_section, deploy.submit, checkout.advance, "
+                                        "or github.create_issue."
                                     ),
                                 },
                                 "arguments": {
@@ -3504,8 +3680,42 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="tracker_creation_rules",
+            description=(
+                "ENC-TSK-M66: Type-keyed pre-creation contract surface. Returns required "
+                "fields, the valid initial status, and the attachment contract for a tracker "
+                "record_type — no record_id required, derived entirely from the governance "
+                "data dictionary (including entity.composition sections)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_type": {
+                        "type": "string",
+                        "description": "Tracker record type, e.g. task, feature, plan, issue.",
+                    },
+                    "parent_type": {
+                        "type": "string",
+                        "description": (
+                            "Optional parent record type to also validate/describe the "
+                            "attachment contract for record_type as a child of parent_type "
+                            "(e.g. record_type=task, parent_type=plan)."
+                        ),
+                    },
+                },
+                "required": ["record_type"],
+            },
+        ),
+        Tool(
             name="tracker_list",
-            description="Returns tracker records for a project, filterable by type and status. Paginated (default 25).",
+            description=(
+                "Returns tracker records for a project, filterable by type and status. Paginated (default 25). "
+                "ENC-ISS-558: 'total' reflects only the records actually fetched in this call, never the "
+                "full-project count. When more records exist beyond what was fetched, the response carries "
+                "total_is_lower_bound=true (and next_cursor) -- treat 'total' as a floor, not a measurement, "
+                "whenever that flag is present. Pass exhaust=true for a bounded, cursor-walked exact count "
+                "(more round trips; capped, see exhaustion_truncated)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3529,6 +3739,24 @@ async def list_tools() -> list[Tool]:
                     "cursor": {
                         "type": "string",
                         "description": "Pagination cursor from previous response's next_cursor.",
+                    },
+                    "exhaust": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, get an exact/truncated total from a server-side census "
+                            "(ENC-TSK-Q15) before computing 'total', instead of reporting a lower "
+                            "bound. Costs one extra raw-API round trip -- leave false for hot-path / "
+                            "session-init reads and reserve for callers that need an exact count."
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["census"],
+                        "description": (
+                            "Set to 'census' to bypass the normal records page entirely and return the "
+                            "raw route's census payload (count/pages/as_of/by_type/...) verbatim under "
+                            "'result'. Mutually exclusive with the records/total list contract."
+                        ),
                     },
                 },
                 "required": ["project_id"],
@@ -3892,6 +4120,18 @@ async def list_tools() -> list[Tool]:
                     "cursor": {
                         "type": "string",
                         "description": "Pagination cursor from previous response's next_cursor.",
+                    },
+                    "document_subtype": {
+                        "type": "string",
+                        "description": "Filter by document_subtype (e.g. skill, handoff).",
+                    },
+                    "include_content": {
+                        "type": "boolean",
+                        "description": (
+                            "When false, list returns metadata-only projection "
+                            "(skill rows: id, title, description, version, updated_at, runtime_hint). "
+                            "Default true preserves full metadata."
+                        ),
                     },
                 },
                 "required": ["project_id"],
@@ -4547,7 +4787,7 @@ async def list_tools() -> list[Tool]:
                         "description": (
                             "Optional S3 key for a pre-built Lambda artifact zip. "
                             "Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip "
-                            "where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). "
+                            "where arch_tag is arm64-py312 (prod and gamma). "
                             "When present, deploy_intake validates the arch tag matches "
                             "the target environment."
                         ),
@@ -4737,6 +4977,77 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["request_id"],
+            },
+        ),
+        Tool(
+            name="coordination_classify_intent",
+            description=(
+                "Session-init intent classifier (ENC-FTR-084 Ph1). Embeds the "
+                "first-turn request text via Titan V2 and returns predicted_entelechy "
+                "{node_ids, confidence}. Optional applied_entelechy_override wins over "
+                "the prediction (which is still computed + logged). Inference-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "first_turn_text": {
+                        "type": "string",
+                        "description": "The first-turn request text to classify.",
+                    },
+                    "session_metadata": {
+                        "type": "object",
+                        "description": "Optional session metadata (surface, model, etc.).",
+                    },
+                    "applied_entelechy_override": {
+                        "description": "Optional io override: list of node_ids, a single id, or {node_ids:[...]}. When present it overrides the prediction.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Nearest-neighbor breadth (default 5, max 25).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project scope for the corpus (default 'enceladus').",
+                    },
+                },
+                "required": ["first_turn_text"],
+            },
+        ),
+        Tool(
+            name="coordination_intent_centroid_drift",
+            description=(
+                "Wave intent-centroid drift telemetry (ENC-FTR-084 Ph1, AC-3). Computes "
+                "the rolling intent vector (mean of FTR-089 embeddings for dispatched "
+                "records) and the scalar intent_centroid_drift vs the previous wave "
+                "centroid, best-effort persisted to enceladus-drift-telemetry."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "wave_id": {
+                        "type": "string",
+                        "description": "The coordination wave identifier.",
+                    },
+                    "embeddings": {
+                        "type": "array",
+                        "description": "List of embedding vectors for the records dispatched in this wave.",
+                        "items": {"type": "array", "items": {"type": "number"}},
+                    },
+                    "previous_centroid": {
+                        "type": "array",
+                        "description": "Optional previous wave centroid vector (drift is null without it).",
+                        "items": {"type": "number"},
+                    },
+                    "persist": {
+                        "type": "boolean",
+                        "description": "Best-effort persist the new intent_centroid_drift column (default true).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project scope (default 'enceladus').",
+                    },
+                },
+                "required": ["wave_id"],
             },
         ),
         Tool(
@@ -5277,6 +5588,21 @@ async def _projects_get(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _projects_prefix_map(args: dict) -> list[TextContent]:
+    """ENC-TSK-P74 / FR-B4-2: read-only prefix -> project_id map.
+
+    Reuses the existing _get_prefix_map() resolver (ENC-TSK-O47) verbatim —
+    no additional table scan. Cacheable, no record bodies: the response is
+    just the prefix->project_id mapping plus provenance/generation metadata.
+    """
+    prefix_map = _get_prefix_map()
+    return _result_text({
+        "prefixes": dict(prefix_map),
+        "source": "project_service.prefix union alias_prefixes",
+        "generated_at": _now_z(),
+    })
+
+
 # --- Tracker ---
 
 
@@ -5404,7 +5730,7 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return _result_text(resp)
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
     # Add completeness score (ENC-FTR-013 ontology)
     record["ontology"] = _compute_completeness_score(record)
     # Summary mode: strip verbose fields unless include_history=true
@@ -5450,7 +5776,7 @@ def _manifest_fetch_record(record_id: str) -> Tuple[Optional[Dict[str, Any]], Op
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return None, {"error_payload": resp, "record_id": record_id}
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
     return record, None
 
 
@@ -5646,7 +5972,7 @@ async def _tracker_validation_rules(args: dict) -> list[TextContent]:
     resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if resp.get("error"):
         return _result_text(resp)
-    record = resp.get("record", resp)
+    record = _unwrap_tracker_envelope(resp, record_type)
 
     current_status = _normalized_status(record.get("status"))
     valid_forward = sorted(TRACKER_VALID_TRANSITIONS.get(record_type, {}).get(current_status, set()))
@@ -5745,22 +6071,25 @@ async def _tracker_validation_rules(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
-async def _tracker_list(args: dict) -> list[TextContent]:
-    project_id = args["project_id"]
-    record_type = args.get("record_type")
-    status_filter = args.get("status")
-    page_size = int(args.get("page_size", 25))
-    cursor = args.get("cursor")
-    query_params: Dict[str, Any] = {}
-    if record_type:
-        query_params["type"] = record_type
-    if status_filter:
-        query_params["status"] = status_filter
-    resp = _tracker_api_request("GET", f"/{project_id}", query=query_params or None)
-    if resp.get("error"):
-        return _result_text(resp)
-    items = resp.get("records", [])
-    # Orphan detection (ENC-FTR-013): flag tasks without Feature lineage
+async def _tracker_creation_rules(args: dict) -> list[TextContent]:
+    """ENC-TSK-M66: type-keyed pre-creation contract surface. No record_id —
+    thin passthrough to coordination_api's dictionary-derived
+    GET /api/v1/tracker/creation_rules (all derivation logic lives there so
+    the PR-deployed Lambda path, not this out-of-band server, owns the
+    contract facts)."""
+    record_type = args["record_type"]
+    parent_type = args.get("parent_type")
+
+    query: Dict[str, Any] = {"record_type": record_type}
+    if parent_type:
+        query["parent_type"] = parent_type
+
+    resp = _coordination_api_request("GET", "/tracker/creation_rules", query=query)
+    return _result_text(resp)
+
+
+def _summarize_tracker_records(items: list) -> tuple:
+    """Build the compact summary shape plus an orphan count for a list of raw records."""
     orphan_count = 0
     summary = []
     for r in items:
@@ -5778,20 +6107,129 @@ async def _tracker_list(args: dict) -> list[TextContent]:
                 entry["orphan"] = True
                 orphan_count += 1
         summary.append(entry)
-    # Cursor pagination (ENC-TSK-820)
-    page, next_cursor, total = _paginate(
-        summary, page_size, cursor,
-        key_fn=lambda e: e.get("id", ""),
-    )
-    result: Dict[str, Any] = {"records": page, "count": len(page), "total": total}
+    return summary, orphan_count
+
+
+async def _tracker_list(args: dict) -> list[TextContent]:
+    project_id = args["project_id"]
+    record_type = args.get("record_type")
+    status_filter = args.get("status")
+    page_size = max(1, min(int(args.get("page_size", 25)), 100))
+    cursor = args.get("cursor")
+    exhaust = bool(args.get("exhaust", False))
+    mode = args.get("mode")
+
+    def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"page_size": page_size}
+        if status_filter:
+            params["status"] = status_filter
+        if page_cursor:
+            params["next_cursor"] = page_cursor
+        if record_type == "escalation":
+            # ENC-ISS-699: escalations are deliberately NOT a member of the
+            # backend's _RECORD_TYPES (generic CRUD surface never touches
+            # them, see backend/lambda/tracker_mutation/lambda_function.py),
+            # so the generic GET /{project}?type=escalation path can't see
+            # them at all. Route to the dedicated, now-paginated escalation
+            # list endpoint instead and normalize its `escalations` key to
+            # `records` so the rest of this function (summary, cursoring,
+            # total accounting) is unchanged for every record type.
+            resp = _tracker_api_request(
+                "GET", f"/{project_id}/escalation/list", query=params)
+            if isinstance(resp, dict) and not resp.get("error") and "escalations" in resp:
+                resp = dict(resp)
+                resp["records"] = resp.pop("escalations")
+            return resp
+        if record_type:
+            params["type"] = record_type
+        return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    def _fetch_census(page_cursor: Optional[str] = None) -> Dict[str, Any]:
+        # ENC-TSK-Q15 (O3.1): mode=census is forwarded to the raw route
+        # unchanged, with the same clamped page_size so the returned page
+        # anchors line up with this caller's paging. The escalation reroute
+        # above is deliberately NOT applied here -- the backend census walk
+        # covers escalations itself (O2.3) via its own second bounded walk,
+        # so a census request must always hit the base project route.
+        params: Dict[str, Any] = {"page_size": page_size, "mode": "census"}
+        if status_filter:
+            params["status"] = status_filter
+        if record_type:
+            params["type"] = record_type
+        if page_cursor:
+            params["next_cursor"] = page_cursor
+        return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    if mode == "census":
+        # Pass-through: the raw route owns the whole census payload shape
+        # (count/pages/as_of/by_type/...). Return it verbatim -- never
+        # reshape it into the records/count/total list contract below.
+        return _result_text(_fetch_census(cursor))
+
+    # ENC-TSK-Q15 (O3.3): exhaust=true is re-implemented over the census
+    # count instead of a bounded raw-page walk. Call the census first (same
+    # filters + page_size) for the exact/truncated total, then fetch page 1
+    # of rows as today -- the 50-raw-page walk and its guard are gone.
+    census_resp = None
+    if exhaust:
+        census_resp = _fetch_census()
+        if census_resp.get("error"):
+            return _result_text(census_resp)
+
+    # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
+    # only 'count' (this page) and 'next_cursor' (more data outstanding or not).
+    # Forward the caller's page_size/cursor to the RAW request (previously this
+    # was never done -- every call re-fetched the raw API's own default single
+    # page and re-sliced it locally, so a caller's cursor never actually moved
+    # the underlying query and 'total' was really just that one default page's
+    # size, mislabeled as a full-project total).
+    resp = _fetch_page(cursor)
+    if resp.get("error"):
+        return _result_text(resp)
+    first_page_items = resp.get("records", [])
+    next_cursor = resp.get("next_cursor")
+
+    page_summary, orphan_count = _summarize_tracker_records(first_page_items)
+
+    if exhaust:
+        total = census_resp.get("count", len(first_page_items))
+        exhaustion_truncated = bool(census_resp.get("count_truncated"))
+        total_is_lower_bound = exhaustion_truncated
+    else:
+        total = len(first_page_items)
+        exhaustion_truncated = False
+        # Honest floor, never a silently-wrong measurement: 'total' (and
+        # 'orphan_tasks') only claim exactness when no next_cursor remains
+        # outstanding after whatever fetching this call actually did.
+        total_is_lower_bound = bool(next_cursor)
+
+    # orphan_tasks/orphan_count are ALWAYS computed from only first_page_items
+    # -- even under exhaust=true, which (ENC-TSK-Q15 O3.3) no longer walks
+    # every page and instead gets 'total' from the server-side census. A
+    # census can be exact (count_truncated=False) while the project still has
+    # more rows than a single page, in which case next_cursor is non-empty
+    # here even though total_is_lower_bound (driven solely by the census) is
+    # False. orphan_tasks must key off whether THIS page fetch actually saw
+    # every row, never solely off the census-derived total_is_lower_bound,
+    # or it silently under-reports as if exact. See surrounding comment:
+    # honest floor, never a silently-wrong measurement.
+    orphan_tasks_is_lower_bound = total_is_lower_bound or bool(next_cursor)
+
+    result: Dict[str, Any] = {"records": page_summary, "count": len(page_summary), "total": total}
+    if total_is_lower_bound:
+        result["total_is_lower_bound"] = True
     if next_cursor:
         result["next_cursor"] = next_cursor
+    if exhaust and exhaustion_truncated:
+        result["exhaustion_truncated"] = True
     if orphan_count > 0:
         result["orphan_tasks"] = orphan_count
         result["orphan_warning"] = (
             f"{orphan_count} task(s) have no parent or feature lineage. "
             "Consider linking them to a feature for traceability."
         )
+        if orphan_tasks_is_lower_bound:
+            result["orphan_tasks_is_lower_bound"] = True
     return _result_text(result)
 
 
@@ -5867,6 +6305,76 @@ async def _tracker_set(args: dict) -> list[TextContent]:
 
     resp = _tracker_api_request("PATCH", f"/{project_id}/{record_type}/{rid}", payload=payload)
     return _result_text(resp)
+
+
+async def _tracker_relate(args: dict) -> list[TextContent]:
+    """ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): convenience action that adds
+    target_id to source_id's related_<target_type>_ids under a single
+    governance-hash-gated PATCH. The reverse pointer (source_id onto
+    target_id's related_<source_type>_ids) is written atomically, server-side,
+    by tracker_mutation's reverse-edge propagation within that same request —
+    so both sides land under the one governance hash check this action performs."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    source_id = str(args.get("source_id", "")).strip()
+    target_id = str(args.get("target_id", "")).strip()
+    if not source_id or not target_id:
+        return _result_text({"error": "source_id and target_id are required."})
+    if source_id.upper() == target_id.upper():
+        return _result_text({"error": "source_id and target_id must not be the same record."})
+
+    try:
+        project_id, source_type, source_rid = _parse_record_id(source_id)
+        _, target_type, _ = _parse_record_id(target_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    field = f"related_{target_type}_ids"
+    if field not in ("related_task_ids", "related_issue_ids", "related_feature_ids"):
+        return _result_text({
+            "error": (
+                f"tracker.relate does not support target_id type '{target_type}'. "
+                "Supported target record types: task, issue, feature."
+            )
+        })
+
+    # Read-modify-write: tracker_set PATCH replaces the field's value outright, so
+    # fetch the source's current list first and append rather than clobber it.
+    get_resp = _tracker_api_request("GET", f"/{project_id}/{source_type}/{source_rid}")
+    if get_resp.get("error"):
+        return _result_text(get_resp)
+    record = _unwrap_tracker_envelope(get_resp, source_type)
+    current_ids = [str(x).strip().upper() for x in (record.get(field) or [])]
+    if target_id.upper() in current_ids:
+        return _result_text({
+            "success": True, "already_related": True,
+            "source_id": source_id, "target_id": target_id, "field": field,
+        })
+    new_ids = current_ids + [target_id.upper()]
+
+    payload: Dict[str, Any] = {
+        "field": field,
+        "value": new_ids,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
+
+    resp = _tracker_api_request("PATCH", f"/{project_id}/{source_type}/{source_rid}", payload=payload)
+    if resp.get("error"):
+        return _result_text(resp)
+    return _result_text({
+        "success": True, "source_id": source_id, "target_id": target_id,
+        "field": field, "value": new_ids,
+        "note": "Reverse edge mirrored onto target's related_" + source_type + "_ids server-side.",
+    })
 
 
 async def _tracker_log(args: dict) -> list[TextContent]:
@@ -6099,7 +6607,16 @@ async def _documents_search(args: dict) -> list[TextContent]:
 async def _documents_get(args: dict) -> list[TextContent]:
     doc_id = args["document_id"]
     include_content = args.get("include_content", True)
-    query = {"include_content": "true" if include_content else "false"}
+    query: Dict[str, Any] = {"include_content": "true" if include_content else "false"}
+    # ENC-TSK-P73 / FR-B3-1..2: digest_only resolves to the same document_api
+    # handler as documents.manifest (document.digest); at_version/at_event
+    # are time-travel read passthrough for the ENC-TSK-P72 history surface.
+    if args.get("digest_only") is not None:
+        query["digest_only"] = "true" if args["digest_only"] else "false"
+    for key in ("at_version", "at_event"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
     resp = _document_api_request("GET", f"/{urllib.parse.quote(str(doc_id), safe='')}", query=query)
     return _result_text(resp)
 
@@ -6108,7 +6625,15 @@ async def _documents_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     page_size = int(args.get("page_size", 25))
     cursor = args.get("cursor")
-    resp = _document_api_request("GET", query={"project": project_id})
+    query: Dict[str, Any] = {"project": project_id}
+    # ENC-TSK-J46 / ENC-FTR-096 Ph2: thread through document_subtype /
+    # handoff_status filters (the latter also covers the lesson-candidate
+    # curation-state field) and the created_at sort used by candidate queues.
+    for passthrough_key in ("document_subtype", "handoff_status", "maturity_state", "sort", "include_content", "content"):
+        value = args.get(passthrough_key)
+        if value is not None and value != "":
+            query[passthrough_key] = value
+    resp = _document_api_request("GET", query=query)
     if isinstance(resp, dict) and resp.get("error"):
         return _result_text(resp)
     # Response is typically {"documents": [...]} or a list
@@ -6236,6 +6761,129 @@ async def _documents_patch(args: dict) -> list[TextContent]:
             document_id,
         )
     result = _enrich_document_compliance_response(result)
+    return _result_text(result)
+
+
+# ENC-TSK-P73 / FR-B3-1: same denylist-driven passthrough convention as
+# _DOCUMENTS_PATCH_BODY_DENYLIST (ENC-ISS-158) -- new patch_section fields
+# (anchor, op, body, if_match, include_heading, rebase_headings,
+# idempotency_key, caused_by, dry_run) forward automatically with no
+# whitelist edit required here.
+#
+# ENC-ISS-776: governance_hash is REQUIRED by document_api's
+# POST /documents/{id}/sections handler (backend/lambda/document_api,
+# ~line 4424) and must be forwarded in the body -- only document_id (the
+# path param) and the session-carriage args provider/sci (not document_api
+# fields) are stripped here. The MCP-level _require_governance_hash_envelope
+# check above still enforces governance_hash's presence on the incoming args.
+_DOCUMENTS_PATCH_SECTION_BODY_DENYLIST = frozenset({"document_id", "provider", "sci"})
+
+
+async def _documents_patch_section(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-1: execute action forwarding to
+    POST /documents/{document_id}/sections (ENC-TSK-P71 patch_section handler).
+
+    if_match is forwarded in the body (denylist passthrough) AND copied onto
+    the If-Match HTTP header, since document_api's guarded-write precondition
+    (ENC-TSK-P70 convention) is read from the header.
+    """
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+    policy_error = _enforce_document_storage_policy(
+        operation="documents_patch_section",
+        storage_target="docstore_api",
+        args=args,
+    )
+    if policy_error:
+        return _result_text(policy_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+
+    body: Dict[str, Any] = {}
+    for key in args:
+        if key in _DOCUMENTS_PATCH_SECTION_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
+
+    extra_headers: Dict[str, str] = {}
+    if_match = body.get("if_match")
+    if if_match:
+        extra_headers["If-Match"] = str(if_match)
+
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request(
+        "POST",
+        path=f"/{encoded_id}/sections",
+        payload=body,
+        extra_headers=extra_headers or None,
+    )
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] documents_patch_section: document API auth failed for document %s — "
+            "check ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
+            document_id,
+        )
+    result = _enrich_document_compliance_response(result)
+    return _result_text(result)
+
+
+async def _documents_manifest(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-2: search action forwarding to
+    GET /documents/{document_id}/manifest (ENC-TSK-P69 document.digest)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    if args.get("digest_only") is not None:
+        query["digest_only"] = "true" if args["digest_only"] else "false"
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/manifest", query=query or None)
+    return _result_text(result)
+
+
+async def _documents_history(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-3: search action forwarding to
+    GET /documents/{document_id}/history (backend lands with ENC-TSK-P72)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    for key in ("since", "until", "actor", "op", "block_id", "cursor", "page_size"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/history", query=query or None)
+    return _result_text(result)
+
+
+async def _documents_diff(args: dict) -> list[TextContent]:
+    """ENC-TSK-P73 / FR-B3-4: search action forwarding to
+    GET /documents/{document_id}/diff (backend lands with ENC-TSK-P72)."""
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(
+            _error_payload("INVALID_INPUT", "document_id is required")
+        )
+    query: Dict[str, Any] = {}
+    for key in ("from", "to"):
+        value = args.get(key)
+        if value is not None:
+            query[key] = value
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("GET", path=f"/{encoded_id}/diff", query=query or None)
     return _result_text(result)
 
 
@@ -7323,8 +7971,10 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     record_resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if not isinstance(record_resp, dict) or record_resp.get("error"):
         return _result_text(record_resp or {"error": "Failed to fetch record"})
-    # Unwrap record envelope — API returns {"record": {...}} (ENC-ISS-110)
-    record_resp = record_resp.get("record", record_resp)
+    # Unwrap record envelope — API returns {"record": {...}} for every type
+    # except escalation, which nests under {"escalation": {...}} instead
+    # (ENC-ISS-110; escalation case fixed under ENC-TSK-P89 / ENC-ISS-699).
+    record_resp = _unwrap_tracker_envelope(record_resp, record_type)
 
     # Build compact record core
     budget_used = 0
@@ -7509,1041 +8159,30 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     return _result_text(response)
 
 
-# --- Code Mode Meta-Tools (ENC-FTR-044) ---
-
-_SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
-    "projects.list": {"tool": "projects_list"},
-    "projects.get": {"tool": "projects_get"},
-    "tracker.get": {"tool": "tracker_get"},
-    "tracker.list": {"tool": "tracker_list"},
-    "tracker.pending_updates": {"tool": "tracker_pending_updates"},
-    "tracker.validation_rules": {"tool": "tracker_validation_rules"},
-    "documents.search": {"tool": "documents_search"},
-    "documents.get": {"tool": "documents_get"},
-    "documents.list": {"tool": "documents_list"},
-    "reference.search": {"tool": "reference_search"},
-    "deploy.state_get": {"tool": "deploy_state_get"},
-    "deploy.history": {"tool": "deploy_history"},
-    "deploy.history_list": {"tool": "deploy_history_list"},
-    "deploy.status": {"tool": "deploy_status"},
-    "deploy.status_get": {"tool": "deploy_status_get"},
-    "deploy.pending_requests": {"tool": "deploy_pending_requests"},
-    "changelog.history": {"tool": "changelog_history"},
-    "changelog.history_all": {"tool": "changelog_history_all"},
-    "changelog.version": {"tool": "changelog_version"},
-    "governance.hash": {"tool": "governance_hash"},
-    "governance.get": {"tool": "governance_get"},
-    "governance.dictionary": {"tool": "governance_dictionary"},
-    "system.connection_health": {"tool": "connection_health"},
-    "github.projects_list": {"tool": "github_projects_list"},
-    "tracker.graphsearch": {"tool": "tracker_graphsearch"},
-    # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
-    "tracker.manifest": {"tool": "tracker_manifest"},
-    "tracker.get_acs": {"tool": "tracker_get_acs"},
-    "tracker.worklog_timeline": {"tool": "tracker_worklog_timeline"},
-    "tracker.worklogs": {"tool": "tracker_worklogs"},
-    "tracker.manifest_bulk": {"tool": "tracker_manifest_bulk"},
-}
-
-_COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
-    "capabilities.get": {"tool": "coordination_capabilities"},
-    "request.get": {"tool": "coordination_request_get"},
-    "auth.cognito_session": {"tool": "coordination_cognito_session"},
-    "dispatch_plan.generate": {"tool": "dispatch_plan_generate"},
-    "dispatch_plan.dry_run": {"tool": "dispatch_plan_dry_run"},
-    # ENC-TSK-I38: Agent identity surface (ENC-FTR-117)
-    "agent.register": {"tool": "agent_register"},
-    "agent.claim": {"tool": "agent_claim"},
-    "agent.list": {"tool": "agent_list"},
-    "agent.retire": {"tool": "agent_retire"},
-    "agent.type.list": {"tool": "agent_type_list"},
-    "agent.type.register": {"tool": "agent_type_register"},
-}
-
-_EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
-    "tracker.create": {"tool": "tracker_create", "requires_governance_hash": True},
-    "tracker.set": {"tool": "tracker_set", "requires_governance_hash": True},
-    "tracker.log": {"tool": "tracker_log", "requires_governance_hash": True},
-    "tracker.set_acceptance_evidence": {
-        "tool": "tracker_set_acceptance_evidence",
-        "requires_governance_hash": True,
-    },
-    "documents.check_policy": {"tool": "check_document_policy"},
-    "documents.put": {"tool": "documents_put", "requires_governance_hash": True},
-    "documents.patch": {"tool": "documents_patch", "requires_governance_hash": True},
-    "deploy.submit": {"tool": "deploy_submit", "requires_governance_hash": True},
-    "deploy.state_set": {"tool": "deploy_state_set", "requires_governance_hash": True},
-    "deploy.trigger": {"tool": "deploy_trigger"},
-    "checkout.task": {"tool": "checkout_task", "requires_governance_hash": True},
-    "checkout.release": {"tool": "release_task", "requires_governance_hash": True},
-    "checkout.advance": {"tool": "advance_task_status", "requires_governance_hash": True},
-    "checkout.append_worklog": {"tool": "append_worklog", "requires_governance_hash": True},
-    "github.create_issue": {"tool": "github_create_issue"},
-    "github.projects_sync": {"tool": "github_projects_sync"},
-}
-
-# ENC-FTR-049: Conditionally register typed relationship actions behind feature flag
-if ENABLE_TYPED_RELATIONSHIPS:
-    _EXECUTE_ACTIONS["tracker.create_relationship"] = {
-        "tool": "tracker_create_relationship", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["tracker.archive_relationship"] = {
-        "tool": "tracker_archive_relationship", "requires_governance_hash": True,
-    }
-    _SEARCH_ACTIONS["tracker.list_relationships"] = {
-        "tool": "tracker_list_relationships",
-    }
-
-# ENC-FTR-121 / ENC-TSK-J68: Escalations — governed request/read surface.
-# escalation.request proposes a lifecycle-forbidden mutation for io approval;
-# approve/deny deliberately have NO MCP action (Cognito human path only, §6).
-if ENABLE_ESCALATION_PRIMITIVE:
-    _EXECUTE_ACTIONS["escalation.request"] = {
-        "tool": "escalation_request", "requires_governance_hash": True,
-    }
-    _SEARCH_ACTIONS["escalation.get"] = {
-        "tool": "escalation_get",
-    }
-    _SEARCH_ACTIONS["escalation.list"] = {
-        "tool": "escalation_list",
-    }
-    # ENC-TSK-J71 (Ph4): session-scoped cursor polling — the listening agent's
-    # side of the loop (§5.4 coordination surface, §5.9 activity rule).
-    _COORDINATION_ACTIONS["escalation.watch"] = {
-        "tool": "escalation_watch",
-    }
-
-# ENC-FTR-052: Conditionally register lesson actions behind feature flag
-if ENABLE_LESSON_PRIMITIVE:
-    _EXECUTE_ACTIONS["tracker.create_lesson"] = {
-        "tool": "tracker_create_lesson", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["tracker.extend_lesson"] = {
-        "tool": "tracker_extend_lesson", "requires_governance_hash": True,
-    }
-    _SEARCH_ACTIONS["tracker.list_lessons"] = {
-        "tool": "tracker_list_lessons",
-    }
-
-# ENC-FTR-061: Conditionally register handoff actions behind feature flag
-if ENABLE_HANDOFF_PRIMITIVE:
-    _EXECUTE_ACTIONS["document.create_handoff"] = {
-        "tool": "document_create_handoff", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["document.claim_handoff"] = {
-        "tool": "document_claim_handoff", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["document.complete_handoff"] = {
-        "tool": "document_complete_handoff", "requires_governance_hash": True,
-    }
-    # ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype actions
-    _EXECUTE_ACTIONS["document.create_coe"] = {
-        "tool": "document_create_coe", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["document.create_wave"] = {
-        "tool": "document_create_wave", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["document.append_handoff_reply"] = {
-        "tool": "document_append_handoff_reply", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["document.append_wave_entry"] = {
-        "tool": "document_append_wave_entry", "requires_governance_hash": True,
-    }
-
-# ENC-ISS-259: document.create_note \u2014 governed ad-hoc note path for coord-lead /
-# supervisor sessions. Wraps documents.put with document_subtype pinned to 'doc'.
-# Not gated behind ENABLE_HANDOFF_PRIMITIVE because the 'doc' subtype is the
-# stable, always-available baseline and pre-dates the handoff primitive rollout.
-_EXECUTE_ACTIONS["document.create_note"] = {
-    "tool": "document_create_note", "requires_governance_hash": True,
-}
-
-# ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
-if ENABLE_COMPONENT_PROPOSAL:
-    _EXECUTE_ACTIONS["component.propose"] = {
-        "tool": "component_propose", "requires_governance_hash": True,
-    }
-    # ENC-FTR-076 v2 / ENC-TSK-F40 (DOC-546B896390EA §9): state machine + edge
-    # + lifecycle actions. All 6 require governance hash (governed mutations).
-    # Authority enforcement (io-only vs agent-permitted) is server-side in
-    # coordination_api handlers — the MCP surface forwards the request along
-    # with the caller's Cognito claims so the Lambda can gate per action.
-    _EXECUTE_ACTIONS["component.advance"] = {
-        "tool": "component_advance", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["component.revert"] = {
-        "tool": "component_revert", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["component.deprecate"] = {
-        "tool": "component_deprecate", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["component.restore"] = {
-        "tool": "component_restore", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["component.add_edge"] = {
-        "tool": "component_add_edge", "requires_governance_hash": True,
-    }
-    _EXECUTE_ACTIONS["component.remove_edge"] = {
-        "tool": "component_remove_edge", "requires_governance_hash": True,
-    }
-
-# ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
-_SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
-# ENC-TSK-H89 / ENC-FTR-082 AC-12: governed bulk vector-read action
-_SEARCH_ACTIONS["graph_query.vector_read"] = {"tool": "graph_query_vector_read"}
-_EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.checkout"] = {"tool": "plan_checkout", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.advance"] = {"tool": "plan_advance", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.add_objective"] = {"tool": "plan_add_objective", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.remove_objective"] = {"tool": "plan_remove_objective", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.reorder_objectives"] = {"tool": "plan_reorder_objectives", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.replace_objectives"] = {"tool": "plan_replace_objectives", "requires_governance_hash": True}
-
-_RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
-
-
-def _merge_meta_tool_arguments(args: Dict[str, Any], reserved: set[str]) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
-    raw_args = args.get("arguments")
-    if isinstance(raw_args, dict):
-        merged.update(raw_args)
-    for key, value in args.items():
-        if key in reserved or key in merged:
-            continue
-        merged[key] = value
-    return merged
-
-
-def _raw_call_summary(raw_call: Dict[str, Any], *, status_override: str = "") -> Dict[str, Any]:
-    summary: Dict[str, Any] = {
-        "tool": raw_call.get("tool"),
-        "status": status_override or raw_call.get("status") or "unknown",
-    }
-    arguments = raw_call.get("arguments")
-    if isinstance(arguments, dict) and arguments:
-        summary["arguments"] = arguments
-    error_code = str(raw_call.get("error_code") or "").strip()
-    if error_code:
-        summary["error_code"] = error_code
-    return summary
-
-
-def _result_metadata(payload: Any) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {}
-
-    metadata: Dict[str, Any] = {}
-    if payload.get("next_cursor") is not None:
-        metadata["next_cursor"] = payload.get("next_cursor")
-    pagination = payload.get("pagination")
-    if metadata.get("next_cursor") is None and isinstance(pagination, dict):
-        if pagination.get("next_cursor") is not None:
-            metadata["next_cursor"] = pagination.get("next_cursor")
-    for key in ("count", "match_count", "total_count"):
-        if payload.get(key) is not None:
-            metadata[key] = payload.get(key)
-    if isinstance(payload.get("budget"), dict):
-        metadata["budget"] = payload.get("budget")
-    if isinstance(payload.get("warnings"), list) and payload.get("warnings"):
-        metadata["warnings"] = payload.get("warnings")
-    return metadata
-
-
-async def _best_effort_raw_tool(
-    tool_name: str,
-    tool_args: Dict[str, Any],
-    *,
-    underlying_calls: List[Dict[str, Any]],
-    warnings: List[str],
-    warning_label: str,
-) -> Any:
-    try:
-        raw_call = await _invoke_raw_tool(tool_name, tool_args)
-    except PermissionError as exc:
-        warnings.append(str(exc))
-        return None
-    except Exception as exc:
-        warnings.append(f"{warning_label}: {exc}")
-        return None
-
-    underlying_calls.append(_raw_call_summary(raw_call))
-    if raw_call["status"] != "success":
-        warnings.append(
-            f"{warning_label}: {raw_call.get('error_code') or 'tool_error'}"
-        )
-        return None
-    return raw_call["payload"]
-
-
-async def _search(args: dict) -> list[TextContent]:
-    action = str(args.get("action") or "").strip()
-    if not action:
-        return _meta_tool_error(
-            "search",
-            code="invalid_input",
-            message="action is required",
-        )
-
-    entry = _SEARCH_ACTIONS.get(action)
-    if not entry:
-        return _meta_tool_error(
-            "search",
-            code="unknown_action",
-            message=f"Unknown search action '{action}'",
-            action=action,
-        )
-
-    raw_args = _merge_meta_tool_arguments(args, {"action", "arguments"})
-    try:
-        raw_call = await _invoke_raw_tool(entry["tool"], raw_args)
-    except PermissionError as exc:
-        return _meta_tool_error(
-            "search",
-            code="boundary_denied",
-            message=str(exc),
-            action=action,
-        )
-    except Exception as exc:
-        return _meta_tool_error(
-            "search",
-            code="tool_resolution_failed",
-            message=str(exc),
-            action=action,
-        )
-
-    if raw_call["status"] != "success":
-        return _meta_tool_error(
-            "search",
-            code=raw_call.get("error_code") or "tool_error",
-            message=f"Underlying tool '{entry['tool']}' returned an error",
-            action=action,
-            underlying_calls=[_raw_call_summary(raw_call)],
-            details={"result": raw_call["payload"]},
-        )
-
-    return _meta_tool_success(
-        "search",
-        action=action,
-        result=raw_call["payload"],
-        metadata=_result_metadata(raw_call["payload"]),
-        underlying_calls=[_raw_call_summary(raw_call)],
-    )
-
-
-async def _coordination_meta(args: dict) -> list[TextContent]:
-    action = str(args.get("action") or "").strip()
-    if not action:
-        return _meta_tool_error(
-            "coordination",
-            code="invalid_input",
-            message="action is required",
-        )
-
-    entry = _COORDINATION_ACTIONS.get(action)
-    if not entry:
-        return _meta_tool_error(
-            "coordination",
-            code="unknown_action",
-            message=f"Unknown coordination action '{action}'",
-            action=action,
-        )
-
-    raw_args = _merge_meta_tool_arguments(args, {"action", "arguments"})
-    try:
-        raw_call = await _invoke_raw_tool(entry["tool"], raw_args)
-    except PermissionError as exc:
-        return _meta_tool_error(
-            "coordination",
-            code="boundary_denied",
-            message=str(exc),
-            action=action,
-        )
-    except Exception as exc:
-        return _meta_tool_error(
-            "coordination",
-            code="tool_resolution_failed",
-            message=str(exc),
-            action=action,
-        )
-
-    if raw_call["status"] != "success":
-        return _meta_tool_error(
-            "coordination",
-            code=raw_call.get("error_code") or "tool_error",
-            message=f"Underlying tool '{entry['tool']}' returned an error",
-            action=action,
-            underlying_calls=[_raw_call_summary(raw_call)],
-            details={"result": raw_call["payload"]},
-        )
-
-    return _meta_tool_success(
-        "coordination",
-        action=action,
-        result=raw_call["payload"],
-        metadata=_result_metadata(raw_call["payload"]),
-        underlying_calls=[_raw_call_summary(raw_call)],
-    )
-
-
-async def _get_compact_context_meta(args: dict) -> list[TextContent]:
-    mode = str(args.get("mode") or "").strip().lower()
-    if not mode:
-        if args.get("record_id"):
-            mode = "record"
-        elif args.get("document_id"):
-            mode = "document"
-        elif args.get("query"):
-            mode = "topic"
-        elif args.get("project_id"):
-            mode = "project"
-    if not mode:
-        return _meta_tool_error(
-            "get_compact_context",
-            code="invalid_input",
-            message="mode is required (or provide record_id, document_id, query, or project_id)",
-        )
-
-    warnings: List[str] = []
-    underlying_calls: List[Dict[str, Any]] = []
-    context: Dict[str, Any] = {}
-    include_code_map = args.get("include_code_map", True) is not False
-    include_related_documents = args.get("include_related_documents", True) is not False
-    include_governance = args.get("include_governance", True) is not False
-
-    if mode in _RECORD_CONTEXT_MODES:
-        record_id = str(args.get("record_id") or "").strip()
-        if not record_id:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="invalid_input",
-                message="record_id is required for record-oriented context modes",
-                mode=mode,
-            )
-
-        raw_args = {
-            "record_id": record_id,
-            "include_components": args.get("include_components", True),
-            "include_architecture": args.get("include_architecture", True),
-            "include_recent_history": args.get("include_recent_history", True),
-            "history_limit": args.get("history_limit", 10),
-            "max_tokens": args.get("max_tokens", 2500),
-        }
-        try:
-            record_call = await _invoke_raw_tool("get_issue_context", raw_args)
-        except PermissionError as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="boundary_denied",
-                message=str(exc),
-                mode=mode,
-            )
-        except Exception as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="tool_resolution_failed",
-                message=str(exc),
-                mode=mode,
-            )
-
-        underlying_calls.append(_raw_call_summary(record_call))
-        if record_call["status"] != "success":
-            return _meta_tool_error(
-                "get_compact_context",
-                code=record_call.get("error_code") or "tool_error",
-                message="Underlying issue-context assembly failed",
-                mode=mode,
-                underlying_calls=underlying_calls,
-                details={"result": record_call["payload"]},
-            )
-
-        context["record_context"] = record_call["payload"]
-        project_id = str(
-            args.get("project_id")
-            or ((record_call["payload"] or {}).get("project_id") if isinstance(record_call["payload"], dict) else "")
-        ).strip()
-        if not project_id:
-            try:
-                project_id, _record_type, _rid = _parse_record_id(record_id)
-            except ValueError:
-                project_id = ""
-
-        if project_id:
-            project_payload = await _best_effort_raw_tool(
-                "projects_get",
-                {"project_name": project_id},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="project lookup failed",
-            )
-            if project_payload is not None:
-                context["project"] = project_payload
-
-        if include_code_map and project_id:
-            code_map_payload = await _best_effort_raw_tool(
-                "get_code_map",
-                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="code map unavailable",
-            )
-            if code_map_payload is not None:
-                context["code_map"] = code_map_payload
-
-        if include_related_documents:
-            related_docs = await _best_effort_raw_tool(
-                "documents_search",
-                {"project_id": project_id, "related": record_id} if project_id else {"related": record_id},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="related document lookup failed",
-            )
-            if related_docs is not None:
-                context["related_documents"] = related_docs
-
-        if include_governance:
-            governance_entity = str(args.get("governance_entity") or "").strip()
-            if not governance_entity:
-                try:
-                    _project_id, record_type, _rid = _parse_record_id(record_id)
-                    governance_entity = f"tracker.{record_type}"
-                except ValueError:
-                    governance_entity = ""
-            if governance_entity:
-                governance_payload = await _best_effort_raw_tool(
-                    "governance_dictionary",
-                    {"entity": governance_entity},
-                    underlying_calls=underlying_calls,
-                    warnings=warnings,
-                    warning_label="governance lookup failed",
-                )
-                if governance_payload is not None:
-                    context["governance"] = governance_payload
-
-    elif mode == "project":
-        project_id = str(args.get("project_id") or "").strip()
-        if not project_id:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="invalid_input",
-                message="project_id is required for project mode",
-                mode=mode,
-            )
-        try:
-            project_call = await _invoke_raw_tool("projects_get", {"project_name": project_id})
-        except PermissionError as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="boundary_denied",
-                message=str(exc),
-                mode=mode,
-            )
-        except Exception as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="tool_resolution_failed",
-                message=str(exc),
-                mode=mode,
-            )
-        underlying_calls.append(_raw_call_summary(project_call))
-        if project_call["status"] != "success":
-            return _meta_tool_error(
-                "get_compact_context",
-                code=project_call.get("error_code") or "tool_error",
-                message="Project lookup failed",
-                mode=mode,
-                underlying_calls=underlying_calls,
-                details={"result": project_call["payload"]},
-            )
-        context["project"] = project_call["payload"]
-
-        if include_code_map:
-            code_map_payload = await _best_effort_raw_tool(
-                "get_code_map",
-                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="code map unavailable",
-            )
-            if code_map_payload is not None:
-                context["code_map"] = code_map_payload
-
-        if include_related_documents:
-            docs_payload = await _best_effort_raw_tool(
-                "documents_list",
-                {"project_id": project_id, "page_size": args.get("page_size", 10)},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="project document lookup failed",
-            )
-            if docs_payload is not None:
-                context["documents"] = docs_payload
-
-        if args.get("domains"):
-            arch_payload = await _best_effort_raw_tool(
-                "get_architecture_excerpts",
-                {
-                    "project_id": project_id,
-                    "domains": args.get("domains"),
-                    "max_excerpt_tokens": args.get("max_excerpt_tokens", 1200),
-                },
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="architecture excerpts unavailable",
-            )
-            if arch_payload is not None:
-                context["architecture"] = arch_payload
-
-        governance_entity = str(args.get("governance_entity") or "").strip()
-        if include_governance and governance_entity:
-            governance_payload = await _best_effort_raw_tool(
-                "governance_dictionary",
-                {"entity": governance_entity},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="governance lookup failed",
-            )
-            if governance_payload is not None:
-                context["governance"] = governance_payload
-
-    elif mode == "document":
-        document_id = str(args.get("document_id") or "").strip()
-        if not document_id:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="invalid_input",
-                message="document_id is required for document mode",
-                mode=mode,
-            )
-        try:
-            document_call = await _invoke_raw_tool("documents_get", {"document_id": document_id, "include_content": True})
-        except PermissionError as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="boundary_denied",
-                message=str(exc),
-                mode=mode,
-            )
-        except Exception as exc:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="tool_resolution_failed",
-                message=str(exc),
-                mode=mode,
-            )
-        underlying_calls.append(_raw_call_summary(document_call))
-        if document_call["status"] != "success":
-            return _meta_tool_error(
-                "get_compact_context",
-                code=document_call.get("error_code") or "tool_error",
-                message="Document lookup failed",
-                mode=mode,
-                underlying_calls=underlying_calls,
-                details={"result": document_call["payload"]},
-            )
-        context["document"] = document_call["payload"]
-
-        document_payload = document_call["payload"] if isinstance(document_call["payload"], dict) else {}
-        document_record = document_payload.get("document") if isinstance(document_payload.get("document"), dict) else {}
-        project_id = str(args.get("project_id") or document_record.get("project_id") or "").strip()
-        if include_code_map and project_id:
-            code_map_payload = await _best_effort_raw_tool(
-                "get_code_map",
-                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="code map unavailable",
-            )
-            if code_map_payload is not None:
-                context["code_map"] = code_map_payload
-
-        related_items = document_record.get("related_items") if isinstance(document_record, dict) else None
-        if include_related_documents and related_items:
-            context["related_items"] = related_items
-
-    elif mode == "topic":
-        query = str(args.get("query") or "").strip()
-        project_id = str(args.get("project_id") or "").strip()
-        if not query and not project_id:
-            return _meta_tool_error(
-                "get_compact_context",
-                code="invalid_input",
-                message="topic mode requires query or project_id",
-                mode=mode,
-            )
-
-        if project_id:
-            project_payload = await _best_effort_raw_tool(
-                "projects_get",
-                {"project_name": project_id},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="project lookup failed",
-            )
-            if project_payload is not None:
-                context["project"] = project_payload
-
-        document_search_args: Dict[str, Any] = {}
-        if project_id:
-            document_search_args["project_id"] = project_id
-        if args.get("keyword"):
-            document_search_args["keyword"] = args.get("keyword")
-        if args.get("title"):
-            document_search_args["title"] = args.get("title")
-        elif query:
-            document_search_args["title"] = query
-        if args.get("related"):
-            document_search_args["related"] = args.get("related")
-        docs_payload = await _best_effort_raw_tool(
-            "documents_search",
-            document_search_args,
-            underlying_calls=underlying_calls,
-            warnings=warnings,
-            warning_label="document topic search failed",
-        )
-        if docs_payload is not None:
-            context["documents"] = docs_payload
-
-        if project_id and query:
-            reference_payload = await _best_effort_raw_tool(
-                "reference_search",
-                {
-                    "project_id": project_id,
-                    "query": query,
-                    "context_lines": args.get("context_lines", 2),
-                    "max_results": args.get("max_results", 10),
-                    **({"section": args.get("section")} if args.get("section") else {}),
-                },
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="reference search failed",
-            )
-            if reference_payload is not None:
-                context["reference"] = reference_payload
-
-        if include_code_map and project_id:
-            code_map_payload = await _best_effort_raw_tool(
-                "get_code_map",
-                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="code map unavailable",
-            )
-            if code_map_payload is not None:
-                context["code_map"] = code_map_payload
-
-        if project_id and args.get("domains"):
-            arch_payload = await _best_effort_raw_tool(
-                "get_architecture_excerpts",
-                {
-                    "project_id": project_id,
-                    "domains": args.get("domains"),
-                    "max_excerpt_tokens": args.get("max_excerpt_tokens", 1200),
-                },
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="architecture excerpts unavailable",
-            )
-            if arch_payload is not None:
-                context["architecture"] = arch_payload
-
-        governance_entity = str(args.get("governance_entity") or "").strip()
-        if include_governance and governance_entity:
-            governance_payload = await _best_effort_raw_tool(
-                "governance_dictionary",
-                {"entity": governance_entity},
-                underlying_calls=underlying_calls,
-                warnings=warnings,
-                warning_label="governance lookup failed",
-            )
-            if governance_payload is not None:
-                context["governance"] = governance_payload
-    else:
-        return _meta_tool_error(
-            "get_compact_context",
-            code="unknown_mode",
-            message=f"Unknown context mode '{mode}'",
-            mode=mode,
-        )
-
-    # ENC-TSK-B92 Phase 1: three-signal hybrid retrieval.
-    # Opt-in by passing `query` and/or `anchor_record_id`. Backward-compat:
-    # callers who do not pass either receive exactly the legacy context shape.
-    include_hybrid_retrieval = args.get("include_hybrid_retrieval")
-    query_text = str(args.get("query") or "").strip()
-    anchor_id = str(args.get("anchor_record_id") or "").strip()
-    # Default anchor for record-oriented modes: use the primary record_id.
-    if not anchor_id and mode in _RECORD_CONTEXT_MODES:
-        anchor_id = str(args.get("record_id") or "").strip()
-    # Infer project_id from args first, then from the assembled context.
-    hybrid_project_id = str(args.get("project_id") or "").strip()
-    if not hybrid_project_id and isinstance(context.get("record_context"), dict):
-        rc = context["record_context"]
-        hybrid_project_id = str((rc or {}).get("project_id") or "").strip()
-    if not hybrid_project_id and anchor_id:
-        try:
-            hybrid_project_id, _rt, _rid = _parse_record_id(anchor_id)
-        except Exception:
-            hybrid_project_id = ""
-
-    # Auto-enable when the caller provided a query or anchor and did not
-    # explicitly opt out. Explicit True is honored regardless.
-    should_invoke_hybrid = (
-        include_hybrid_retrieval is True
-        or (include_hybrid_retrieval is not False and (query_text or anchor_id))
-    )
-    if should_invoke_hybrid and hybrid_project_id and (query_text or anchor_id):
-        try:
-            hybrid_resp = _invoke_hybrid_retrieval(
-                project_id=hybrid_project_id,
-                query_text=query_text or None,
-                anchor_record_id=anchor_id or None,
-                record_type_filter=args.get("record_type"),
-                top_n=args.get("top_n"),
-                include_below_threshold=bool(args.get("include_below_threshold", False)),
-            )
-            underlying_calls.append({
-                "tool": "graph_query_api.hybrid",
-                "status": "success" if hybrid_resp.get("success") else "error",
-                "arguments": {
-                    "project_id": hybrid_project_id,
-                    "query": query_text,
-                    "anchor_record_id": anchor_id,
-                    "record_type": args.get("record_type"),
-                    "top_n": args.get("top_n"),
-                    "include_below_threshold": bool(args.get("include_below_threshold", False)),
-                },
-            })
-            if hybrid_resp.get("error"):
-                warnings.append(
-                    "hybrid retrieval unavailable: " + str(hybrid_resp.get("error"))
-                )
-            else:
-                context["hybrid_retrieval"] = {
-                    "nodes": hybrid_resp.get("nodes", []),
-                    "summary": hybrid_resp.get("summary", ""),
-                    "signal_availability": hybrid_resp.get("signal_availability", {}),
-                    "graph_algorithm": hybrid_resp.get("graph_algorithm"),
-                    "rrf_k": hybrid_resp.get("rrf_k"),
-                    "embedding_coverage_sample": hybrid_resp.get("embedding_coverage_sample", {}),
-                    "per_node_fusion": hybrid_resp.get("per_node_fusion", {}),
-                    "fsrs_t3_threshold": hybrid_resp.get("fsrs_t3_threshold"),
-                    "include_below_threshold": hybrid_resp.get("include_below_threshold"),
-                    "duration_ms": hybrid_resp.get("duration_ms"),
-                }
-        except Exception as exc:
-            warnings.append(f"hybrid retrieval failed: {exc}")
-
-    # ENC-FTR-050: Context Node assembly manifest (flagged off by default)
-    if ENABLE_CONTEXT_NODES and args.get("max_tokens"):
-        try:
-            import importlib
-            _scoring = importlib.import_module("context_node_scoring")
-            token_budget = int(args.get("max_tokens", 2500))
-            record_id = str(args.get("record_id") or args.get("query") or "")
-            # Build candidate list from context sections
-            _candidates = []
-            for section_key, section_val in context.items():
-                if isinstance(section_val, dict):
-                    _est_tokens = len(json.dumps(section_val, default=str)) // 4
-                    _candidates.append({
-                        "record_id": section_key,
-                        "title": section_key,
-                        "token_cost": _est_tokens,
-                        "record_type": "task",
-                        "updated_at": section_val.get("updated_at", "2026-01-01T00:00:00Z"),
-                    })
-            if _candidates:
-                _inc, _exc, _manifest = _scoring.score_candidates(
-                    _candidates, query=record_id, seed_record_id=record_id,
-                    budget=token_budget, graph_healthy=False,
-                )
-                context["context_assembly_manifest"] = {
-                    "enabled": True,
-                    "token_budget": token_budget,
-                    **_manifest,
-                    "included_sections": [i.get("record_id", "") for i in _inc],
-                    "excluded_sections": [e.get("record_id", "") for e in _exc],
-                }
-                # AC9: Telemetry logging
-                logger.info(
-                    "[CONTEXT_NODE_TELEMETRY] mode=%s budget=%d used=%d efficiency=%.4f "
-                    "included=%d excluded=%d",
-                    mode, token_budget, _manifest.get("tokens_used", 0),
-                    _manifest.get("packing_efficiency", 0),
-                    _manifest.get("items_included", 0),
-                    _manifest.get("items_excluded", 0),
-                )
-        except Exception as _cn_err:
-            warnings.append(f"context_node_scoring unavailable: {_cn_err}")
-
-    return _meta_tool_success(
-        "get_compact_context",
-        mode=mode,
-        result=context,
-        underlying_calls=underlying_calls,
-        warnings=warnings,
-        metadata={"section_count": len(context)},
-        partial=bool(warnings),
-    )
-
-
-async def _execute(args: dict) -> list[TextContent]:
-    steps = args.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return _meta_tool_error(
-            "execute",
-            code="invalid_input",
-            message="steps must be a non-empty array",
-        )
-
-    overall_dry_run = bool(args.get("dry_run", False))
-    step_results: List[Dict[str, Any]] = []
-    underlying_calls: List[Dict[str, Any]] = []
-    failed_steps: List[Dict[str, Any]] = []
-
-    for index, raw_step in enumerate(steps, start=1):
-        if not isinstance(raw_step, dict):
-            failed_steps.append({"step": index, "error": "step must be an object"})
-            step_results.append({"step": index, "status": "invalid", "error": "step must be an object"})
-            break
-
-        action = str(raw_step.get("action") or "").strip()
-        on_error = str(raw_step.get("on_error") or "abort").strip().lower()
-        entry = _EXECUTE_ACTIONS.get(action)
-        if not action or entry is None:
-            error_message = f"Unknown execute action '{action}'" if action else "step action is required"
-            failed_steps.append({"step": index, "action": action, "error": error_message})
-            step_results.append({"step": index, "action": action, "status": "invalid", "error": error_message})
-            if on_error != "continue":
-                break
-            continue
-
-        step_args = {}
-        if isinstance(raw_step.get("arguments"), dict):
-            step_args.update(raw_step["arguments"])
-        step_dry_run = overall_dry_run or bool(raw_step.get("dry_run", False))
-        summary = {
-            "tool": entry["tool"],
-            "arguments": step_args,
-            "status": "dry_run" if step_dry_run else "pending",
-        }
-
-        if entry.get("requires_governance_hash") and not step_args.get("governance_hash"):
-            error_message = f"Action '{action}' requires governance_hash"
-            failed_steps.append({"step": index, "action": action, "error": error_message})
-            summary["status"] = "blocked"
-            summary["error_code"] = "governance_hash_missing"
-            underlying_calls.append(summary)
-            step_results.append({
-                "step": index,
-                "action": action,
-                "status": "blocked",
-                "error": error_message,
-                "resolved_calls": [summary],
-            })
-            if on_error != "continue":
-                break
-            continue
-
-        if not _raw_tool_allowed(entry["tool"]):
-            error_message = f"Raw tool '{entry['tool']}' is outside the current session boundary"
-            failed_steps.append({"step": index, "action": action, "error": error_message})
-            summary["status"] = "blocked"
-            summary["error_code"] = "boundary_denied"
-            underlying_calls.append(summary)
-            step_results.append({
-                "step": index,
-                "action": action,
-                "status": "blocked",
-                "error": error_message,
-                "resolved_calls": [summary],
-            })
-            if on_error != "continue":
-                break
-            continue
-
-        if step_dry_run:
-            underlying_calls.append(summary)
-            step_results.append({
-                "step": index,
-                "action": action,
-                "status": "dry_run",
-                "resolved_calls": [summary],
-            })
-            continue
-
-        try:
-            raw_call = await _invoke_raw_tool(entry["tool"], step_args)
-        except Exception as exc:
-            error_message = str(exc)
-            failed_steps.append({"step": index, "action": action, "error": error_message})
-            summary["status"] = "error"
-            summary["error_code"] = "tool_resolution_failed"
-            underlying_calls.append(summary)
-            step_results.append({
-                "step": index,
-                "action": action,
-                "status": "error",
-                "error": error_message,
-                "resolved_calls": [summary],
-            })
-            if on_error != "continue":
-                break
-            continue
-
-        call_summary = _raw_call_summary(raw_call)
-        underlying_calls.append(call_summary)
-        if raw_call["status"] != "success":
-            error_message = f"Underlying tool '{entry['tool']}' returned an error"
-            failed_steps.append({
-                "step": index,
-                "action": action,
-                "error": error_message,
-                "error_code": raw_call.get("error_code") or "tool_error",
-            })
-            step_results.append({
-                "step": index,
-                "action": action,
-                "status": "error",
-                "error": error_message,
-                "result": raw_call["payload"],
-                "resolved_calls": [call_summary],
-            })
-            if on_error != "continue":
-                break
-            continue
-
-        step_results.append({
-            "step": index,
-            "action": action,
-            "status": "success",
-            "result": raw_call["payload"],
-            "resolved_calls": [call_summary],
-        })
-
-    if failed_steps:
-        return _result_text({
-            "success": False,
-            "interface_mode": INTERFACE_MODE,
-            "tool": "execute",
-            "dry_run": overall_dry_run,
-            "partial": any(step.get("status") == "success" for step in step_results),
-            "step_results": step_results,
-            "underlying_calls": underlying_calls,
-            "error": {
-                "code": "step_failed",
-                "message": "One or more execute steps failed",
-                "details": {"failed_steps": failed_steps},
-            },
-        })
-
-    return _meta_tool_success(
-        "execute",
-        steps=step_results,
-        underlying_calls=underlying_calls,
-        dry_run=overall_dry_run,
-        metadata={"step_count": len(step_results)},
-    )
+# --- Code Mode Meta-Tools (ENC-FTR-044 / ENC-TSK-L09 decomposition) ---
+from mcp_server.actions import ActionFeatureFlags, build_action_registries
+from mcp_server.runtime import bind_runtime
+from mcp_server.tools.context import get_compact_context_meta
+from mcp_server.tools.coordination import coordination_meta, register_actions as register_coordination_actions
+from mcp_server.tools.execute import execute, register_actions as register_execute_actions
+from mcp_server.tools.search import register_actions as register_search_actions, search
+
+_ACTION_FLAGS = ActionFeatureFlags(
+    enable_typed_relationships=ENABLE_TYPED_RELATIONSHIPS,
+    enable_escalation_primitive=ENABLE_ESCALATION_PRIMITIVE,
+    enable_lesson_primitive=ENABLE_LESSON_PRIMITIVE,
+    enable_handoff_primitive=ENABLE_HANDOFF_PRIMITIVE,
+    enable_component_proposal=ENABLE_COMPONENT_PROPOSAL,
+)
+_SEARCH_ACTIONS, _COORDINATION_ACTIONS, _EXECUTE_ACTIONS = build_action_registries(_ACTION_FLAGS)
+register_search_actions(_SEARCH_ACTIONS)
+register_coordination_actions(_COORDINATION_ACTIONS)
+register_execute_actions(_EXECUTE_ACTIONS)
+
+_search = search
+_coordination_meta = coordination_meta
+_get_compact_context_meta = get_compact_context_meta
+_execute = execute
 
 
 # --- Deployment ---
@@ -8845,6 +8484,45 @@ async def _coordination_cognito_session(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+async def _coordination_classify_intent(args: dict) -> list[TextContent]:
+    """Session-init intent classification (ENC-FTR-084 Ph1 / ENC-TSK-I93).
+
+    Embeds the first-turn text via Titan V2 and returns predicted_entelechy
+    {node_ids, confidence}. Honors applied_entelechy_override (override wins;
+    the prediction is still computed + logged). Inference-only.
+    """
+    payload: Dict[str, Any] = {}
+    for key in (
+        "first_turn_text",
+        "request_text",
+        "session_metadata",
+        "applied_entelechy_override",
+        "top_k",
+        "project_id",
+    ):
+        if key in args and args[key] is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/session-init/classify-intent", payload=payload)
+    return _result_text(result)
+
+
+async def _coordination_intent_centroid_drift(args: dict) -> list[TextContent]:
+    """Wave intent-centroid drift telemetry (ENC-FTR-084 Ph1, AC-3 / ENC-TSK-I93)."""
+    payload: Dict[str, Any] = {}
+    for key in (
+        "wave_id",
+        "embeddings",
+        "dispatched_record_embeddings",
+        "previous_centroid",
+        "persist",
+        "project_id",
+    ):
+        if key in args and args[key] is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/session-init/intent-centroid-drift", payload=payload)
+    return _result_text(result)
+
+
 # --- Governance ---
 
 
@@ -9039,12 +8717,6 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     for key in ("anchor_record_id", "top_n", "include_below_threshold"):
         if args.get(key) is not None:
             query_params[key] = args[key]
-    # ENC-TSK-H89 (ENC-FTR-082 AC-12): bulk vector-read pagination passthrough
-    # (search_type=vector_read). offset/limit reach the dedicated strip-exempt
-    # corpus read in graph_query_api; no effect on the other search types.
-    for key in ("offset", "limit"):
-        if args.get(key) is not None:
-            query_params[key] = args[key]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):
@@ -9052,23 +8724,170 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
-async def _graph_query_vector_read(args: dict) -> list[TextContent]:
-    """ENC-TSK-H89 / ENC-FTR-082 AC-12 — governed bulk vector-read over the
-    n.embedding corpus. Self-describing alias for the graph_query_api
-    search_type=vector_read path: returns paginated {record_id, record_type,
-    embedding} for downstream correlation analysis (ENC-TSK-H34 AC-1). The hybrid
-    retrieval path keeps stripping embeddings; ONLY this dedicated read returns
-    the raw vector."""
+# --- ENC-FTR-086 / ENC-TSK-I83: Convergence Surface read action -------------
+# telemetry.rank is a SOFT prior (Locked Design Decision D1, DOC-E3F5E025B3D9):
+# queryable by agents, structurally invisible to governance gates. The ranking
+# logic lives in the isolated ``telemetry_rank`` sibling module which imports
+# nothing from governance code; governance Lambdas import neither it nor the
+# convergence-telemetry counter table. On any failure the action degrades to an
+# empty row list with degraded:true rather than raising — telemetry being down
+# must never block mutation work.
+
+# Bound on records scanned for the compute-on-read projection.
+_TELEMETRY_READ_MAX_RECORDS = int(os.environ.get("CONVERGENCE_TELEMETRY_MAX_RECORDS", "5000"))
+
+
+async def _telemetry_rank(args: dict) -> list[TextContent]:
+    """Frequency-ranked attribute-value leaderboard (ENC-FTR-086 Convergence Surface).
+
+    Arguments: attribute_name (required), project_id (default 'enceladus'),
+    record_type (resolved from the eligible-fields map when omitted), limit
+    (default 10, max 100), cursor (opaque, optional).
+
+    Phase-2 read surface: the ranking is projected on-read from the governed
+    tracker records that are the source of truth, routed through the tracker
+    service API (consistent with the MCP API boundary guard — handlers never
+    touch DynamoDB directly). When ENC-FTR-086 Phase-1 lands its dedicated
+    read Lambda, this handler can front it over HTTP without changing the D3
+    response contract (the ``telemetry_rank.rank_counter_items`` helper already
+    emits the identical row shape from pre-aggregated counter rows).
+    """
+    import telemetry_rank  # noqa: E402,PLC0415 (isolated sibling module; lazy keeps cold-start lean)
+
+    try:
+        attribute_name = str(args.get("attribute_name") or args.get("attribute") or "").strip()
+        if not attribute_name:
+            return _result_text(
+                {"error": "attribute_name is required", **telemetry_rank.degraded_payload("missing_attribute_name")}
+            )
+
+        project_id = str(args.get("project_id") or "enceladus").strip() or "enceladus"
+        record_type = telemetry_rank.resolve_record_type(attribute_name, args.get("record_type"))
+        limit = args.get("limit", args.get("top_n", telemetry_rank.DEFAULT_LIMIT))
+        cursor = args.get("cursor")
+
+        if not telemetry_rank.is_eligible(attribute_name):
+            # Not a failure — a policy answer. Return empty rows + eligibility hint.
+            payload = telemetry_rank.degraded_payload("attribute_not_telemetry_eligible")
+            payload["degraded"] = False
+            payload["eligible"] = False
+            payload["attribute_name"] = attribute_name
+            payload["eligible_attributes"] = sorted(telemetry_rank.ELIGIBLE_FIELDS.keys())
+            return _result_text(payload)
+
+        # Compute-on-read from the governed tracker records via the service API.
+        resp = _tracker_api_request("GET", f"/{project_id}", query={"type": record_type})
+        if not isinstance(resp, dict) or resp.get("error"):
+            return _result_text(telemetry_rank.degraded_payload("tracker_read_failed"))
+        records = resp.get("records", []) or []
+        if len(records) > _TELEMETRY_READ_MAX_RECORDS:
+            records = records[:_TELEMETRY_READ_MAX_RECORDS]
+        result = telemetry_rank.rank_records(records, attribute_name, limit=limit, cursor=cursor)
+
+        result["source"] = "compute_on_read"
+        result["degraded"] = False
+        result["eligible"] = True
+        result["attribute_name"] = attribute_name
+        result["record_type"] = record_type
+        result["project_id"] = project_id
+        return _result_text(result)
+    except Exception as exc:
+        logger.warning("[telemetry.rank] degraded: %s", exc)
+        return _result_text(telemetry_rank.degraded_payload(f"exception:{type(exc).__name__}"))
+async def _tracker_embeddings_for(args: dict) -> list[TextContent]:
+    """ENC-FTR-089 / ENC-TSK-I89 — raw-embedding egress (admin-scoped read).
+
+    Returns the stored Amazon Titan Text Embeddings V2 vector (256-dim
+    float32, L2-normalized) for each requested record_id, reading the existing
+    `embedding` graph node property (no new edge types/nodes). The response
+    carries an N x 256 `matrix` so callers can compute the demand centroid /
+    Fréchet barycenter approximation directly via np.mean(matrix, axis=0)
+    (FTR-084 / FTR-087).
+
+    IAM scope: gated downstream to the internal service key and admin-tier
+    (io-dev-admin) Cognito tokens; standard agent tokens receive HTTP 403.
+    """
+    project_id = args.get("project_id")
+    record_ids = args.get("record_ids")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+    if record_ids is None or record_ids == "":
+        return _result_text({"error": "record_ids is required (list of record IDs)"})
+
+    if isinstance(record_ids, str):
+        ids = [r.strip() for r in record_ids.split(",") if r.strip()]
+    elif isinstance(record_ids, (list, tuple)):
+        ids = [str(r).strip() for r in record_ids if str(r).strip()]
+    else:
+        return _result_text({"error": "record_ids must be a list or comma-separated string"})
+
+    if not ids:
+        return _result_text({"error": "record_ids must contain at least one record ID"})
+
+    query_params: Dict[str, Any] = {
+        "search_type": "embeddings_for",
+        "project_id": project_id,
+        "record_ids": ",".join(ids),
+    }
+    resp = _graph_query_api_request(query=query_params)
+    return _result_text(resp)
+
+
+async def _tracker_sheaf_cohomology(args: dict) -> list[TextContent]:
+    """Sheaf Laplacian H1 inconsistency detection (ENC-FTR-095 / ENC-TSK-I90).
+
+    Forwards to the graph_query_api ``sheaf_cohomology`` search_type, which reads
+    the existing governed graph and returns the first sheaf cohomology dimension
+    (``h1_dim``), the flagged ``inconsistency_nodes`` (endpoints of contradictory
+    edges), and ``computation_ms``. Read-only: no graph writes, no new edge types.
+    """
     project_id = args.get("project_id")
     if not project_id:
         return _result_text({"error": "project_id is required"})
+
     query_params: Dict[str, Any] = {
-        "search_type": "vector_read",
+        "search_type": "sheaf_cohomology",
         "project_id": project_id,
     }
-    for key in ("offset", "limit", "record_type"):
-        if args.get(key) is not None:
-            query_params[key] = args[key]
+    # Optional anchor restricting the computation to a connected subgraph.
+    vertex_set_query = args.get("vertex_set_query")
+    if vertex_set_query:
+        query_params["vertex_set_query"] = vertex_set_query
+
+    resp = _graph_query_api_request(query=query_params)
+    return _result_text(resp)
+
+
+async def _tracker_graph_laplacian(args: dict) -> list[TextContent]:
+    """ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action.
+
+    Resolves an induced subgraph from a vertex set (vertex_set_query keyword or
+    explicit record_ids), then returns the CSR adjacency (base64 float32), the
+    Fiedler eigenvector, the k smallest Laplacian eigenvalues, the degree vector,
+    and an index->record_id vertex_map. Backed by the graph_query_api
+    search_type='laplacian' handler (scipy.sparse.linalg.eigsh). project_id
+    defaults to 'enceladus'. No new DynamoDB tables or edge types.
+    """
+    project_id = args.get("project_id") or "enceladus"
+    query_params: Dict[str, Any] = {
+        "search_type": "laplacian",
+        "project_id": project_id,
+    }
+    if args.get("vertex_set_query") is not None:
+        query_params["vertex_set_query"] = args["vertex_set_query"]
+    if args.get("record_ids") is not None:
+        rids = args["record_ids"]
+        query_params["record_ids"] = ",".join(rids) if isinstance(rids, list) else rids
+    if args.get("edge_type_filter") is not None:
+        etf = args["edge_type_filter"]
+        query_params["edge_type_filter"] = ",".join(etf) if isinstance(etf, list) else etf
+    if args.get("k") is not None:
+        query_params["k"] = str(args["k"])
+    if args.get("limit") is not None:
+        query_params["limit"] = str(args["limit"])
+    if args.get("normalization") is not None:
+        query_params["normalization"] = args["normalization"]
+
     resp = _graph_query_api_request(query=query_params)
     return _result_text(resp)
 
@@ -9202,6 +9021,15 @@ async def _connection_health(args: dict) -> list[TextContent]:
         "tracker_api_internal_api_key_configured": bool(TRACKER_API_INTERNAL_API_KEY),
     }
     resp["graph_index"] = _graph_health_check()
+    # ENC-TSK-P73 / AC-3: computed from the live action registry (not
+    # hardcoded) so agents feature-detect docstore surface support instead
+    # of probing with a throwaway call.
+    resp["docstore_capabilities"] = {
+        "patch_section": "documents.patch_section" in _EXECUTE_ACTIONS,
+        "manifest": "documents.manifest" in _SEARCH_ACTIONS,
+        "history": "documents.history" in _SEARCH_ACTIONS,
+        "prefix_map": "projects.prefix_map" in _SEARCH_ACTIONS,
+    }
     return _result_text(resp)
 
 
@@ -9306,14 +9134,16 @@ async def _dispatch_plan_dry_run(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
-# ENC-TSK-I38: Agent identity actions (agent.*)
+# ENC-TSK-I38: Agent identity actions (agent.*) — ported to v4/main by ENC-TSK-J43
 # -------------------------------------------------------------------
 
 
 async def _agent_register(args: dict) -> list[TextContent]:
     """Mint a new ENC-SES-NNN session (agent.register)."""
     payload: Dict[str, Any] = {}
-    for key in ("agent_type_id", "runtime", "parent_session_id", "status"):
+    # ENC-TSK-J43: credential_id is an optional binding to an ENC-CRED credential; it is
+    # only forwarded when supplied, so omitting it is fully backward-compatible.
+    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id"):
         if args.get(key) is not None:
             payload[key] = args[key]
     result = _coordination_api_request("POST", "/agents/sessions", payload=payload)
@@ -9350,6 +9180,19 @@ async def _agent_retire(args: dict) -> list[TextContent]:
     """Retire an ENC-SES-NNN session (append-only, agent.retire)."""
     session_id = urllib.parse.quote(str(args["session_id"]), safe="")
     result = _coordination_api_request("POST", f"/agents/sessions/{session_id}/retire")
+    return _result_text(result)
+
+
+async def _agent_checkout_release_backfill(args: dict) -> list[TextContent]:
+    """Release task checkouts held by already-retired ENC-SES sessions."""
+    payload: Dict[str, Any] = {}
+    if args.get("dry_run") is not None:
+        payload["dry_run"] = bool(args["dry_run"])
+    if args.get("session_ids") is not None:
+        payload["session_ids"] = args["session_ids"]
+    result = _coordination_api_request(
+        "POST", "/agents/sessions/checkout-release-backfill", payload=payload
+    )
     return _result_text(result)
 
 
@@ -10144,6 +9987,21 @@ async def _component_propose(args: dict) -> list[TextContent]:
         payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
     if args.get("category"):
         payload["category"] = args["category"]
+    # ENC-TSK-Q24 (ENC-ISS-797): v3 component-address fields were accepted by
+    # this tool's args but silently dropped before reaching coordination_api
+    # -- forward them (and their rationale) whenever the caller supplies them.
+    if args.get("component_address"):
+        payload["component_address"] = args["component_address"]
+    if args.get("component_repo_dir"):
+        payload["component_repo_dir"] = args["component_repo_dir"]
+    if args.get("component_address_class"):
+        payload["component_address_class"] = args["component_address_class"]
+    if args.get("component_class"):
+        payload["component_class"] = args["component_class"]
+    if args.get("requested_required_transition_type"):
+        payload["requested_required_transition_type"] = args["requested_required_transition_type"]
+    if args.get("required_transition_type_rationale"):
+        payload["required_transition_type_rationale"] = args["required_transition_type_rationale"]
 
     resp = _coordination_api_request(
         "POST", "/components/propose", payload=payload,
@@ -10330,11 +10188,15 @@ _TOOL_HANDLERS = {
     "execute": _execute,
     "projects_list": _projects_list,
     "projects_get": _projects_get,
+    # ENC-TSK-P74 / FR-B4-2: read-only prefix -> project_id map (reuses _get_prefix_map())
+    "projects_prefix_map": _projects_prefix_map,
     "tracker_get": _tracker_get,
     "tracker_validation_rules": _tracker_validation_rules,
+    "tracker_creation_rules": _tracker_creation_rules,
     "tracker_list": _tracker_list,
     "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
+    "tracker_relate": _tracker_relate,
     "tracker_log": _tracker_log,
     "tracker_create": _tracker_create,
     "tracker_set_acceptance_evidence": _tracker_set_acceptance_evidence,
@@ -10343,6 +10205,11 @@ _TOOL_HANDLERS = {
     "documents_list": _documents_list,
     "documents_put": _documents_put,
     "documents_patch": _documents_patch,
+    # ENC-TSK-P73 / FR-B3-1..4: patch_section + manifest/history/diff read forwarding
+    "documents_patch_section": _documents_patch_section,
+    "documents_manifest": _documents_manifest,
+    "documents_history": _documents_history,
+    "documents_diff": _documents_diff,
     "check_document_policy": _check_document_policy,
     "reference_search": _reference_search,
     "get_code_map": _get_code_map,
@@ -10363,11 +10230,14 @@ _TOOL_HANDLERS = {
     "coordination_capabilities": _coordination_capabilities,
     "coordination_request_get": _coordination_request_get,
     "coordination_cognito_session": _coordination_cognito_session,
-    # ENC-TSK-I38: Agent identity actions
+    "coordination_classify_intent": _coordination_classify_intent,
+    "coordination_intent_centroid_drift": _coordination_intent_centroid_drift,
+    # ENC-TSK-I38: Agent identity actions (ported to v4/main by ENC-TSK-J43)
     "agent_register": _agent_register,
     "agent_claim": _agent_claim,
     "agent_list": _agent_list,
     "agent_retire": _agent_retire,
+    "agent_checkout_release_backfill": _agent_checkout_release_backfill,
     "agent_type_list": _agent_type_list,
     "agent_type_register": _agent_type_register,
     "governance_update": _governance_update,
@@ -10388,14 +10258,20 @@ _TOOL_HANDLERS = {
     "escalation_watch": _escalation_watch,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
-    # ENC-TSK-H89 / ENC-FTR-082 AC-12: governed bulk vector-read
-    "graph_query_vector_read": _graph_query_vector_read,
+    # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress
+    "tracker_embeddings_for": _tracker_embeddings_for,
+    # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
+    "tracker_sheaf_cohomology": _tracker_sheaf_cohomology,
+    # ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action
+    "tracker_graph_laplacian": _tracker_graph_laplacian,
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker_manifest": _tracker_manifest,
     "tracker_get_acs": _tracker_get_acs,
     "tracker_worklog_timeline": _tracker_worklog_timeline,
     "tracker_worklogs": _tracker_worklogs,
     "tracker_manifest_bulk": _tracker_manifest_bulk,
+    # ENC-FTR-086 / ENC-TSK-I83: Convergence Surface frequency-rank read action
+    "telemetry_rank": _telemetry_rank,
     # ENC-FTR-049: Typed relationship edges
     "tracker_create_relationship": _tracker_create_relationship,
     "tracker_archive_relationship": _tracker_archive_relationship,
@@ -10439,6 +10315,19 @@ _TOOL_HANDLERS = {
     "component_add_edge": _component_add_edge,
     "component_remove_edge": _component_remove_edge,
 }
+
+
+bind_runtime(
+    interface_mode=INTERFACE_MODE,
+    invoke_raw_tool=_invoke_raw_tool,
+    raw_tool_allowed=_raw_tool_allowed,
+    result_text=_result_text,
+    parse_record_id=_parse_record_id,
+    invoke_hybrid_retrieval=_invoke_hybrid_retrieval,
+    error_payload=_error_payload,
+    enable_context_nodes=ENABLE_CONTEXT_NODES,
+)
+
 
 
 # ===================================================================
@@ -10615,7 +10504,7 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
             "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "token_endpoint_auth_methods_supported": ["none"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "scopes_supported": ["openid", "email", "profile"],
@@ -10819,7 +10708,19 @@ def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
     # Replace client's redirect_uri with the server-side callback used in /authorize
     if "redirect_uri" in params:
         params["redirect_uri"] = [f"{base}/callback"]
-        body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
+
+    # Public clients (post-DCR-desecretization, ENC-TSK-P29) no longer receive a
+    # client_secret, so they cannot supply one. Cognito's app client is confidential,
+    # so we inject the real credential server-side, overwriting whatever the caller
+    # sent (existing connectors on the old secret keep working; new ones with none
+    # or a stale value are corrected transparently). If no secret is configured,
+    # forward none — the correct shape for a true public client.
+    params.pop("client_secret", None)
+    if COGNITO_CLIENT_SECRET_CODE:
+        params["client_secret"] = [COGNITO_CLIENT_SECRET_CODE]
+    if COGNITO_CLIENT_ID_CODE:
+        params["client_id"] = [COGNITO_CLIENT_ID_CODE]
+    body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
 
     ctx = ssl.create_default_context()
     try:
@@ -10882,12 +10783,11 @@ def _handle_cognito_register(event: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {"content-type": "application/json", "cache-control": "no-store"},
         "body": json.dumps({
             "client_id": COGNITO_CLIENT_ID_CODE,
-            "client_secret": COGNITO_CLIENT_SECRET_CODE,
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "scope": "openid email profile",
-            "token_endpoint_auth_method": "client_secret_post",
+            "token_endpoint_auth_method": "none",
         }),
         "isBase64Encoded": False,
     }
@@ -10920,7 +10820,7 @@ def _handle_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
             "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "token_endpoint_auth_methods_supported": ["none"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
@@ -11097,11 +10997,10 @@ def _handle_oauth_register(event: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {"content-type": "application/json", "cache-control": "no-store"},
         "body": json.dumps({
             "client_id": OAUTH_CLIENT_ID,
-            "client_secret": OAUTH_CLIENT_SECRET,
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
-            "token_endpoint_auth_method": "client_secret_post",
+            "token_endpoint_auth_method": "none",
         }),
         "isBase64Encoded": False,
     }
@@ -11272,12 +11171,12 @@ def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     path = req_ctx.get("path", "")
     method = req_ctx.get("method", "GET").upper()
 
-    if path == "/.well-known/oauth-protected-resource" and method == "GET":
+    if path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp") and method == "GET":
         return _handle_oauth_protected_resource(event)
 
     cognito = _cognito_mode_active()
 
-    if path == "/.well-known/oauth-authorization-server" and method == "GET":
+    if path in ("/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp") and method == "GET":
         return _handle_cognito_oauth_server_metadata(event) if cognito else _handle_oauth_server_metadata(event)
     if path == "/authorize" and method == "GET":
         return _handle_cognito_authorize(event) if cognito else _handle_oauth_authorize(event)

@@ -1,0 +1,20 @@
+<!-- @dsCard group="v2 · Collections" viewport="720x180" name="PropertyFilter" subtitle="Mono token chips · field:value + Enter" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}.w{max-width:560px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { PropertyFilter } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+function Demo(){
+  const [q,setQ]=React.useState({tokens:[{propertyKey:'status',operator:'=',value:'blocked'},{propertyKey:'priority',operator:'=',value:'P0'}],operation:'and'});
+  return e('div',{className:'w'},e(PropertyFilter,{query:q,onChange:(ev)=>setQ(ev.detail),
+    filteringProperties:[{key:'status'},{key:'priority'},{key:'project'},{key:'owner'}],
+    hint:'try  project:enceladus  then Enter'}));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

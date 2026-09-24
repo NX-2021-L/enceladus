@@ -1,0 +1,81 @@
+{
+  "_doc": "ENC-TSK-P15 / ENC-ISS-669. Pinned, hash-verified snapshot of NX-2021-L/devops's OWN declared Lambda estate -- built in reverse of the pattern devops already uses for the enceladus shared library (NX-2021-L/devops scripts/fetch_shared_library.py: a pinned immutable commit SHA plus a recorded sha256 per source module, where a stale digest is a hard build failure, never a warning). Enceladus CI cannot read a private sibling repo at check time without a token, so unlike fetch_shared_library.py this file cannot fetch devops over the network at build time -- it is a COMMITTED snapshot, refreshed by hand, by someone with read access to NX-2021-L/devops, whenever devops's Lambda estate changes. tools/verify_devops_ownership_snapshot.py checks this file's own internal consistency on every CI run (schema, no duplicate names, digest shape) and, when the DEVOPS_OWNERSHIP_LOCAL_SOURCE environment variable points at a local checkout of NX-2021-L/devops, re-hashes every declared source file and hard-fails on any mismatch -- the same digest-mismatch-is-a-refusal discipline fetch_shared_library.py enforces in the other direction. tools/verify_lambda_arch_parity.py's cross-source reconciliation (ENC-ISS-669 AC-6) reads functions[].function_name from this file as the complete set of names owned by NX-2021-L/devops: a live Lambda matching one of these names resolves to NOT_APPLICABLE_ON_PLANE, not a silent skip and not an unclassifiable failure. PREFERRED LONG-TERM SHAPE: devops publishes its own ownership artifact (mirroring how NX-2021-L/enceladus is fetched today -- publicly readable at a pinned commit) and enceladus fetches and verifies it at build time the same way fetch_shared_library.py does. That is not possible today because NX-2021-L/devops is a private repository and no token is wired into enceladus CI -- this snapshot is the interim, and the interim-ness is deliberate, not an oversight: see ownership_predicate below for why a name-prefix heuristic could not stand in for it.",
+  "owning_repo": "NX-2021-L/devops",
+  "pinned_commit": "c0af94fd61e9c262e626366beeadb2a124aafa61",
+  "pinned_at": "2026-08-23",
+  "pinned_by": "ENC-TSK-P15, verified against a local read-access checkout of NX-2021-L/devops at the pinned commit (origin/main resolved to the same SHA at verification time)",
+  "sources": {
+    "infrastructure/analytics-stack.yaml": {
+      "sha256": "6860c22723fdf4fec1922480c445022f913377f9b79fabb3c4d9ca5989b46930",
+      "declares_functions": [],
+      "reason": "devops's own top-of-tree deploy manifest. Its components.lambdas.manifest field points at infrastructure/aws/lambda/functions.yaml -- included here because that pointer is what makes functions.yaml the thing a naive predicate would stop at, and a change to this pointer (e.g. retargeting components.lambdas.manifest elsewhere) must invalidate this pin."
+    },
+    "infrastructure/aws/lambda/functions.yaml": {
+      "sha256": "913e540b0363fc23aff535ad33ada06468a8d097e4d6af3b1e615468414a50d2",
+      "declares_functions": [
+        "devops-json-to-parquet-transformer",
+        "devops-glue-crawler-launcher",
+        "devops-adhoc-promotion",
+        "devops-platform-health"
+      ],
+      "reason": "devops's declared Lambda deploy manifest for the 'Deploy Analytics Stack' workflow. FOUR functions -- this is exactly the source a naive predicate would read and stop at, which is why ENC-ISS-669 found a fifth, live, devops-owned function invisible to enceladus: devops-io-devops-mcp appears nowhere in this file."
+    },
+    "scripts/deploy_io_devops_mcp.py": {
+      "sha256": "56a80d03e772eea35a79da3826a242274c3b22ca4c041ba4d81759603eb9c26d",
+      "declares_functions": [
+        "devops-io-devops-mcp"
+      ],
+      "reason": "devops-io-devops-mcp's FUNCTION_NAME constant lives here, not in functions.yaml. The script's own docstring says why: 'Self-contained -- it does not import scripts/deploy_analytics_stack.py or drive off infrastructure/analytics-stack.yaml. This function's shape ... is specific to it and does not belong in the shared analytics-stack manifest.' That is a deliberate devops-side design choice enceladus has no standing to change -- it is exactly why the ownership predicate cannot be 'read functions.yaml' alone."
+    },
+    ".github/workflows/deploy-io-devops.yml": {
+      "sha256": "a940bbc9435cc40602f451a531771cb435f1132237179404aba65e32f81fa26b",
+      "declares_functions": [
+        "devops-io-devops-mcp"
+      ],
+      "reason": "the workflow that actually invokes deploy_io_devops_mcp.py -- on push to services/lambda/devops_mcp/**, on a weekly JWKS re-bake schedule, and on workflow_dispatch. Corroborates that devops-io-devops-mcp is a live, actively-deployed function, not a dead script nobody runs."
+    }
+  },
+  "functions": [
+    {
+      "function_name": "devops-json-to-parquet-transformer",
+      "declared_in": "infrastructure/aws/lambda/functions.yaml",
+      "runtime": "python3.11",
+      "architecture": "x86_64",
+      "deploy_channel": "Deploy Analytics Stack (.github/workflows/deploy-analytics-stack.yml) -- disabled_manually under DVP-TSK-700; no live deploy channel today (see AC-7 rationale on the manifest exception entry)",
+      "notes": ""
+    },
+    {
+      "function_name": "devops-glue-crawler-launcher",
+      "declared_in": "infrastructure/aws/lambda/functions.yaml",
+      "runtime": "python3.11",
+      "architecture": "x86_64",
+      "deploy_channel": "Deploy Analytics Stack (.github/workflows/deploy-analytics-stack.yml) -- disabled_manually under DVP-TSK-700; no live deploy channel today (see AC-7 rationale on the manifest exception entry)",
+      "notes": "LEGACY (devops DVP-TSK-413): decommissioned crawler launcher, reserved_concurrent_executions 0, no EventBridge invoke policy."
+    },
+    {
+      "function_name": "devops-adhoc-promotion",
+      "declared_in": "infrastructure/aws/lambda/functions.yaml",
+      "runtime": "python3.11",
+      "architecture": "x86_64",
+      "deploy_channel": "Deploy Analytics Stack (.github/workflows/deploy-analytics-stack.yml) -- disabled_manually under DVP-TSK-700; no live deploy channel today (see AC-7 rationale on the manifest exception entry)",
+      "notes": "devops DVP-TSK-661 ad-hoc promotion transform (hive.adhoc -> governed schema)."
+    },
+    {
+      "function_name": "devops-platform-health",
+      "declared_in": "infrastructure/aws/lambda/functions.yaml",
+      "runtime": "python3.11",
+      "architecture": "x86_64",
+      "deploy_channel": "Deploy Analytics Stack (.github/workflows/deploy-analytics-stack.yml) -- disabled_manually under DVP-TSK-700; no live deploy channel today (see AC-7 rationale on the manifest exception entry)",
+      "notes": "devops DVP-TSK-665 B6-R2 platform health monitor -- nine scheduled checks."
+    },
+    {
+      "function_name": "devops-io-devops-mcp",
+      "declared_in": "scripts/deploy_io_devops_mcp.py + .github/workflows/deploy-io-devops.yml",
+      "runtime": "python3.12",
+      "architecture": "arm64",
+      "deploy_channel": "Deploy io-devops MCP (.github/workflows/deploy-io-devops.yml) -- ACTIVE: push to services/lambda/devops_mcp/**, weekly JWKS re-bake schedule, workflow_dispatch. The one devops-owned function with a live deploy channel today.",
+      "notes": "Already arm64/python3.12 -- not part of the x86_64 remediation surface. Declared nowhere in functions.yaml; this is the exact gap this snapshot exists to close, and the acceptance test a functions.yaml-only predicate fails."
+    }
+  ],
+  "ownership_predicate": "Any Lambda function whose FunctionName exactly matches one of functions[].function_name in this file is owned by NX-2021-L/devops (owning_repo above) and is NOT_APPLICABLE_ON_PLANE to every enceladus deploy-validation and architecture-parity check, regardless of its resolved architecture or runtime. Membership is by exact name match against THIS FILE -- never a name-prefix heuristic. enceladus's own lambda_workflow_manifest.json independently declares dozens of its OWN functions that also carry a 'devops-' prefix (devops-changelog-api, devops-coordination-api, devops-graph-sync, ...), a historical naming holdover from before the two repos split -- a prefix-based predicate would misclassify enceladus's own functions as devops-owned (false exception) or, read the other way, would need to somehow exclude those, which just reproduces this file's job worse. See tools/verify_lambda_arch_parity.py's _validate_cross_source_reconciliation (ENC-TSK-P15 AC-6) for the read point, and infrastructure/lambda_workflow_manifest.json's architecture_exceptions.prod.permanent.families.devops_owned for the governance record (rationale, terminal_state, ratchet)."
+}

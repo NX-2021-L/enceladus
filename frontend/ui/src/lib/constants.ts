@@ -8,7 +8,12 @@ export const ENABLE_REFRESH_LINK = true
 export const COGNITO_DOMAIN =
   'https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com'
 export const COGNITO_CLIENT_ID = '6q607dk3liirhtecgps7hifmlk'
-export const COGNITO_REDIRECT_URI = 'https://jreese.net/enceladus/callback'
+// Computed from the current origin (not hardcoded to prod) so the OAuth
+// flow returns to whichever domain served the page -- prod, gamma, or any
+// future environment. Each domain's callback URL must also be registered
+// on the Cognito App Client (see enceladus-auth-edge-gamma for gamma's
+// server-side token exchange, which independently derives the same value).
+export const COGNITO_REDIRECT_URI = `${window.location.origin}/enceladus/callback`
 export const COGNITO_SCOPES = 'openid email profile'
 
 export const STATUS_COLORS: Record<string, string> = {

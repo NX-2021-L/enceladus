@@ -1,0 +1,4 @@
+# ENC-TSK-K26: record_extensions lives in shared_layer source but is not yet in
+# the published enceladus-shared:10 Lambda layer. Vendor into the function zip
+# until the layer is bumped (see governance_data_dictionary enceladus_shared.record_extensions).
+backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py

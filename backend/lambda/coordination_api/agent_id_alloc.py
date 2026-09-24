@@ -44,10 +44,13 @@ from typing import Any, Dict, List, Mapping, Optional
 from botocore.exceptions import BotoCoreError, ClientError
 
 from config import (
+    AGENT_CREDENTIALS_TABLE,
     AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS,
     AGENT_SESSIONS_TABLE,
+    AGENT_SESSIONS_UNCLAIM_TTL_MINUTES,
     AGENT_TYPES_TABLE,
     CHECKOUT_TOKENS_TABLE,
+    TRACKER_TABLE,
     logger,
 )
 from aws_clients import _get_ddb
@@ -63,22 +66,34 @@ __all__ = [
     "AGENT_TYPE_ID_PREFIX",
     "SESSION_STATUSES",
     "AGENT_TYPE_STATUSES",
+    "CREDENTIAL_STATUSES",
+    "CREDENTIAL_ID_PREFIX",
     "SESSION_NODE_PROPERTIES",
     "AGENT_TYPE_NODE_PROPERTIES",
+    "CREDENTIAL_NODE_PROPERTIES",
     "encode_seq",
     "mint_session_id",
     "mint_agent_type_id",
+    "mint_credential_id",
     "get_session",
     "get_agent_type",
+    "get_credential",
     "claim_session",
     "retire_session",
+    "retire_session_with_checkout_release",
     "SCI_PREFIX",
     "SCI_TTL_SECONDS",
     "mint_sci",
     "revoke_sci_for_session",
+    "issue_credential",
+    "rotate_credential",
+    "revoke_credential",
     "sweep_idle_sessions",
+    "sweep_unclaimed_sessions",
+    "release_checkouts_for_retired_sessions",
     "list_sessions",
     "list_agent_types",
+    "list_credentials",
     "find_agent_type",
     "IdAllocationError",
     "CallerSuppliedIdError",
@@ -89,6 +104,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 SESSION_ID_PREFIX = "ENC-SES"
 AGENT_TYPE_ID_PREFIX = "ENC-AGT"
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: credential ids are opaque uuid4 hex (CRED-<32hex>).
+# Unlike ENC-SES/ENC-AGT (monotonic, human-legible, directory-ordered), a credential id
+# is a secret-adjacent handle whose value must not encode issuance order — so it is minted
+# from uuid4, not the shared base-36 counter. Still server-only (forbidden-field guarded).
+CREDENTIAL_ID_PREFIX = "CRED"
 
 # Reserved partition-key sentinels for the per-table monotonic counters. These rows
 # coexist with node rows in the same table (tracker_mutation discipline) and are excluded
@@ -105,6 +125,9 @@ _MINT_MAX_ATTEMPTS = 8
 # deprecated (when a model is superseded). v4 inherits these vocabularies verbatim.
 SESSION_STATUSES = ("allocated", "claimed", "retired")
 AGENT_TYPE_STATUSES = ("active", "deprecated")
+# CRED lifecycle: active -> revoked (terminal). Rotation issues a NEW active credential
+# whose rotated_from points at the parent; the parent is then revoked (reason='rotated').
+CREDENTIAL_STATUSES = ("active", "revoked")
 
 # The exact persisted property sets (excluding the partition key). Kept as module
 # constants so tests and v4 backfill can assert value-identity against them.
@@ -122,6 +145,16 @@ AGENT_TYPE_NODE_PROPERTIES = (
     "cost_tier",
     "status",
     "usage_count",
+)
+# CRED node properties (excluding the partition key credential_id). Value-identical to the
+# intended :AgentCredential Neo4j node shape (graph_sync AGENT_NODE_PROPERTIES).
+CREDENTIAL_NODE_PROPERTIES = (
+    "agent_identity_id",
+    "issued_at",
+    "status",
+    "revoked_at",
+    "revoked_reason",
+    "rotated_from",
 )
 
 
@@ -228,6 +261,7 @@ def mint_session_id(
     parent_session_id: str = "root",
     status: str = "allocated",
     claimed_at: str = "",
+    credential_id: str = "",
     caller_payload: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mint a server-allocated ENC-SES-NNN and persist the session node. Returns the
@@ -236,12 +270,30 @@ def mint_session_id(
     ``status`` defaults to ``allocated`` (the pre-allocate/claim flow for a dispatched
     session); pass ``claimed`` for a self-allocating root/ad-hoc session, in which case
     ``claimed_at`` defaults to mint time.
+
+    ``credential_id`` (ENC-TSK-J04) optionally binds the session to the ENC-CRED it
+    authenticated with. It is written ONLY when provided, so the frozen value-identity
+    shape (``SESSION_NODE_PROPERTIES``) is preserved for the credential-less path; the
+    revoke cascade (``revoke_credential``) reaps sessions carrying a bound credential_id.
     """
     _assert_no_caller_id(caller_payload, "session_id")
     if status not in SESSION_STATUSES:
         raise ValueError(f"status must be one of {SESSION_STATUSES}, got {status!r}")
     if not agent_type_id:
         raise ValueError("agent_type_id is required to mint a session")
+
+    # ENC-TSK-J43: when a session is bound to a credential, that credential must exist and
+    # be active at mint time. Binding to a missing/revoked credential is rejected so the
+    # revoke cascade's invariant holds (a live session's bound credential is always live).
+    if credential_id:
+        bound = get_credential(credential_id)
+        if bound is None:
+            raise ValueError(f"credential_id {credential_id!r} not found")
+        if bound.get("status") != "active":
+            raise ValueError(
+                f"credential_id {credential_id!r} is not active "
+                f"(status={bound.get('status')!r})"
+            )
 
     now = _now_z()
     resolved_claimed_at = claimed_at or (now if status == "claimed" else "")
@@ -259,6 +311,8 @@ def mint_session_id(
             "claimed_at": resolved_claimed_at,
             "status": status,
         }
+        if credential_id:
+            item["credential_id"] = credential_id
         try:
             _put_node(AGENT_SESSIONS_TABLE, "session_id", item)
             logger.info("[INFO] Minted session id %s (agent_type=%s)", session_id, agent_type_id)
@@ -409,34 +463,199 @@ def claim_session(
     return updated
 
 
-def retire_session(session_id: str) -> Dict[str, Any]:
-    """Flip a session to retired from any live state (allocated or claimed → retired).
+_MAX_RETIREMENT_TRANSACTION_ITEMS = 100
 
-    Append-only: once retired a session cannot be un-retired. Returns the
-    updated session item.
 
-    Raises ValueError when the session is missing or already retired.
+def _task_display_id(task: Mapping[str, Any]) -> str:
+    item_id = str(task.get("item_id") or "").strip()
+    if item_id:
+        return item_id
+    record_id = str(task.get("record_id") or "").strip()
+    return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+
+
+def _checked_out_tasks_for_session(session_id: str) -> List[Dict[str, Any]]:
+    """Return task records whose checkout is currently held by ``session_id``."""
+    if not session_id:
+        return []
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "active_agent_session_id = :sid AND begins_with(#rid, :task_pfx) "
+            "AND (#active = :true OR checkout_state = :checked_out)"
+        ),
+        "ExpressionAttributeNames": {
+            "#rid": "record_id",
+            "#active": "active_agent_session",
+        },
+        "ExpressionAttributeValues": {
+            ":sid": _serialize(session_id),
+            ":task_pfx": _serialize("task#"),
+            ":true": _serialize(True),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+
+    tasks: List[Dict[str, Any]] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        tasks.extend(_deserialize(raw) for raw in scan.get("Items", []))
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+    return tasks
+
+
+def _sci_revoke_transact_item(
+    session: Mapping[str, Any], *, reason: str, now: str
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    token_id = str(session.get("sci_token_id") or "").strip()
+    if not token_id:
+        return None, None
+
+    ddb = _get_ddb()
+    raw = ddb.get_item(
+        TableName=CHECKOUT_TOKENS_TABLE,
+        Key={"pk": _serialize(token_id)},
+    ).get("Item")
+    if not raw:
+        return None, None
+    token = _deserialize(raw)
+    if bool(token.get("revoked")):
+        return None, None
+
+    return {
+        "Update": {
+            "TableName": CHECKOUT_TOKENS_TABLE,
+            "Key": {"pk": _serialize(token_id)},
+            "UpdateExpression": (
+                "SET revoked = :t, revoked_at = :now, revocation_reason = :reason"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(pk) AND (attribute_not_exists(revoked) OR revoked = :f)"
+            ),
+            "ExpressionAttributeValues": {
+                ":t": _serialize(True),
+                ":f": _serialize(False),
+                ":now": _serialize(now),
+                ":reason": _serialize(reason),
+            },
+        }
+    }, token_id
+
+
+def _checkout_release_transact_items(
+    session_id: str, tasks: List[Mapping[str, Any]], *, reason: str, now: str
+) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    note = f"Checkout released because agent session {session_id} retired ({reason})"
+    history_entry = {"M": {
+        "timestamp": _serialize(now),
+        "status": _serialize("worklog"),
+        "description": _serialize(f"[RETIREMENT-RELEASE] {note}"),
+    }}
+    for task in tasks:
+        project_id = str(task.get("project_id") or "").strip()
+        record_id = str(task.get("record_id") or "").strip()
+        if not project_id or not record_id:
+            continue
+        items.append({
+            "Update": {
+                "TableName": TRACKER_TABLE,
+                "Key": {
+                    "project_id": _serialize(project_id),
+                    "record_id": _serialize(record_id),
+                },
+                "UpdateExpression": (
+                    "SET active_agent_session = :f, "
+                    "active_agent_session_id = :empty_s, "
+                    "active_agent_session_parent = :f, "
+                    "checkout_state = :checked_in, "
+                    "checked_in_by = :sid, checked_in_at = :now, "
+                    "updated_at = :now, last_update_note = :note, "
+                    "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                    "history = list_append(if_not_exists(history, :empty_l), :hentry)"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(#rid) AND active_agent_session_id = :sid"
+                ),
+                "ExpressionAttributeNames": {"#rid": "record_id"},
+                "ExpressionAttributeValues": {
+                    ":f": _serialize(False),
+                    ":empty_s": _serialize(""),
+                    ":checked_in": _serialize("checked_in"),
+                    ":sid": _serialize(session_id),
+                    ":now": _serialize(now),
+                    ":note": _serialize(note),
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    ":empty_l": {"L": []},
+                    ":hentry": {"L": [history_entry]},
+                },
+            }
+        })
+    return items
+
+
+def retire_session_with_checkout_release(
+    session_id: str, *, reason: str = "explicit_retire"
+) -> Dict[str, Any]:
+    """Retire a live session and atomically release task checkouts it owns.
+
+    The transaction includes the append-only session retirement, SCI revocation
+    when an unrevoked SCI exists, and every task checkout release currently held
+    by the session. A failure leaves all three surfaces untouched.
     """
     if not session_id:
         raise ValueError("session_id is required")
 
+    session = get_session(session_id)
+    if session is None:
+        raise ValueError(f"Session {session_id!r} not found")
+    status = str(session.get("status") or "").strip()
+    if status == "retired":
+        raise ValueError(f"Session {session_id!r} is already retired")
+    if status not in {"allocated", "claimed"}:
+        raise ValueError(f"Session {session_id!r} cannot be retired from status={status!r}")
+
     ddb = _get_ddb()
-    try:
-        resp = ddb.update_item(
-            TableName=AGENT_SESSIONS_TABLE,
-            Key={"session_id": _serialize(session_id)},
-            UpdateExpression="SET #st = :retired",
-            ConditionExpression="#st = :allocated OR #st = :claimed",
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
+    now = _now_z()
+    tasks = _checked_out_tasks_for_session(session_id)
+    task_ids = [_task_display_id(task) for task in tasks]
+
+    transact_items: List[Dict[str, Any]] = [{
+        "Update": {
+            "TableName": AGENT_SESSIONS_TABLE,
+            "Key": {"session_id": _serialize(session_id)},
+            "UpdateExpression": "SET #st = :retired",
+            "ConditionExpression": "#st = :allocated OR #st = :claimed",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "ExpressionAttributeValues": {
                 ":retired": _serialize("retired"),
                 ":allocated": _serialize("allocated"),
                 ":claimed": _serialize("claimed"),
             },
-            ReturnValues="ALL_NEW",
+        }
+    }]
+    sci_item, sci_token_id = _sci_revoke_transact_item(session, reason=reason, now=now)
+    if sci_item:
+        transact_items.append(sci_item)
+    transact_items.extend(_checkout_release_transact_items(session_id, tasks, reason=reason, now=now))
+    if len(transact_items) > _MAX_RETIREMENT_TRANSACTION_ITEMS:
+        raise ValueError(
+            f"Session {session_id!r} has too many checkout releases for one atomic "
+            f"transaction ({len(transact_items)} items)."
         )
+
+    try:
+        ddb.transact_write_items(TransactItems=transact_items)
     except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        if exc.response.get("Error", {}).get("Code") in {
+            "ConditionalCheckFailedException",
+            "TransactionCanceledException",
+        }:
             existing = get_session(session_id)
             if existing is None:
                 raise ValueError(f"Session {session_id!r} not found") from exc
@@ -447,8 +666,39 @@ def retire_session(session_id: str) -> Dict[str, Any]:
             ) from exc
         raise
 
-    updated = _deserialize(resp.get("Attributes", {}))
+    updated = get_session(session_id) or {**session, "status": "retired"}
     logger.info("[INFO] Retired session %s", session_id)
+    if task_ids:
+        logger.info(
+            "[INFO] Released %d checkout(s) for retired session %s: %s",
+            len(task_ids), session_id, task_ids,
+        )
+    if sci_token_id:
+        logger.info(
+            "[INFO] Revoked SCI %s for session %s (reason=%s)",
+            sci_token_id, session_id, reason,
+        )
+    return {
+        "session": updated,
+        "released_task_count": len(task_ids),
+        "released_tasks": task_ids,
+        "released_task_records": [
+            {
+                "project_id": str(task.get("project_id") or ""),
+                "record_id": str(task.get("record_id") or ""),
+                "task_id": _task_display_id(task),
+            }
+            for task in tasks
+        ],
+        "sci_revoked": bool(sci_token_id),
+        "sci_token_id": sci_token_id or "",
+    }
+
+
+def retire_session(session_id: str) -> Dict[str, Any]:
+    """Flip a session to retired from any live state and release its checkouts."""
+    result = retire_session_with_checkout_release(session_id, reason="explicit_retire")
+    updated = result["session"]
     return updated
 
 
@@ -491,11 +741,6 @@ def touch_session_activity(session_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Session Claim ID (SCI) tokens — ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122)
 # ---------------------------------------------------------------------------
-# Backported to main by ENC-TSK-M44 (ENC-ISS-441 reopened by the 2026-07-08T22:25:44Z
-# main-ref v3-prod Lambda deploy that reverted this v4-first feature). See DOC-B716E8FB10B6
-# COE for the incident. SCI is the session-scoped credential a claimed agent session must
-# hold and present on every governed mutation (Ph3 enforcement gate lives in
-# checkout_service and tracker_mutation — see their _validate_sci_gate).
 
 SCI_PREFIX = "SCI"
 # 24h session lifetime per the ENC-ISS-441 spec — deliberately distinct from the checkout
@@ -571,8 +816,7 @@ def revoke_sci_for_session(
     that is already revoked (or TTL-expired out of the table) is reported with
     ``already_revoked`` and the first revocation's metadata is never overwritten.
     Callers: ``agent.retire`` (reason=explicit_retire) and the ENC-TSK-J94 sweeps
-    (reason=unclaim_ttl_exceeded / idle_ttl_exceeded — not yet backported by M44; see
-    the M44 PR report for the follow-up).
+    (reason=unclaim_ttl_exceeded / idle_ttl_exceeded).
     """
     if not session_id:
         raise ValueError("session_id is required")
@@ -718,14 +962,26 @@ def sweep_idle_sessions(
 
     retired: List[str] = []
     skipped: List[Dict[str, str]] = []
+    revoked_scis: List[str] = []
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
     if not dry_run:
         for sid in candidate_ids:
             try:
-                retire_session(sid)
+                result = retire_session_with_checkout_release(
+                    sid, reason="idle_ttl_exceeded"
+                )
                 retired.append(sid)
             except ValueError as exc:
                 # Concurrently retired/transitioned between scan and update — idempotent skip.
                 skipped.append({"session_id": sid, "reason": str(exc)})
+                continue
+            if result.get("sci_revoked") and result.get("sci_token_id"):
+                revoked_scis.append(str(result["sci_token_id"]))
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
 
     summary: Dict[str, Any] = {
         "enabled": True,
@@ -739,8 +995,292 @@ def sweep_idle_sessions(
         "retired": retired,
         "skipped_count": len(skipped),
         "skipped": skipped,
+        "revoked_sci_count": len(revoked_scis),
+        "revoked_scis": revoked_scis,
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
     }
     logger.info("[INFO] Agent-session idle-sweep: %s", json.dumps(summary, default=str))
+    return summary
+
+
+def _revoke_sci_after_sweep(session_id: str, *, reason: str) -> Optional[str]:
+    """Best-effort SCI revocation for a just-swept session (ENC-ISS-441 / ENC-TSK-J94).
+
+    Returns the token id when THIS call performed the revocation; None when the session
+    had no SCI, the token was already revoked (idempotent re-run), or revocation failed
+    (logged — the next sweep pass re-revokes, and an expired token fails closed anyway).
+    """
+    try:
+        revoked = revoke_sci_for_session(session_id, reason=reason)
+    except (ValueError, BotoCoreError, ClientError) as exc:
+        logger.warning(
+            "[ERROR] SCI revocation failed for swept session %s (reason=%s): %s",
+            session_id, reason, exc,
+        )
+        return None
+    if revoked and not revoked.get("already_revoked"):
+        token_id = str(revoked.get("token_id") or revoked.get("pk") or "")
+        logger.info(
+            "[INFO] Revoked SCI %s for swept session %s (reason=%s)",
+            token_id, session_id, reason,
+        )
+        return token_id or None
+    return None
+
+
+def sweep_unclaimed_sessions(
+    *,
+    unclaim_ttl_minutes: int = AGENT_SESSIONS_UNCLAIM_TTL_MINUTES,
+    now: Optional[dt.datetime] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Reap ghost registrations: ``allocated`` sessions never claimed within the TTL
+    (ENC-ISS-441 retirement lifecycle part 1 / ENC-TSK-J94).
+
+    A session that calls ``agent.register`` but never ``agent.claim`` within
+    ``unclaim_ttl_minutes`` (default 10) of ``created_at`` is flipped to ``retired`` —
+    the ENC-ISS-441 evidence found 10 of 24 production sessions in exactly this ghost
+    state. The reference timestamp is strictly ``created_at`` (an allocated session has
+    no claim heartbeat by definition; io design decision on the issue).
+
+    Same append-only, idempotent construction as ``sweep_idle_sessions``: candidates are
+    retired through ``retire_session``'s conditional flip, concurrent transitions are
+    skipped, nothing is deleted. Although an allocated session should have no SCI (SCIs
+    are minted at claim), revocation is still attempted per retired session as
+    defense-in-depth (reason=unclaim_ttl_exceeded).
+    """
+    if isinstance(unclaim_ttl_minutes, bool) or not isinstance(unclaim_ttl_minutes, int):
+        raise ValueError(
+            f"unclaim_ttl_minutes must be an int, got {type(unclaim_ttl_minutes).__name__}"
+        )
+    if unclaim_ttl_minutes < 0:
+        raise ValueError(f"unclaim_ttl_minutes must be >= 0, got {unclaim_ttl_minutes}")
+
+    now_dt = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = (now_dt - dt.timedelta(minutes=unclaim_ttl_minutes)).strftime(_TS_FORMAT)
+
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": AGENT_SESSIONS_TABLE,
+        "FilterExpression": (
+            "NOT begins_with(session_id, :ctr_pfx) AND #st = :allocated"
+        ),
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {
+            ":ctr_pfx": _serialize("counter#"),
+            ":allocated": _serialize("allocated"),
+        },
+    }
+
+    scanned_allocated = 0
+    candidate_ids: List[str] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        for raw in scan.get("Items", []):
+            item = _deserialize(raw)
+            scanned_allocated += 1
+            created_at = str(item.get("created_at") or "")
+            if created_at and created_at < cutoff:
+                candidate_ids.append(item["session_id"])
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+
+    retired: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    revoked_scis: List[str] = []
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
+    if not dry_run:
+        for sid in candidate_ids:
+            try:
+                result = retire_session_with_checkout_release(
+                    sid, reason="unclaim_ttl_exceeded"
+                )
+                retired.append(sid)
+            except ValueError as exc:
+                # Claimed or retired between scan and update — idempotent skip.
+                skipped.append({"session_id": sid, "reason": str(exc)})
+                continue
+            if result.get("sci_revoked") and result.get("sci_token_id"):
+                revoked_scis.append(str(result["sci_token_id"]))
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
+
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "dry_run": dry_run,
+        "unclaim_ttl_minutes": unclaim_ttl_minutes,
+        "cutoff": cutoff,
+        "scanned_allocated": scanned_allocated,
+        "candidate_count": len(candidate_ids),
+        "candidate_ids": candidate_ids,
+        "retired_count": len(retired),
+        "retired": retired,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "revoked_sci_count": len(revoked_scis),
+        "revoked_scis": revoked_scis,
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
+    }
+    logger.info("[INFO] Agent-session unclaim-sweep: %s", json.dumps(summary, default=str))
+    return summary
+
+
+def _checked_out_session_task_candidates() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "begins_with(#rid, :task_pfx) AND active_agent_session_id <> :empty_s "
+            "AND (#active = :true OR checkout_state = :checked_out)"
+        ),
+        "ExpressionAttributeNames": {
+            "#rid": "record_id",
+            "#active": "active_agent_session",
+        },
+        "ExpressionAttributeValues": {
+            ":task_pfx": _serialize("task#"),
+            ":empty_s": _serialize(""),
+            ":true": _serialize(True),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+    tasks: List[Dict[str, Any]] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        tasks.extend(_deserialize(raw) for raw in scan.get("Items", []))
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+    return tasks
+
+
+def _release_retired_session_checkouts(
+    session_id: str, tasks: List[Mapping[str, Any]], *, reason: str
+) -> Dict[str, Any]:
+    session = get_session(session_id)
+    if session is None:
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "skipped": True,
+            "reason": "session_not_found",
+        }
+    if session.get("status") != "retired":
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "skipped": True,
+            "reason": f"session_status_{session.get('status')}",
+        }
+
+    now = _now_z()
+    transact_items: List[Dict[str, Any]] = []
+    sci_item, sci_token_id = _sci_revoke_transact_item(session, reason=reason, now=now)
+    if sci_item:
+        transact_items.append(sci_item)
+    transact_items.extend(_checkout_release_transact_items(session_id, tasks, reason=reason, now=now))
+    if not transact_items:
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "sci_revoked": False,
+        }
+    if len(transact_items) > _MAX_RETIREMENT_TRANSACTION_ITEMS:
+        raise ValueError(
+            f"Retired session {session_id!r} has too many checkout releases for one "
+            f"atomic transaction ({len(transact_items)} items)."
+        )
+
+    _get_ddb().transact_write_items(TransactItems=transact_items)
+    task_ids = [_task_display_id(task) for task in tasks]
+    return {
+        "session_id": session_id,
+        "released_task_count": len(task_ids),
+        "released_tasks": task_ids,
+        "released_task_records": [
+            {
+                "project_id": str(task.get("project_id") or ""),
+                "record_id": str(task.get("record_id") or ""),
+                "task_id": _task_display_id(task),
+            }
+            for task in tasks
+        ],
+        "sci_revoked": bool(sci_token_id),
+        "sci_token_id": sci_token_id or "",
+    }
+
+
+def release_checkouts_for_retired_sessions(
+    *, dry_run: bool = False, session_ids: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """One-time backfill: release task checkouts held by already-retired sessions."""
+    requested = {str(sid).strip() for sid in (session_ids or []) if str(sid).strip()}
+    checked_out = _checked_out_session_task_candidates()
+    by_session: Dict[str, List[Dict[str, Any]]] = {}
+    skipped_live: List[Dict[str, str]] = []
+    for task in checked_out:
+        sid = str(task.get("active_agent_session_id") or "").strip()
+        if not sid or (requested and sid not in requested):
+            continue
+        session = get_session(sid)
+        if session and session.get("status") == "retired":
+            by_session.setdefault(sid, []).append(task)
+        else:
+            skipped_live.append({
+                "session_id": sid,
+                "task_id": _task_display_id(task),
+                "reason": "session_not_retired" if session else "session_not_found",
+            })
+
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
+    session_results: List[Dict[str, Any]] = []
+    if not dry_run:
+        for sid, tasks in sorted(by_session.items()):
+            result = _release_retired_session_checkouts(
+                sid, tasks, reason="retired_session_backfill"
+            )
+            session_results.append(result)
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
+
+    candidates_by_session = {
+        sid: [_task_display_id(task) for task in tasks]
+        for sid, tasks in sorted(by_session.items())
+    }
+    summary = {
+        "success": True,
+        "dry_run": dry_run,
+        "candidate_session_count": len(by_session),
+        "candidate_task_count": sum(len(tasks) for tasks in by_session.values()),
+        "candidates_by_session": candidates_by_session,
+        "released_session_count": len(released_by_session),
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
+        "session_results": session_results,
+        "skipped_live_count": len(skipped_live),
+        "skipped_live": skipped_live,
+    }
+    logger.info(
+        "[INFO] Retired-session checkout backfill: %s",
+        json.dumps(summary, default=str),
+    )
     return summary
 
 
@@ -752,11 +1292,13 @@ def list_sessions(
     *,
     status: Optional[str] = None,
     agent_type_id: Optional[str] = None,
+    credential_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return all session nodes, excluding counter# sentinel rows.
 
-    Accepts optional ``status`` and ``agent_type_id`` filters. Results are
-    returned in DynamoDB scan order (unordered within a page).
+    Accepts optional ``status``, ``agent_type_id`` and ``credential_id`` filters. The
+    ``credential_id`` filter (ENC-TSK-J04) powers the revoke cascade's session reap.
+    Results are returned in DynamoDB scan order (unordered within a page).
     """
     ddb = _get_ddb()
     filter_parts = ["NOT begins_with(session_id, :ctr_pfx)"]
@@ -770,6 +1312,9 @@ def list_sessions(
     if agent_type_id:
         filter_parts.append("agent_type_id = :agt")
         expr_values[":agt"] = _serialize(agent_type_id)
+    if credential_id:
+        filter_parts.append("credential_id = :cred")
+        expr_values[":cred"] = _serialize(credential_id)
 
     kwargs: Dict[str, Any] = {
         "TableName": AGENT_SESSIONS_TABLE,
@@ -844,3 +1389,287 @@ def find_agent_type(*, surface: str, model: str) -> Optional[Dict[str, Any]]:
     items = [_deserialize(r) for r in scan.get("Items", [])]
     active = [i for i in items if i.get("status") == "active"]
     return active[0] if active else (items[0] if items else None)
+
+
+# ---------------------------------------------------------------------------
+# Agent-credential lifecycle — CRED-<uuid4hex> (ENC-TSK-J04 / ENC-FTR-074 Ph3)
+# ---------------------------------------------------------------------------
+#
+# A credential is the durable, revocable link between an agent IDENTITY (ENC-AGT-NNN)
+# and the M2M auth material minted for it (ENC-FTR-074 Ph1/Ph2 dual-client Cognito).
+# It rides the SAME async DynamoDB Streams -> EventBridge Pipe -> SQS -> graph_sync path
+# as sessions/types; graph_sync projects :AgentCredential nodes and OWNED_BY / DERIVED_FROM
+# edges. There is NO synchronous Neo4j write here — the graph is a derived read-index.
+#
+# Lifecycle:  issue -> (rotate)* -> revoke
+#   * issue_credential:  active credential OWNED_BY an identity.
+#   * rotate_credential: issue a new active credential (rotated_from=parent) then revoke the
+#     parent with reason='rotated'. Graph gets a DERIVED_FROM edge child -> parent.
+#   * revoke_credential: terminal flip to 'revoked'; CASCADES (see below).
+
+
+def get_credential(credential_id: str) -> Optional[Dict[str, Any]]:
+    """Return the credential node for ``credential_id``, or None if absent."""
+    raw = _get_ddb().get_item(
+        TableName=AGENT_CREDENTIALS_TABLE,
+        Key={"credential_id": _serialize(credential_id)},
+        ConsistentRead=True,
+    ).get("Item")
+    return _deserialize(raw) if raw else None
+
+
+def mint_credential_id(caller_payload: Optional[Mapping[str, Any]] = None) -> str:
+    """Mint an opaque server-only credential id (``CRED-<32 hex>``).
+
+    Unlike ENC-SES / ENC-AGT, credential ids do NOT use the shared monotonic base-36
+    counter — a credential handle is secret-adjacent and must not encode issuance order.
+    uuid4 gives a collision-free, order-free id. Server-only: callers may never supply it
+    (forbidden-field guard, mirroring the ENC-TSK-B99 boundary).
+    """
+    _assert_no_caller_id(caller_payload, "credential_id")
+    return f"{CREDENTIAL_ID_PREFIX}-{uuid.uuid4().hex}"
+
+
+def issue_credential(
+    *,
+    agent_identity_id: str,
+    rotated_from: str = "",
+    caller_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Issue a new active credential owned by ``agent_identity_id`` and persist it.
+
+    ``rotated_from`` (optional) is the parent credential id when this credential is the
+    product of a rotation; it drives the graph DERIVED_FROM edge (child -> parent). The
+    caller never supplies the credential id. Returns the persisted item.
+    """
+    _assert_no_caller_id(caller_payload, "credential_id")
+    if not agent_identity_id:
+        raise ValueError("agent_identity_id is required to issue a credential")
+    if not str(agent_identity_id).startswith(AGENT_TYPE_ID_PREFIX):
+        raise ValueError(
+            f"agent_identity_id must be an {AGENT_TYPE_ID_PREFIX}-NNN id, got {agent_identity_id!r}"
+        )
+
+    now = _now_z()
+    last_exc: Optional[Exception] = None
+    for _ in range(_MINT_MAX_ATTEMPTS):
+        credential_id = mint_credential_id()
+        item: Dict[str, Any] = {
+            "credential_id": credential_id,
+            "agent_identity_id": agent_identity_id,
+            "issued_at": now,
+            "status": "active",
+            "revoked_at": "",
+            "revoked_reason": "",
+            "rotated_from": rotated_from or "",
+        }
+        try:
+            _put_node(AGENT_CREDENTIALS_TABLE, "credential_id", item)
+            logger.info(
+                "[INFO] Issued credential %s (identity=%s, rotated_from=%s)",
+                credential_id, agent_identity_id, rotated_from or "-",
+            )
+            return item
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                last_exc = exc
+                continue  # uuid4 collision is astronomically unlikely — retry regardless
+            raise
+    raise IdAllocationError(
+        f"Failed minting credential id after {_MINT_MAX_ATTEMPTS} attempts: {last_exc}"
+    )
+
+
+def rotate_credential(
+    credential_id: str,
+    *,
+    caller_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Rotate an active credential: issue a successor then revoke the parent.
+
+    Returns ``{"new_credential": {...}, "revoked_parent": {...}}``. The successor's
+    ``rotated_from`` points at ``credential_id`` (drives the graph DERIVED_FROM edge). The
+    parent is revoked with reason ``'rotated'`` (NON-cascading — a rotation must not reap
+    the identity's sessions; only an explicit revoke cascades).
+
+    Raises ValueError if the credential is missing or not currently active.
+    """
+    _assert_no_caller_id(caller_payload, "credential_id")
+    parent = get_credential(credential_id)
+    if parent is None:
+        raise ValueError(f"Credential {credential_id!r} not found")
+    if parent.get("status") != "active":
+        raise ValueError(
+            f"Credential {credential_id!r} is not rotatable: status={parent.get('status')!r}"
+        )
+
+    new_credential = issue_credential(
+        agent_identity_id=parent["agent_identity_id"],
+        rotated_from=credential_id,
+    )
+    revoked_parent = _revoke_one(credential_id, reason="rotated")
+    logger.info("[INFO] Rotated credential %s -> %s", credential_id, new_credential["credential_id"])
+    return {"new_credential": new_credential, "revoked_parent": revoked_parent}
+
+
+def _revoke_one(credential_id: str, *, reason: str) -> Dict[str, Any]:
+    """Conditionally flip a single credential active -> revoked. Idempotent-safe:
+    an already-revoked credential returns its current item WITHOUT re-stamping
+    revoked_at/revoked_reason (the conditional guards against double-revoke)."""
+    ddb = _get_ddb()
+    now = _now_z()
+    try:
+        resp = ddb.update_item(
+            TableName=AGENT_CREDENTIALS_TABLE,
+            Key={"credential_id": _serialize(credential_id)},
+            UpdateExpression="SET #st = :revoked, revoked_at = :now, revoked_reason = :reason",
+            ConditionExpression="#st = :active",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":revoked": _serialize("revoked"),
+                ":active": _serialize("active"),
+                ":now": _serialize(now),
+                ":reason": _serialize(reason),
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            existing = get_credential(credential_id)
+            if existing is None:
+                raise ValueError(f"Credential {credential_id!r} not found") from exc
+            # Already revoked — idempotent no-op (cascade re-entry / concurrent revoke).
+            return existing
+        raise
+    return _deserialize(resp.get("Attributes", {}))
+
+
+def revoke_credential(
+    credential_id: str,
+    reason: str = "revoked",
+    *,
+    caller_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Revoke a credential and CASCADE (ENC-TSK-J04 AC#4).
+
+    The cascade is a DynamoDB-side traversal (DynamoDB is the source of truth; the graph
+    edges are a derived read-index that reflects the cascade asynchronously once the
+    stream events flow through graph_sync). In one guarded sequence it:
+
+      (a) flips this credential active -> revoked (conditional, no double-revoke);
+      (b) retires every live session whose ``credential_id`` == this credential, via the
+          existing append-only ``retire_session``; and
+      (c) recursively revokes every credential whose ``rotated_from`` == this credential
+          (the rotation-lineage descendants), reason ``'cascade:<root>'``.
+
+    Idempotent and cycle-safe: a ``visited`` set guards against rotation cycles (which
+    should be impossible given uuid4 parents, but a malformed ``rotated_from`` pointing at
+    an ancestor is defended against), and each conditional flip is a no-op on an
+    already-revoked credential. Returns a summary of everything reaped.
+    """
+    _assert_no_caller_id(caller_payload, "credential_id")
+    if get_credential(credential_id) is None:
+        raise ValueError(f"Credential {credential_id!r} not found")
+
+    revoked: List[str] = []
+    retired_sessions: List[str] = []
+    skipped_sessions: List[Dict[str, str]] = []
+    visited: set = set()
+
+    def _cascade(cred_id: str, reason_for_this: str) -> None:
+        if cred_id in visited:  # cycle / diamond guard
+            return
+        visited.add(cred_id)
+
+        item = _revoke_one(cred_id, reason=reason_for_this)
+        # Record only credentials that this call transitioned or that exist in-lineage.
+        revoked.append(cred_id)
+
+        # (b) reap sessions bound to this credential.
+        for sess in list_sessions(credential_id=cred_id):
+            sid = sess.get("session_id", "")
+            if not sid or sess.get("status") == "retired":
+                continue
+            try:
+                retire_session(sid)
+                retired_sessions.append(sid)
+            except ValueError as exc:
+                skipped_sessions.append({"session_id": sid, "reason": str(exc)})
+
+        # (c) recurse into rotation descendants (rotated_from == cred_id).
+        for child in _credentials_rotated_from(cred_id):
+            child_id = child.get("credential_id", "")
+            if child_id and child_id not in visited:
+                _cascade(child_id, reason_for_this=f"cascade:{credential_id}")
+
+    _cascade(credential_id, reason_for_this=reason)
+
+    summary = {
+        "credential_id": credential_id,
+        "reason": reason,
+        "revoked_credentials": revoked,
+        "revoked_count": len(revoked),
+        "retired_sessions": retired_sessions,
+        "retired_session_count": len(retired_sessions),
+        "skipped_sessions": skipped_sessions,
+    }
+    logger.info("[INFO] Credential revoke cascade: %s", json.dumps(summary, default=str))
+    return summary
+
+
+def _credentials_rotated_from(parent_credential_id: str) -> List[Dict[str, Any]]:
+    """Return all credential nodes whose ``rotated_from`` == ``parent_credential_id``."""
+    ddb = _get_ddb()
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_CREDENTIALS_TABLE,
+        "FilterExpression": (
+            "rotated_from = :parent AND NOT begins_with(credential_id, :ctr_pfx)"
+        ),
+        "ExpressionAttributeValues": {
+            ":parent": _serialize(parent_credential_id),
+            ":ctr_pfx": _serialize("counter#"),
+        },
+    }
+    items: List[Dict[str, Any]] = []
+    scan = ddb.scan(**kwargs)
+    items.extend(_deserialize(r) for r in scan.get("Items", []))
+    while scan.get("LastEvaluatedKey"):
+        scan = ddb.scan(**kwargs, ExclusiveStartKey=scan["LastEvaluatedKey"])
+        items.extend(_deserialize(r) for r in scan.get("Items", []))
+    return items
+
+
+def list_credentials(
+    *,
+    status: Optional[str] = None,
+    agent_identity_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return all credential nodes, excluding counter# sentinel rows (none are minted for
+    this table today, but the filter keeps the read uniform with the other stores)."""
+    ddb = _get_ddb()
+    filter_parts = ["NOT begins_with(credential_id, :ctr_pfx)"]
+    expr_names: Dict[str, str] = {}
+    expr_values: Dict[str, Any] = {":ctr_pfx": _serialize("counter#")}
+    if status:
+        filter_parts.append("#st = :status")
+        expr_names["#st"] = "status"
+        expr_values[":status"] = _serialize(status)
+    if agent_identity_id:
+        filter_parts.append("agent_identity_id = :aid")
+        expr_values[":aid"] = _serialize(agent_identity_id)
+
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_CREDENTIALS_TABLE,
+        "FilterExpression": " AND ".join(filter_parts),
+        "ExpressionAttributeValues": expr_values,
+    }
+    if expr_names:
+        kwargs["ExpressionAttributeNames"] = expr_names
+
+    items: List[Dict[str, Any]] = []
+    scan = ddb.scan(**kwargs)
+    items.extend(_deserialize(r) for r in scan.get("Items", []))
+    while scan.get("LastEvaluatedKey"):
+        scan = ddb.scan(**kwargs, ExclusiveStartKey=scan["LastEvaluatedKey"])
+        items.extend(_deserialize(r) for r in scan.get("Items", []))
+    return items

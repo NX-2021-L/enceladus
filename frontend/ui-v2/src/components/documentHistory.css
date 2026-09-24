@@ -1,0 +1,210 @@
+/* ENC-TSK-P81 -- document history / rewind / diff panel. Tokens follow the
+   same conventions as documentSections.css / recordDetailHub.css. */
+
+.ev2-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ev2-history__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  background: var(--bg-surface);
+  border: var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+}
+
+.ev2-history__filter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+}
+
+.ev2-history__filter-label {
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-weight: var(--fw-bold);
+}
+
+.ev2-history__filter-input,
+.ev2-history__filter-select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-inset, var(--bg-surface));
+  border: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+}
+
+.ev2-history__status {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  padding: var(--space-1);
+}
+
+.ev2-history__status--error {
+  color: var(--enc-crimson, var(--danger));
+}
+
+.ev2-history__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ev2-history__event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--bg-surface);
+  border: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  cursor: pointer;
+}
+
+.ev2-history__event--selected {
+  border-color: var(--accent);
+}
+
+.ev2-history__event--rejected {
+  border-color: var(--enc-crimson, var(--danger));
+}
+
+.ev2-history__event-op {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-bold);
+}
+
+.ev2-history__event-actor,
+.ev2-history__event-surface {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.ev2-history__event-anchor {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 16rem;
+  font-size: var(--text-xs);
+}
+
+.ev2-history__event-version {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.ev2-history__event-ts {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.ev2-history__event-badge {
+  color: var(--enc-crimson, var(--danger));
+  border: 1px solid var(--enc-crimson, var(--danger));
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-bold);
+}
+
+.ev2-history__load-more {
+  align-self: flex-start;
+  font: inherit;
+  background: none;
+  border: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.ev2-history__rewind,
+.ev2-history__diff {
+  background: var(--bg-surface);
+  border: var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+}
+
+.ev2-history__rewind-head,
+.ev2-history__diff-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.ev2-history__rewind-pill {
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--fg-muted);
+  border: var(--border-subtle);
+  border-radius: 999px;
+  padding: 0 var(--space-2);
+}
+
+.ev2-history__rewind-badge {
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  font-weight: var(--fw-bold);
+}
+
+.ev2-history__rewind-badge--verified {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.ev2-history__rewind-badge--mismatch {
+  color: var(--enc-crimson, var(--danger));
+  border: 1px solid var(--enc-crimson, var(--danger));
+}
+
+.ev2-history__rewind-version {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+
+.ev2-history__rewind-status,
+.ev2-history__diff-status {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.ev2-history__rewind-status--error,
+.ev2-history__diff-status--error {
+  color: var(--enc-crimson, var(--danger));
+}
+
+.ev2-history__diff-truncated {
+  color: var(--v2-status-warning, #c9a15c);
+}
+
+.ev2-history__diff-body {
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ev2-history__diff-line--add {
+  background: rgba(46, 160, 67, 0.15);
+}
+
+.ev2-history__diff-line--del {
+  background: rgba(248, 81, 73, 0.15);
+}

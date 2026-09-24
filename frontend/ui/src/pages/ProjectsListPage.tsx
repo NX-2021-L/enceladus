@@ -12,7 +12,14 @@ export function ProjectsListPage() {
 
   if (isPending) return <LoadingState />
   if (isError) return <ErrorState />
-  if (!projects.length) return <EmptyState message="No projects found" />
+  if (!projects.length) {
+    return (
+      <EmptyState
+        message="No projects yet"
+        action={{ label: '+ New Project', to: '/projects/create' }}
+      />
+    )
+  }
 
   return (
     <div className="p-4 space-y-3">

@@ -43,9 +43,8 @@ aws lambda get-function-configuration \
   --function-name enceladus-governance-audit \
   --region us-west-2
 
-aws lambda list-event-source-mappings \
-  --function-name enceladus-governance-audit \
-  --region us-west-2
+aws pipes list-pipes --region us-west-2 \
+  --query "Pipes[?contains(Name, 'governance-audit')].[Name,CurrentState,Source,Target]"
 ```
 
 Runtime smoke test:

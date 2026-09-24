@@ -87,6 +87,7 @@ from http_utils import _error, _json_body, _path_method, _response
 from project_utils import _load_project_meta
 from mcp_integration import _load_mcp_server_module
 from tracker_ops import _append_tracker_history, _collect_tracker_snapshots, _related_records_mutated, _requires_related_record_mutation_guard, _set_tracker_status
+from anthropic_batch import NON_INTERACTIVE_WORKLOADS
 from decomposition import (
     _acquire_dispatch_lock,
     _classify_dispatch_failure,
@@ -121,6 +122,7 @@ from dispatch_ssm import (
     _append_dispatch_worklog,
     _build_result_payload,
     _dispatch_claude_api,
+    _dispatch_claude_batch_api,
     _dispatch_openai_codex_api,
     _is_timeout_failure,
     _lambda_provider_preflight,
@@ -129,6 +131,7 @@ from dispatch_ssm import (
     _refresh_request_from_ssm,
     _send_dispatch,
 )
+from provider_adapters import dispatch_via_provider_adapter, wire_default_provider_adapters
 from lifecycle import (
     _compute_plan_status,
     _emit_callback_event,
@@ -161,6 +164,24 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
+
+_PROVIDER_ADAPTERS_WIRED = False
+
+
+def _ensure_provider_adapters_wired() -> None:
+    global _PROVIDER_ADAPTERS_WIRED
+    if _PROVIDER_ADAPTERS_WIRED:
+        return
+
+    def _bedrock_unavailable(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        raise RuntimeError("bedrock_agent direct dispatch is not wired in handlers path")
+
+    wire_default_provider_adapters(
+        claude_dispatch=_dispatch_claude_api,
+        codex_dispatch=_dispatch_openai_codex_api,
+        bedrock_dispatch=_bedrock_unavailable,
+    )
+    _PROVIDER_ADAPTERS_WIRED = True
 
 
 def _mcp_jsonrpc_response(request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -515,8 +536,10 @@ def _handle_capabilities() -> Dict[str, Any]:
                                 "description": "Deferred batch execution via Anthropic Message Batches API for 50% cost savings",
                                 "max_timeout_hours": 24,
                                 "cost_savings_estimate": "50%",
+                                "poll_interval_seconds": 60,
                                 "incompatible_modes": ["preflight"],
                                 "preference_field": "provider_preferences.batch_eligible",
+                                "non_interactive_workloads": sorted(NON_INTERACTIVE_WORKLOADS.keys()),
                             },
                         },
                         "secret_ref_configured": provider_secrets["claude_agent_sdk"].get("secret_ref_configured"),
@@ -1093,33 +1116,30 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         # Check if batch mode is requested via provider_preferences
         is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
 
+        dispatch_meta: Optional[Dict[str, Any]] = None
         if is_batch and execution_mode == "claude_agent_sdk":
             # Batch mode: set batch_context metadata, dispatch async
             request["batch_context"] = {
+                **(request.get("batch_context") or {}),
                 "batch_eligible": True,
                 "batch_submitted_at": now,
                 "batch_max_timeout_hours": 24,
                 "cost_savings_estimate": "50%",
             }
-            dispatch_meta = _dispatch_claude_api(
+            dispatch_meta = _dispatch_claude_batch_api(
                 request=request,
                 prompt=prompt,
                 dispatch_id=dispatch_id,
             )
-        elif execution_mode == "claude_agent_sdk":
-            dispatch_meta = _dispatch_claude_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
+        if dispatch_meta is None:
+            _ensure_provider_adapters_wired()
+            dispatch_meta = dispatch_via_provider_adapter(
+                execution_mode,
+                request,
+                prompt,
+                dispatch_id,
             )
-        elif execution_mode in {"codex_app_server", "codex_full_auto"}:
-            dispatch_meta = _dispatch_openai_codex_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-                execution_mode=execution_mode,
-            )
-        else:
+        if dispatch_meta is None:
             dispatch_meta = _send_dispatch(
                 request,
                 execution_mode=execution_mode,
@@ -1193,6 +1213,21 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         if execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto"}:
             provider_result = dispatch_meta.get("provider_result") or {}
             terminal_state = str(dispatch_meta.get("status") or "succeeded").strip().lower()
+
+            if terminal_state == "running":
+                request["updated_at"] = now
+                request["updated_epoch"] = now_epoch
+                _update_request(request)
+                return _response(
+                    202,
+                    {
+                        "success": True,
+                        "request": _redact_request(request),
+                        "dispatch": dispatch_meta,
+                        "plan_status": _compute_plan_status(request),
+                    },
+                )
+
             if terminal_state not in _VALID_TERMINAL_STATES:
                 terminal_state = "succeeded"
 

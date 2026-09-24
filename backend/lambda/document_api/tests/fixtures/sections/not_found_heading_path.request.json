@@ -1,0 +1,10 @@
+{
+  "anchor": {
+    "heading_path": [
+      "Nonexistent",
+      "Nested"
+    ]
+  },
+  "op": "replace",
+  "body": "x"
+}

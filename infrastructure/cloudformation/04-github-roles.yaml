@@ -380,19 +380,28 @@ Resources:
                 Effect: Allow
                 Action: "events:ListRules"
                 Resource: "arn:aws:events:us-west-2:356364570033:rule/*"
-        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1' (uncodified out-of-band grant)
+        # ENC-TSK-P99 / ENC-ISS-775 codify: this policy used to be gamma-only
+        # (ENC-TSK-L55/K59). A separate prod-scoped policy (ENC-TSK-P97) was
+        # tried, but a second put-role-policy call on this role hit the
+        # aggregate inline-policy quota (10,240 bytes) -- run 35169979296
+        # LimitExceeded. Fixed by merging both dashboard ARNs into ONE
+        # statement under this SAME existing policy name instead (see
+        # iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml and its prod
+        # sibling, which both now write this identical merged document).
         - PolicyName: enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: GammaCloudWatchDashboardBootstrap
+              - Sid: CloudWatchDashboardOps
                 Effect: Allow
                 Action:
                   - "cloudwatch:PutDashboard"
                   - "cloudwatch:GetDashboard"
                   - "cloudwatch:DeleteDashboards"
                   - "cloudwatch:ListDashboards"
-                Resource: "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma"
+                Resource:
+                  - "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma"
+                  - "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture"
         # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-gamma-ddb-sns-v1' (uncodified out-of-band grant)
         - PolicyName: enceladus-cfn-deploy-gamma-ddb-sns-v1
           PolicyDocument:
@@ -1066,6 +1075,107 @@ Resources:
               - s3:PutLifecycleConfiguration
             Resource: "arn:aws:s3:::jreese-net"
 
+  GovernanceMartStackOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-governance-mart-ops
+      Description: >
+        ENC-TSK-O98 / ENC-ISS-660: Glue database, mart bucket and default-group
+        Scheduler reach for the gamma governance mart resources declared in
+        02-compute.yaml (ENC-TSK-O80). Gamma-scoped; production's out-of-band
+        mart resources are deliberately not reachable.
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # GovernanceMartDatabaseGamma (AWS::Glue::Database, name "devops-gamma").
+          # DeleteDatabase cascades to contained tables and user-defined
+          # functions, so the delete path needs those child ARNs too or the
+          # rollback cannot clean up -- which is exactly what happened on
+          # 2026-08-23 (AccessDenied on glue:DeleteDatabase, retried 3x, stack
+          # left UPDATE_ROLLBACK_COMPLETE "one or more resources could not be
+          # deleted"). The catalog ARN is required by Glue for any database call.
+          - Sid: GovernanceMartGlueDatabaseGamma
+            Effect: Allow
+            Action:
+              - glue:CreateDatabase
+              - glue:GetDatabase
+              - glue:UpdateDatabase
+              - glue:DeleteDatabase
+              - glue:GetTables
+              - glue:DeleteTable
+              - glue:GetUserDefinedFunctions
+              - glue:DeleteUserDefinedFunction
+              - glue:TagResource
+              - glue:UntagResource
+              - glue:GetTags
+            Resource:
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:database/devops-gamma"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:table/devops-gamma/*"
+              - !Sub "arn:aws:glue:us-west-2:${AWS::AccountId}:userDefinedFunction/devops-gamma/*"
+
+          # GovernanceMartBucketGamma (AWS::S3::Bucket, "devops-agentcli-compute-gamma").
+          # Bucket-level only -- no object actions. The mart Lambda writes its
+          # own objects under its own execution role; the deploy role has no
+          # business reading or writing mart data, only provisioning the bucket.
+          # The read actions beyond the three properties the template sets
+          # (encryption, public-access-block, tags) are what CloudFormation's
+          # S3 bucket handler calls on read-back; denying them fails the stack
+          # just as surely as denying CreateBucket.
+          - Sid: GovernanceMartBucketGamma
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutEncryptionConfiguration
+              - s3:GetEncryptionConfiguration
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:GetBucketVersioning
+              - s3:GetLifecycleConfiguration
+              - s3:GetBucketOwnershipControls
+            Resource:
+              - "arn:aws:s3:::devops-agentcli-compute-gamma"
+
+          # GovernanceMartScheduleGamma (AWS::Scheduler::Schedule,
+          # "devops-governance-mart-daily-gamma"). THE THIRD GAP. The existing
+          # EventBridgeSchedulerOps statement on CloudFormationDeployPolicy --
+          # and the identical statement applied live by
+          # iam-cfn-deploy-role-scheduler-patch.yml -- are both scoped to
+          # schedule/rhythm-*/* and schedule/enceladus-*/*. This schedule sets
+          # no GroupName, so its ARN is schedule/default/devops-governance-mart-daily-gamma,
+          # matched by neither. Creating a schedule in a group also requires
+          # GetScheduleGroup on that group, hence schedule-group/default.
+          # Deliberately NOT schedule/default/* -- only the mart's own prefix.
+          - Sid: GovernanceMartSchedulerDefaultGroupGamma
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:GetSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:TagResource
+              - scheduler:UntagResource
+            Resource:
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/default/devops-governance-mart-*"
+          - Sid: GovernanceMartSchedulerDefaultGroupRead
+            Effect: Allow
+            Action:
+              - scheduler:GetScheduleGroup
+            Resource:
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/default"
+
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1195,6 +1305,32 @@ Resources:
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+              # ENC-TSK-L06 / B63 Phase 2 AC-6: the ID Service's HMAC provenance-signing
+              # secret is declared as a CFN-managed AWS::SecretsManager::Secret resource
+              # (02-compute.yaml IdServiceHmacSecret) using GenerateSecretString so no
+              # plaintext ever passes through a git commit or an agent session. CFN's
+              # GenerateSecretString mechanism calls secretsmanager:GetRandomPassword
+              # internally to generate the value BEFORE the CreateSecret call -- that
+              # action does not support resource-level scoping in IAM (AWS requires
+              # Resource: "*" for it; confirmed via the live rollback failure on
+              # enceladus-compute-gamma 2026-07-07: "not authorized to perform:
+              # secretsmanager:GetRandomPassword ... (Service: SecretsManager)").
+              # CreateSecret/TagResource are scoped to the enceladus/id-service/*
+              # secret path only.
+              - Sid: SecretsManagerIdServiceProvision
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:enceladus/id-service/*"
+              - Sid: SecretsManagerGetRandomPassword
+                Effect: Allow
+                # GetRandomPassword has no resource type in IAM (must be "*"); it is the
+                # mechanism CFN's GenerateSecretString calls internally to mint secret
+                # material server-side, never exposing plaintext to this role's caller.
+                Action: secretsmanager:GetRandomPassword
+                Resource: "*"
               - Sid: EC2Fleet
                 Effect: Allow
                 Action:
@@ -1516,6 +1652,24 @@ Resources:
                   - lambda:CreateAlias
                   - lambda:UpdateAlias
                 Resource: "*"
+              # ENC-TSK-N80 / ENC-ISS-591: lifecycle hygiene verbs for _deploy.yml's
+              # SnapStart heal + version prune. UpdateFunctionConfiguration on the
+              # bare gamma function ARNs only; DeleteFunction on VERSION-QUALIFIED
+              # gamma ARNs only -- the role can delete stale versions but is
+              # structurally unable to delete a whole function (an unqualified
+              # delete-function targets the bare ARN, which this does not grant).
+              # One-off live application ahead of the next roles-stack deploy:
+              # .github/workflows/iam-v4gamma-deploy-role-lambda-lifecycle-patch.yml
+              - Sid: V4GammaLambdaLifecycle
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionConfiguration
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-gamma"
+              - Sid: V4GammaLambdaVersionPrune
+                Effect: Allow
+                Action:
+                  - lambda:DeleteFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-gamma:*"
               # S3 read for artifact version probing (belt-and-suspenders;
               # update-function-code fetches via Lambda service role, but
               # the resolve-job S3 probe runs under this env's job context

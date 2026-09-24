@@ -34,6 +34,7 @@ from enceladus_shared.warehouse_registration import (  # noqa: E402
     build_contract,
 )
 
+import lambda_function  # noqa: E402
 import mart_project  # noqa: E402
 import mart_schema  # noqa: E402
 from mart_source import is_sentinel  # noqa: E402
@@ -361,3 +362,156 @@ def test_terminal_status_vocabulary_is_case_folded():
     assert mart_project.is_terminal("Completed")
     assert not mart_project.is_terminal("in-progress")
     assert not mart_project.is_terminal(None)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O80: EventBridge Scheduler retries pin `last_day` via the
+# `<aws.scheduler.scheduled-time>` context attribute (Target.Input on
+# GovernanceMartScheduleGamma, 02-compute.yaml). Scheduler substitutes that
+# placeholder with the schedule's INTENDED fire time -- constant across every
+# retry attempt of one firing -- as an ISO-8601 string, e.g.
+# "2026-08-23T06:00:00Z". These tests pin the handler's parsing of that shape
+# so a future change to `_parse_last_day` can't silently break the one thing
+# that makes a retry crossing midnight UTC still overwrite the day it was
+# meant to, instead of quietly drifting onto the day it happened to run.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_last_day_accepts_a_bare_date():
+    assert lambda_function._parse_last_day("2026-08-23") == date(2026, 8, 23)
+
+
+def test_parse_last_day_accepts_the_scheduler_scheduled_time_shape():
+    # What Scheduler actually substitutes for <aws.scheduler.scheduled-time>.
+    assert lambda_function._parse_last_day("2026-08-23T06:00:00Z") == date(2026, 8, 23)
+
+
+def test_parse_last_day_pins_the_intended_day_across_a_late_retry():
+    # The scenario retries introduce that a bare Rule never had to consider: a
+    # retry firing after midnight UTC for a schedule that was meant to run the
+    # day before. Because Input carries the ORIGINAL scheduled-time (constant
+    # per firing, not per attempt), a retry at 00:12 the next day still
+    # resolves to the day the schedule intended.
+    original_fire_time = "2026-08-23T06:00:00Z"
+    late_retry_wall_clock = date(2026, 8, 24)  # what datetime.now() would give
+    resolved = lambda_function._parse_last_day(original_fire_time)
+    assert resolved == date(2026, 8, 23)
+    assert resolved != late_retry_wall_clock
+
+
+def test_parse_last_day_treats_falsy_as_unset():
+    assert lambda_function._parse_last_day(None) is None
+    assert lambda_function._parse_last_day("") is None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-O81 -- dead-man's-switch heartbeat.
+#
+# The whole value of this signal is that it is emitted ONLY when the work
+# genuinely landed. The paired alarm sets TreatMissingData: breaching, so a
+# heartbeat on a path where nothing was written would not merely be noise --
+# it would actively suppress the alarm that exists to catch a silent stop.
+# That is the ENC-ISS-665 self-fulfilling-signal defect, and these tests exist
+# to keep it from being reintroduced.
+# ---------------------------------------------------------------------------
+
+
+class _HeartbeatSpy:
+    """Records put_metric_data calls instead of reaching CloudWatch."""
+
+    def __init__(self):
+        self.calls = []
+
+    def put_metric_data(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+@pytest.fixture
+def heartbeat_spy(monkeypatch):
+    spy = _HeartbeatSpy()
+    monkeypatch.setattr(lambda_function.boto3, "client", lambda service: spy)
+    return spy
+
+
+class _Ctx:
+    function_name = "devops-governance-mart-gamma"
+
+
+def _summary(files=1):
+    return {
+        "write_timestamp": "2026-08-23T21:32:33Z",
+        "table_count": 1,
+        "total_rows": 1,
+        "total_bytes": 1,
+        "tables": [{"table": "dim_record", "files": files}],
+    }
+
+
+def _stub_refresh(monkeypatch, files=1):
+    class _Result:
+        def as_dict(self):
+            return _summary(files=files)
+
+    monkeypatch.setattr(lambda_function, "refresh_mart", lambda **kwargs: _Result())
+
+
+def test_heartbeat_is_emitted_on_a_clean_run(monkeypatch, heartbeat_spy):
+    _stub_refresh(monkeypatch)
+    lambda_function.lambda_handler({}, _Ctx())
+
+    assert len(heartbeat_spy.calls) == 1
+    call = heartbeat_spy.calls[0]
+    assert call["Namespace"] == "Enceladus/GovernanceMart"
+    datum = call["MetricData"][0]
+    assert datum["MetricName"] == "MartLastSuccess"
+    assert datum["Value"] == 1
+    assert datum["Dimensions"] == [
+        {"Name": "FunctionName", "Value": "devops-governance-mart-gamma"}
+    ]
+
+
+def test_no_heartbeat_when_the_refresh_raises(monkeypatch, heartbeat_spy):
+    """The failure path must stay silent: absence is what the alarm reads."""
+
+    def _boom(**kwargs):
+        raise RuntimeError("StorageWriteError NoSuchBucket")
+
+    monkeypatch.setattr(lambda_function, "refresh_mart", _boom)
+    with pytest.raises(RuntimeError):
+        lambda_function.lambda_handler({}, _Ctx())
+
+    assert heartbeat_spy.calls == []
+
+
+def test_no_heartbeat_on_a_dry_run(monkeypatch, heartbeat_spy):
+    """A dry run writes nothing, so it is not a day the series should count."""
+    _stub_refresh(monkeypatch)
+    lambda_function.lambda_handler({"dry_run": True}, _Ctx())
+
+    assert heartbeat_spy.calls == []
+
+
+def test_no_heartbeat_on_a_full_refresh_violation(monkeypatch, heartbeat_spy):
+    """Objects landed, but in the WRONG SHAPE -- not a healthy day either."""
+    _stub_refresh(monkeypatch, files=2)
+    result = lambda_function.lambda_handler({}, _Ctx())
+
+    assert result["body"]["full_refresh_violations"] == ["dim_record"]
+    assert heartbeat_spy.calls == []
+
+
+def test_publish_failure_does_not_fail_the_run(monkeypatch):
+    """A telemetry fault must not become a data outage.
+
+    The alarm fails safe in the correct direction: no datapoint breaches, which
+    is a false alarm rather than a silent stop.
+    """
+    _stub_refresh(monkeypatch)
+
+    class _Broken:
+        def put_metric_data(self, **kwargs):
+            raise lambda_function.ClientError({"Error": {"Code": "AccessDenied"}}, "PutMetricData")
+
+    monkeypatch.setattr(lambda_function.boto3, "client", lambda service: _Broken())
+    result = lambda_function.lambda_handler({}, _Ctx())
+    assert result["statusCode"] == 200

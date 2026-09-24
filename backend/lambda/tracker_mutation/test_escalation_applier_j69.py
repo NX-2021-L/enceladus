@@ -154,7 +154,8 @@ class TestApplierGuards(_ApplierBase):
         ddb = _FakeDdb(escalation=_escalation_item(status="requested"))
         resp = self._apply(ddb)
         self.assertEqual(409, resp["statusCode"])
-        self.assertIn("not 'approved'", json.loads(resp["body"])["error"])
+        self.assertIn("applies only while status=approved or failed",
+                      json.loads(resp["body"])["error"])
         self.assertEqual([], ddb.updates)
 
     def test_denied_status_refused_409(self):
@@ -274,6 +275,98 @@ class TestApplierFsmWalk(_ApplierBase):
             self.lf._escalation_fsm_transition(
                 "enceladus", "ENC-ESC-001", "requested", "applied", "system")
 
+    def test_escalation_fsm_helper_accepts_failed_to_applying_only(self):
+        # ENC-TSK-P89: failed->applying is now legal, but only that one edge —
+        # denied and applied stay terminal for the applying transition.
+        ddb = _FakeDdb(escalation=_escalation_item(status="failed"))
+        with mock.patch.object(self.lf, "_get_ddb", return_value=ddb):
+            self.assertTrue(self.lf._escalation_fsm_transition(
+                "enceladus", "ENC-ESC-001", "failed", "applying", "system"))
+        with self.assertRaises(ValueError):
+            self.lf._escalation_fsm_transition(
+                "enceladus", "ENC-ESC-001", "denied", "applying", "system")
+        with self.assertRaises(ValueError):
+            self.lf._escalation_fsm_transition(
+                "enceladus", "ENC-ESC-001", "applied", "applying", "system")
+
+
+class TestFailedApplyRetry(_ApplierBase):
+    """ENC-TSK-P89: re-drive of an escalation parked in status=failed with
+    applied_at unset (the ENC-ESC-105 prod gap — a DynamoDB ValidationException
+    on the target write left the escalation with no legal retry path)."""
+
+    def test_failed_unapplied_retries_end_to_end_applied(self):
+        ddb = _FakeDdb(
+            escalation=_override_escalation("closed", field_values={"status": "closed"},
+                                            status="failed"),
+            target=_target_task(status="coding-complete", checked_out=False))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        body = json.loads(resp["body"])
+        self.assertEqual("applied", body["status"])
+        self.assertTrue(body["applied_at"])
+
+        esc_updates = ddb.escalation_updates()
+        self.assertEqual(2, len(esc_updates))
+        applying, applied = esc_updates
+        # The gate is still a conditional write on the CURRENT status value.
+        self.assertEqual({"S": "failed"}, applying["ExpressionAttributeValues"][":from_status"])
+        self.assertEqual({"S": "applying"}, applying["ExpressionAttributeValues"][":to_status"])
+        self.assertIn("attribute_not_exists(applied_at)", applying["ConditionExpression"])
+        # retry_count incremented via if_not_exists(...) + 1, starting from 0.
+        self.assertIn("retry_count = if_not_exists(retry_count, :zero) + :one",
+                      applying["UpdateExpression"])
+        self.assertEqual({"N": "1"}, applying["ExpressionAttributeValues"][":one"])
+        # Two events land in the SAME atomic write: the ordinary "applying"
+        # transition event, and a "retry" history entry that never erases the
+        # prior failure's audit (nothing about the old event/result is removed).
+        events = applying["ExpressionAttributeValues"][":event"]["L"]
+        self.assertEqual(2, len(events))
+        self.assertEqual("applying", events[0]["M"]["event_type"]["S"])
+        self.assertEqual("retry", events[1]["M"]["event_type"]["S"])
+        self.assertIn("at", events[1]["M"])
+        retry_detail = json.loads(events[1]["M"]["detail"]["S"])
+        self.assertEqual("re-drive after failed apply (ENC-TSK-P89)",
+                         retry_detail["description"])
+
+        self.assertEqual({"S": "applied"}, applied["ExpressionAttributeValues"][":to_status"])
+        self.assertEqual(1, len(ddb.target_updates()))
+
+    def test_failed_with_applied_at_set_is_no_op_without_any_write(self):
+        # Stale/racing state: failed status but applied_at already landed by a
+        # concurrent applier — the exactly-once guard wins before any FSM walk.
+        ddb = _FakeDdb(escalation=_override_escalation(
+            "closed", status="failed", applied_at="2026-09-16T22:50:00Z"))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        body = json.loads(resp["body"])
+        self.assertTrue(body["no_op"])
+        self.assertEqual([], ddb.updates)
+
+    def test_requested_and_denied_still_refused_409(self):
+        for status in ("requested", "denied", "denied_with_guidance"):
+            with self.subTest(status=status):
+                ddb = _FakeDdb(escalation=_override_escalation("closed", status=status))
+                resp = self._apply(ddb)
+                self.assertEqual(409, resp["statusCode"])
+                self.assertEqual([], ddb.updates)
+
+    def test_two_sequential_redrives_of_same_failed_escalation_apply_exactly_once(self):
+        first = _FakeDdb(
+            escalation=_override_escalation("closed", field_values={"status": "closed"},
+                                            status="failed"),
+            target=_target_task(status="coding-complete", checked_out=False))
+        resp1 = self._apply(first)
+        self.assertEqual(200, resp1["statusCode"])
+        self.assertEqual(1, len(first.target_updates()))
+
+        # Second re-drive sees the now-applied escalation; must be a pure no-op.
+        second = _FakeDdb(escalation=_override_escalation(
+            "closed", status="applied", applied_at="2026-09-16T22:55:00Z"))
+        resp2 = self._apply(second)
+        self.assertTrue(json.loads(resp2["body"])["no_op"])
+        self.assertEqual([], second.updates)
+
 
 class TestDeployArcChangeApply(_ApplierBase):
     def test_arc_rewrite_preserves_active_checkout(self):
@@ -318,12 +411,14 @@ class TestDeployArcChangeApply(_ApplierBase):
         self.assertEqual([{"S": "ENC-ESC-001"}], provenance)
 
 
-def _override_escalation(target_status, field_values=None, target="ENC-TSK-J10"):
+def _override_escalation(target_status, field_values=None, target="ENC-TSK-J10",
+                         status="approved", applied_at=None):
     payload = {"target_status": target_status}
     if field_values is not None:
         payload["field_values"] = field_values
     return _escalation_item(mutation_type="direct_state_override",
-                            payload=payload, target=target)
+                            payload=payload, target=target,
+                            status=status, applied_at=applied_at)
 
 
 class TestDirectStateOverrideApply(_ApplierBase):
@@ -414,6 +509,125 @@ class TestDirectStateOverrideApply(_ApplierBase):
         resp = self._apply(ddb)
         self.assertEqual(200, resp["statusCode"])
         self.assertEqual(1, len(ddb.target_updates()))
+
+
+def _split_top_level(text, sep=","):
+    """Split `text` on `sep` only outside parentheses (paren-depth 0)."""
+    parts, current, depth = [], [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _resolved_set_paths(target_update):
+    """Parse a captured update_item call's SET clauses into top-level
+    attribute paths, resolving every #alias through ExpressionAttributeNames.
+    Returns them in clause order so a duplicate top-level path (the
+    ENC-ISS-759 "Two document paths overlap" collision) is visible to the
+    caller as a repeated entry.
+    """
+    expression = target_update["UpdateExpression"]
+    names = target_update.get("ExpressionAttributeNames", {})
+    set_section = expression.split(" ADD ", 1)[0]
+    assert set_section.startswith("SET "), set_section
+    set_section = set_section[len("SET "):]
+    paths = []
+    for clause in _split_top_level(set_section):
+        lhs = clause.split("=", 1)[0].strip()
+        top_level = lhs.split(".")[0].split("[")[0].strip()
+        paths.append(names.get(top_level, top_level))
+    return paths
+
+
+class TestDirectStateOverrideFieldValuesCollision(_ApplierBase):
+    """ENC-ISS-759 regression.
+
+    ENC-ESC-105 and ENC-ESC-106 are stored with field_values restating
+    payload.target_status under the key "status" -- the old code rendered
+    both #st and a #fv{i} alias to the top-level `status` path in the same
+    UpdateExpression, and DynamoDB rejects that whole UpdateItem call with
+    ValidationException "Two document paths overlap" (no partial write).
+    These tests assert the applier now collapses every reserved bookkeeping
+    path to exactly one SET clause. test_status_key_collapses_to_one_alias
+    fails against the pre-fix code: sorted(field_values.items()) renders
+    #fv1 -> "status" alongside the unconditional #st -> "status".
+    """
+
+    def test_status_key_collapses_to_one_alias(self):
+        ddb = _FakeDdb(
+            escalation=_override_escalation(
+                "deploy-success",
+                {"status": "deploy-success",
+                 "live_validation_evidence": "gamma smoke 200 OK"}),
+            target=_target_task(status="pr", checked_out=False))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        target_update = ddb.target_updates()[0]
+        paths = _resolved_set_paths(target_update)
+        self.assertEqual(len(paths), len(set(paths)),
+                          f"duplicate top-level path(s) in UpdateExpression: {paths}")
+        self.assertEqual(1, paths.count("status"))
+        values = target_update["ExpressionAttributeValues"]
+        self.assertEqual({"S": "deploy-success"}, values[":target_status"])
+        result = json.loads(resp["body"])["result"]
+        self.assertEqual(["status"], result["after"]["dropped_field_values"])
+
+    def test_status_mismatch_target_status_wins_and_drop_is_recorded(self):
+        ddb = _FakeDdb(
+            escalation=_override_escalation("deploy-success", {"status": "closed"}),
+            target=_target_task(status="pr", checked_out=False))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        result = json.loads(resp["body"])["result"]
+        self.assertEqual("deploy-success", result["after"]["status"])
+        self.assertEqual(["status"], result["after"]["dropped_field_values"])
+        target_update = ddb.target_updates()[0]
+        values = target_update["ExpressionAttributeValues"]
+        self.assertEqual({"S": "deploy-success"}, values[":target_status"])
+        paths = _resolved_set_paths(target_update)
+        self.assertEqual(len(paths), len(set(paths)))
+        note = values[":hentry"]["L"][0]["M"]["description"]["S"]
+        self.assertIn("dropped_field_values", note)
+        self.assertIn("status", note)
+
+    def test_bookkeeping_key_collision_is_dropped(self):
+        ddb = _FakeDdb(
+            escalation=_override_escalation(
+                "deploy-success", {"updated_at": "2020-01-01T00:00:00Z",
+                                    "live_validation_evidence": "ok"}),
+            target=_target_task(status="pr", checked_out=False))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        target_update = ddb.target_updates()[0]
+        paths = _resolved_set_paths(target_update)
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(1, paths.count("updated_at"))
+        result = json.loads(resp["body"])["result"]
+        self.assertEqual(["updated_at"], result["after"]["dropped_field_values"])
+
+    def test_closure_still_emits_escalated_closure_and_closed_count_once(self):
+        ddb = _FakeDdb(
+            escalation=_override_escalation(
+                "closed", {"status": "closed", "live_validation_evidence": "ok"}),
+            target=_target_task(status="deploy-success", checked_out=False))
+        resp = self._apply(ddb)
+        self.assertEqual(200, resp["statusCode"])
+        target_update = ddb.target_updates()[0]
+        expression = target_update["UpdateExpression"]
+        paths = _resolved_set_paths(target_update)
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(1, expression.count("escalated_closure"))
+        self.assertEqual(1, expression.count("closed_count"))
+        self.assertIn("ADD closed_count :one_count", expression)
 
 
 class TestValidatorsUntouched(unittest.TestCase):

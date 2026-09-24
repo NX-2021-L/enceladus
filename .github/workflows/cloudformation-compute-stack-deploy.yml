@@ -28,6 +28,7 @@ on:
     paths:
       - "infrastructure/cloudformation/01-data.yaml"
       - "infrastructure/cloudformation/02-compute.yaml"
+      - "tools/apply_rhythm_artifact_lifecycle.py"
       - ".github/workflows/cloudformation-compute-stack-deploy.yml"
   workflow_dispatch:
     inputs:
@@ -46,6 +47,69 @@ on:
         type: string
         required: false
         default: "manual compute stack deploy"
+      # ENC-TSK-O61 / ENC-ISS-652. Before this input, the target plane was derived
+      # SOLELY from github.ref, so the cutover's actual pairing -- v4/main's template
+      # against the PROD stack enceladus-compute -- could not be rendered by any lane.
+      # The first sight of the real prod change-set would have been the moment it
+      # executed. Leave EMPTY for the historical ref-derived behaviour; a push event
+      # never supplies it, so the default path is unchanged.
+      target_environment:
+        description: "Override the target plane (empty = derive from ref, as before). 'production' is ALWAYS plan-only."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
+      plan_only:
+        description: "Create the change-sets and stop. Never executes."
+        type: boolean
+        required: false
+        default: false
+      # ENC-TSK-P40 / ENC-TSK-O11. BEFORE this input, the apply job was guarded
+      # `target_environment != 'production'` and took its Environment from
+      # github.ref. Under PLN-006 fork mode (main -> v4/main auto-sync DISABLED)
+      # those two facts combined into a dead end: from any v4/** ref
+      # target_environment=production is ALWAYS plan-only and an empty value
+      # resolves to -gamma, so the ONLY ref that could reach the v3-prod
+      # required-reviewer gate was main -- 796 commits behind v4/main, whose
+      # 02-compute.yaml declares 27 Lambda functions to v4/main's 47. There was
+      # no path from the code to its own approval gate.
+      #
+      # A gate that cannot be satisfied is not a control: it forces a
+      # route-around, and every route-around is worse (merging 796 commits into
+      # the cutover's blast radius, or executing the change-set from a terminal,
+      # which is the direct-CFN-deploy class that caused the Sev1 in
+      # DOC-2CACF0D1E7E6). This is ENC-ISS-624's second-order finding again -- a
+      # mandatory guard that is red for reasons unrelated to the change teaches
+      # operators to wave it through.
+      #
+      # So the control is REPAIRED, not weakened. The v3-prod Environment binding
+      # and its required reviewer are unchanged; only the SELECTOR moves, from
+      # github.ref (a plane proxy that broke) to the resolved suffix (the real
+      # variable). That is the same correction ENC-TSK-P40 makes inside the
+      # template, where IsGamma was standing in for architecture.
+      #
+      # Defaults FALSE. A prod apply therefore requires an explicit, deliberate,
+      # logged affirmative act AND io's approval on the v3-prod Environment --
+      # strictly more visible than the input this replaces, not less.
+      allow_apply:
+        description: "Execute the rendered change-sets on the PROD plane. Requires io approval on the v3-prod Environment. Gamma applies do not need this."
+        type: boolean
+        required: false
+        default: false
+      # ENC-TSK-P45 / ENC-TSK-O22 (io ruling 2026-08-26): the cutover apply must be able to
+      # execute the COMPUTE change-set while leaving the DATA change-set unexecuted — pre-dispatch
+      # verification found the v4 01-data.yaml template regressive vs the stored production data
+      # template (PITR true→omitted on 11 tables; DeploymentManagerTable GSIs 4→1), so executing
+      # data as a side effect of a compute apply would mutate the PROTECTED enceladus-data stack.
+      # Default TRUE preserves every existing behavior: push events never supply inputs (the
+      # event_name guard below keeps them executing data as before), and a dispatch that omits
+      # this input behaves exactly as it always has. Only an explicit apply_data=false skips
+      # data execution.
+      apply_data:
+        description: "Execute the rendered DATA stack change-set. Set false to apply compute only (the data-template drift is reconciled under its own record, never as a cutover side effect)."
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -58,7 +122,12 @@ concurrency:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/02-compute.yaml
-  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  # ENC-TSK-O61: gamma when explicitly requested, OR (no override supplied) when the
+  # ref is a v4 branch -- byte-identical to the previous ref-only expression for every
+  # push event. Written gamma-first deliberately: GitHub Actions treats '' as FALSY, so
+  # the natural `cond && '' || fallback` ternary silently falls through and would have
+  # made target_environment=production resolve to the gamma suffix.
+  ENVIRONMENT_SUFFIX: ${{ (github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-compute
   DEFAULT_DATA_STACK_NAME: enceladus-data
 
@@ -74,6 +143,7 @@ jobs:
       data_changeset_arn: ${{ steps.data_changeset.outputs.changeset_arn }}
       compute_has_changes: ${{ steps.compute_changeset.outputs.has_changes }}
       compute_changeset_arn: ${{ steps.compute_changeset.outputs.changeset_arn }}
+      environment_suffix: ${{ steps.params.outputs.environment_suffix }}
 
     steps:
       - name: Checkout
@@ -110,6 +180,10 @@ jobs:
           {
             echo "stack_name=${stack_name}"
             echo "data_stack_name=${data_stack_name}"
+            # ENC-TSK-P40: the apply job gates its Environment on the RESOLVED plane
+            # rather than on github.ref. jobs.<id>.environment cannot read the `env`
+            # context, so the resolved suffix has to travel as a job output.
+            echo "environment_suffix=${ENVIRONMENT_SUFFIX}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Guard against unadopted out-of-band Lambdas (ENC-TSK-H29 / ENC-ISS-386)
@@ -222,11 +296,12 @@ jobs:
             fi
           done
 
-          # --- DynamoDB tables (new tables added by ENC-TSK-I27/I28 that can be orphaned) ---
+          # --- DynamoDB tables (new tables added by ENC-TSK-I27/I28/L13 that can be orphaned) ---
           candidate_tables=(
             "governance-version${suffix}"
             "agent-sessions${suffix}"
             "agent-types${suffix}"
+            "enceladus-relationships${suffix}"
           )
           tracked_tables=$(aws cloudformation list-stack-resources \
             --stack-name "${stack_name}" --region "${region}" \
@@ -350,7 +425,8 @@ jobs:
           fi
 
           # ENC-TSK-H28 / ENC-ISS-385: SharedLayerArn must be passed explicitly too -- for the
-          # INVERSE reason to the NoEcho guards above. enceladus-shared:10 (== :7 + appconfig_flags)
+          # INVERSE reason to the NoEcho guards above. enceladus-shared:12 (ENC-TSK-O94 /
+          # ENC-ISS-656; previously :10 == :7 + appconfig_flags)
           # is the canonical pin; 02-compute.yaml's SharedLayerArn Default is :10 and all 23 fns
           # !Ref it. But `aws cloudformation deploy` reuses the stack's stored param value for any
           # un-passed param, and the deployed enceladus-compute stack stored SharedLayerArn=:7
@@ -367,8 +443,32 @@ jobs:
           # prod feature flags. Prod: 5t3sqte/bnwj3lj; gamma: fhhcl7m/zecfu42.
           if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
             APPCFG_APP="fhhcl7m"; APPCFG_ENV="zecfu42"
+            # ENC-TSK-L54: scheduler IAM landed (enceladus-cfn-deploy-scheduler-v1 on CFN deploy role).
+            RHYTHM_CYCLE_ENABLED="true"
+            # ENC-TSK-N22 / ENC-PLN-078 W1e: absorb the seven legacy consolidation-arc
+            # EventBridge rules into the Rhythm Cycle (RhythmAbsorbed => State=DISABLED).
+            # Must be passed explicitly: the gamma stack stores the N19 value (false) and
+            # `aws cloudformation deploy` reuses stored params over template Defaults
+            # (ENC-LSN-053 AXIS-2 / ENC-TSK-H28). Tenant invocation is unconditional in
+            # heavy_integrate, so this ends legacy+beat double-execution without
+            # silencing the consolidation arc (DOC-0D9D3C2E62F3 section 5).
+            RHYTHM_ABSORB_LEGACY="true"
+            # ENC-TSK-N78: io cost-stop directive 2026-08-01 — pause all five rhythm
+            # beat schedules on gamma (State=DISABLED, definitions preserved). Passed
+            # explicitly for the same stored-param reason as above. Deliberately NOT
+            # done via RHYTHM_CYCLE_ENABLED=false: that would flip RhythmAbsorbed
+            # false and resurrect the seven legacy crons (incl. gdmp-nightly under
+            # the armed GDMP mutation flag). Flip back to "true" to resume the mind.
+            RHYTHM_BEATS_ENABLED="false"
           else
             APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
+            RHYTHM_CYCLE_ENABLED="true"
+            # ENC-TSK-N22: prod keeps the template default; RhythmAbsorbed additionally
+            # requires a non-empty EnvironmentSuffix, so prod rules stay ENABLED either way.
+            RHYTHM_ABSORB_LEGACY="false"
+            # ENC-TSK-N78: prod has no rhythm schedules (RhythmActive requires a
+            # non-empty suffix); explicit true keeps the stored param non-drifting.
+            RHYTHM_BEATS_ENABLED="true"
           fi
 
           aws cloudformation deploy \
@@ -386,7 +486,10 @@ jobs:
               AppConfigApplicationId="${APPCFG_APP}" \
               AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
-              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
+              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12" \
+              RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
+              RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
+              RhythmBeatsEnabled="${RHYTHM_BEATS_ENABLED}" \
               CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}" 2>&1 | tee /tmp/plan-compute.log
               # ADE Component C (ENC-FTR-118): pass the Cursor webhook HMAC secret as a NoEcho
               # param so `aws cloudformation deploy` does not reuse/zero it (same value-strip class
@@ -427,12 +530,35 @@ jobs:
   apply:
     name: Apply Data + Compute change-sets
     needs: plan
-    if: needs.plan.outputs.data_has_changes == 'true' || needs.plan.outputs.compute_has_changes == 'true'
+    # ENC-TSK-O61: two additional guards, both fail-safe for push events (where
+    # github.event.inputs is null, so each comparison is true and the historical
+    # behaviour is preserved exactly).
+    #   plan_only            -- create the change-sets and stop.
+    #   target_environment   -- an explicit 'production' target is ALWAYS plan-only.
+    # The second is the load-bearing one. Without it this input would become a way to
+    # apply to PROD from a v4 ref, bypassing the v3-prod Environment pause that gates
+    # every production deploy. The input exists to make the prod apply VISIBLE before
+    # it happens, never to make it easier to perform.
+    if: >-
+      (needs.plan.outputs.data_has_changes == 'true' || needs.plan.outputs.compute_has_changes == 'true')
+      && github.event.inputs.plan_only != 'true'
+      && (needs.plan.outputs.environment_suffix == '-gamma'
+          || github.event_name == 'push'
+          || github.event.inputs.allow_apply == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
     # none. A main-branch run therefore pauses here as a rejectable request.
-    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    #
+    # ENC-TSK-P40: the `github.event_name == 'push'` arm of the guard above is a
+    # DELIBERATE carve-out that preserves the historical push-to-main behaviour
+    # byte-for-byte -- a push never supplies inputs, so requiring allow_apply
+    # would have silently disabled the existing prod deploy path. What changed is
+    # narrower and strictly tightening: a workflow_dispatch that resolves to the
+    # PROD plane now needs an explicit allow_apply=true instead of merely omitting
+    # target_environment. Both paths still land on the v3-prod Environment and
+    # still wait for io.
+    environment: ${{ needs.plan.outputs.environment_suffix == '-gamma' && 'v4-gamma' || 'v3-prod' }}
 
     steps:
       - name: Checkout
@@ -446,7 +572,9 @@ jobs:
 
       - name: Execute Data stack change-set
         id: deploy_data
-        if: needs.plan.outputs.data_has_changes == 'true'
+        # ENC-TSK-P45: skippable via apply_data=false (workflow_dispatch only). Push events carry
+        # no inputs, so the event_name clause keeps their behavior byte-identical to before.
+        if: needs.plan.outputs.data_has_changes == 'true' && (github.event_name != 'workflow_dispatch' || inputs.apply_data == true)
         run: |
           set -euo pipefail
           aws cloudformation execute-change-set \
@@ -467,6 +595,26 @@ jobs:
           aws cloudformation wait stack-update-complete \
             --region "${AWS_REGION}" \
             --stack-name "${{ needs.plan.outputs.stack_name }}"
+
+      # ENC-TSK-O99 / ENC-ISS-660 (secondary). A rollback restores previously
+      # stored parameter values, including ones the failed update was
+      # deliberately changing. On 2026-08-23 that silently reverted
+      # SharedLayerArn :12 -> :10 (ENC-ISS-656) while the only post-deploy check
+      # asked about stack STATUS, which is a different question. `always()` on
+      # purpose: the failure path is the only path where this matters.
+      - name: Post-deploy parameter assertion (ENC-TSK-O99)
+        if: always() && needs.plan.outputs.compute_has_changes == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/assert_post_deploy_stack_parameters.py \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}"
+
+      - name: Equalize rhythm-cycle S3 artifact retention (gamma, ENC-TSK-N49)
+        if: env.ENVIRONMENT_SUFFIX == '-gamma'
+        run: |
+          set -euo pipefail
+          python3 tools/apply_rhythm_artifact_lifecycle.py --env-prefix gamma
 
       - name: Report stack events on failure
         if: failure()

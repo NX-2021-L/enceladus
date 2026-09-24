@@ -79,6 +79,7 @@ Action identifiers are grouped by domain. The **Hash** column marks actions that
 | `tracker.pending_updates` | Tracker | — |
 | `tracker.validation_rules` | Tracker | — |
 | `tracker.graphsearch` | Tracker | — |
+| `tracker.sheaf_cohomology` | Tracker | ENC-FTR-095 |
 | `tracker.manifest` | Tracker | — |
 | `tracker.get_acs` | Tracker | — |
 | `tracker.worklog_timeline` | Tracker | — |

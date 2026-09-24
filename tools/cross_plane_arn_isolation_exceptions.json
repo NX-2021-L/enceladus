@@ -1,0 +1,17 @@
+{
+  "_doc": "ENC-TSK-P15 / ENC-ISS-669: declared exceptions for tools/verify_cross_plane_arn_isolation.py. Each entry is a resource the sweep flags as a plane-suffixed-context resource pointing at a hardcoded, unsuffixed literal ARN -- and that is, by inspection, DELIBERATE rather than a hazard. An entry here does not silence the finding: the tool still fires it and prints classification NOT_APPLICABLE_ON_PLANE with the owning repo and the ruling. Delete an entry the moment its target stops matching (the tool treats a stale exception as its own violation, same convention as cfn_deploy_role_reach_map.json).",
+  "_schema": "template, logical_id, field (the dotted/indexed property path the tool walked), arn (the fully-rendered ARN the tool computed -- must match exactly or the exception will not fire and the finding surfaces as a VIOLATION instead), owning_repo, ruling, owner_record, recorded (ISO date), reason (>=80 chars, must name the mechanism that actually enforces isolation here).",
+  "exceptions": [
+    {
+      "template": "02-compute.yaml",
+      "logical_id": "ProjectJsonSyncRule",
+      "field": "Targets[0].Arn",
+      "arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-json-to-parquet-transformer",
+      "owning_repo": "NX-2021-L/devops",
+      "ruling": "Directional isolation ruling: gamma READS devops prod; gamma NEVER WRITES into it, and an invoke is a write.",
+      "owner_record": "ENC-ISS-669 / ENC-TSK-P15 (see also DVP-TSK-625, the harm-stop that disabled the live rule)",
+      "recorded": "2026-08-23",
+      "reason": "devops-json-to-parquet-transformer is owned by NX-2021-L/devops, not this repo, and has no per-plane rendering -- it will never exist as -gamma, so suffixing the ARN would just point at a Lambda that can never be created. The Rule's Name is plane-suffixed (${EnvironmentSuffix}) even though only production ever renders it, which is exactly the shape that lets Condition: IsProduction quietly get deleted later by someone tidying the template; isolation here is enforced by that Condition, not by the ARN, so this exception exists to make the tool prove the Condition is still doing the job on every run rather than assuming it."
+    }
+  ]
+}

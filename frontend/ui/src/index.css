@@ -1,5 +1,16 @@
 @import "tailwindcss";
 
+:root {
+  /* DS token reconciliation (ENC-TSK-M22 / FND-09) -- mirrors
+     frontend/design-system-2/colors_and_type.css so ui-v2 uses the same
+     card border, radius, and motion values as the canonical design system. */
+  --border-subtle: rgba(61, 155, 168, 0.2);
+  --border-hover: rgba(61, 155, 168, 0.5);
+  --radius-lg: 8px;
+  --radius-sm: 4px;
+  --ease-orbit: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 html {
   -webkit-tap-highlight-color: transparent;
 }

@@ -12,13 +12,21 @@ name: Build Lambda Artifacts (Gen2)
 # manifest JSON and consumed by envs/<target>.yaml in F60 Phase 2.
 #
 # Invariants enforced:
-#   - ubuntu-latest host <=> x86_64 <=> python3.11 (matches
+#   - ubuntu-24.04-arm host <=> arm64 <=> python3.12 (matches
 #     tools/cfn-guard/lambda-architecture.guard + runtime-whitelist.guard
-#     + manifest-shape.guard matrix rules).
-#   - ubuntu-24.04-arm host <=> arm64 <=> python3.12.
+#     + manifest-shape.guard matrix rules). ENC-TSK-Q20 FR-5 collapsed the
+#     legacy two-row matrix down to this single declared row, derived from
+#     envs/architecture.yaml (tools/arch_declaration.py).
 #   - pip install uses --platform + --only-binary=:all: to prevent source
 #     builds that would fall back to the host arch (ENC-ISS-213 aarch64-abi3
 #     protection). --implementation cp + --python-version pins the ABI.
+#   - ENC-TSK-Q20 FR-6: artifact keys are immutable. Before packaging, a
+#     function's key is head-object probed; an existing object is never
+#     rebuilt or byte-compared (zips are not byte-reproducible across
+#     builds) -- it is skipped, cross-checking its stored checksum against
+#     the sha256 this workflow records as upload-time object metadata. A
+#     new upload writes with --if-none-match '*' so a concurrent writer
+#     racing the same key fails loudly (412) instead of silently clobbering.
 #
 # Downstream: F60 Phase 2 _deploy.yml consumes artifact_manifest.json (GitHub
 # Actions workflow artifact) to resolve which S3 VersionId to deploy per
@@ -61,11 +69,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # ENC-TSK-Q20 FR-5: single row, derived from envs/architecture.yaml
+        # (tools/arch_declaration.py --field arch|runtime) -- arm64/3.12 is
+        # the ONE declared build target on every plane. Kept as a
+        # `matrix.include` list (not flattened) so the job name stays
+        # build-arm64-py3.12 and downstream `needs.build.outputs.*`
+        # references are unchanged.
         include:
-          - arch: x86_64
-            py_version: "3.11"
-            runner: ubuntu-latest
-            pip_platform: manylinux2014_x86_64
           - arch: arm64
             py_version: "3.12"
             runner: ubuntu-24.04-arm
@@ -131,29 +141,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/build-out
-          declare -A version_ids
-
-          # ENC-TSK-Q09 (ENC-ISS-782 P0): the shared, single-source-of-truth
-          # list of functions that require the MCP server runtime
-          # (tools/enceladus-mcp-server/*.py + mcp_server/) packaged into
-          # their zip. Read from the .guard-tools checkout (main), never
-          # duplicated inline here -- see tools/mcp_runtime_functions.txt
-          # for the membership reasoning (mcp_code/mcp_streamable/
-          # mcp_streaming_gateway declare a server.* handler; coordination_api
-          # is a deliberate parity inclusion, not a hard requirement). This
-          # job and the dedicated build-mcp-code job below both read it, so
-          # editing membership in one place keeps both in agreement.
-          mapfile -t MCP_RUNTIME_FUNCTIONS < <(
-            grep -v '^[[:space:]]*#' .guard-tools/tools/mcp_runtime_functions.txt \
-              | grep -v '^[[:space:]]*$'
-          )
-          needs_mcp_runtime() {
-            local target="$1" x
-            for x in "${MCP_RUNTIME_FUNCTIONS[@]}"; do
-              [ "$x" = "$target" ] && return 0
-            done
-            return 1
-          }
+          bucket="${{ inputs.artifact_bucket }}"
+          sha="${{ inputs.commit_sha }}"
+          version_ids_file="/tmp/version-ids-${{ matrix.arch }}.txt"
+          : > "$version_ids_file"
 
           while IFS= read -r fn; do
             [ -z "$fn" ] && continue
@@ -180,6 +171,42 @@ jobs:
             srcdir="backend/lambda/$fn"
             [ -d "$srcdir" ] || { echo "skip missing $srcdir"; continue; }
 
+            key="${{ inputs.artifact_key_prefix }}/${{ matrix.arch }}-py${{ matrix.py_version }}/${fn}-${sha}.zip"
+
+            # ENC-TSK-Q20 FR-6: artifact keys are immutable -- a zip is NOT
+            # byte-reproducible across rebuilds (timestamps, filesystem
+            # ordering), so an existing object at this key is never rebuilt
+            # or byte-compared. head-object BEFORE packaging: if the key
+            # already exists, skip packaging entirely and just record its
+            # VersionId for the manifest.
+            head_json="/tmp/head-$fn.json"
+            rm -f "$head_json"
+            if aws s3api head-object --bucket "$bucket" --key "$key" \
+                --checksum-mode ENABLED --output json \
+                > "$head_json" 2>"/tmp/head-err-$fn.txt"; then
+              info=$(python3 -c "import json; d = json.load(open('$head_json')); cs = d.get('ChecksumSHA256') or ''; meta = (d.get('Metadata') or {}).get('sha256') or ''; vid = d.get('VersionId') or ''; print(cs, meta, vid, sep='\t')")
+              IFS=$'\t' read -r stored_checksum_b64 stored_sha256_meta version_id <<< "$info"
+
+              stored_checksum_hex=""
+              if [ -n "$stored_checksum_b64" ]; then
+                stored_checksum_hex=$(python3 -c "import base64,sys; print(base64.b64decode(sys.argv[1]).hex())" "$stored_checksum_b64")
+              fi
+
+              if [ -n "$stored_checksum_hex" ] && [ -n "$stored_sha256_meta" ]; then
+                if [ "$stored_checksum_hex" = "$stored_sha256_meta" ]; then
+                  echo "skip-on-exists key=$key sha256=$stored_sha256_meta version=$version_id (stored checksum == recorded upload hash)"
+                else
+                  echo "::error::skip-on-exists hash mismatch key=$key stored_checksum_sha256=$stored_checksum_hex recorded_metadata_sha256=$stored_sha256_meta"
+                  exit 1
+                fi
+              else
+                echo "skip-on-exists key=$key version=$version_id (pre-FR-6 object, no recorded hash)"
+              fi
+
+              printf '%s=%s\n' "$fn" "$version_id" >> "$version_ids_file"
+              continue
+            fi
+
             workdir="/tmp/build-$fn"
             rm -rf "$workdir"
             mkdir -p "$workdir"
@@ -187,18 +214,13 @@ jobs:
             # Copy source.
             rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
 
-            # ENC-TSK-Q09 (ENC-ISS-782 P0): package the MCP server runtime
-            # for every OTHER function in MCP_RUNTIME_FUNCTIONS (mcp_code is
-            # routed past this point by the case/esac skip above). Mirrors
-            # v4/main's own inline packaging (see
-            # `git show origin/v4/main:.github/workflows/_build.yml`) and the
-            # build-mcp-code job's copy step below -- same glob, same test_*
-            # exclusion, same defensive mcp_server/ copy (this repo has not
-            # adopted the mcp_server/ package decomposition yet, so that
-            # directory does not exist here today; copy it the moment it
-            # does, with no follow-up edit needed).
-            mcp_server_pkg_present=0
-            if needs_mcp_runtime "$fn"; then
+            # ENC-TSK-K11/K12: coordination_api, mcp_code, and mcp_streamable load
+            # server.py from the function zip root (ENCELADUS_MCP_SERVER_PATH=server.py).
+            # Package the full MCP server runtime module set — telemetry_rank and siblings
+            # are required (mcp.jreese.net Function URL -> enceladus-mcp-streamable*).
+            # ENC-TSK-L10: mcp_streaming_gateway also imports `from server import app`
+            # (see asgi_app.py) for the REST API Gateway response-streaming endpoint.
+            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || [ "$fn" = "mcp_streamable" ] || [ "$fn" = "mcp_streaming_gateway" ]; then
               for py in tools/enceladus-mcp-server/*.py; do
                 base=$(basename "$py")
                 case "$base" in
@@ -206,12 +228,15 @@ jobs:
                 esac
                 cp "$py" "$workdir/$base"
               done
-              if [ -d tools/enceladus-mcp-server/mcp_server ]; then
-                rsync -a --exclude='__pycache__' --exclude='*.pyc' \
-                  tools/enceladus-mcp-server/mcp_server/ "$workdir/mcp_server/"
-                mcp_server_pkg_present=1
+              # ENC-TSK-L63 / ENC-ISS-492: server.py imports the decomposed mcp_server
+              # package (ENC-TSK-L09). Root-level *.py copy alone is insufficient.
+              if [ ! -d tools/enceladus-mcp-server/mcp_server ]; then
+                echo "ERROR: $fn requires tools/enceladus-mcp-server/mcp_server package" >&2
+                exit 1
               fi
-              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules (ENC-TSK-Q09)"
+              rsync -a --exclude='__pycache__' --exclude='*.pyc' \
+                tools/enceladus-mcp-server/mcp_server/ "$workdir/mcp_server/"
+              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules + mcp_server/"
             fi
 
             # ENC-TSK-G43: cross-Lambda module sharing via .build_extras manifest.
@@ -250,42 +275,71 @@ jobs:
             zipfile="/tmp/build-out/$fn.zip"
             (cd "$workdir" && zip -qrX "$zipfile" .)
 
-            # ENC-TSK-Q09 AC-2 (ENC-ISS-782 P0): the contents guard must run
-            # for EVERY function in MCP_RUNTIME_FUNCTIONS, not mcp_code
-            # alone -- fail the build, not the invoke, when a zip is missing
-            # an entry its handler needs. Required entries are derived from
-            # mcp_server_pkg_present, the SAME condition the copy step above
-            # used, never hardcoded -- a hardcoded --require list would keep
-            # printing OK if that copy step regressed (wrong exclude, empty
-            # dir, wrong destination).
-            if needs_mcp_runtime "$fn"; then
-              REQUIRE_ARGS=(server.py)
-              if [ "$mcp_server_pkg_present" = "1" ]; then
-                REQUIRE_ARGS+=(mcp_server/__init__.py)
-              fi
-              python3 .guard-tools/tools/assert_lambda_artifact_contents.py "$zipfile" "$fn" --require "${REQUIRE_ARGS[@]}"
+            # ENC-TSK-Q19 FR-4: inspect the actual zip contents for a wrong-ABI
+            # .so before it ever reaches S3 -- a Gen2 package-arch gate, not
+            # just a pre-build pip-flag check (stdlib-only; no extra install).
+            python3 tools/verify_lambda_package_arch.py \
+              --package "$zipfile" --expected-arch "${{ matrix.arch }}"
+
+            # ENC-TSK-Q09 (ENC-ISS-782 P0, forward-ported from main during
+            # ENC-TSK-Q21): fail the build, not the invoke, when an
+            # MCP-runtime function's zip is missing an entry its handler
+            # needs. tools/mcp_runtime_functions.txt is this repo's shared
+            # source of truth for which functions need the runtime;
+            # tools/assert_deploy_lane_parity.py separately guards that the
+            # `if [ "$fn" = "mcp_code" ] || ...` condition above stays in
+            # parity with it. The mcp_server/ package is unconditionally
+            # required above (ENC-TSK-L63), so it is always required here too.
+            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || [ "$fn" = "mcp_streamable" ] || [ "$fn" = "mcp_streaming_gateway" ]; then
+              python3 tools/assert_lambda_artifact_contents.py "$zipfile" "$fn" --require server.py mcp_server/__init__.py
             fi
 
-            # S3 upload (bucket must have Versioning=Enabled).
-            sha="${{ inputs.commit_sha }}"
-            key="${{ inputs.artifact_key_prefix }}/${{ matrix.arch }}-py${{ matrix.py_version }}/${fn}-${sha}.zip"
-            put_out=$(aws s3api put-object \
-              --bucket "${{ inputs.artifact_bucket }}" \
-              --key "$key" \
-              --body "$zipfile" \
-              --content-type application/zip \
-              --output json)
-            version_id=$(echo "$put_out" | python -c 'import sys,json; print(json.load(sys.stdin)["VersionId"])')
-            version_ids["$fn"]="$version_id"
-            echo "uploaded s3://${{ inputs.artifact_bucket }}/$key VersionId=$version_id"
+            # ENC-TSK-Q20 FR-6: S3 upload (bucket must have Versioning=Enabled).
+            # sha256 the zip and record it as recoverable object metadata
+            # (checked by the head-object skip-on-exists path above), and
+            # write with a conditional PUT so two racing builds for the same
+            # key can't silently clobber one another -- a 412 fails loudly.
+            sha256_hex=$(sha256sum "$zipfile" | awk '{print $1}')
+            put_err="/tmp/put-err-$fn.txt"
+            if put_out=$(aws s3api put-object \
+                --bucket "$bucket" \
+                --key "$key" \
+                --body "$zipfile" \
+                --content-type application/zip \
+                --checksum-algorithm SHA256 \
+                --metadata sha256="$sha256_hex" \
+                --if-none-match '*' \
+                --output json 2>"$put_err"); then
+              version_id=$(echo "$put_out" | python3 -c 'import sys,json; print(json.load(sys.stdin)["VersionId"])')
+              printf '%s=%s\n' "$fn" "$version_id" >> "$version_ids_file"
+              echo "uploaded s3://$bucket/$key VersionId=$version_id sha256=$sha256_hex"
+            else
+              put_rc=$?
+              err_text=$(cat "$put_err")
+              if echo "$err_text" | grep -qi 'PreconditionFailed\|412'; then
+                echo "::error::concurrent writer won for key=$key (If-None-Match precondition failed, exit $put_rc): $err_text"
+              else
+                echo "::error::failed to upload key=$key (exit $put_rc): $err_text"
+              fi
+              exit 1
+            fi
           done < /tmp/functions.txt
 
           # Emit manifest JSON: {arch, py_version, commit_sha, artifact_version_ids: {fn: version_id}}.
-          python - <<PY > /tmp/manifest-${{ matrix.arch }}.json
-          import json, os
+          # ids are read back from version_ids_file (both the skip-on-exists
+          # and freshly-uploaded paths append to it) so the manifest keeps
+          # its {fn: version_id} shape regardless of which path each
+          # function took.
+          python - "$version_ids_file" <<PY > /tmp/manifest-${{ matrix.arch }}.json
+          import json, sys
           ids = {}
-          for fn, vid in [line.split('=', 1) for line in os.environ.get('VERSION_IDS_RAW', '').splitlines() if line]:
-              ids[fn] = vid
+          with open(sys.argv[1]) as fh:
+              for line in fh:
+                  line = line.strip()
+                  if not line or "=" not in line:
+                      continue
+                  fn, vid = line.split("=", 1)
+                  ids[fn] = vid
           manifest = {
               "arch": "${{ matrix.arch }}",
               "py_version": "${{ matrix.py_version }}",
@@ -296,8 +350,6 @@ jobs:
           }
           print(json.dumps(manifest, indent=2, sort_keys=True))
           PY
-        env:
-          VERSION_IDS_RAW: |
 
       - name: Upload manifest as workflow artifact
         uses: actions/upload-artifact@v4

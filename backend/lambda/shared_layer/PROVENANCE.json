@@ -1,0 +1,165 @@
+{
+  "_purpose": "Per-published-version provenance ledger for the enceladus-shared Lambda layer (ENC-TSK-P13 AC-4). A version with provenance='unknown' is an ENUMERATED gap, not an assumption of benignity -- see 'investigation' on each entry for exactly what was and was not checked and why.",
+  "_how_to_extend": "After a REAL publish via .github/workflows/shared-layer-build.yml (workflow_dispatch, dry_run=false), that job prints a provenance record to its log. Land it here as a new entry via a follow-up, reviewed PR -- this ledger is never auto-committed by CI, deliberately (see that workflow's header comment).",
+  "_layer_arn_prefix": "arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared",
+  "_generated_during": "ENC-TSK-P13, 2026-08-23",
+  "versions": [
+    {
+      "version": 12,
+      "created": "2026-08-21T23:46:39.178Z",
+      "compatible_runtimes": ["python3.11", "python3.12"],
+      "compatible_architectures": ["x86_64", "arm64"],
+      "provenance": "known",
+      "channel": "manual_cli",
+      "actor": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::356364570033:user/io-dev-admin",
+        "accessKeyId": "REDACTED -- AWS access key id; recoverable from the cited cloudtrail_event_id"
+      },
+      "source_ip": "REDACTED -- operator source IP; recoverable from the cited cloudtrail_event_id",
+      "user_agent": "aws-cli/2.34.5 md/awscrt#0.31.2 ua/2.1 os/macos#25.4.0 md/arch#arm64 lang/python#3.13.13 md/pyimpl#CPython md/command#lambda.publish-layer-version",
+      "cloudtrail_event_id": "d1c3457c-7892-4b43-ba07-73dc3dac72db",
+      "content_sha256_of_zip": "lhePWF0MgI2hRNcERkMqWCmNa1zZxbKgUJMAwN2Mq6E= (base64, AWS Content.CodeSha256)",
+      "commit_correlation": {
+        "method": "downloaded the live layer zip (aws lambda get-layer-version --version-number 12), diffed each of its 10 shipped python/enceladus_shared/*.py files byte-for-byte against v4/main HEAD",
+        "result": "all 10 shipped modules are byte-identical to current v4/main HEAD. The layer does NOT contain warehouse_registration.py.",
+        "most_likely_source_commit": "v4/main @ bc997780b4d78cebb6bd323e40e11ebf4cb8539c (HEAD at publish time, 2026-08-21T23:46:39Z) or an ancestor with identical shared_layer content -- the next v4/main commit landed at 2026-08-21T17:28:52-07:00 (00:28:52Z), before the publish, and none of the intervening commits touch python/enceladus_shared/*.py",
+        "why_warehouse_registration.py_is_absent": "it did not exist on v4/main yet at publish time -- it landed the FOLLOWING day via commit 29b7821 (ENC-TSK-O93 / PR #1129, 'forward-port warehouse_registration.py, restoring the v4/main Gen2 build', 2026-08-22T20:11:35-07:00). This is a timing gap, not a deliberate exclusion."
+      },
+      "ci_workflow_correlation": {
+        "enceladus_repo": "gh run list, +/-2h around 2026-08-21T23:46:39Z: zero runs at that timestamp (nearest are 22:29:55Z and 00:20:45Z, both unrelated PR merges)",
+        "devops_repo": "gh run list, same window: zero runs of any kind",
+        "workflow_grep": "git grep -c 'publish-layer-version|PublishLayerVersion|publish_layer_version' .github/workflows/ (both repos): zero hits for enceladus-shared in either"
+      },
+      "corroborating_signal": {
+        "denied_agent_attempt": "2026-08-22T20:26:24-07:00 (~1 day AFTER this publish), IAM user enceladus-agent-cli attempted the identical `aws lambda publish-layer-version --layer-name enceladus-shared` call from the SAME source IP and same aws-cli/os/arch fingerprint, and was denied: 'User: arn:aws:iam::356364570033:user/enceladus-agent-cli is not authorized to perform: lambda:PublishLayerVersion ... because no identity-based policy allows the lambda:PublishLayerVersion action'. Consistent with an agent session attempting the publish, being blocked by IAM design, and a human (io-dev-admin) doing it by hand instead -- see the identical pattern on v11 below."
+      }
+    },
+    {
+      "version": 11,
+      "created": "2026-07-12T05:10:52.051Z",
+      "compatible_runtimes": ["python3.12"],
+      "compatible_architectures": ["arm64"],
+      "provenance": "known",
+      "channel": "manual_cli",
+      "actor": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::356364570033:user/io-dev-admin",
+        "accessKeyId": "REDACTED -- AWS access key id; recoverable from the cited cloudtrail_event_id"
+      },
+      "source_ip": "REDACTED -- operator source IP; recoverable from the cited cloudtrail_event_id",
+      "user_agent": "aws-cli/2.34.5 md/awscrt#0.31.2 ua/2.1 os/macos#25.4.0 md/arch#arm64 lang/python#3.13.13 md/pyimpl#CPython md/command#lambda.publish-layer-version",
+      "content_sha256_of_zip": "d2ZdPguTrCB7K1s08CDCCmg5k0+Uk0r4nSPK/xHtDWQ= (base64, AWS Content.CodeSha256)",
+      "commit_correlation": {
+        "method": "downloaded the live layer zip (aws lambda get-layer-version --version-number 11), listed contents",
+        "result": "contains 9 modules (auth.py, version_seq.py, __init__.py, http_utils.py, relationship_store.py, record_extensions.py, aws_clients.py, serialization.py, appconfig_flags.py). Missing BOTH github_app_auth.py and warehouse_registration.py -- consistent with a build from source that predates both (github_app_auth.py landed with the work that produced :12 per the SharedLayerArn Default comment in infrastructure/cloudformation/02-compute.yaml; warehouse_registration.py landed 2026-08-22 per commit 29b7821)."
+      },
+      "ci_workflow_correlation": {
+        "enceladus_repo": "gh run list, +/-2h around 2026-07-12T05:10:52Z: zero runs between 03:30Z and 06:36Z -- the entire window is silent",
+        "devops_repo": "gh run list, same window: zero runs of any kind",
+        "workflow_grep": "same zero-hits result as :12, both repos"
+      },
+      "corroborating_signal": {
+        "denied_agent_attempt": "2026-07-11T21:27:54-07:00 (~43 minutes BEFORE this publish, same evening), IAM user enceladus-agent-cli attempted the identical publish-layer-version call for enceladus-shared and was denied with the same AccessDenied message as the :12 case. Same inference: an agent session tried and was blocked; a human did it by hand shortly after."
+      }
+    },
+    {
+      "version": 10,
+      "created": "2026-04-21T18:14:15.695Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "CloudTrail lookup-events (EventName=PublishLayerVersion20181031, us-west-2) returned zero results for a tight window around this timestamp -- but CloudTrail Event History's default retention is ~90 days, and 2026-08-23 minus 90 days is ~2026-05-25, so April 2026 is OUTSIDE the queryable window. This is a ceiling, not evidence of absence -- recorded honestly as such. gh run list found no GitHub Actions run in either repo at the exact timestamp (nearest enceladus activity is ~28-54 minutes away; devops repo shows zero runs in the window, consistent with every other window checked in this task). This version was NOT independently confirmed as manual-CLI the way :11/:12 were; it is enumerated here as a gap, not assumed to share their channel."
+    },
+    {
+      "version": 9,
+      "created": "2026-04-11T10:26:25.477Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Same CloudTrail retention ceiling as :10 (outside the ~90-day window). gh run list found no GitHub Actions run in either repo at the exact timestamp. Enumerated as a gap."
+    },
+    {
+      "version": 8,
+      "created": "2026-04-11T10:25:52.285Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass (out of ENC-TSK-P13's given leads, which named only :11 and :12). Published 33 seconds before :9 -- likely the same operator/session republishing quickly, but this is a guess, not a finding, and is labeled as such. Enumerated, not assumed benign."
+    },
+    {
+      "version": 7,
+      "created": "2026-04-03T07:06:59.319Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass. Referenced elsewhere in this repo (tools/verify_shared_layer_version.py, ENC-TSK-H24/H28 history) as the version involved in the ENC-LSN-053 Sev-1 (:7-vs-:10 incident) -- that history describes CONSUMPTION/pin drift, not this version's publish channel. Enumerated, not assumed benign."
+    },
+    {
+      "version": 6,
+      "created": "2026-02-24T19:09:58.594Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass -- pre-dates this task's forensic window (CloudTrail and the given leads both stop at :11/:12). Enumerated, not assumed benign."
+    },
+    {
+      "version": 5,
+      "created": "2026-02-24T18:48:08.739Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass. Enumerated, not assumed benign."
+    },
+    {
+      "version": 4,
+      "created": "2026-02-24T18:46:13.946Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass. Enumerated, not assumed benign."
+    },
+    {
+      "version": 3,
+      "created": "2026-02-24T18:39:03.737Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass. Enumerated, not assumed benign."
+    },
+    {
+      "version": 2,
+      "created": "2026-02-24T03:58:40.419Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Not individually investigated in this pass. Enumerated, not assumed benign."
+    },
+    {
+      "version": 1,
+      "created": "2026-02-24T03:58:29.859Z",
+      "compatible_runtimes": ["python3.11"],
+      "compatible_architectures": null,
+      "provenance": "unknown",
+      "channel": "unknown",
+      "investigation": "Original publish (ENC-TSK-525 per shared_layer/deploy.sh git history). Not individually investigated in this pass. Enumerated, not assumed benign."
+    }
+  ],
+  "summary": {
+    "total_versions_live": 12,
+    "provenance_known": 2,
+    "provenance_unknown": 10,
+    "known_channel": "manual_cli (aws lambda publish-layer-version run by hand by IAM user io-dev-admin from a local macOS/arm64 machine) -- NOT any CI/CD workflow in either NX-2021-L/enceladus or NX-2021-L/devops",
+    "ci_channel_ruled_out_for": ["v11", "v12"],
+    "ci_channel_unverifiable_for": ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"]
+  }
+}

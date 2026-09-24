@@ -62,6 +62,142 @@ def test_invalid_since_returns_400(monkeypatch):
     assert "since" in payload["error"]
 
 
+# --- ENC-TSK-M74: server-side page cap + continuation cursor on bare /api/v1/feed ---
+
+def _feed_full_event(cursor: str | None = None) -> dict:
+    qs: dict = {}
+    if cursor is not None:
+        qs["cursor"] = cursor
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": "/api/v1/feed",
+        "headers": {"Cookie": "enceladus_id_token=test-token"},
+        "queryStringParameters": qs,
+    }
+
+
+def _many_tasks(n: int) -> list:
+    # Descending timestamps so ordering is unambiguous.
+    return [
+        {
+            "task_id": f"ENC-TSK-{i:03d}",
+            "project_id": "enceladus",
+            "updated_at": f"2026-07-10T{(59 - (i % 60)):02d}:00:00Z",
+            "title": f"t{i}",
+        }
+        for i in range(n)
+    ]
+
+
+def test_full_refresh_caps_page_and_returns_next_cursor(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(feed_query, "MAX_FEED_PAGE_RECORDS", 75)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records",
+        lambda cursor=None, page_size=None: (_many_tasks(120), [], [], [], []),
+    )
+
+    resp = feed_query.lambda_handler(_feed_full_event(), None)
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    total = sum(len(payload[k]) for k in ("tasks", "issues", "features", "lessons", "plans"))
+    assert total == 75
+    assert payload["next_cursor"]  # non-null when more remain
+    assert "feed_source" in payload
+
+    # Page 2 continues after the cursor with no overlap and drains the tail.
+    resp2 = feed_query.lambda_handler(_feed_full_event(cursor=payload["next_cursor"]), None)
+    payload2 = json.loads(resp2["body"])
+    total2 = sum(len(payload2[k]) for k in ("tasks", "issues", "features", "lessons", "plans"))
+    assert total2 == 45
+    assert payload2["next_cursor"] is None
+    page1_ids = {t["task_id"] for t in payload["tasks"]}
+    page2_ids = {t["task_id"] for t in payload2["tasks"]}
+    assert not (page1_ids & page2_ids)
+    assert len(page1_ids | page2_ids) == 120
+
+
+def test_full_refresh_below_cap_null_cursor(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records",
+        lambda cursor=None, page_size=None: (_many_tasks(10), [], [], [], []),
+    )
+    resp = feed_query.lambda_handler(_feed_full_event(), None)
+    payload = json.loads(resp["body"])
+    assert len(payload["tasks"]) == 10
+    assert payload["next_cursor"] is None
+
+
+def test_full_refresh_invalid_cursor_returns_400(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    called = {"n": 0}
+
+    def _boom():
+        called["n"] += 1
+        return ([], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_query_all_records", _boom)
+    resp = feed_query.lambda_handler(_feed_full_event(cursor="!!!bad!!!"), None)
+    assert resp["statusCode"] == 400
+    payload = json.loads(resp["body"])
+    assert "cursor" in payload["error"].lower()
+    # 400s before any query work.
+    assert called["n"] == 0
+
+
+def _corpus_get_event(**params: str) -> dict:
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": "/api/v1/feed/corpus",
+        "headers": {"Cookie": "enceladus_id_token=test-token"},
+        "queryStringParameters": params or None,
+    }
+
+
+def test_corpus_requires_auth():
+    resp = feed_query.lambda_handler(
+        {
+            "requestContext": {"http": {"method": "GET"}},
+            "rawPath": "/api/v1/feed/corpus",
+            "headers": {},
+        },
+        None,
+    )
+    assert resp["statusCode"] == 401
+
+
+def test_corpus_returns_paginated_payload(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(
+        feed_query,
+        "_get_corpus_entries",
+        lambda: feed_query.feed_corpus.build_tracker_entries_from_records(
+            [{"task_id": "ENC-TSK-1", "project_id": "enceladus", "title": "One", "status": "open", "priority": "P1", "updated_at": "2026-07-05T10:00:00Z"}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    resp = feed_query.lambda_handler(_corpus_get_event(limit="10"), None)
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    assert payload["success"] is True
+    assert payload["items"][0]["record_id"] == "ENC-TSK-1"
+    assert "facets" in payload
+    assert payload["total_matches"] == 1
+
+
+def test_corpus_invalid_cursor_returns_400(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    resp = feed_query.lambda_handler(_corpus_get_event(cursor="bad-cursor"), None)
+    assert resp["statusCode"] == 400
+
+
 # ---------------------------------------------------------------------------
 # _ddb_history defensive behavior (ENC-TSK-C31)
 #
@@ -314,6 +450,100 @@ def test_max_full_refresh_caps_configured():
 
 
 # ---------------------------------------------------------------------------
+# Per-project fan-out + per-project caps (ENC-TSK-M36 / feed data-truth)
+#
+# Confirmed live against gamma: /api/v1/feed/tasks.json and /api/v1/feed/corpus
+# both took ~20s on a cache miss because _query_all_records / (the former
+# _query_corpus_tracker_records copy) queried every active project's
+# project-type-index SEQUENTIALLY. Separately, the per-type caps used to
+# apply to the merged cross-project pool, so a project with many lessons
+# recently updated could crowd another project's lessons out of the snapshot
+# entirely even though that project's lessons were never actually missing
+# from DynamoDB. _fan_out_by_project fixes the latency (concurrent per-
+# project fetch); capping inside _query_all_records's per-project loop fixes
+# the fairness -- these tests lock in both behaviors without touching
+# DynamoDB (project fetch itself is monkeypatched).
+# ---------------------------------------------------------------------------
+
+
+def _fake_project_records(pid: str, lesson_count: int) -> tuple:
+    """Build a one-project (tasks, issues, features, lessons, plans) tuple
+    with `lesson_count` lessons, each with a distinct recent updated_at so
+    _cap_by_updated_at's ordering is deterministic."""
+    lessons = [
+        {
+            "lesson_id": f"{pid}-LSN-{i:03d}",
+            "project_id": pid,
+            "updated_at": f"2026-07-0{(i % 8) + 1}T00:00:00Z",
+        }
+        for i in range(lesson_count)
+    ]
+    return ([], [], [], lessons, [])
+
+
+def test_fan_out_by_project_queries_every_project_and_preserves_order(monkeypatch):
+    projects = [{"project_id": "enceladus"}, {"project_id": "cfg"}, {"project_id": "fly"}]
+    calls: list[str] = []
+
+    def fake_query(pid, _cutoff):
+        calls.append(pid)
+        return _fake_project_records(pid, lesson_count=1)
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    results = feed_query._fan_out_by_project(projects, cutoff)
+
+    # Every project was queried exactly once...
+    assert sorted(calls) == ["cfg", "enceladus", "fly"]
+    # ...and results come back in the SAME order as the input project list,
+    # regardless of thread completion order.
+    assert [pid for pid, _ in results] == ["enceladus", "cfg", "fly"]
+
+
+def test_fan_out_by_project_empty_list_short_circuits(monkeypatch):
+    called = False
+
+    def fake_query(_pid, _cutoff):
+        nonlocal called
+        called = True
+        return ([], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    assert feed_query._fan_out_by_project([], cutoff) == []
+    assert called is False
+
+
+def test_query_all_records_caps_are_per_project_not_global(monkeypatch):
+    # A busier project ("enceladus") has 15 lessons (over the cap of 10); a
+    # quieter project ("cfg") has 2. Before ENC-TSK-M36, the cap applied to
+    # the MERGED 17-lesson pool, so with a global cap of 10 the two "cfg"
+    # lessons could be entirely dropped if enceladus's lessons all sorted
+    # more recent. Capping per project must keep BOTH projects represented.
+    monkeypatch.setattr(
+        feed_query,
+        "_get_active_projects",
+        lambda: [{"project_id": "enceladus"}, {"project_id": "cfg"}],
+    )
+
+    def fake_query(pid, _cutoff):
+        if pid == "enceladus":
+            return _fake_project_records(pid, lesson_count=15)
+        return _fake_project_records(pid, lesson_count=2)
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+
+    _tasks, _issues, _features, all_lessons, _plans = feed_query._query_all_records()
+
+    lesson_ids = {l["lesson_id"] for l in all_lessons}
+    # enceladus capped down to 10 (its own cap, not zeroed out by cfg)...
+    assert sum(1 for lid in lesson_ids if lid.startswith("enceladus-")) == 10
+    # ...and cfg's 2 lessons survive too -- global capping would have let
+    # enceladus's 15 crowd them out entirely.
+    assert sum(1 for lid in lesson_ids if lid.startswith("cfg-")) == 2
+
+
+# ---------------------------------------------------------------------------
 # VALID_RECORD_TYPES whitelist (ENC-TSK-C40 / ENC-ISS-177)
 #
 # Before the fix, VALID_RECORD_TYPES = {"task", "issue", "feature"} silently
@@ -521,3 +751,344 @@ def test_ddb_history_mixed_good_and_bad_entries():
     assert len(result) == 2
     assert result[0]["description"] == "good entry 1"
     assert result[1]["description"] == "good entry 2"
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M39: OpenSearch-tier fast path + DDB circuit-breaker fallback
+#
+# feed_query is not VPC-attached to the OpenSearch domain, so the fast path
+# invokes graph_query_api (action='feed_selection', already VPC-attached) as
+# a selection proxy, then hydrates the returned record keys with the same
+# bounded BatchGetItem helper the incremental/delta path already uses. Any
+# failure (missing config, invoke error, non-ok response) must fall back to
+# the existing DDB fan-out rather than raising or returning nothing.
+# ---------------------------------------------------------------------------
+
+
+class _FakePayload:
+    def __init__(self, payload: dict):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+
+class _FakeGraphQueryLambdaClient:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+        self.calls: list[dict] = []
+
+    def invoke(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._exc is not None:
+            raise self._exc
+        return self._response
+
+
+def test_query_all_records_via_opensearch_disabled_when_function_unset(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "")
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+def test_query_all_records_via_opensearch_returns_none_on_invoke_error(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(exc=feed_query.ClientError({"Error": {}}, "Invoke"))
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+    assert len(fake_client.calls) == 1
+
+
+def test_query_all_records_via_opensearch_returns_none_when_not_ok(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": False, "error": "opensearch_not_configured"})}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+def test_query_all_records_via_opensearch_returns_none_on_function_error(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": True, "selection": {}}), "FunctionError": "Unhandled"}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M48: _hydrate_records_via_batch_get fans out concurrently
+#
+# Live gamma verification of M39/M47 showed feed_source=opensearch but ~4s
+# p95, not <500ms -- CloudWatch confirmed graph_query_api's own selection
+# round trip was already fast, isolating the bottleneck to feed_query's own
+# sequential BatchGetItem chunking across the (often 20+ active project)
+# candidate set the OpenSearch tier can return. These tests lock in that the
+# fix fans batches out via a thread pool (matching ENC-TSK-M36's DDB fan-out
+# concurrency fix) rather than one call at a time.
+# ---------------------------------------------------------------------------
+
+
+def test_hydrate_records_via_batch_get_empty_short_circuits(monkeypatch):
+    called = False
+
+    def fake_fetch(_batch, _cutoff):
+        nonlocal called
+        called = True
+        return ([], [], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_fetch_and_transform_batch", fake_fetch)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    assert feed_query._hydrate_records_via_batch_get([], cutoff) == ([], [], [], [], [], [])
+    assert called is False
+
+
+def test_hydrate_records_via_batch_get_chunks_concurrently_and_merges(monkeypatch):
+    # 250 keys -> 3 chunks of <=100 -- forces _hydrate_records_via_batch_get
+    # to fan out more than one batch.
+    changed_keys = [
+        {"project_id": {"S": "enceladus"}, "record_id": {"S": f"task#T-{i}"}}
+        for i in range(250)
+    ]
+    seen_batch_sizes = []
+
+    def fake_fetch(batch, _cutoff):
+        seen_batch_sizes.append(len(batch))
+        # One distinct task per batch so we can confirm every batch's
+        # results made it into the merged output.
+        rid = batch[0]["record_id"]["S"]
+        return ([{"task_id": rid}], [], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_fetch_and_transform_batch", fake_fetch)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+
+    tasks, issues, features, lessons, plans, closed_ids = feed_query._hydrate_records_via_batch_get(
+        changed_keys, cutoff
+    )
+
+    assert sorted(seen_batch_sizes) == [50, 100, 100]
+    assert len(tasks) == 3
+    assert issues == [] and features == [] and lessons == [] and plans == [] and closed_ids == []
+
+
+def test_query_all_records_via_opensearch_no_active_projects_short_circuits(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient()
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result == ([], [], [], [], [])
+    assert fake_client.calls == []  # never invokes with an empty project list
+
+
+def test_query_all_records_via_opensearch_hydrates_selected_keys(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    selection = {
+        "enceladus#task": ["ENC-TSK-001", "ENC-TSK-002"],
+        "enceladus#issue": ["ENC-ISS-010"],
+    }
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": True, "selection": selection})}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    captured = {}
+
+    def fake_hydrate(changed_keys, _cutoff):
+        captured["keys"] = changed_keys
+        return (["task-row"], ["issue-row"], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_hydrate_records_via_batch_get", fake_hydrate)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+
+    assert result == (["task-row"], ["issue-row"], [], [], [])
+    # Invoke payload carries the per-type caps + active project IDs.
+    invoke_payload = json.loads(fake_client.calls[0]["Payload"])
+    assert invoke_payload["action"] == "feed_selection"
+    assert invoke_payload["project_ids"] == ["enceladus"]
+    assert invoke_payload["caps"]["task"] == feed_query.MAX_TASKS_FULL_REFRESH
+    # Selected bare IDs are reconstructed into (project_id, record_id) DDB keys.
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-001"}} in captured["keys"]
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-002"}} in captured["keys"]
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "issue#ENC-ISS-010"}} in captured["keys"]
+
+
+def test_query_all_records_uses_opensearch_result_when_available(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_opensearch",
+        lambda _projects, _cutoff, page_size=None, cursor=None: (["t"], ["i"], ["f"], ["l"], ["p"]),
+    )
+
+    def _boom(*_a, **_k):
+        raise AssertionError("DDB fallback must not run when the OpenSearch tier succeeds")
+
+    monkeypatch.setattr(feed_query, "_query_all_records_via_ddb", _boom)
+
+    result = feed_query._query_all_records()
+    assert result == (["t"], ["i"], ["f"], ["l"], ["p"])
+    assert feed_query._last_feed_query_source == "opensearch"
+
+
+def test_query_all_records_falls_back_to_ddb_when_opensearch_returns_none(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", lambda _p, _c, page_size=None, cursor=None: None)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_ddb",
+        lambda _p, _c: (["t"], [], [], [], []),
+    )
+
+    result = feed_query._query_all_records()
+    assert result == (["t"], [], [], [], [])
+    assert feed_query._last_feed_query_source == "ddb_fanout"
+
+
+def test_query_all_records_falls_back_to_ddb_when_opensearch_raises(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+
+    def _raise(_p, _c, page_size=None, cursor=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", _raise)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_ddb",
+        lambda _p, _c: ([], [], [], [], []),
+    )
+
+    result = feed_query._query_all_records()
+    assert result == ([], [], [], [], [])
+    assert feed_query._last_feed_query_source == "ddb_fanout"
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M76 — upstream page cap: the OpenSearch selection path must hydrate
+# ONLY the page window (<=page_size+1 keys after the cursor), not the corpus.
+# ---------------------------------------------------------------------------
+import datetime as _dt
+
+
+class _FakePayload:
+    def __init__(self, data):
+        self._d = json.dumps(data).encode("utf-8")
+
+    def read(self):
+        return self._d
+
+
+class _FakeLambdaClient:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def invoke(self, **kw):
+        self.calls.append(json.loads(kw["Payload"].decode("utf-8")))
+        return {"Payload": _FakePayload(self._result)}
+
+
+_M76_SELECTION = {
+    "enceladus#task": [
+        {"id": "ENC-TSK-001", "updated_at": "2026-07-10T09:00:00Z"},
+        {"id": "ENC-TSK-002", "updated_at": "2026-07-10T05:00:00Z"},
+    ],
+    "enceladus#issue": [
+        {"id": "ENC-ISS-001", "updated_at": "2026-07-10T08:00:00Z"},
+        {"id": "ENC-ISS-002", "updated_at": "2026-07-10T02:00:00Z"},
+    ],
+    "enceladus#feature": [
+        {"id": "ENC-FTR-001", "updated_at": "2026-07-10T07:00:00Z"},
+    ],
+}
+# Global (updated_at desc) order: TSK-001(09) ISS-001(08) FTR-001(07) TSK-002(05) ISS-002(02)
+
+
+def _record_ids(keys):
+    return [k["record_id"]["S"] for k in keys]
+
+
+def _setup_opensearch(monkeypatch, selection=_M76_SELECTION):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "fake-graph-fn")
+    client = _FakeLambdaClient({"ok": True, "selection": selection})
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: client)
+    captured = {"keys": None}
+
+    def _fake_hydrate(keys, cutoff):
+        captured["keys"] = list(keys)
+        return [], [], [], [], [], []
+
+    monkeypatch.setattr(feed_query, "_hydrate_records_via_batch_get", _fake_hydrate)
+    return client, captured
+
+
+def test_m76_opensearch_hydrates_only_page_first_page(monkeypatch):
+    client, captured = _setup_opensearch(monkeypatch)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=3, cursor=None)
+
+    # 5 candidates, page_size=3 -> hydrate exactly page_size+1 = 4 keys (NOT all 5).
+    assert captured["keys"] is not None
+    assert len(captured["keys"]) == 4
+    assert _record_ids(captured["keys"]) == [
+        "task#ENC-TSK-001", "issue#ENC-ISS-001", "feature#ENC-FTR-001", "task#ENC-TSK-002",
+    ]
+    # page_size + before were threaded to the selection tier; no before on page 1.
+    assert client.calls[0]["page_size"] == 3
+    assert "before" not in client.calls[0]
+
+
+def test_m76_opensearch_cursor_strictly_after_no_dup_no_gap(monkeypatch):
+    client, captured = _setup_opensearch(monkeypatch)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    # Cursor at ISS-001 (2nd global item). The page after it must be exactly
+    # FTR-001, TSK-002, ISS-002 -- no ISS-001 (no dup), no skipped record (no gap).
+    cursor = feed_query.feed_corpus.encode_cursor(
+        "2026-07-10T08:00:00Z", feed_query.feed_corpus.tracker_record_key("enceladus", "ENC-ISS-001")
+    )
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=3, cursor=cursor)
+
+    assert _record_ids(captured["keys"]) == [
+        "feature#ENC-FTR-001", "task#ENC-TSK-002", "issue#ENC-ISS-002",
+    ]
+    # cursor's updated_at is threaded to the selection tier as the range bound.
+    assert client.calls[0]["before"] == "2026-07-10T08:00:00Z"
+
+
+def test_m76_hydration_scales_with_page_not_corpus(monkeypatch):
+    # A corpus-sized selection (200 candidates) must still hydrate only page+1.
+    big = {"enceladus#task": [
+        {"id": f"ENC-TSK-{i:03d}", "updated_at": f"2026-07-10T{(59 - (i % 60)):02d}:00:00Z"}
+        for i in range(200)
+    ]}
+    client, captured = _setup_opensearch(monkeypatch, selection=big)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=75, cursor=None)
+    assert len(captured["keys"]) == 76  # page_size + 1, NOT 200

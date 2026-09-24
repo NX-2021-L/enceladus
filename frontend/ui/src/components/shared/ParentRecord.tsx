@@ -48,7 +48,7 @@ export function ParentRecord({ parentId, allTasks, allIssues, allFeatures }: Par
       </h3>
       <Link
         to={routeForId(parentId)}
-        className="block rounded-md bg-slate-700/50 p-3 hover:bg-slate-700 transition-colors"
+        className="block rounded-lg bg-slate-700/50 p-3 border border-[color:var(--border-subtle)] hover:border-[color:var(--border-hover)] hover:bg-slate-700 transition-colors"
       >
         <div className="flex items-center gap-2 mb-1">
           <span className="font-mono text-xs text-blue-400">{parentId}</span>

@@ -1,0 +1,276 @@
+.feed-route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: calc(var(--space-16) * 56);
+  /* ENC-TSK-M38: floor this flex item's cross-axis auto-minimum so a
+     long unbreakable descendant (a token, hash, or native form control)
+     can never bubble a wider intrinsic min-content up through
+     .ev2-al__content and force horizontal scroll at narrow viewports. */
+  min-width: var(--space-0);
+}
+
+.feed-route__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.feed-route__eyebrow {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+.feed-route__title {
+  margin: var(--space-0);
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-3xl);
+  line-height: var(--lh-tight);
+  color: var(--fg-display);
+}
+
+.feed-route__subtitle {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--lh-relaxed);
+  color: var(--fg-muted);
+}
+
+.feed-route__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+  /* ENC-TSK-M38: same auto-minimum floor as .feed-route -- the toolbar is
+     itself a flex item of the column above it. */
+  min-width: var(--space-0);
+}
+
+.feed-route__search {
+  flex: 1;
+  /* ENC-TSK-M38 (ENC-ISS-51x residual): flex:1 alone does not give this
+     item a shrink floor -- its automatic minimum size is its content's
+     min-content width unless min-width:0 overrides it. The nested
+     Autosuggest/Input chain sets min-width:0 on the innermost <input>,
+     but that alone is fragile across future content additions (icons,
+     inline suggestions); floor the outer flex item explicitly so the
+     "Search records or saved name…" box can always shrink to fit ≤606px
+     viewports instead of forcing this row (and the page) wider. */
+  min-width: var(--space-0);
+}
+
+/* ENC-TSK-M26 fix: this min-width (768px) was unconditional, so at mobile
+   widths a single toolbar item alone exceeded the viewport and forced
+   .ev2-al__content to scroll horizontally regardless of flex-wrap on the
+   toolbar (wrap only helps once there's more than one item competing for
+   space -- it can't shrink a single item below its own min-width). Only
+   opt into the wider minimum once there's room for it. */
+@media (min-width: 48.0625rem) {
+  .feed-route__search {
+    /* ENC-ISS-528: cap the wider minimum at the container width. `min-width`
+       otherwise wins over the container, so the flat 768px floor (4rem*12)
+       exceeded the sidebar-narrowed content column at ~769-1070px viewports
+       and forced the search box (and page) into horizontal overflow, while the
+       FeedPropertyFilter below it — which has no min-width — stayed constrained.
+       min(..., 100%) keeps the 768px preference when there's room but lets the
+       box shrink to fit the column, matching the lower input's behavior. */
+    min-width: min(calc(var(--space-16) * 12), 100%);
+  }
+}
+
+.feed-route__sort {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.feed-route__sort select {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--fg);
+}
+
+.feed-route__telemetry {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.feed-route__telemetry > summary {
+  cursor: pointer;
+  color: var(--accent);
+  list-style: none;
+}
+
+.feed-route__telemetry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.feed-route__telemetry > summary::before {
+  content: '▸ ';
+}
+
+.feed-route__telemetry[open] > summary::before {
+  content: '▾ ';
+}
+
+.feed-route__telemetry > div {
+  margin-top: var(--space-1);
+}
+
+.feed-property-filter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.feed-route__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.feed-route__meta-error {
+  color: var(--status-blocked);
+}
+
+.feed-route__empty {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.feed-route__empty-action {
+  appearance: none;
+  border: none;
+  background: none;
+  margin-left: var(--space-2, 8px);
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--accent, #3d9ba8);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ENC-TSK-M35: master-detail split (FTR-128 AC-18). Cloudscape's
+ * `ColumnLayout` only offers equal-width columns; Feed.dc.html's
+ * `.feed-pane`/`.record-pane` ratio is asymmetric (narrower dense list,
+ * wider reading pane), so this is a dedicated flex wrapper rather than a
+ * ColumnLayout instance. */
+.feed-route__split {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+
+.feed-route__list-scroll {
+  flex: 1 1 380px;
+  max-width: 460px;
+  max-height: calc(var(--space-16) * 28);
+  overflow-y: auto;
+  padding-right: var(--space-2);
+}
+
+.feed-route__pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1.5 1 0;
+  min-width: var(--space-0);
+}
+
+.feed-route__scroll-hint {
+  margin: var(--space-3) var(--space-0) var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.feed-recent-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.feed-recent-nav__label {
+  font-family: var(--font-heading);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+.feed-recent-nav .ev2-pag__btn:not([aria-label='Previous page']):not([aria-label='Next page']),
+.feed-recent-nav .ev2-pag__ellipsis {
+  display: none;
+}
+
+/* ENC-TSK-O48 (io gamma UAT, pre-cutover): keep RecordDetailHub STACKED inside
+   the feed reading pane.
+ *
+ * recordDetailHub.css turns `.ev2-rdh` into a two-column grid
+ * (`22rem minmax(0, 1fr)`) at `@media (min-width: 64rem)`, with
+ * `.ev2-rdh__main { display: contents }` promoting the header card and the tab
+ * content to sibling grid columns. On the full-page record routes that is
+ * right -- the hub owns the whole content width.
+ *
+ * Here it is not. The hub renders inside `.feed-route__pane`, which is already
+ * one column of the `.feed-route__split` master-detail flex. The hub then
+ * splits its own column again, producing three effective columns:
+ * feed list | 22rem header card | whatever remains. The remainder is a few
+ * hundred pixels even on a wide display, so Overview body text wrapped at
+ * roughly two words per line.
+ *
+ * The media query asks how wide the WINDOW is; what matters is how wide the
+ * HUB'S CONTAINER is. A CSS container query on `.ev2-rdh` is the correct
+ * root-cause fix and would work for every consumer, but ui-v2 and
+ * design-system-2 currently use no container queries at all, so introducing
+ * the pattern touches every hub consumer -- not a change to make days before
+ * the cutover. This scoped override is the pre-cutover fix; the container-query
+ * refactor is recorded on ENC-TSK-O48 as the follow-up.
+ *
+ * Deliberately NOT reverted here: `.ev2-rdh__vitals` keeps its two-column
+ * layout (the header card is now full pane width, so two columns reads better,
+ * not worse), and the action bar stays inline rather than reverting to the
+ * mobile sticky variant. */
+@media (min-width: 64rem) {
+  .feed-route__pane .ev2-rdh {
+    display: block;
+  }
+
+  .feed-route__pane .ev2-rdh__main {
+    display: block;
+  }
+
+  .feed-route__pane .ev2-rdh__head {
+    position: static;
+    margin-bottom: var(--space-5);
+  }
+}
+
+
+/* ENC-TSK-P63 (obs 3): the reading pane showed BOTH hub action toolbars in
+   the accessibility tree; the sticky variant is redundant inside the pane. */
+.feed-route__pane .ev2-rdh__actionbar--sticky {
+  display: none;
+}

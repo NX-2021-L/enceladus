@@ -20,7 +20,7 @@ import {
 import type { DocumentFilters } from '../types/filters'
 
 export function DocumentsListPage() {
-  const { filters, toggleArrayFilter, setFilter } = useFilterState<DocumentFilters>({})
+  const { filters, toggleArrayFilter, setFilter, clearFilters } = useFilterState<DocumentFilters>({})
   const { projects } = useProjects()
   const {
     documents,
@@ -144,7 +144,10 @@ export function DocumentsListPage() {
               <ScrollSentinel sentinelRef={sentinelRef} hasMore={hasMore} />
             </>
           ) : (
-            <EmptyState message="No documents match your filters" />
+            <EmptyState
+              message="No documents match your filters"
+              action={{ label: 'Clear filters', onClick: clearFilters }}
+            />
           )}
         </div>
       )}

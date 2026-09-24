@@ -1,0 +1,53 @@
+# Enceladus external-dependency manifest — Neo4j AuraDB
+#
+# This file is the owned source-of-record for component `comp-enceladus-neo4j`
+# in the v3 component registry (see tools/seed-component-registry.py). It
+# declares the connection contract and secret references for the externally
+# managed Neo4j AuraDB instance that backs Enceladus hybrid retrieval.
+#
+# Ownership / provenance: ENC-TSK-L05 AC-3 (external-dependency registration),
+# per DOC-157A790F9E8B T3. The AuraDB instance itself is provisioned and
+# operated outside CloudFormation (managed service); changes to it are tracked
+# via `external_deploy_evidence` rather than a CFN change-set. Editing this
+# manifest is the governed way to record connection/config changes.
+
+component_id: comp-enceladus-neo4j
+address_class: neo4j_auradb
+component_class: external
+
+external_system: Neo4j AuraDB
+
+# Criticality: this is the graph substrate for hybrid retrieval (Personalized
+# PageRank / PPR traversal + vector-adjacent lookups). An outage or a bad
+# connection-config change degrades retrieval quality system-wide.
+criticality: high
+
+owner: io
+
+# Connection contract. The runtime never hard-codes the URI or password — both
+# are resolved at cold-start from AWS Secrets Manager via the secret names
+# below (also mirrored as the component's required_env_secrets).
+connection:
+  # bolt+routing URI for the AuraDB instance, e.g.
+  # neo4j+s://{instance-id}.databases.neo4j.io
+  uri_secret_ref: NEO4J_URI          # AWS Secrets Manager secret name
+  password_secret_ref: NEO4J_PASSWORD  # AWS Secrets Manager secret name
+
+# How to re-derive the concrete AuraDB instance id (the {instance-id} in the
+# URI above) when it is not already known from the secret value:
+#   1. Sign in to the Neo4j Aura console: https://console.neo4j.io/
+#   2. Select the correct tenant/project, then open the running AuraDB instance
+#      that backs Enceladus (labeled for the Enceladus graph substrate).
+#   3. The instance's "Connection URI" is shown on the instance detail card in
+#      the form neo4j+s://<instance-id>.databases.neo4j.io — the <instance-id>
+#      is the leading dbid segment of that hostname.
+#   4. Confirm it matches the value stored in the NEO4J_URI Secrets Manager
+#      secret; if they differ, the secret is the deploy-time source of truth and
+#      should be reconciled via external_deploy_evidence, not edited in place.
+retrieval_steps: >-
+  Re-derive the AuraDB instance id from the Neo4j Aura console
+  (https://console.neo4j.io/): open the Enceladus AuraDB instance under the
+  correct tenant/project and read the {instance-id} dbid segment from its
+  Connection URI (neo4j+s://<instance-id>.databases.neo4j.io); reconcile against
+  the NEO4J_URI Secrets Manager secret, which remains the deploy-time source of
+  truth.

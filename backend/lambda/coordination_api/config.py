@@ -33,10 +33,6 @@ def _first_nonempty_env(*names: str) -> str:
     return ""
 
 __all__ = [
-    "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
-    "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
-    "AGENT_SESSIONS_TABLE",
-    "AGENT_TYPES_TABLE",
     "ANTHROPIC_API_BASE_URL",
     "ANTHROPIC_API_KEY_SECRET_ID",
     "ANTHROPIC_API_STREAM_TIMEOUT_SECONDS",
@@ -63,6 +59,15 @@ __all__ = [
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
     "COORDINATION_INTERNAL_API_KEYS",
     "COORDINATION_MCP_HTTP_PATH",
+    "AGENT_SESSIONS_TABLE",
+    "AGENT_TYPES_TABLE",
+    "AGENT_CREDENTIALS_TABLE",
+    "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
+    "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
+    "AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED",
+    "AGENT_SESSIONS_UNCLAIM_TTL_MINUTES",
+    "DRIFT_TELEMETRY_TABLE",
+    "GRAPH_QUERY_API_URL",
     "COORDINATION_PUBLIC_BASE_URL",
     "COORDINATION_TABLE",
     "CORS_ORIGIN",
@@ -180,27 +185,50 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 # names. The allocator (agent_id_alloc.py) is dormant until the agent.* surface (I38).
 AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
 AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
-# ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44: Session Claim
-# ID (SCI) tokens live in the SAME DynamoDB table the checkout service uses for CAI/CCI
-# (pk = token id, token_type discriminator). Env-suffixed so gamma coordination_api writes
-# the -gamma twin.
-CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle store (CRED-<uuid4hex>).
+# Rides the same DynamoDB Streams -> EventBridge Pipe -> SQS -> graph_sync path as the
+# session/type stores so credential nodes + OWNED_BY/DERIVED_FROM edges project async.
+AGENT_CREDENTIALS_TABLE = os.environ.get("AGENT_CREDENTIALS_TABLE", "agent-credentials")
 # ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop for abandoned agent
 # sessions. A session left in a live status (allocated/claimed) past the threshold is
 # reaped to 'retired' via an append-only status flip — NOT native DynamoDB TTL, which
 # hard-deletes and would violate the append-only retire model established in ENC-TSK-I38.
-# The threshold is operator-configurable; the sweep can be disabled via the enable flag.
 AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
     os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
 )
+# ENC-ISS-441 / ENC-TSK-J94: default tightened from I71's 86400 (24h) to 7200 (2h) per the
+# io design decision on the issue. The idle reference prefers last_activity_at (J71/J83
+# heartbeat), so listening agents polling escalation.watch are exempt while they poll.
 AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
-    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
+    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "7200")
 )
+# ENC-ISS-441 / ENC-TSK-J94: unclaim TTL sweep — a session registered (allocated) but never
+# claimed within this many minutes is a ghost registration and is reaped to 'retired'.
+# 10 of 24 production sessions exhibited this pattern (the ENC-ISS-441 evidence).
+AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED", "true").lower() == "true"
+)
+AGENT_SESSIONS_UNCLAIM_TTL_MINUTES = int(
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_TTL_MINUTES", "10")
+)
+# ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122): Session Claim ID (SCI) tokens live in the SAME
+# DynamoDB table the checkout service uses for CAI/CCI (pk = token id, token_type
+# discriminator). Env-suffixed so gamma coordination_api writes the -gamma twin.
+CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
+
+# --- ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier ---
+# graph_query_api hybrid endpoint used by the default nearest-neighbor provider
+# (Titan V2 vector search). Empty => the classifier degrades to no neighbors so
+# session-init inference never blocks. Set on the gamma stack to enable real
+# predictions. The drift-telemetry table is owned by FTR-087 (planned); empty
+# default keeps the new intent_centroid_drift column write a graceful no-op.
+GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")

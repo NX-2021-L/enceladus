@@ -20,9 +20,11 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared_layer", "python"))
 
 _SPEC = importlib.util.spec_from_file_location(
     "checkout_service",
@@ -88,8 +90,8 @@ class ComponentMisconfiguredHelperTests(unittest.TestCase):
         def fake_get_item(**kwargs):
             cid = kwargs["Key"]["component_id"]["S"]
             mapping = {
-                "comp-checkout-service": "github_pr_deploy",
-                "comp-governance-docs": "no_code",
+                "comp-checkout-service": "code",
+                "comp-governance-docs": "documentation",
             }
             return _registry_item(component_id=cid, required_value=mapping[cid])
 
@@ -97,8 +99,8 @@ class ComponentMisconfiguredHelperTests(unittest.TestCase):
             result = checkout_service._get_required_transition_type(
                 ["comp-checkout-service", "comp-governance-docs"]
             )
-        # github_pr_deploy has rank 0 (strictest) and wins.
-        self.assertEqual(result, "github_pr_deploy")
+        # code is stricter than documentation and wins.
+        self.assertEqual(result, "code")
 
     def test_missing_component_id_fails_open_with_warning(self):
         """A stale task.components entry (no registry row) must not hard block."""
@@ -125,30 +127,17 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
                 "components": ["comp-checkout-service"],
             },
         )
-        def _get_item_side_effect(TableName, Key):
-            # ENC-ISS-441 / ENC-TSK-J93 SCI gate (backported by ENC-TSK-M44): answer the
-            # AGENT_SESSIONS_TABLE lookup as a pre-Ph3 grandfathered session so this
-            # COMPONENT_MISCONFIGURED regression test — unrelated to SCI — passes the
-            # gate without needing a minted SCI token.
-            if "session_id" in Key:
-                return {
-                    "Item": {
-                        "session_id": Key["session_id"],
-                        "created_at": {"S": "2026-06-01T00:00:00Z"},
-                        "status": {"S": "claimed"},
-                    }
-                }
-            return _registry_item(component_id="comp-checkout-service", required_value=None)
-
         with patch.object(
             checkout_service._ddb,
             "get_item",
-            side_effect=_get_item_side_effect,
+            return_value=_registry_item(
+                component_id="comp-checkout-service", required_value=None
+            ),
         ):
             response = checkout_service._handle_checkout(
                 "enceladus",
                 "ENC-TSK-FAKE",
-                {"active_agent_session_id": "ENC-SES-001"},
+                {"active_agent_session_id": "test-session"},
             )
 
         self.assertEqual(response["statusCode"], 500)
@@ -163,7 +152,7 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
             "jreese.net/components/comp-checkout-service", details["remediation_url"]
         )
         self.assertIn("required_transition_type", details["remediation_guidance"])
-        self.assertIn("DOC-240A67973B13", details["rule_citation"])
+        self.assertIn("DOC-157A790F9E8B", details["rule_citation"])
 
     @patch.object(checkout_service, "_get_task")
     def test_handle_advance_surfaces_component_misconfigured_envelope(self, mock_get_task):

@@ -17,8 +17,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # ENC-TSK-O84: full history is needed to resolve the base ref for the
+      # architecture_exceptions ratchet below (git show <base>:<manifest>).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Lint Python files
         run: |
@@ -42,10 +46,50 @@ jobs:
           print(f'  entities: {list(d[\"entities\"].keys())}')
           "
 
+      # ENC-TSK-O84: resolve the base ref the architecture_exceptions ratchet
+      # diffs against -- the PR's base sha for a pull_request event, or the
+      # previous commit for a direct push (same pattern as the governance
+      # dictionary guard's "Resolve diff range" step).
+      - name: Resolve base ref for architecture-exceptions ratchet (ENC-TSK-O84)
+        id: arch_exceptions_range
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            base="${{ github.event.before }}"
+            if [[ -z "${base}" || "${base}" == "0000000000000000000000000000000000000000" ]]; then
+              base="$(git rev-parse HEAD~1)"
+            fi
+            echo "base=${base}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ENC-TSK-O83: the guard now parses 02-compute.yaml structurally
+      # instead of scanning raw text, so it needs PyYAML. No earlier step in
+      # this job imports yaml, so provision it here (same scoped-install
+      # pattern as the env-parity step below).
       - name: Verify Lambda architecture parity
         run: |
           set -euo pipefail
-          python3 tools/verify_lambda_arch_parity.py
+          python3 -m pip install --quiet pyyaml
+          python3 tools/verify_lambda_arch_parity.py \
+            --exceptions-base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
+
+      - name: Manifest / declaration parity (ENC-TSK-Q19 FR-3)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 tools/verify_lambda_arch_parity.py --manifest-parity-only
+
+      - name: Architecture literal lint (ENC-TSK-Q19 FR-1)
+        run: |
+          set -euo pipefail
+          python3 tools/lint_architecture_literals.py
+
+      - name: Gen2 package-arch gate self-test (ENC-TSK-Q19 FR-4)
+        run: |
+          set -euo pipefail
+          python3 tools/ci_selftest_package_arch_gate.py
 
       - name: Test Lambda package architecture parity guard (ENC-TSK-E19)
         run: |
@@ -76,32 +120,35 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
-      # DVP-TSK-671 (BRD B2-R2): the warehouse registration library claims
-      # idempotency, full-refresh correctness, schema evolution, and a
-      # transactional write ordering. The whole T2 contract rests on those
-      # claims, so they are tested rather than asserted. Needs pyarrow for the
-      # Parquet write path; the contract half of the suite runs without it.
-      - name: Warehouse registration contract tests (DVP-TSK-671)
+      # ENC-ISS-663 / ENC-TSK-P03: the placeholder-Lambda guard's own predicate.
+      # Its self-tests carry the false-positive cases explicitly -- a legitimately
+      # small index-handler function and a Lambda Web Adapter run.sh entrypoint
+      # both read OK -- because a guard that cries wolf on healthy functions gets
+      # switched off, and then the real finding is lost.
+      - name: Placeholder-Lambda guard self-tests (ENC-ISS-663)
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pyarrow
-          cd backend/lambda/shared_layer
-          PYTHONPATH=python python3 -m unittest test_warehouse_registration -v
+          python3 tools/assert_no_placeholder_lambdas.py --self-test
+          python3 -m unittest tools.test_compute_affected_targets
 
-      # DVP-TSK-648/649 (BRD B3): the governance analytics mart's grain contract
-      # is only a contract if violating it fails the build. This suite enforces
-      # DOC-3391173F2A5C mechanically — the substitution test is parametrised
-      # over all seven tables and fails on any free-text column name, because
-      # per the grain contract the appearance of such a column IS the Risk R-4
-      # drift signal rather than something a later review might catch. It also
-      # asserts daily grain on every fact table, the mandatory freshness stamp,
-      # zero partition keys (DOC-1E1EC5B7CE02), and that the four
-      # awaiting-upstream spectral columns stay DECLARED-and-NULL (risk R-11).
-      - name: Governance mart contract tests (DVP-TSK-648)
+      # ENC-ISS-663 / ENC-TSK-P03: a function in lambda_workflow_manifest.json with
+      # no function_name_map entry is SILENTLY SKIPPED by _deploy.yml while
+      # CloudFormation still creates it -- leaving it on its placeholder body. This
+      # already happened to the AppSync FeedPublisher (ENC-TSK-K56); the remedy then
+      # was a comment asking a human to keep the two files in lockstep, and four
+      # months later it recurred for three more functions. This is that comment,
+      # executed. Runs on every PR -- no AWS access required.
+      - name: Function-name-map lockstep (ENC-ISS-663)
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pyarrow pytest
-          python3 -m pytest backend/lambda/governance_mart -q
+          python3 -m pip install --quiet pyyaml
+          python3 tools/assert_function_name_map_lockstep.py --self-test
+          python3 tools/assert_function_name_map_lockstep.py
+      # DVP-TSK-671 (BRD B2-R2) Warehouse registration contract tests: removed
+      # during ENC-TSK-Q21 reconciliation -- backend/lambda/shared_layer/
+      # test_warehouse_registration.py is a main-only file dropped under rule A
+      # (backend/ must be EXACT origin/v4/main content; deployable main-only
+      # changes are out of scope for this forward-port, io reviews separately).
 
       # DVP-TSK-703: the platform health monitor and the ad-hoc promotion
       # transform tests used to run here. Both lambdas moved to
@@ -121,8 +168,228 @@ jobs:
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.
+      # ENC-TSK-O99 / ENC-ISS-660: nothing in CI had any notion of IAM REACH.
+      # ENC-TSK-O80 introduced an AWS::Glue::Database the CloudFormation deploy
+      # role cannot create; every guard was green, the apply failed, and the
+      # rollback reverted an unrelated SharedLayerArn :12 -> :10 across the
+      # fleet. A dry-run change-set does not substitute -- change-set CREATION
+      # succeeds regardless of execution-time permissions.
+      - name: CFN deploy-role reach guard (ENC-TSK-O99)
+        run: |
+          set -euo pipefail
+          python3 tools/cfn_deploy_role_reach_guard.py
+          python3 -m unittest tools.test_cfn_deploy_role_reach_guard
+
+      # ENC-TSK-P15 / ENC-ISS-669: ProjectJsonSyncRule's Name carries
+      # ${EnvironmentSuffix} like every other EventBridge rule in
+      # 02-compute.yaml, while its Target Arn hardcodes the PRODUCTION
+      # devops-json-to-parquet-transformer Lambda with no suffix. Only
+      # Condition: IsProduction stops a gamma rendering of that rule from
+      # invoking the production devops Lambda from gamma -- a direct
+      # violation of the standing directional isolation ruling (gamma READS
+      # devops prod; gamma NEVER WRITES into it, and an invoke is a write).
+      # This guard sweeps every governed template for the same shape: a
+      # plane-suffixed-context resource whose invoke target hardcodes a
+      # literal, unsuffixed ARN with no declared exception.
+      - name: Cross-plane ARN isolation sweep (ENC-TSK-P15)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_cross_plane_arn_isolation.py
+          python3 -m unittest tools.test_verify_cross_plane_arn_isolation
+
+      # ENC-TSK-P15 AC-3/AC-4/AC-5 (ENC-ISS-669): the arm64 architecture
+      # contract enumerated ONE repository's CloudFormation template while
+      # the fleet spans two -- four production devops-owned Lambdas (plus a
+      # fifth, devops-io-devops-mcp, declared nowhere in devops's OWN
+      # functions.yaml either) were never in scope for any enceladus check.
+      # infrastructure/devops_lambda_ownership_snapshot.json is the
+      # pinned, hash-verified interim fix (enceladus CI cannot read the
+      # private devops repo at check time without a token); this step
+      # verifies that snapshot's own internal consistency every run --
+      # network-free, credential-free, so it always actually runs, unlike
+      # the AWS-credentialed cross-source reconciliation in
+      # verify_lambda_arch_parity.py --check-live-reconciliation (opt-in,
+      # not wired here -- see that flag's own help text for why).
+      - name: Devops Lambda ownership snapshot (ENC-TSK-P15)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_devops_ownership_snapshot.py
+          python3 -m unittest tools.test_verify_devops_ownership_snapshot
+
+      # ENC-TSK-P12 / ENC-ISS-667: devops-recompute-governance-gamma's schedule
+      # went silent for ~365.7h against a 26h expectation and nothing alarmed --
+      # 49 of 51 functions had no liveness probe at all. This guard is the
+      # STRUCTURAL half of the per-component liveness contract (contract schema,
+      # the two reused sources -- devops ownership snapshot, ENC-TSK-P15;
+      # legacy_schedules.py's rhythm-tier map, K91 -- still load, and
+      # 02-compute.yaml + 05-monitoring.yaml still parse and still carry the
+      # RhythmAbsorbed/UnlearningEnabledCond conditions and the permanent-
+      # decommission citations this contract's family logic keys off of). No
+      # AWS credentials needed, same as every other guard in this job. The full
+      # AWS-derived reconciliation (--live: enumerate every live EventBridge
+      # Rule and Scheduler schedule, cross-check every disabled legacy rule's
+      # supersession claim against whether its claimed rhythm tier is actually
+      # alive, check real CloudWatch Invocations activity) is opt-in and not
+      # wired here -- same reasoning as verify_lambda_arch_parity.py's
+      # --check-live-reconciliation flag, this job has no AWS credentials
+      # configured anywhere.
+      - name: Per-component liveness contract (ENC-TSK-P12)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 tools/verify_liveness_contract.py
+          python3 -m unittest tools.test_verify_liveness_contract
+
+      # ENC-TSK-P11 / ENC-ISS-666: DOC-6EFD5DB32CD8 Revision 19 Addendum's
+      # Component Dependency Closure primitive. A two-state present/absent
+      # model has nowhere to put a dependency that is absent BY DECISION
+      # (the Trino/Superset estate: one EC2 host, no gamma twin, none
+      # intended) as distinct from an ordinary gap that should eventually
+      # close (devops-agentcli-compute is not yet provisioned on gamma) --
+      # so a check meeting that edge invents an answer, which is
+      # ENC-ISS-665's fabricated-verdict failure mode by another route.
+      # Structural only here: schema validation, the cheap local
+      # bundled_module existence check (no AWS -- always runs for real),
+      # the devops-ownership predicate reuse (ENC-TSK-P15, never a second
+      # ownership mechanism), and the --base-ref ratchets (AC-9's
+      # enforced_dependency_kinds may only grow; AC-8's revert-orphan rule,
+      # reusing this job's own arch_exceptions_range base-ref resolution
+      # rather than a second one). The AWS-derived existence checks
+      # (--live) and the live component-coverage reconciliation
+      # (--check-component-coverage, reusing verify_lambda_arch_parity.py's
+      # own _enumerate_live_lambda_functions) are opt-in and not wired
+      # here -- same reasoning as that file's --check-live-reconciliation:
+      # this job has no AWS credentials configured anywhere.
+      - name: Component dependency closure (ENC-TSK-P11)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_component_closure.py \
+            --base-ref "${{ steps.arch_exceptions_range.outputs.base }}"
+          python3 -m unittest tools.test_verify_component_closure
+
+      # ENC-TSK-P40 / ENC-ISS-696 / ENC-ISS-697. Credential-free by design: the
+      # ENC-ISS-696 condition (an arm64 function selecting a layer that DECLARES
+      # CompatibleArchitectures [x86_64]) is decidable from
+      # infrastructure/component_dependency_closure.json alone, so CI can block it
+      # with no AWS access. --scope declared restricts the run to attachments the
+      # governed closure can settle and REPORTS the remainder as out-of-scope
+      # rather than absorbing them; the compute deploy lane additionally runs this
+      # same predicate as CHECK 9/9 with OIDC credentials and --scope all, so
+      # nothing escapes both invocations.
+      - name: Layer/function architecture coherence (ENC-TSK-P40 / ENC-ISS-697)
+        run: |
+          set -euo pipefail
+          python3 tools/verify_layer_arch_coherence.py --plane prod  --offline --scope declared
+          python3 tools/verify_layer_arch_coherence.py --plane gamma --offline --scope declared
+          python3 -m unittest tools.test_verify_layer_arch_coherence
+
       - name: Prod-gate coverage guard (ENC-TSK-J65)
         run: |
           set -euo pipefail
           python3 tools/prod_gate_coverage_guard.py
           python3 -m unittest tools.test_prod_gate_coverage_guard
+
+      - name: v3-prod promote preflight self-tests (ENC-TSK-Q21 FR-8)
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.test_promote_preflight -v
+
+      # ENC-TSK-P08 / ENC-ISS-665: nothing wired this harness into CI before
+      # this task (git grep verify_arm64_validation_harness in
+      # .github/workflows/ returned nothing) -- so its non-passing discipline
+      # gated nothing. This job has no AWS credentials configured anywhere
+      # (no aws-actions/configure-aws-credentials step exists in this
+      # workflow), so the honest pre-merge wiring is two-part:
+      #   1. The harness's own self-tests (--self-test) as a REAL blocking
+      #      gate -- these need no AWS access and are what prove the
+      #      ENC-ISS-665 remedies (run-start anchoring, the terminated-
+      #      invocation requirement, the load-bearing cross-point
+      #      contradiction assertion, log-group-wide evaluation) and the
+      #      ENC-ISS-668 ATTESTED rollup all hold, on every PR.
+      #   2. One real, unmocked CLI invocation with no AWS credentials
+      #      present, to prove -- for real, not only in a mock -- that the
+      #      harness reports an honest non-pass (UNKNOWN/ATTESTED-eligible
+      #      points, never a fabricated PASS) rather than crashing when it
+      #      genuinely cannot reach AWS. This step is NOT gated on
+      #      overall == pass (it cannot ever be here, credential-less); it is
+      #      gated on "did not crash" and "never reports an unqualified pass."
+      - name: Five-point arm64 validation harness self-tests (ENC-ISS-665 / ENC-ISS-668)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest pyyaml certifi boto3
+          python3 tools/verify_arm64_validation_harness.py --self-test
+
+          echo "[INFO] running one live CLI invocation with no AWS credentials present, to prove honest non-pass reporting rather than a crash or a fabricated pass"
+          set +e
+          python3 tools/verify_arm64_validation_harness.py \
+            --function-name devops-governance-mart-gamma --output /tmp/five-point-ci-report.json
+          set -e
+          python3 -c "
+          import json
+          report = json.load(open('/tmp/five-point-ci-report.json'))
+          fn = report['functions'][0]
+          assert fn['overall'] != 'pass', (
+              f\"this pre-merge lane has no AWS credentials -- overall must never read pass \"
+              f\"here, got {fn['overall']!r}\"
+          )
+          print(f\"[SUCCESS] harness ran for real with no AWS credentials and reported \"
+                f\"overall={fn['overall']!r} (never a fabricated pass)\")
+          "
+
+  frontend-ui-tests:
+    name: Frontend UI Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend/ui
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ENC-TSK-H81 (ENC-FTR-051 AC3): documentMarkdown/DownloadMarkdownButton
+      # tests run here; this job is the "comp-enceladus-pwa CI suite" the AC refers to.
+      - name: Run tests
+        run: npm test
+
+  frontend-ui-v2:
+    name: Frontend UI v2 (ui-v2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend/ui-v2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/ui-v2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint (eslint + design-system adherence)
+        run: npm run lint:adherence
+
+      - name: Run tests
+        run: npm test

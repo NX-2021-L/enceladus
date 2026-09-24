@@ -68,7 +68,7 @@ def _watch(escalations, params, touched=True):
     fake = mock.MagicMock()
     fake.query.return_value = {"Items": [_serialized(e) for e in escalations]}
     with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake), \
-         mock.patch.object(coordination_lambda._agent_alloc, "touch_session_activity",
+         mock.patch.object(coordination_lambda._agent_id_alloc, "touch_session_activity",
                            return_value=touched) as touch:
         resp = coordination_lambda._handle_escalation_watch(
             {"queryStringParameters": params}, INTERNAL_CLAIMS)
