@@ -319,7 +319,11 @@
     },
     "promote-gamma-to-prod-request.yml": {
       "class": "inert",
-      "notes": "relay: dispatches _deploy.yml whose v3-prod lane is environment-gated; performs no mutation itself"
+      "notes": "ENC-TSK-Q21: relay -- opens/supersedes the auto/promote-v4main-to-main-* PR and dispatches PR Commit Gate against it; the actual v3-prod deploy is dispatched only on that PR's merge (promote-merged-dispatch.yml). Performs no AWS mutation itself."
+    },
+    "promote-merged-dispatch.yml": {
+      "class": "inert",
+      "notes": "ENC-TSK-Q21 FR-8: relay -- fires on merge of an auto/promote-v4main-to-main-* PR to main and dispatches _deploy.yml (target_environment=v3-prod) whose v3-prod lane is environment-gated; also deletes the merged promote branch (a contents write, not a runtime mutation). Performs no AWS mutation itself."
     },
     "s3-governance-notification-wire.yml": {
       "class": "conditional",
