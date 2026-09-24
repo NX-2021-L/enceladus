@@ -59,17 +59,25 @@ env:
 jobs:
 
   # ---------------------------------------------------------------------------
-  # BUILD — runs only on push-to-v4/main (gamma path).
-  # push-to-main is intentionally a no-op: v3-prod is workflow_dispatch-only,
-  # and v4/main is forward-synced from main by the sync-main-to-v4main workflow
-  # (ENC-TSK-G71) which then triggers this workflow on the v4/main push.
-  # workflow_dispatch / workflow_call callers provide a pre-built SHA.
+  # BUILD — produces the Gen2 artifacts the deploy consumes.
+  # Runs on: push-to-v4/main (gamma path, builds github.sha), AND
+  #          workflow_dispatch / workflow_call (builds the caller-supplied SHA).
+  # ENC-TSK-I60: dispatch/call previously skipped build and required artifacts to
+  # have been pre-built by a v4/main push. v3-prod is workflow_dispatch-only and
+  # in post-fork mode a main SHA never reaches v4/main, so its Gen2 artifacts
+  # were never built — every dispatched v3-prod deploy failed at Resolve. Building
+  # the target SHA here makes a dispatched deploy self-contained (build -> resolve
+  # -> deploy) with zero out-of-band S3 artifact population.
+  # push-to-main stays a no-op (build skipped -> resolve/deploy skipped).
   # ---------------------------------------------------------------------------
   build:
-    if: github.event_name == 'push' && github.ref_name == 'v4/main'
+    if: |
+      (github.event_name == 'push' && github.ref_name == 'v4/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     uses: ./.github/workflows/_build.yml
     with:
-      commit_sha: ${{ github.sha }}
+      commit_sha: ${{ inputs.commit_sha || github.sha }}
 
   # ---------------------------------------------------------------------------
   # RESOLVE — parse env manifest, probe S3 for artifacts, emit deploy inputs.
@@ -78,15 +86,11 @@ jobs:
   resolve:
     name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
     needs: [build]
-    # On push events, only proceed when the build job actually ran (v4/main).
-    # On workflow_dispatch / workflow_call, build is skipped — proceed with the
-    # caller-supplied commit_sha + target_environment.
-    if: |
-      always() &&
-      (
-        (github.event_name == 'push' && needs.build.result == 'success') ||
-        (github.event_name != 'push' && needs.build.result == 'skipped')
-      )
+    # ENC-TSK-I60: build now runs on every deploy path (push-to-v4/main,
+    # workflow_dispatch, workflow_call), so resolve simply requires it to have
+    # succeeded. push-to-main is preserved as a no-op: build is skipped there, so
+    # this condition is false and resolve (and deploy) are skipped.
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       commit_sha:            ${{ steps.sha.outputs.commit_sha }}
@@ -96,6 +100,13 @@ jobs:
       py_version:            ${{ steps.manifest.outputs.py_version }}
       canary_preference:     ${{ steps.manifest.outputs.canary_preference }}
       version_ids_json:      ${{ steps.probe.outputs.version_ids_json }}
+      # ENC-TSK-Q05 AC-2: per-function resolved S3 key prefix ("<arch>-py<pyver>",
+      # e.g. "lambda-artifacts/arm64-py3.12"), for exactly the functions this run
+      # probed (narrowed or full-scope, same set as version_ids_json). Consumed by
+      # the deploy job's architecture guard (tools/assert_artifact_arch_matches_functions.py)
+      # to compare what is about to be shipped against what the target function
+      # actually is (ENC-ISS-778 P0). Existing outputs above/below are unchanged.
+      key_prefixes_json:     ${{ steps.probe.outputs.key_prefixes_json }}
       function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
       environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
@@ -104,7 +115,14 @@ jobs:
       affected_functions_json: ${{ steps.affected.outputs.affected_functions_json }}
 
     steps:
+      # ENC-TSK-I60: pin to the target SHA so the `find backend/lambda` probe
+      # enumerates exactly the function set that _build.yml built and that the
+      # deploy job (which checks out commit_sha) will deploy. Without this the
+      # probe runs against the workflow's branch HEAD, which drifts past the
+      # deployed SHA over time and reintroduces missing-artifact failures.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
 
       - name: Resolve commit SHA
         id: sha
@@ -257,9 +275,21 @@ jobs:
             if [[ ${#FNS[@]} -eq 0 ]]; then
               echo "No affected functions and not full_scope -- nothing to deploy."
               echo "version_ids_json={}" >> "$GITHUB_OUTPUT"
+              # ENC-TSK-Q05 AC-2: keep in lockstep with version_ids_json on the
+              # empty-scope early exit -- an empty map here is what makes the
+              # architecture guard's "no deploy targets" no-op fire correctly.
+              echo "key_prefixes_json={}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
+
+          # ENC-ISS-494 / ENC-ISS-778 (forward-ported from main during
+          # ENC-TSK-Q21): mcp_code's key prefix is kept as an explicit
+          # per-function override -- on v4/main this now equals KEY_PREFIX
+          # exactly (the whole fleet is arm64/python3.12 since the Q20
+          # cutover), but the FN_KEY_PREFIX conditional below is shared code
+          # that expects this variable to be set whenever mcp_code is probed.
+          MCP_CODE_KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/arm64-py3.12"
 
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
 
@@ -293,8 +323,18 @@ jobs:
 
           MISSING=()
           > /tmp/vid_map.txt
+          # ENC-TSK-Q05 AC-2: per-function resolved key prefix, written alongside
+          # the VersionId map so the deploy job's architecture guard can compare
+          # each function's artifact arch/py (encoded in this prefix) against its
+          # live get-function-configuration -- BEFORE update-function-code runs.
+          > /tmp/prefix_map.txt
           for fn in "${FNS[@]}"; do
-            KEY="${KEY_PREFIX}/${fn}-${SHA}.zip"
+            if [[ "$fn" == "mcp_code" ]]; then
+              FN_KEY_PREFIX="$MCP_CODE_KEY_PREFIX"
+            else
+              FN_KEY_PREFIX="$KEY_PREFIX"
+            fi
+            KEY="${FN_KEY_PREFIX}/${fn}-${SHA}.zip"
             VID=$(aws s3api head-object \
               --bucket "$BUCKET" \
               --key "$KEY" \
@@ -303,13 +343,14 @@ jobs:
               MISSING+=("$fn")
             else
               printf '%s=%s\n' "$fn" "$VID" >> /tmp/vid_map.txt
+              printf '%s=%s\n' "$fn" "$FN_KEY_PREFIX" >> /tmp/prefix_map.txt
             fi
           done
 
           if [[ ${#MISSING[@]} -gt 0 ]]; then
             echo "::error::Artifacts missing in S3 for SHA=${SHA} (arch=${ARCH}-py${PY}):"
             printf '  missing: %s\n' "${MISSING[@]}"
-            echo "::error::Build artifacts first via _build.yml before dispatching _deploy.yml."
+            echo "::error::The build job should have produced these (it runs on push-to-v4/main and on dispatch/call). Check the build job logs for this run; a partial build or a SHA/branch mismatch in the resolve checkout is the usual cause (ENC-TSK-I60)."
             exit 1
           fi
 
@@ -326,7 +367,22 @@ jobs:
           PY
           )
 
+          # ENC-TSK-Q05 AC-2: same map-file-to-JSON shape as VID_JSON above.
+          PREFIX_JSON=$(python3 - <<'PY'
+          import json
+          d = {}
+          with open('/tmp/prefix_map.txt') as f:
+              for line in f:
+                  line = line.strip()
+                  if '=' in line:
+                      k, v = line.split('=', 1)
+                      d[k] = v
+          print(json.dumps(d))
+          PY
+          )
+
           echo "version_ids_json=$VID_JSON" >> "$GITHUB_OUTPUT"
+          echo "key_prefixes_json=$PREFIX_JSON" >> "$GITHUB_OUTPUT"
           echo "Resolved ${#FNS[@]} artifact VersionIds."
 
   # ---------------------------------------------------------------------------
@@ -335,11 +391,12 @@ jobs:
   deploy:
     name: Deploy → ${{ needs.resolve.outputs.environment }}
     needs: resolve
-    # Without this explicit condition, GitHub Actions' implicit success() check evaluates
-    # the transitive job chain: build (skipped on workflow_dispatch) → resolve → deploy.
-    # A skipped ancestor causes success() to return false, silently skipping the deploy job.
-    # This if: allows the deploy to run on workflow_dispatch (build skipped) as long as
-    # resolve itself succeeded.
+    # GitHub Actions' implicit success() check evaluates the transitive job chain
+    # build → resolve → deploy; a skipped ancestor (e.g. build on push-to-main,
+    # which is a deliberate no-op) would make success() false and silently skip
+    # deploy. This explicit condition runs deploy whenever resolve itself
+    # succeeded, regardless of upstream skips. (ENC-TSK-I60: build now runs on
+    # dispatch/call too, but this guard remains correct for the push-to-main path.)
     if: always() && needs.resolve.result == 'success'
     environment: ${{ needs.resolve.outputs.environment }}
     runs-on: ubuntu-latest
@@ -408,6 +465,68 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
+      # ENC-TSK-Q05 (ENC-ISS-778 P0): the primary checkout above is the
+      # PROMOTED tree -- needs.resolve.outputs.commit_sha is whatever
+      # v4/main SHA a v3-prod promote points at, and that tree does not
+      # carry tools/ scripts that live only on main (this workflow's own
+      # branch). Same shape as _build.yml's build-mcp-code "Checkout guard
+      # tooling" step: fetch both AC-2/AC-3 guard scripts from the
+      # workflow's own branch into a separate path instead of relying on
+      # them being present in the (possibly foreign) promoted tree. Must
+      # NOT be made conditional on the scripts existing in the primary
+      # checkout -- that would disable both guards exactly when it matters
+      # (every promote checks out a v4/main tree that lacks them).
+      - name: Checkout guard tooling (workflow branch)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .guard-tools
+          sparse-checkout: |
+            tools/assert_artifact_arch_matches_functions.py
+            tools/post_deploy_smoke.py
+          sparse-checkout-cone-mode: false
+
+      # ENC-TSK-Q05 AC-2 (ENC-ISS-778 P0): compare what is about to be
+      # shipped against what each target function actually IS, before any
+      # update-function-code call. Fails closed on a mismatch, an
+      # unparseable prefix, or an unreadable/ambiguous function
+      # configuration; a not-yet-provisioned function (bootstrapping a new
+      # environment) is a legitimate skip, not a failure -- see the
+      # script's own docstring for the full fail-closed semantics.
+      # Unconditional / no continue-on-error / no `|| true` by design: this
+      # step existing at all is the fix, so it must not be possible to
+      # silently disable it.
+      - name: Assert deploy-time architecture guard (ENC-TSK-Q05 AC-2)
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          KEY_PREFIXES_JSON: ${{ needs.resolve.outputs.key_prefixes_json }}
+        run: |
+          set -euo pipefail
+          python3 .guard-tools/tools/assert_artifact_arch_matches_functions.py \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --key-prefixes-json "${KEY_PREFIXES_JSON}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): capture each deploy target's
+      # CURRENT 'live' alias version before it is overwritten below -- this
+      # is the only place that version is ever observable, so it must run
+      # before "Deploy Lambda functions", not after. A function with no
+      # existing 'live' alias yet (bootstrap case) is simply absent from the
+      # captured map; the post-deploy check step treats that as a clean
+      # no-op (nothing to roll back to), never a failure.
+      - name: Capture pre-deploy alias versions (ENC-TSK-Q05 AC-3)
+        id: pre_deploy_versions
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+        run: |
+          set -euo pipefail
+          VERSIONS_JSON=$(python3 .guard-tools/tools/post_deploy_smoke.py capture \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --version-ids-json "${VERSION_IDS_JSON}" \
+            --region "${{ env.AWS_REGION }}" | tail -n 1)
+          echo "previous_alias_versions_json=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
+
       - name: Deploy Lambda functions
         id: lambda_deploy
         env:
@@ -445,6 +564,11 @@ jobs:
           py     = os.environ['PY_VERSION']
           sha    = os.environ['SHA']
           prefix = f"lambda-artifacts/{arch}-py{py}"
+          # ENC-ISS-494: mcp_code's live v3-prod runtime (arm64/python3.12) genuinely
+          # diverges from this target's environment-wide arch/py above -- ENC-ISS-778
+          # retired the BAD hardcoded pre-cutover value here (the P0 502 cause) but
+          # kept the per-function override, now pointed at the correct prefix.
+          mcp_code_prefix = "lambda-artifacts/arm64-py3.12"
           region = 'us-west-2'
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
@@ -621,7 +745,8 @@ jobs:
               if not mapped_name:
                   log(f'[skip] {fn}  (not in function_name_map)')
                   return {'fn': fn, 'status': 'skip'}
-              s3_key = f"{prefix}/{fn}-{sha}.zip"
+              fn_prefix = mcp_code_prefix if fn == 'mcp_code' else prefix
+              s3_key = f"{fn_prefix}/{fn}-{sha}.zip"
               log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id} (stage->{staging_bucket})')
 
               # ENC-TSK-N79 / ENC-ISS-591: enforce manifest SnapStart intent BEFORE
@@ -988,6 +1113,33 @@ jobs:
           python3 tools/assert_no_placeholder_lambdas.py \
             --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
             --region "${{ env.AWS_REGION }}"
+      # ENC-TSK-Q05 AC-3 (ENC-ISS-778 P0): probe each deployed function's
+      # public endpoint (data-driven PROBE_TABLE, seeded with
+      # enceladus-mcp-code / mcp.jreese.net -- the incident surface, which
+      # 502'd on both routes) with retry/backoff for cold-start tolerance.
+      # On failure, automatically restores the 'live' alias to the version
+      # captured above and fails the run -- whether or not the rollback
+      # itself succeeds, because a fired rollback means this deploy shipped
+      # something broken and must be investigated. A function with no
+      # PROBE_TABLE entry, or no captured previous version, is a clean
+      # no-op (reported distinctly, never mistaken for a verified pass).
+      # `if: success()` intentionally: a deploy that already failed upstream
+      # has nothing here worth probing.
+      - name: Post-deploy smoke test with automatic rollback (ENC-TSK-Q05 AC-3)
+        if: success()
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+          PREVIOUS_ALIAS_VERSIONS_JSON: ${{ steps.pre_deploy_versions.outputs.previous_alias_versions_json }}
+          ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          python3 .guard-tools/tools/post_deploy_smoke.py check \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --version-ids-json "${VERSION_IDS_JSON}" \
+            --previous-alias-versions-json "${PREVIOUS_ALIAS_VERSIONS_JSON}" \
+            --region "${{ env.AWS_REGION }}" \
+            --environment-suffix="${ENVIRONMENT_SUFFIX}"
 
       - name: Set deployment status → success
         if: success()

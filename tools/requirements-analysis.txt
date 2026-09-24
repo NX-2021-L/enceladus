@@ -1,0 +1,8 @@
+# ENC-TSK-H91 correlation analysis (tools/correlation_analysis_h91.py).
+# numpy is OPTIONAL: it vectorizes the upper-triangle cosine (X @ X.T) for the
+# ~5000-node corpus. The script and its unit tests fall back to a pure-Python
+# (stdlib math) path when numpy is absent, so this is the only third-party dep.
+# boto3/botocore are imported lazily for the live gamma/S3 paths and are expected
+# to already be present in the product-lead terminal / Lambda runtime; they are
+# intentionally NOT pinned here so `--source file` and the unit tests need no AWS.
+numpy>=1.21

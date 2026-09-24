@@ -1,0 +1,127 @@
+{
+  "files": [
+    {
+      "path": "tools/elr/README.md",
+      "sha256": "97a6cd6cbbc3afc779da9d2ddd7ca6aef1a722006bf61a6379a9eaa497b5f3d8",
+      "size_bytes": 2096
+    },
+    {
+      "path": "tools/elr/elr_batch_get.py",
+      "sha256": "3f867e57c17488c5b43ba79c0dd349fae65088c10fcf462f02dd97f773f20574",
+      "size_bytes": 24437
+    },
+    {
+      "path": "tools/elr/elr_contracts.json",
+      "sha256": "d8921394d76e2db99b420169e9e81a25fb39713a24182c7842edfa36a3072069",
+      "size_bytes": 7694
+    },
+    {
+      "path": "tools/elr/elr_doc_digest.py",
+      "sha256": "993c8778a86e02092d902cfaa06b3471ef18cc153cc38cd682ef339e2fdc61d5",
+      "size_bytes": 5466
+    },
+    {
+      "path": "tools/elr/elr_doc_get.py",
+      "sha256": "d27bee2f7ff1aa46ee598b6fdefb29652eac2685347c92e324d9fab67da5e313",
+      "size_bytes": 10686
+    },
+    {
+      "path": "tools/elr/elr_doc_patch.py",
+      "sha256": "af0ec3f440ffa919403e6c2af6d32134bc3c9ec3f83e25648a00512d538cca95",
+      "size_bytes": 25092
+    },
+    {
+      "path": "tools/elr/elr_lib/__init__.py",
+      "sha256": "d0767fce7c573039a91993b7ae6503b54d69bd21924da54d8fef7d7b07f52277",
+      "size_bytes": 1080
+    },
+    {
+      "path": "tools/elr/elr_lib/config.py",
+      "sha256": "09ece2b91b3374858e7f2e012d7133e8262aa33283c6e75bad0c858809221cd4",
+      "size_bytes": 10546
+    },
+    {
+      "path": "tools/elr/elr_lib/digest.py",
+      "sha256": "309853678b6c689cd271768b4e4b5cac69e046b579a5fd9678953966e8ec60f4",
+      "size_bytes": 10285
+    },
+    {
+      "path": "tools/elr/elr_lib/identity.py",
+      "sha256": "5546cd3b3b2fde302625a5ee4ec00ac3e34be2ce2e31b83e218a67f6d5091a00",
+      "size_bytes": 26886
+    },
+    {
+      "path": "tools/elr/elr_lib/manifest.py",
+      "sha256": "d0339291ff51e5bee423939862fe18d3653bae58043d45896bf50f5764c6ef51",
+      "size_bytes": 5778
+    },
+    {
+      "path": "tools/elr/elr_lib/plane_safety.py",
+      "sha256": "eb595a25e4181deed6770e0687690df7254948a6b6c977c82dcc0b896f3c8f75",
+      "size_bytes": 15585
+    },
+    {
+      "path": "tools/elr/elr_lib/profiles.py",
+      "sha256": "5badda061f8dcc08380a0acda5ccca3a36f1997f14901247d00b1852d4dd9470",
+      "size_bytes": 5603
+    },
+    {
+      "path": "tools/elr/elr_lib/sections.py",
+      "sha256": "31e4ba3cd4150270b1ddfe28cb86a02f7b16f5b1276bd10f31d476d8f0a737d9",
+      "size_bytes": 5227
+    },
+    {
+      "path": "tools/elr/elr_lib/tls.py",
+      "sha256": "cfaa7c1f4f7a35e08efb01244a8bd50c90a92afd2033589d11a52c98eb906ea4",
+      "size_bytes": 5356
+    },
+    {
+      "path": "tools/elr/elr_lib/transport.py",
+      "sha256": "505e2c1c6dc7df1c2695c1f31313e7bd3c2fc7d696786f9f7d9eefea15b68c6a",
+      "size_bytes": 17209
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/__init__.py",
+      "sha256": "85bc68ba0344cd559a3d4ad4d2a4989a9e86bedd3359404a52beb750ec0a1a25",
+      "size_bytes": 168
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/document_api_outline.py",
+      "sha256": "4560a61fe8e05f9783398ad8a9cac0f4985a04020ffd8954fdf3d5ca58046427",
+      "size_bytes": 14027
+    },
+    {
+      "path": "tools/elr/elr_lib/vendor/document_api_sections.py",
+      "sha256": "3caa33865d06d1c3bea85caaa45e947cf8972fcca02e4f7a1d76ab8eb65ac397",
+      "size_bytes": 19017
+    },
+    {
+      "path": "tools/elr/elr_list.py",
+      "sha256": "aa13ae7479a092df4d61ad8b1c3191c12b1abb381d265b7430da2172a94d618b",
+      "size_bytes": 20516
+    },
+    {
+      "path": "tools/elr/elr_publish.py",
+      "sha256": "812df2d0eba83964515410dcf48e0491df63b5c75cd0d0f68d1cbf268185a92a",
+      "size_bytes": 30624
+    },
+    {
+      "path": "tools/elr/elr_smoke.py",
+      "sha256": "557611e461eb79a736937a72066f75e4384bf7728faa60086889c5afb4bccba6",
+      "size_bytes": 10340
+    },
+    {
+      "path": "tools/elr/elr_sync.py",
+      "sha256": "5d3cd1ccb554ae205f0246f81d704af9fda552c1f9220623b62ccf10bee28fb9",
+      "size_bytes": 33083
+    },
+    {
+      "path": "tools/elr/elr_validate.py",
+      "sha256": "967baaf494837533fcfbf4d1ab08d87a039f2dbf816c750f5ee7c0fa6edf03e1",
+      "size_bytes": 38563
+    }
+  ],
+  "generated_at": "2026-09-24T00:01:03-07:00",
+  "manifest_version": 1,
+  "source_ref": "95cb874df27dfbefefc316fcdd965c5320d61fd3"
+}

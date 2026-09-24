@@ -1,0 +1,31 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 4,
+    "section_bytes": 11
+  },
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 6,
+    "line_end": 12,
+    "section_bytes": 112
+  },
+  {
+    "heading_path": [
+      "Child Of Second Title"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 10,
+    "line_end": 12,
+    "section_bytes": 14
+  }
+]

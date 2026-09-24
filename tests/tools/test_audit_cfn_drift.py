@@ -259,3 +259,47 @@ def test_self_check_passes(mod):
     """The tool's own offline self-check (ENC-TSK-J12) must pass; this pins
     it as a real regression signal rather than a script that always exits 0."""
     assert mod._self_check() is True
+
+
+def test_has_failing_drift_pure_add_cfn_only_passes_pre_deploy(mod):
+    """ENC-ISS-467: a branch that only ADDS a route (cfn_only, no live_only)
+    must pass the pre-deploy gate -- this is what the FTR-120 change-set
+    review is for -- but must still fail the strict scheduled-audit mode."""
+    report = {
+        "apigw_routes": {"inconclusive": False, "live_only": [], "cfn_only": ["GET /new"]},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    assert mod._has_failing_drift(report, pre_deploy=True) is False
+    assert mod._has_failing_drift(report, pre_deploy=False) is True
+
+
+def test_has_failing_drift_live_only_fails_both_modes(mod):
+    """live_only stays fail-closed everywhere -- it's the
+    AWS::EarlyValidation::ResourceExistenceCheck wedge guard, not something
+    a change-set review compensates for."""
+    report = {
+        "apigw_routes": {"inconclusive": False, "live_only": ["GET /orphan"], "cfn_only": []},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    assert mod._has_failing_drift(report, pre_deploy=True) is True
+    assert mod._has_failing_drift(report, pre_deploy=False) is True
+
+
+def test_has_failing_drift_no_drift_passes_both_modes(mod):
+    report = {
+        "apigw_routes": {"inconclusive": False, "live_only": [], "cfn_only": []},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    assert mod._has_failing_drift(report, pre_deploy=True) is False
+    assert mod._has_failing_drift(report, pre_deploy=False) is False
+
+
+def test_has_failing_drift_ignores_inconclusive_sections(mod):
+    """An AccessDenied-inconclusive section must never itself trigger a fail
+    (ENC-TSK-J22 / GH#672) in either mode."""
+    report = {
+        "apigw_routes": {"inconclusive": True, "live_only": [], "cfn_only": []},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    assert mod._has_failing_drift(report, pre_deploy=True) is False
+    assert mod._has_failing_drift(report, pre_deploy=False) is False

@@ -1,0 +1,167 @@
+name: IAM CFN Deploy Role — Legacy DynamoDB Table Patch
+
+# DVP-TSK-705 (supersedes DVP-TSK-704) / DVP-PLN-001.
+#
+# THE GAP: CloudFormationDeployPolicy statement DynamoDBTableOps scopes its Resource list to
+# table/enceladus-* and table/devops-*. Nine of the eleven tables in the 01-data stack predate
+# that naming convention (agent-compliance-violations, agent-sessions, agent-types,
+# component-registry, coordination-requests, documents, governance-policies, governance-version,
+# projects), so the deploy role held NO control-plane DynamoDB permission on them.
+#
+# THE EFFECT: every "CloudFormation Compute Stack Deploy" apply since the last green run on
+# 2026-07-08 failed at dynamodb:DescribeTable, rolled 01-data back to UPDATE_ROLLBACK_COMPLETE,
+# and skipped the 02-compute change-set — which is why devops-governance-mart, and every other
+# Lambda added to 02-compute since, never existed in AWS despite being merged to main. This was
+# misread as "the pipeline is broken"; the pipeline was fine, and the v3-prod required-reviewer
+# pause in front of it is a deliberate ENC-FTR-120 control, not a failure.
+#
+# WHY A MANAGED POLICY, NOT AN INLINE GRANT: DVP-TSK-704 first tried to extend DynamoDBTableOps
+# in place and failed live with LimitExceeded. The IAM 10,240-byte limit for role inline policies
+# is AGGREGATE across all inline policies on the role, not per-policy, and this role already sits
+# at 10089/10240 (measured 2026-08-08). That is the same wall CodeDeployStackOpsPolicy
+# (ENC-TSK-J85) and LambdaFunctionUrlConfigPolicy (ENC-TSK-K09) each hit, and this follows their
+# resolution exactly: an attached managed policy, which does not count against the inline
+# aggregate.
+#
+# Durable declaration lives in infrastructure/cloudformation/04-github-roles.yaml as
+# LegacyDataStackDdbOpsPolicy. This one-off dispatch applies the same grant live ahead of the
+# next github-roles stack deploy, which is the pattern established by
+# iam-cfn-deploy-role-scheduler-patch.yml and its siblings. The policy name and document here are
+# kept identical to the template so the next stack deploy is a no-op rather than a conflict.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "DVP-TSK-705 — grant control-plane DynamoDB ops on the nine legacy 01-data tables"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Attach legacy 01-data DynamoDB managed policy to the CFN deploy role
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Create or update the managed policy and attach it
+        env:
+          ROLE_NAME: enceladus-cloudformation-deploy-github-role
+          POLICY_NAME: enceladus-cfn-deploy-legacy-ddb-v1
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
+
+          ACCOUNT_ID="${ACCOUNT_ID}" python3 <<'PY' > /tmp/legacy-ddb-policy.json
+          import json, os
+          account_id = os.environ["ACCOUNT_ID"]
+          legacy = [
+              "agent-compliance-violations",
+              "agent-sessions",
+              "agent-types",
+              "component-registry",
+              "coordination-requests",
+              "documents",
+              "governance-policies",
+              "governance-version",
+              "projects",
+          ]
+          doc = {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Sid": "LegacyDataStackDdbOps",
+                      "Effect": "Allow",
+                      "Action": [
+                          "dynamodb:CreateTable",
+                          "dynamodb:DeleteTable",
+                          "dynamodb:DescribeTable",
+                          "dynamodb:UpdateTable",
+                          "dynamodb:DescribeTimeToLive",
+                          "dynamodb:UpdateTimeToLive",
+                          "dynamodb:DescribeContinuousBackups",
+                          "dynamodb:UpdateContinuousBackups",
+                          "dynamodb:TagResource",
+                          "dynamodb:UntagResource",
+                          "dynamodb:ListTagsOfResource",
+                      ],
+                      "Resource": [
+                          f"arn:aws:dynamodb:us-west-2:{account_id}:table/{t}" for t in legacy
+                      ],
+                  }
+              ],
+          }
+          body = json.dumps(doc, separators=(",", ":"))
+          assert len(body) <= 6144, f"managed policy document {len(body)} exceeds the 6144-byte limit"
+          print(body)
+          PY
+
+          if aws iam get-policy --policy-arn "${POLICY_ARN}" >/dev/null 2>&1; then
+            echo "Policy exists — creating a new default version"
+            # Managed policies cap at 5 versions; drop the oldest non-default before adding.
+            versions="$(aws iam list-policy-versions --policy-arn "${POLICY_ARN}" \
+              --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text)"
+            count="$(aws iam list-policy-versions --policy-arn "${POLICY_ARN}" \
+              --query 'length(Versions)' --output text)"
+            if [ "${count}" -ge 5 ]; then
+              oldest="$(echo "${versions}" | tr '\t' '\n' | tail -1)"
+              echo "Pruning oldest non-default version ${oldest}"
+              aws iam delete-policy-version --policy-arn "${POLICY_ARN}" --version-id "${oldest}"
+            fi
+            aws iam create-policy-version \
+              --policy-arn "${POLICY_ARN}" \
+              --policy-document "file:///tmp/legacy-ddb-policy.json" \
+              --set-as-default >/dev/null
+          else
+            echo "Policy does not exist — creating"
+            aws iam create-policy \
+              --policy-name "${POLICY_NAME}" \
+              --policy-document "file:///tmp/legacy-ddb-policy.json" \
+              --description "DVP-TSK-705: control-plane DynamoDB ops on the nine legacy un-prefixed 01-data tables" >/dev/null
+          fi
+
+          if aws iam list-attached-role-policies --role-name "${ROLE_NAME}" \
+               --query 'AttachedPolicies[].PolicyArn' --output text | grep -qF "${POLICY_ARN}"; then
+            echo "Already attached to ${ROLE_NAME}"
+          else
+            echo "Attaching ${POLICY_ARN} to ${ROLE_NAME}"
+            aws iam attach-role-policy --role-name "${ROLE_NAME}" --policy-arn "${POLICY_ARN}"
+          fi
+
+      - name: Verify the grant with the IAM simulator
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/enceladus-cloudformation-deploy-github-role"
+          # IAM is eventually consistent; give the attach a moment to propagate.
+          sleep 15
+          rc=0
+          for t in agent-compliance-violations agent-sessions agent-types component-registry \
+                   coordination-requests devops-deployment-manager documents governance-policies \
+                   governance-version projects devops-project-tracker; do
+            decisions="$(aws iam simulate-principal-policy \
+              --policy-source-arn "${ROLE_ARN}" \
+              --action-names dynamodb:DescribeTable dynamodb:UpdateTable dynamodb:ListTagsOfResource \
+              --resource-arns "arn:aws:dynamodb:us-west-2:${ACCOUNT_ID}:table/${t}" \
+              --query 'EvaluationResults[].EvalDecision' --output text)"
+            echo "${t}: ${decisions}"
+            case "${decisions}" in
+              *[Dd]eny*) echo "::error::${t} still denied"; rc=1 ;;
+            esac
+          done
+          exit "${rc}"

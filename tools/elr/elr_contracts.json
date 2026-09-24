@@ -1,0 +1,151 @@
+{
+  "overlay_version": "1.0.0",
+  "updated": "2026-08-22",
+  "_comment": "Empirical validator-behavior overlay for elr-validate Layer 2 (DOC-F2CF625B7556 section 4a / Appendix B). Each entry carries requirement text learned by a real rejected call. Layer 1 (the live governance dictionary) is authoritative wherever it encodes a rule -- dictionary_derivable records that overlap so redundant entries can retire as the dictionary backfills them. Structured fields (entity, op, missing_field, required_fields, rejected_fields) are elr-validate lookup metadata, not part of the original verified-shape prose.",
+  "entries": [
+    {
+      "id": 1,
+      "operation": "checkout.task",
+      "requirement": "Needs active_agent_session_id IN ADDITION TO provider + sci; omitting fails with bare 'active_agent_session_id is required'",
+      "dictionary_derivable": "false",
+      "entity": null,
+      "op": "checkout.task",
+      "required_fields": ["active_agent_session_id", "provider", "sci"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 2,
+      "operation": "tracker.set_acceptance_evidence",
+      "requirement": "Needs evidence_acceptance (bool) alongside criterion_index + evidence; omitting fails with bare 'evidence_acceptance'",
+      "dictionary_derivable": "false",
+      "entity": null,
+      "op": "tracker.set_acceptance_evidence",
+      "required_fields": ["criterion_index", "evidence", "evidence_acceptance"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 3,
+      "operation": "checkout.advance to deploy-success (status path)",
+      "requirement": "Cannot jump from merged-main; requires intermediate deploy-init hop",
+      "dictionary_derivable": "false",
+      "entity": "tracker.task",
+      "op": "checkout.advance",
+      "target_status": "deploy-success",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 4,
+      "operation": "checkout.advance to deploy-success (evidence shape)",
+      "requirement": "Requires transition_evidence.deploy_evidence nested — even though the handler's own example_fix shows the Jobs-API object flat; the error message and the validator disagree — trust the validator",
+      "dictionary_derivable": "true (tracker.task transition_evidence.properties.deploy_evidence.required_fields)",
+      "entity": "tracker.task",
+      "op": "checkout.advance",
+      "target_status": "deploy-success",
+      "nested_required_object": "transition_evidence.deploy_evidence",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 5,
+      "operation": "escalation.request (mutation_type=deploy_arc_change)",
+      "requirement": "Requires payload.new_deploy_arc_type",
+      "dictionary_derivable": "false",
+      "entity": null,
+      "op": "escalation.request",
+      "mutation_type": "deploy_arc_change",
+      "required_fields": ["payload.new_deploy_arc_type"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 6,
+      "operation": "escalation.request (mutation_type=direct_state_override)",
+      "requirement": "Requires payload.target_status — cannot express a bare field change (e.g. priority) without one",
+      "dictionary_derivable": "false",
+      "entity": null,
+      "op": "escalation.request",
+      "mutation_type": "direct_state_override",
+      "required_fields": ["payload.target_status"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 7,
+      "operation": "tracker.create (record_type=plan)",
+      "requirement": "category enum is {operational, remediation, strategic, tactical} — a DIFFERENT enum from task/feature; 'infrastructure' is rejected",
+      "dictionary_derivable": "true (tracker.plan.fields.category.enum)",
+      "entity": "tracker.plan",
+      "op": "tracker.create",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 8,
+      "operation": "tracker.log",
+      "requirement": "Rejected on tasks ('Task worklogs must be appended via append_worklog'); works on plan / feature / issue",
+      "dictionary_derivable": "false",
+      "entity": "tracker.task",
+      "op": "tracker.log",
+      "rejected_on_entity": true,
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 9,
+      "operation": "plan.add_objective",
+      "requirement": "Accepts a feature id, not only tasks; a feature objective also satisfies the plan-completion gate, whose terminal set is {closed, completed, complete, archived, deprecated, production}",
+      "dictionary_derivable": "false",
+      "entity": "tracker.plan",
+      "op": "plan.add_objective",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0EZ"}
+    },
+    {
+      "id": 10,
+      "operation": "tracker.create (record_type=feature)",
+      "requirement": "Requires user_story; omitting fails with 'Feature creation requires user_story.' Feature category enum is {capability, enhancement, epic, infrastructure}; feature priority enum is {P0, P1, P2, P3}. Verified 2026-08-22, ENC-FTR-134 minting session.",
+      "dictionary_derivable": "partial (enums yes; user_story required-ness NOT encoded — see Appendix B)",
+      "entity": "tracker.feature",
+      "op": "tracker.create",
+      "missing_field": "user_story",
+      "verified": {"date": "2026-08-22", "session": "ENC-FTR-134-minting"}
+    },
+    {
+      "id": 11,
+      "operation": "plan.add_objective",
+      "requirement": "required args are record_id (the plan ID) + objective_task_id (+ project_id, governance_hash); plan_id and objective_id are rejected",
+      "dictionary_derivable": "false",
+      "entity": "tracker.plan",
+      "op": "plan.add_objective",
+      "required_fields": ["record_id", "objective_task_id", "project_id", "governance_hash"],
+      "rejected_fields": ["plan_id", "objective_id"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0F9"}
+    },
+    {
+      "id": 12,
+      "operation": "coordination agent.register",
+      "requirement": "agent_type_id is required (discover via agent.type.list); agent.register/claim live on the coordination surface, not execute",
+      "dictionary_derivable": "false",
+      "entity": null,
+      "op": "coordination.agent.register",
+      "required_fields": ["agent_type_id"],
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0F9"}
+    },
+    {
+      "id": 13,
+      "operation": "checkout.advance on code_only tasks",
+      "requirement": "the FULL chain committed→pr→merged-main→closed is enforced (committed→closed rejected); close requires transition_evidence.code_on_main_evidence as a NESTED object {commit_sha: 40-hex reachable from main} even though the handler's example_fix shows it flat — the validator and its example disagree; trust the validator",
+      "dictionary_derivable": "partial (nested shape encoded; chain not)",
+      "entity": "tracker.task",
+      "op": "checkout.advance",
+      "transition_type": "code_only",
+      "target_status": "closed",
+      "nested_required_object": "transition_evidence.code_on_main_evidence",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0F9"}
+    },
+    {
+      "id": 14,
+      "operation": "checkout.advance to closed (any task)",
+      "requirement": "rejected until every acceptance criterion has evidence_acceptance=true via tracker.set_acceptance_evidence",
+      "dictionary_derivable": "false",
+      "entity": "tracker.task",
+      "op": "checkout.advance",
+      "target_status": "closed",
+      "verified": {"date": "2026-08-22", "session": "ENC-SES-0F9"}
+    }
+  ]
+}

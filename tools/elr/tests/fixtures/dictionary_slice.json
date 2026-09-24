@@ -1,0 +1,95 @@
+{
+  "version": "2026-08-22.test-fixture",
+  "updated_at": "2026-08-22T00:00:00Z",
+  "entities": {
+    "tracker.feature": {
+      "description": "Fixture slice mirroring the real tracker.feature entity: enums ARE dictionary-encoded, but create-path required-ness for user_story is NOT (Appendix B.1 finding) -- constraints carries only min_length, never constraints.required.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["planned", "in-progress", "completed", "production", "deprecated"]
+        },
+        "priority": {
+          "type": "enum",
+          "enum": ["P0", "P1", "P2", "P3"]
+        },
+        "category": {
+          "type": "enum",
+          "enum": ["epic", "capability", "enhancement", "infrastructure"]
+        },
+        "user_story": {
+          "type": "string",
+          "constraints": {"min_length": 10}
+        }
+      }
+    },
+    "tracker.task": {
+      "description": "Fixture slice mirroring tracker.task's nested transition_evidence.properties.<x>.required_fields shape.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["open", "in-progress", "committed", "pr", "merged-main", "deploy-init", "deploy-success", "closed"]
+        },
+        "deploy_target": {
+          "type": "enum",
+          "enum": ["prod", "gamma", "undeclared"]
+        },
+        "transition_evidence": {
+          "type": "object",
+          "properties": {
+            "deploy_evidence": {
+              "type": "object",
+              "required_fields": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "head_sha": {"type": "string", "constraints": {"pattern": "^[0-9a-f]{40}$"}},
+                "status": {"type": "enum", "enum": ["completed"]}
+              }
+            },
+            "code_on_main_evidence": {
+              "type": "object",
+              "required_fields": {
+                "commit_sha": {"type": "string", "constraints": {"pattern": "^[0-9a-f]{40}$"}},
+                "github_verified": {
+                  "type": "boolean",
+                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually -- the service stamps this field."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "tracker.lesson": {
+      "description": "Fixture slice mirroring tracker.lesson's constraints.required=true encoding scheme (B.1 scheme 1) -- used to exercise Layer 1 precedence.",
+      "fields": {
+        "title": {
+          "type": "string",
+          "constraints": {"required": true, "min_length": 1}
+        },
+        "observation": {
+          "type": "string",
+          "constraints": {"required": true, "min_length": 1}
+        },
+        "pillar_scores": {
+          "type": "object",
+          "constraints": {"required": true}
+        }
+      }
+    },
+    "tracker.issue": {
+      "description": "Fixture slice mirroring tracker.issue's evidence array with required_keys per item.",
+      "fields": {
+        "category": {
+          "type": "enum",
+          "enum": ["bug", "debt", "risk", "security", "performance"]
+        },
+        "evidence": {
+          "type": "array",
+          "item_type": "object",
+          "constraints": {"min_items": 1, "required_keys": ["description", "steps_to_duplicate"]}
+        }
+      }
+    }
+  }
+}

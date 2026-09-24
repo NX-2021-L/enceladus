@@ -1,0 +1,73 @@
+name: Deploy Lane Parity Guard
+
+# ENC-TSK-Q05 AC-4 (ENC-ISS-778 P0 corrective action).
+#
+# main is the DISPATCH lane: a v3-prod promote runs main's own copies of
+# .github/workflows/_deploy.yml and _build.yml against a *promoted v4/main
+# commit*. v4/main is the gamma lane: it runs its own copies of the
+# same-named reusable workflows on push. ENC-ISS-778's first defect existed
+# because these two lanes' copies had drifted for months (~378 / ~96 lines)
+# and main kept a pre-ARM64-cutover x86_64-py3.11 pin for mcp_code that
+# v4/main had long since dropped -- nothing compared the two lanes' actual
+# ship-time decisions (artifact key prefixes, producer counts, packaging
+# inputs). A raw diff between the two files is permanently red (they
+# legitimately differ in trigger, checkout shape, and job topology) and
+# would get ignored, which is worse than no gate. This guard instead checks
+# named INVARIANTS -- see tools/assert_deploy_lane_parity.py's module
+# docstring for the full list and the reasoning behind each one.
+#
+# Scoped to main only: the comparison script reads the checked-out tree as
+# "main" and diffs it against `origin/v4/main` via `git show`. Running it on
+# a v4/main push would compare v4/main against itself (a trivial no-op), so
+# this workflow's triggers are intentionally main-only.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/_deploy.yml"
+      - ".github/workflows/_build.yml"
+      - "tools/assert_deploy_lane_parity.py"
+      - "tools/mcp_runtime_functions.txt"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/_deploy.yml"
+      - ".github/workflows/_build.yml"
+      - "tools/assert_deploy_lane_parity.py"
+      - "tools/mcp_runtime_functions.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Assert deploy-lane parity (main vs v4/main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # A default actions/checkout only fetches the triggering ref -- v4/main
+      # is not present locally otherwise. Fetch it explicitly into the
+      # origin/v4/main remote-tracking ref the script reads via `git show`.
+      # If v4/main is ever renamed or deleted, this step fails the job with
+      # a clear git error rather than the script silently having nothing to
+      # compare against.
+      - name: Fetch v4/main for lane comparison
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/v4/main:refs/remotes/origin/v4/main --depth=1
+
+      - name: Assert deploy-lane parity
+        run: |
+          set -euo pipefail
+          python3 tools/assert_deploy_lane_parity.py --other-ref origin/v4/main

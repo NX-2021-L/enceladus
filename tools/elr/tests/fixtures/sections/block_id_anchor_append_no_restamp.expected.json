@@ -1,0 +1,24 @@
+{
+  "name": "block_id_anchor_append_no_restamp",
+  "request": {
+    "anchor": {
+      "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "heading_path": [
+        "Alpha"
+      ]
+    },
+    "op": "append",
+    "body": "More."
+  },
+  "ok": true,
+  "bytes_changed": 8,
+  "stamped": false,
+  "block_id_was_none_before": false,
+  "anchor_resolved": {
+    "heading_path": [
+      "Alpha"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

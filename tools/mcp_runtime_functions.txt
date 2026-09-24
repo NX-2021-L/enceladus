@@ -1,0 +1,67 @@
+# ENC-TSK-Q09 (ENC-ISS-782 P0): single source of truth for which
+# backend/lambda/<fn>/ Lambda functions require the MCP server runtime --
+# every tools/enceladus-mcp-server/*.py module (excluding test_*) plus the
+# tools/enceladus-mcp-server/mcp_server/ package, once this repo adopts that
+# decomposition -- packaged into their build artifact zip.
+#
+# .github/workflows/_build.yml's matrix `build` job and its dedicated
+# `build-mcp-code` job both read THIS file (via the .guard-tools sparse
+# checkout of `ref: main`, the same mechanism that already fetches
+# tools/assert_lambda_artifact_contents.py into a promoted-tree checkout
+# that does not carry this repo's own tooling) instead of each carrying
+# their own copy of the function list. tools/assert_deploy_lane_parity.py
+# also reads it (as main's own list) to compare against v4/main's inline
+# `if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || ...; then`
+# condition in its matrix job -- see resolve_mcp_runtime_function_names().
+#
+# A function name written here but not covered by any producer job (or vice
+# versa) is exactly the defect class ENC-ISS-782 shipped: the matrix job's
+# per-function build loop discovered mcp_streamable (and would have
+# discovered mcp_streaming_gateway, and does discover coordination_api)
+# from a promoted v4/main tree and built it as an ordinary function -- no
+# tools/enceladus-mcp-server/ copy -- because main's matrix loop only ever
+# special-cased mcp_code (ENC-ISS-778), never the others. mcp_streamable's
+# real handler is server.lambda_handler; a zip without server.py 502s at
+# invoke time instead of failing at build time.
+#
+# One function name per line. Blank lines and lines starting with `#` are
+# ignored by every reader of this file. Do not duplicate this list inline
+# in _build.yml or assert_deploy_lane_parity.py -- that duplication is what
+# let the matrix job and the dedicated job (and, before ENC-TSK-Q09, main
+# and v4/main) drift apart in the first place.
+#
+# Membership:
+#
+# mcp_code, mcp_streamable, mcp_streaming_gateway: each ships a
+# backend/lambda/<fn>/lambda_function.py "build-discovery shim" whose ONLY
+# job is `from server import lambda_handler` (mcp_streaming_gateway's real
+# entry point is asgi_app.py's `from server import app` under the AWS
+# Lambda Web Adapter, but the same file-must-exist requirement applies) --
+# i.e. the zip is provably unable to import without tools/enceladus-mcp-
+# server/server.py present at its root. This is the "declares a server.*
+# handler" criterion ENC-TSK-Q09's AC-1 asks for.
+#
+# coordination_api: its DEPLOYED Handler is lambda_function.lambda_handler,
+# not server.*, and confirmed by infrastructure/lambda-manifests/devops-
+# coordination-api.json (entry_file: lambda_function.py) -- nothing in
+# backend/lambda/coordination_api/ imports server.py or the mcp_server
+# package at module load time. Only a lazy, defensive
+# _load_mcp_server_module() (mcp_integration.py / lambda_function.py),
+# used by a handful of optional routes (local governance-hash computation,
+# capabilities' mcp_server_configuration block), touches it at all, and
+# only at request time. So coordination_api's main-built artifact boots
+# and serves every OTHER route today without this package. It is included
+# here anyway, DELIBERATELY, for two reasons: (1) it keeps this file in
+# exact parity with v4/main's own inline packaging condition, which is the
+# one invariant tools/assert_deploy_lane_parity.py's
+# mcp_runtime_packaged_function_set check can hold both lanes to without
+# permanently flagging a legitimate, understood difference as noise (see
+# that guard's module docstring on why a raw diff is worse than no gate);
+# and (2) it stops those optional routes from silently degrading to a
+# RuntimeError the first time a v3-prod promote ships a main-built
+# coordination_api artifact and someone exercises them. See ENC-TSK-Q09's
+# design_decisions for the full reasoning.
+mcp_code
+coordination_api
+mcp_streamable
+mcp_streaming_gateway

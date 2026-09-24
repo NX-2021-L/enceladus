@@ -1,5 +1,15 @@
 name: Sync main to v4/main
 
+# ============================================================================
+# DISABLED — ENC-TSK-H63 (ENC-PLN-006 fork-mode).
+# v4/main has diverged from main and is now ahead with v4-only work, so
+# auto-syncing main -> v4/main is a collision risk (it would -s ours clobber
+# v4/main's tree, or fail-loud on every main push). The single `sync` job is
+# gated off via `if: ${{ false }}` below. Do NOT re-enable without io approval.
+# promote-gamma-to-prod-request.yml stays active — the approval gate there is
+# the cutover toggle. Re-enable only when v4 is cut over to main.
+# ============================================================================
+#
 # ENC-TSK-G71: Auto-sync main -> v4/main on every main push.
 # v4/main rulesets reject direct push from non-bypass actors, so the sync
 # runs as a transient PR with auto-merge enabled. The PR base is v4/main and
@@ -28,6 +38,10 @@ concurrency:
 
 jobs:
   sync:
+    # ENC-TSK-H63: hard-disabled for the duration of ENC-PLN-006 fork-mode.
+    # See the DISABLED banner at the top of this file. Removing this guard
+    # re-enables the main -> v4/main auto-sync and requires io approval.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

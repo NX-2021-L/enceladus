@@ -43,7 +43,7 @@ on:
         description: "CodeDeploy canary preference"
         type: choice
         required: false
-        default: "Linear10PercentEvery10Minutes"
+        default: "Canary10Percent5Minutes"
         options:
           - Canary10Percent5Minutes
           - Canary10Percent10Minutes
@@ -69,7 +69,7 @@ env:
   TEMPLATE_FILE: infrastructure/cloudformation/07-codedeploy.yaml
   DEFAULT_STACK_NAME: enceladus-codedeploy
   DEFAULT_COMPUTE_STACK_NAME: enceladus-compute
-  DEFAULT_CANARY_PREFERENCE: Linear10PercentEvery10Minutes
+  DEFAULT_CANARY_PREFERENCE: Canary10Percent5Minutes
 
 jobs:
   plan:
