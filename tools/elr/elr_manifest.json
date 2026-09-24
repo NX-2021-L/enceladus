@@ -42,8 +42,8 @@
     },
     {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "412961a9d7a19e96e57070105f0da33764b31f3617142177266883de7eb5f374",
-      "size_bytes": 10026
+      "sha256": "309853678b6c689cd271768b4e4b5cac69e046b579a5fd9678953966e8ec60f4",
+      "size_bytes": 10285
     },
     {
       "path": "tools/elr/elr_lib/identity.py",
@@ -97,8 +97,8 @@
     },
     {
       "path": "tools/elr/elr_list.py",
-      "sha256": "42c14d4ba8e2d7df7683628ba7f4bf7dc388edc5a408a9f55b909cef79664be0",
-      "size_bytes": 19000
+      "sha256": "da151a407508e1a2f8f434a5bff0b6ae1ffb3baf73f371df2c4df330abf3b872",
+      "size_bytes": 19844
     },
     {
       "path": "tools/elr/elr_publish.py",
@@ -121,7 +121,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-23T22:59:14-07:00",
+  "generated_at": "2026-09-23T23:13:55-07:00",
   "manifest_version": 1,
-  "source_ref": "468f06dd3082d5ddb0ccfd9fd39f63881ab32346"
+  "source_ref": "cfc9b338f0851757d92f41ff3fe00991eaa026fa"
 }
