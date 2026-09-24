@@ -3010,6 +3010,14 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
             rid = item.get("record_id", "")
             if isinstance(rid, str) and rid.startswith(_TRACKER_COUNTER_PREFIX):
                 continue
+            if item.get("record_type") == "escalation":
+                # D5: escalations are counted ONLY through the dedicated
+                # _census_escalation_walk (ENC-TSK-Q14-0C) second walk, never
+                # through this general project-partition walk -- an
+                # unfiltered base-branch walk shares the same partition as
+                # escalation rows (record_id begins_with "escalation#") and
+                # would otherwise double count them.
+                continue
             rows.append(item)
 
         if not last_evaluated_key:
@@ -3031,6 +3039,7 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
         "exhausted": exhausted,
         "truncated_reason": truncated_reason,
         "branch": branch,
+        "raw_pages_fetched": raw_pages_fetched,
     }
 
 
@@ -3070,6 +3079,175 @@ def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> Li
         })
         prev_cursor = _encode_list_cursor(last, branch)
     return pages
+
+
+def _census_escalation_walk(project_id: str, max_raw_pages: Optional[int] = None,
+                             wall_clock_ms: Optional[int] = None, clock=None) -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): bounded raw walk counting a project's escalations.
+
+    Reuses `_handle_escalation_list`'s own query shape (ENC-ISS-699:
+    KeyConditionExpression begins_with(record_id, "escalation#")) but walks
+    to exhaustion or a budget -- like _census_walk -- instead of truncating
+    to a caller page_size. Only a count is needed here (census by_type),
+    not the escalation bodies, so ProjectionExpression trims to record_id.
+
+    `max_raw_pages <= 0` (the caller has no budget left, e.g. the primary
+    walk already spent it all) short-circuits to a single deterministic
+    not-exhausted result with zero DynamoDB calls -- there is nothing left
+    to spend, so there is no reason to make one doomed call first.
+
+    Returns {count, exhausted, truncated_reason}. Same exhaustion/budget
+    semantics as _census_walk.
+    """
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        # Nothing to walk -- the escalation primitive itself is off, not a
+        # budget/data question. Treat as a trivially exhausted empty walk.
+        return {"count": 0, "exhausted": True, "truncated_reason": None}
+
+    if max_raw_pages <= 0:
+        return {"count": 0, "exhausted": False, "truncated_reason": "pages"}
+
+    ddb = _get_ddb()
+    clock = clock or time.monotonic
+    started = clock()
+
+    kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :esc_prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":esc_prefix": _ser_s("escalation#"),
+        },
+        "ProjectionExpression": "record_id",
+        "Limit": _CENSUS_RAW_PAGE_LIMIT,
+    }
+
+    count = 0
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        count += len(resp.get("Items", []))
+
+        if not last_evaluated_key:
+            exhausted = True
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {"count": count, "exhausted": exhausted, "truncated_reason": truncated_reason}
+
+
+def _census_collect(project_id: str, record_type: str = "", status_filter: str = "",
+                     max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                     escalation_max_raw_pages: Optional[int] = None,
+                     escalation_wall_clock_ms: Optional[int] = None,
+                     clock=None) -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): primary census walk + (in-scope) escalation walk, merged.
+
+    D5: the escalation second walk runs when there is no `type` filter, or
+    `type == "escalation"` -- any other explicit type filter omits it
+    entirely (by_type then carries only that one type; no escalation walk,
+    no wasted DynamoDB calls). `type == "escalation"` skips the *primary*
+    walk instead (there is nothing for it to usefully find -- see
+    _census_walk's own escalation-row exclusion) and relies solely on the
+    escalation walk for both `by_type["escalation"]` and `count`.
+
+    Escalation and primary-walk rows never overlap (_census_walk excludes
+    escalation rows the same way it excludes counter rows), so by_type's
+    two contributions are always additive, never double-counted.
+
+    Budget sharing ("under the remaining budget", per o2_spec.md O2.3):
+    unless `escalation_max_raw_pages`/`escalation_wall_clock_ms` are given
+    explicitly (tests use this to force deterministic truncation), the
+    escalation walk gets whatever raw-page/wall-clock budget the primary
+    walk did not spend out of the shared CENSUS_MAX_RAW_PAGES /
+    CENSUS_WALL_CLOCK_MS (or caller-supplied `max_raw_pages`/
+    `wall_clock_ms`) totals.
+
+    When the escalation walk truncates, its rows are excluded from `count`
+    and `by_type` entirely (D5) -- `excluded_types` is set to
+    `["escalation"]` and `count_truncated` is forced true, independent of
+    whether the primary walk itself was exhausted.
+
+    Returns {rows, exhausted, truncated_reason, branch, by_type, count,
+    count_truncated, excluded_types}. `rows` never contains escalation
+    rows -- O2.2 page anchors are built from `rows` alone, matching D5's
+    "escalation rows excluded from ... pages".
+    """
+    record_type = str(record_type or "").strip()
+    status_filter = str(status_filter or "").strip()
+    clock = clock or time.monotonic
+    started = clock()
+
+    total_max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    total_wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if record_type == "escalation":
+        primary = {
+            "rows": [], "exhausted": True, "truncated_reason": None,
+            "branch": "base", "raw_pages_fetched": 0,
+        }
+    else:
+        primary = _census_walk(
+            project_id, record_type=record_type, status_filter=status_filter,
+            max_raw_pages=total_max_raw_pages, wall_clock_ms=total_wall_clock_ms, clock=clock,
+        )
+
+    by_type: Dict[str, int] = {}
+    for row in primary["rows"]:
+        rt = row.get("record_type")
+        if rt:
+            by_type[rt] = by_type.get(rt, 0) + 1
+
+    excluded_types: List[str] = []
+    escalation_truncated = False
+    include_escalations = (not record_type) or record_type == "escalation"
+
+    if include_escalations:
+        if escalation_max_raw_pages is None:
+            escalation_max_raw_pages = max(total_max_raw_pages - primary["raw_pages_fetched"], 0)
+        if escalation_wall_clock_ms is None:
+            elapsed_ms = (clock() - started) * 1000
+            escalation_wall_clock_ms = max(total_wall_clock_ms - elapsed_ms, 0)
+
+        esc = _census_escalation_walk(
+            project_id, max_raw_pages=escalation_max_raw_pages,
+            wall_clock_ms=escalation_wall_clock_ms, clock=clock,
+        )
+        if esc["exhausted"]:
+            by_type["escalation"] = esc["count"]
+        else:
+            excluded_types.append("escalation")
+            escalation_truncated = True
+
+    count = sum(by_type.values())
+
+    return {
+        "rows": primary["rows"],
+        "exhausted": primary["exhausted"],
+        "truncated_reason": primary["truncated_reason"],
+        "branch": primary["branch"],
+        "by_type": by_type,
+        "count": count,
+        "count_truncated": (not primary["exhausted"]) or escalation_truncated,
+        "excluded_types": excluded_types,
+    }
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
