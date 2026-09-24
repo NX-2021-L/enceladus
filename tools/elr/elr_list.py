@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """elr_list.py -- ELR tracker list (ENC-TSK-Q16, plan ENC-PLN-093 objective
-O4, U2). Skeleton + the base route: an argparse CLI over
---project/--type/--status/--page-size that issues one plain
-``GET {tracker_base}/{project}`` through the existing elr_lib InternalClient
-(query params only, no path segments beyond the project), and prints a
-compact digest.
+O4, U2). Base route (--project/--type/--status/--page-size) plus the
+bounded server-side census walk (--census, U1, mode=census): the full
+census payload is written verbatim to a local side file under
+--lists-dir; only a compact digest ({count, exhausted, count_truncated,
+pages, as_of, by_type}) is ever printed.
 
-This is the foundation leaf (ENC-TSK-Q16-0A). The bounded census walk
-(--census), the explicit single-page read (--page), the bounded N-page
-loop (--pages), and the tracker_capabilities.census preflight land in
-later commits on this same file.
+The explicit single-page read (--page), the bounded N-page loop
+(--pages), and the tracker_capabilities.census preflight land in later
+commits on this same file.
 
 Usage:
     python3 tools/elr/elr_list.py --project enceladus
-    python3 tools/elr/elr_list.py --project enceladus --type task --status open
+    python3 tools/elr/elr_list.py --project enceladus --type task --status open --census
 """
 
 from __future__ import annotations
@@ -44,6 +43,8 @@ RESERVED_PROJECT_SENTINEL = "_"
 MIN_PAGE_SIZE = 1
 MAX_PAGE_SIZE = 200
 DEFAULT_PAGE_SIZE = 100
+
+DEFAULT_LISTS_DIR = "~/.enceladus/lists"
 
 
 # --- argparse value types ----------------------------------------------------
@@ -98,7 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--page-size",
         type=_page_size_arg,
         default=DEFAULT_PAGE_SIZE,
-        help=f"Rows per raw page (default: {DEFAULT_PAGE_SIZE}, max: {MAX_PAGE_SIZE}).",
+        help=f"Rows per raw/census page (default: {DEFAULT_PAGE_SIZE}, max: {MAX_PAGE_SIZE}).",
+    )
+    parser.add_argument(
+        "--census",
+        action="store_true",
+        default=False,
+        help="Run one bounded server-side census walk (mode=census) and write its payload to disk.",
+    )
+    parser.add_argument(
+        "--lists-dir",
+        default=DEFAULT_LISTS_DIR,
+        help=f"Directory for census/page side files (default: {DEFAULT_LISTS_DIR}).",
     )
     parser.add_argument(
         "--profile",
@@ -119,14 +131,89 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# --- side-file naming (--census) ------------------------------------------
+
+
+def _slug_or_all(value: Optional[str]) -> str:
+    return value if value else "all"
+
+
+def census_file_path(
+    lists_dir: str, project: str, type_: Optional[str], status: Optional[str], started_at: str
+) -> Path:
+    name = f"{project}_{_slug_or_all(type_)}_{_slug_or_all(status)}_{started_at}.census.json"
+    return Path(lists_dir).expanduser() / name
+
+
+def census_glob(lists_dir: str, project: str, type_: Optional[str], status: Optional[str]) -> List[Path]:
+    pattern = f"{project}_{_slug_or_all(type_)}_{_slug_or_all(status)}_*.census.json"
+    return sorted(Path(lists_dir).expanduser().glob(pattern))
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+# --- --census ------------------------------------------------------------------
+
+
+def run_census(client: InternalClient, key_sent: bool, args: argparse.Namespace) -> Dict[str, Any]:
+    query: Dict[str, Any] = {
+        "mode": "census",
+        "type": args.type,
+        "status": args.status,
+        "page_size": args.page_size,
+    }
+    encoded_project = urllib.parse.quote(str(args.project), safe="")
+    status, body = client.request("GET", "tracker", f"/{encoded_project}", query=query)
+
+    posture, anomalies = classify_internal_posture(key_sent=key_sent, status_code=status)
+    anomalies = list(anomalies)
+    ok = 200 <= status < 300 and isinstance(body, dict)
+    if isinstance(body, dict) and body.get("error"):
+        anomalies.append(f"response_error: {body['error']}")
+        ok = False
+
+    count = exhausted = count_truncated = pages = as_of = by_type = None
+    if ok:
+        count = body.get("count")
+        exhausted = body.get("exhausted")
+        count_truncated = body.get("count_truncated")
+        pages = body.get("pages")
+        as_of = body.get("as_of")
+        by_type = body.get("by_type")
+
+        started_at = None
+        if isinstance(as_of, dict):
+            started_at = as_of.get("started_at")
+        out_path = census_file_path(
+            args.lists_dir, args.project, args.type, args.status, started_at or "unknown-start"
+        )
+        _write_json_file(out_path, body)
+
+    return build_digest(
+        "elr_list.census",
+        ok,
+        status,
+        identity_posture=posture,
+        anomalies=anomalies,
+        count=count,
+        exhausted=exhausted,
+        count_truncated=count_truncated,
+        pages=pages,
+        as_of=as_of,
+        by_type=by_type,
+    )
+
+
 # --- base route ----------------------------------------------------------------
 
 
 def run_plain_list(client: InternalClient, key_sent: bool, args: argparse.Namespace) -> Dict[str, Any]:
     """One plain GET {tracker_base}/{project} -- query params only, no
-    mode=census, no cursor. Scaffolding for the base route; --census
-    (ENC-TSK-Q16-0B) and --page/--pages (ENC-TSK-Q16-0C) add the real
-    entry points this tool exists for.
+    mode=census, no cursor. Used when no mode flag is given; --page/
+    --pages (ENC-TSK-Q16-0C) add the remaining entry points.
     """
     query: Dict[str, Any] = {"type": args.type, "status": args.status, "page_size": args.page_size}
     encoded_project = urllib.parse.quote(str(args.project), safe="")
@@ -165,7 +252,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     client = InternalClient(config, timeout=args.timeout)
     key_sent = bool(config.key_for("tracker"))
 
-    digest = run_plain_list(client, key_sent, args)
+    if args.census:
+        digest = run_census(client, key_sent, args)
+    else:
+        digest = run_plain_list(client, key_sent, args)
 
     print(json.dumps(digest, sort_keys=True))
     return 0 if digest.get("ok") else 1

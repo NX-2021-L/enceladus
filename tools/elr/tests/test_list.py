@@ -4,8 +4,9 @@ matching elr_batch_get.py's/elr_sync.py's test style.
 
 ENC-TSK-Q16-0A: parser skeleton (--project/--type/--status/--page-size),
 the --project '_' sentinel rejection, and the base plain-list route.
---census (0B), --page/--pages (0C), and the capability preflight (0D)
-extend this file in later commits.
+ENC-TSK-Q16-0B adds --census's digest-exact-keys and side-file contract.
+--page/--pages (0C) and the capability preflight (0D) extend this file
+in later commits.
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import patch
 
 import elr_list
@@ -122,6 +125,71 @@ class PageSizeBoundsTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 parser.parse_args(["--project", "p", "--page-size", "0"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class CensusModeTests(unittest.TestCase):
+    def _census_body(self):
+        return {
+            "count": 70,
+            "count_truncated": False,
+            "exhausted": True,
+            "pages": [
+                {"cursor": None, "first": {"id": "ENC-TSK-1", "status": "open", "title": "t1"}, "last": {"id": "ENC-TSK-50", "status": "open", "title": "t50"}, "n": 50},
+                {"cursor": "CURSOR-1", "first": {"id": "ENC-TSK-51", "status": "open", "title": "t51"}, "last": {"id": "ENC-TSK-70", "status": "open", "title": "t70"}, "n": 20},
+            ],
+            "page_size": 50,
+            "as_of": {"kind": "wall_clock+max_updated_at", "started_at": "2026-09-24T05:00:00Z", "max_updated_at": "2026-09-24T05:00:01Z"},
+            "order": "record_id_asc",
+            "by_type": {"task": 70, "issue": 0, "feature": 0, "plan": 0, "lesson": 0, "escalation": 0},
+            "ids_inline_cap": 500,
+        }
+
+    def test_census_digest_keys_exactly_the_six(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(_URLOPEN, side_effect=[_ok(self._census_body())]):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
+        self.assertEqual(exit_code, 0)
+        digest = json.loads(stdout.getvalue().strip())
+        optional_keys = set(digest.keys()) - _STABLE_KEYS
+        self.assertEqual(optional_keys, {"count", "exhausted", "count_truncated", "pages", "as_of", "by_type"})
+        self.assertEqual(digest["count"], 70)
+        self.assertEqual(digest["exhausted"], True)
+        self.assertEqual(digest["count_truncated"], False)
+        self.assertEqual(len(digest["pages"]), 2)
+        self.assertEqual(digest["by_type"]["task"], 70)
+
+    def test_census_writes_verbatim_side_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            body = self._census_body()
+            with patch(_URLOPEN, side_effect=[_ok(body)]):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = elr_list.main(
+                        ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--census"]
+                    )
+            self.assertEqual(exit_code, 0)
+            expected_path = Path(tmp) / "enceladus_task_open_2026-09-24T05:00:00Z.census.json"
+            self.assertTrue(expected_path.is_file())
+            on_disk = json.loads(expected_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk, body)
+
+    def test_census_file_uses_all_when_no_type_or_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(_URLOPEN, side_effect=[_ok(self._census_body())]):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
+            self.assertEqual(exit_code, 0)
+            expected_path = Path(tmp) / "enceladus_all_all_2026-09-24T05:00:00Z.census.json"
+            self.assertTrue(expected_path.is_file())
+
+    def test_census_server_error_reported_not_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(_URLOPEN, side_effect=[_http_error(500, json.dumps({"error": "boom"}).encode())]):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(list(Path(tmp).glob("*.census.json")), [])
 
 
 class PlainListRouteTests(unittest.TestCase):

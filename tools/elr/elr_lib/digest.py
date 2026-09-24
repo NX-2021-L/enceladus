@@ -97,6 +97,12 @@ ANCHOR_AMBIGUOUS envelope. ``request_bytes`` is the measured wire size
 proof the delta-only contract holds regardless of how large the target
 document is. Same digest-first discipline as every other field -- small
 and stable, never a raw document body.
+
+``count``, ``exhausted``, ``count_truncated``, ``pages``, ``as_of``, and
+``by_type`` (added for ENC-TSK-Q16 / elr_list.py's ``--census`` mode) carry
+the U1 bounded-census payload's own small, stable summary fields verbatim
+(the full census response is written to a local side file under
+--lists-dir; these six are the ONLY census fields echoed to stdout).
 """
 
 from __future__ import annotations
@@ -147,6 +153,12 @@ _OPTIONAL_FIELDS = (
     "recommended_next_actions",
     "candidates",
     "request_bytes",
+    "count",
+    "exhausted",
+    "count_truncated",
+    "pages",
+    "as_of",
+    "by_type",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
