@@ -3084,7 +3084,8 @@ def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> Li
     return pages
 
 
-def _census_escalation_walk(project_id: str, max_raw_pages: Optional[int] = None,
+def _census_escalation_walk(project_id: str, status_filter: str = "",
+                             max_raw_pages: Optional[int] = None,
                              wall_clock_ms: Optional[int] = None, clock=None) -> Dict[str, Any]:
     """ENC-TSK-Q14 (O2.3): bounded raw walk counting a project's escalations.
 
@@ -3092,7 +3093,20 @@ def _census_escalation_walk(project_id: str, max_raw_pages: Optional[int] = None
     KeyConditionExpression begins_with(record_id, "escalation#")) but walks
     to exhaustion or a budget -- like _census_walk -- instead of truncating
     to a caller page_size. Only a count is needed here (census by_type),
-    not the escalation bodies, so ProjectionExpression trims to record_id.
+    not the escalation bodies, so ProjectionExpression trims to record_id
+    (plus #st when `status_filter` is set, so the FilterExpression below has
+    something to evaluate against).
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C): applied as a raw
+    `#st = :st` FilterExpression exactly like the plain-list route
+    (_handle_list_records / _census_walk) applies its own `status_filter`
+    -- no vocabulary validation against `_ESCALATION_STATUSES` here, same
+    as the primary census walk never validates a task/issue status value.
+    Before this fix, this walk ignored the caller's status filter entirely,
+    so a `mode=census` request with `status=...` silently counted
+    escalations of every status while the primary walk correctly filtered
+    -- contradicting the "status filter applies inside the walk exactly as
+    the list route" contract in `_handle_list_census`'s docstring.
 
     `max_raw_pages <= 0` (the caller has no budget left, e.g. the primary
     walk already spent it all) short-circuits to a single deterministic
@@ -3127,6 +3141,10 @@ def _census_escalation_walk(project_id: str, max_raw_pages: Optional[int] = None
         "ProjectionExpression": "record_id",
         "Limit": _CENSUS_RAW_PAGE_LIMIT,
     }
+    if status_filter:
+        kwargs["FilterExpression"] = "#st = :st"
+        kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+        kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
 
     count = 0
     exhausted = False
@@ -3174,6 +3192,12 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
     Escalation and primary-walk rows never overlap (_census_walk excludes
     escalation rows the same way it excludes counter rows), so by_type's
     two contributions are always additive, never double-counted.
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C) is passed to BOTH walks --
+    the primary walk already applied it; it is now also forwarded to
+    `_census_escalation_walk` whenever the escalation walk runs, so a
+    status-filtered census never silently mixes a filtered primary count
+    with an unfiltered escalation count under one `count`/`by_type`.
 
     Budget sharing ("under the remaining budget", per o2_spec.md O2.3):
     unless `escalation_max_raw_pages`/`escalation_wall_clock_ms` are given
@@ -3230,7 +3254,7 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
             escalation_wall_clock_ms = max(total_wall_clock_ms - elapsed_ms, 0)
 
         esc = _census_escalation_walk(
-            project_id, max_raw_pages=escalation_max_raw_pages,
+            project_id, status_filter=status_filter, max_raw_pages=escalation_max_raw_pages,
             wall_clock_ms=escalation_wall_clock_ms, clock=clock,
         )
         if esc["exhausted"]:

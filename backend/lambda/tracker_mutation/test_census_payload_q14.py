@@ -100,8 +100,11 @@ def _raw_item(n, project_id="proj", record_type="task", status="open"):
     }
 
 
-def _escalation_item(n, project_id="proj"):
-    return {"project_id": {"S": project_id}, "record_id": {"S": f"escalation#ESC-{n:04d}"}}
+def _escalation_item(n, project_id="proj", status=None):
+    item = {"project_id": {"S": project_id}, "record_id": {"S": f"escalation#ESC-{n:04d}"}}
+    if status is not None:
+        item["status"] = {"S": status}
+    return item
 
 
 class TestCensusPayloadSchema(unittest.TestCase):
@@ -170,6 +173,29 @@ class TestCensusPayloadSchema(unittest.TestCase):
         _validate(body, self.schema)
         self.assertEqual(body["count"], 1)
         self.assertEqual(body["by_type"], {"task": 1})
+
+    def test_status_filter_applies_to_escalation_walk_too(self):
+        """Review fix (ENC-TSK-Q14-0C): a mixed (no `type`) census with a
+        `status` filter must apply inside the escalation walk exactly as
+        it applies inside the primary walk, not just the primary one.
+
+        Repro from the review finding: 3 open + 2 closed tasks, 4 open +
+        6 resolved escalations, status=open -> expected count is
+        3 tasks + 4 escalations = 7, not 3 tasks + all 10 escalations.
+        """
+        items = [_raw_item(n, status="open") for n in range(1, 4)] + [
+            _raw_item(n, status="closed") for n in range(4, 6)
+        ]
+        escalation_items = [_escalation_item(n, status="open") for n in range(1, 5)] + [
+            _escalation_item(n, status="resolved") for n in range(5, 11)
+        ]
+        resp, body = self._call(
+            {"mode": "census", "status": "open"}, items, escalation_items=escalation_items,
+        )
+        self.assertEqual(resp["statusCode"], 200)
+        _validate(body, self.schema)
+        self.assertEqual(body["by_type"], {"task": 3, "escalation": 4})
+        self.assertEqual(body["count"], 7)
 
 
 if __name__ == "__main__":

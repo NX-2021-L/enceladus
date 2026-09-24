@@ -27,11 +27,14 @@ def _task_item(n, project_id="proj", status="open"):
     }
 
 
-def _escalation_item(n, project_id="proj"):
-    return {
+def _escalation_item(n, project_id="proj", status=None):
+    item = {
         "project_id": {"S": project_id},
         "record_id": {"S": f"escalation#ESC-{n:04d}"},
     }
+    if status is not None:
+        item["status"] = {"S": status}
+    return item
 
 
 class TestCensusEscalationWalk(unittest.TestCase):
@@ -76,6 +79,30 @@ class TestCensusEscalationWalk(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         table.query.assert_not_called()
 
+    def test_status_filter_applies_inside_the_walk(self):
+        """Review fix (ENC-TSK-Q14-0C): status_filter must reach the
+        escalation walk's own FilterExpression, mirroring _census_walk."""
+        items = [_escalation_item(n, status="requested") for n in range(1, 5)] + [
+            _escalation_item(n, status="resolved") for n in range(5, 11)
+        ]
+        table = PagingTable(items, raw_page_size=200)
+
+        result = self._walk(table, status_filter="requested", max_raw_pages=50)
+
+        self.assertTrue(result["exhausted"])
+        self.assertEqual(result["count"], 4)
+
+    def test_no_status_filter_counts_every_status(self):
+        items = [_escalation_item(n, status="requested") for n in range(1, 5)] + [
+            _escalation_item(n, status="resolved") for n in range(5, 11)
+        ]
+        table = PagingTable(items, raw_page_size=200)
+
+        result = self._walk(table, max_raw_pages=50)
+
+        self.assertTrue(result["exhausted"])
+        self.assertEqual(result["count"], 10)
+
 
 class TestCensusCollect(unittest.TestCase):
     def setUp(self):
@@ -108,6 +135,31 @@ class TestCensusCollect(unittest.TestCase):
         self.assertNotIn("escalation", result["by_type"])
         self.assertEqual(result["by_type"], {"task": 5})
         self.assertEqual(result["count"], 5)
+
+    def test_status_filter_reaches_both_walks_no_type_filter(self):
+        """Review fix (ENC-TSK-Q14-0C): a mixed (no `type`) census with a
+        `status` filter must not silently mix a filtered task count with an
+        unfiltered escalation count (AC Q14-0D)."""
+        primary_table = PagingTable(
+            [_task_item(n, status="open") for n in range(1, 4)]
+            + [_task_item(n, status="closed") for n in range(4, 6)],
+            raw_page_size=200,
+        )
+        escalation_table = PagingTable(
+            [_escalation_item(n, status="open") for n in range(1, 5)]
+            + [_escalation_item(n, status="resolved") for n in range(5, 11)],
+            raw_page_size=200,
+        )
+
+        with mock.patch.object(self.lf, "_get_ddb", side_effect=[primary_table, escalation_table]):
+            result = self.lf._census_collect("proj", status_filter="open")
+
+        # Only the 3 open tasks + 4 open escalations should count -- not
+        # all 3 open tasks + all 10 escalations regardless of status.
+        self.assertEqual(result["by_type"], {"task": 3, "escalation": 4})
+        self.assertEqual(result["count"], 7)
+        self.assertEqual(result["excluded_types"], [])
+        self.assertFalse(result["count_truncated"])
 
     def test_type_task_omits_escalation_walk_entirely(self):
         primary_table = PagingTable(
