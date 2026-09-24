@@ -105,6 +105,7 @@ class SenseConstraintTests(unittest.TestCase):
         self.assertEqual(snap["open_task_delta"], 2)
         self.assertEqual(snap["open_task_count"], 5)
         self.assertFalse(snap["open_task_count_truncated"])
+        self.assertFalse(snap["open_count_truncated"])
 
     @mock.patch("tiers.sense.write_artifact")
     @mock.patch(
@@ -122,6 +123,7 @@ class SenseConstraintTests(unittest.TestCase):
         write_artifact.return_value = {"timestamped_key": "k", "latest_key": "l", "bytes": "10"}
         snap = run_sense()
         self.assertTrue(snap["open_task_count_truncated"])
+        self.assertTrue(snap["open_count_truncated"])
 
 
 class TrackerUrlShapeTests(unittest.TestCase):
@@ -134,7 +136,7 @@ class TrackerUrlShapeTests(unittest.TestCase):
     "type" (the handler reads "type", not "record_type"). The dispatch-plan
     URL must not double the /api/v1 prefix."""
 
-    @mock.patch("tiers.sense.get_json", return_value={"count": 7})
+    @mock.patch("tiers.sense.get_json", return_value={"count": 7, "count_truncated": False})
     def test_sense_open_task_count_url_shape(self, get_json):
         import tiers.sense as sense
 
@@ -148,42 +150,43 @@ class TrackerUrlShapeTests(unittest.TestCase):
         self.assertEqual(url, f"https://x/api/v1/tracker/{sense.PROJECT_ID}")
         self.assertEqual(params["type"], "task")
         self.assertEqual(params["status"], "open")
-        self.assertEqual(params["page_size"], 200)
+        self.assertEqual(params["mode"], "census")
+        self.assertEqual(params["page_size"], 100)
         self.assertNotIn("record_type", params)
         self.assertNotIn("project_id", params)
 
     def test_sense_open_task_count_follows_cursor_to_exhaustion(self):
-        """ENC-ISS-557: a next_cursor on a page_size=200 response must not be
-        dropped -- the prior implementation returned "count" (page-scoped)
-        as if it were the total, plateauing at 200 forever once the real
-        backlog exceeded one page."""
+        """ENC-ISS-557: sense's open task count now comes from a single
+        `mode=census` call -- the tracker route performs its own
+        server-side walk and hands back the true total in one round trip,
+        rather than sense plateauing at one page's "count" or paginating
+        itself via next_cursor."""
         import tiers.sense as sense
 
-        pages = [
-            {"count": 200, "next_cursor": "c1"},
-            {"count": 200, "next_cursor": "c2"},
-            {"count": 43, "next_cursor": ""},
-        ]
+        census = {"count": 443, "count_truncated": False, "exhausted": True}
         with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
-            with mock.patch.object(sense, "get_json", side_effect=pages) as get_json:
+            with mock.patch.object(sense, "get_json", return_value=census) as get_json:
                 result = sense._open_task_count()
         self.assertEqual(result["count"], 443)
-        self.assertEqual(result["page_count"], 3)
+        self.assertEqual(result["page_count"], 1)
         self.assertFalse(result["truncated"])
         self.assertIsNone(result["cursor_terminus"])
-        second_call_params = get_json.call_args_list[1][0][1]
-        self.assertEqual(second_call_params["next_cursor"], "c1")
+        self.assertEqual(get_json.call_count, 1)
 
     def test_sense_open_task_count_marks_truncated_at_max_pages(self):
+        """A census response with count_truncated=True means the tracker's
+        own server-side walk hit its budget -- count is a floor, not exact."""
         import tiers.sense as sense
 
-        page = {"count": 200, "next_cursor": "still-more"}
+        census = {"count": 200, "count_truncated": True}
         with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
-            with mock.patch.object(sense, "get_json", return_value=page):
+            with mock.patch.object(sense, "get_json", return_value=census) as get_json:
                 result = sense._open_task_count()
-        self.assertEqual(result["page_count"], sense._MAX_PAGES)
+        self.assertEqual(result["count"], 200)
+        self.assertEqual(result["page_count"], 1)
         self.assertTrue(result["truncated"])
-        self.assertEqual(result["cursor_terminus"], "still-more")
+        self.assertIsNone(result["cursor_terminus"])
+        self.assertEqual(get_json.call_count, 1)
 
     @mock.patch("tiers.decide.get_json", return_value={"records": []})
     def test_decide_open_leaf_tasks_url_shape(self, get_json):
@@ -199,6 +202,7 @@ class TrackerUrlShapeTests(unittest.TestCase):
         self.assertEqual(url, f"https://x/api/v1/tracker/{decide.PROJECT_ID}")
         self.assertEqual(params["type"], "task")
         self.assertEqual(params["status"], "open")
+        self.assertEqual(params["mode"], "census")
         self.assertNotIn("record_type", params)
         self.assertNotIn("project_id", params)
 
@@ -322,70 +326,75 @@ class DecideEscalationSchemaTests(unittest.TestCase):
 
 
 class DecideCursorPaginationTests(unittest.TestCase):
-    """ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): cursor-exhausted
-    paginated backlog read replacing the single-page + orphan-flag heuristic
-    (ENC-ISS-542)."""
+    """ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): census-backed backlog
+    read (ENC-PLN-093 O5.3) replacing the single-page + orphan-flag
+    heuristic (ENC-ISS-542) and, later, the cursor-exhausted pagination
+    walk."""
 
-    def test_pagination_exhaustion_accumulates_across_pages(self):
+    def test_open_leaf_tasks_inline_census_returns_ids_in_one_call(self):
+        """Small backlog: census inlines every id -- one call, no page walk."""
         import tiers.decide as decide
 
-        responses = [
-            {"records": [{"item_id": "ENC-TSK-A1"}, {"item_id": "ENC-TSK-A2"}], "next_cursor": "cur-1"},
-            {"records": [{"item_id": "ENC-TSK-A3"}], "next_cursor": "cur-2"},
-            {"records": [{"item_id": "ENC-TSK-A4"}]},  # no next_cursor -> natural exhaustion
-        ]
+        ids = [f"ENC-TSK-L{i}" for i in range(500)]
+        census = {"count": 500, "count_truncated": False, "ids_inline_cap": 500, "ids": ids}
         with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
-            decide, "get_json", side_effect=responses
+            decide, "get_json", return_value=census
         ) as get_json:
             backlog = decide._open_leaf_tasks()
 
-        self.assertEqual(len(backlog["leaves"]), 4)
-        self.assertEqual(backlog["page_count"], 3)
+        self.assertEqual(backlog["leaves"], ids)
+        self.assertEqual(backlog["page_count"], 1)
         self.assertIsNone(backlog["cursor_terminus"])
         self.assertFalse(backlog["truncated"])
-        # Second and third calls must forward the cursor from the prior response.
-        self.assertEqual(get_json.call_args_list[1][0][1]["next_cursor"], "cur-1")
-        self.assertEqual(get_json.call_args_list[2][0][1]["next_cursor"], "cur-2")
-        # First call must not carry a next_cursor param at all.
-        self.assertNotIn("next_cursor", get_json.call_args_list[0][0][1])
+        self.assertEqual(get_json.call_count, 1)
 
-    def test_leaf_filter_is_explicit_parent_absence_not_orphan_flag(self):
+    def test_open_leaf_tasks_paged_census_walks_page_cursors(self):
+        """Backlog over the inline cap: census has no inline ids, only a
+        per-page cursor list -- each page's cursor is replayed against the
+        plain (non-census) route to pull that page's records."""
         import tiers.decide as decide
 
-        records = [
-            {"item_id": "ENC-TSK-B1"},  # no parent key at all -> leaf
-            {"item_id": "ENC-TSK-B2", "parent": ""},  # empty parent -> leaf
-            {"item_id": "ENC-TSK-B3", "parent": "ENC-TSK-PARENT"},  # has parent -> not a leaf
-            {"item_id": "ENC-TSK-B4", "orphan": False},  # orphan flag false but no parent -> leaf
-            {"item_id": "ENC-TSK-B5", "orphan": True, "parent": "ENC-TSK-PARENT2"},  # orphan flag true but has parent -> not a leaf
+        inline_ids = [f"ENC-TSK-L{i}" for i in range(500)]
+        extra_id = "ENC-TSK-L500"
+        census = {
+            "count": 501,
+            "count_truncated": False,
+            "ids_inline_cap": 500,
+            "pages": [{"cursor": None, "n": 300}, {"cursor": "c1", "n": 201}],
+        }
+        page_responses = [
+            {"records": [{"item_id": i} for i in inline_ids[:300]]},
+            {"records": [{"item_id": i} for i in inline_ids[300:]] + [{"item_id": extra_id}]},
         ]
         with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
-            decide, "get_json", return_value={"records": records}
+            decide, "get_json", side_effect=[census, *page_responses]
+        ) as get_json:
+            backlog = decide._open_leaf_tasks()
+
+        # The paged id set covers the same shared rows as the inline case,
+        # plus the one extra record only reachable via the second page.
+        self.assertEqual(set(backlog["leaves"]) & set(inline_ids), set(inline_ids))
+        self.assertIn(extra_id, backlog["leaves"])
+        self.assertEqual(backlog["page_count"], 2)
+        self.assertIsNone(backlog["cursor_terminus"])
+        self.assertFalse(backlog["truncated"])
+        # census call + one call per page.
+        self.assertEqual(get_json.call_count, 1 + 2)
+        second_call_params = get_json.call_args_list[1][0][1]
+        self.assertNotIn("next_cursor", second_call_params)
+        third_call_params = get_json.call_args_list[2][0][1]
+        self.assertEqual(third_call_params["next_cursor"], "c1")
+
+    def test_open_leaf_tasks_truncated_census_marks_backlog_truncated(self):
+        import tiers.decide as decide
+
+        census = {"count": 300, "count_truncated": True, "ids_inline_cap": 500, "ids": []}
+        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
+            decide, "get_json", return_value=census
         ):
             backlog = decide._open_leaf_tasks()
 
-        leaf_ids = {r["item_id"] for r in backlog["leaves"]}
-        self.assertEqual(leaf_ids, {"ENC-TSK-B1", "ENC-TSK-B2", "ENC-TSK-B4"})
-
-    def test_max_pages_guard_truncates_and_marks_artifact(self):
-        import tiers.decide as decide
-
-        def _always_more(url, params):
-            # Every page reports a record and a next_cursor that never empties,
-            # simulating a pathological/never-terminating tracker response.
-            return {"records": [{"item_id": "ENC-TSK-C1"}], "next_cursor": "cur-forever"}
-
-        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
-            decide, "get_json", side_effect=_always_more
-        ) as get_json:
-            backlog = decide._open_leaf_tasks()
-
-        self.assertEqual(get_json.call_count, decide._MAX_PAGES)
-        self.assertEqual(backlog["page_count"], decide._MAX_PAGES)
         self.assertTrue(backlog["truncated"])
-        self.assertEqual(backlog["cursor_terminus"], "cur-forever")
-        # Never loops unbounded — accumulates exactly one leaf per page.
-        self.assertEqual(len(backlog["leaves"]), decide._MAX_PAGES)
 
     @mock.patch("tiers.decide._dispatch_plan_dry_run", return_value={"dispatches": []})
     @mock.patch("tiers.decide.write_artifact")
