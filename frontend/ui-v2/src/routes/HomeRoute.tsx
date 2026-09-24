@@ -385,14 +385,20 @@ export function HomeRoute() {
         </Link>
         <Link to="/feed" search={OPEN_TASKS_SEARCH} className="home-route__count-tile">
           <span className="home-route__count-value">
-            {awaitingCheckoutQuery.isLoading ? '…' : (awaitingCheckoutQuery.data ?? 0)}
+            {awaitingCheckoutQuery.isLoading ? '…' : (awaitingCheckoutQuery.data?.count ?? 0)}
+            {awaitingCheckoutQuery.data?.truncated && (
+              <span className="home-route__count-truncated" title="Hit the census page/time budget — this count may be an undercount">
+                *
+              </span>
+            )}
           </span>
           <span className="home-route__count-label">Awaiting checkout</span>
         </Link>
       </section>
       <p className="home-route__counts-note">
-        Counts are exact (server-computed). Their links open Feed pre-filtered to match — results
-        may lag briefly behind the count while the local feed snapshot finishes syncing.
+        Counts are exact (server-computed), unless marked with * — a census that hit its bounded
+        walk budget and may undercount. Their links open Feed pre-filtered to match — results may
+        lag briefly behind the count while the local feed snapshot finishes syncing.
       </p>
 
       <section className="home-route__recent" aria-label="Recent activity">

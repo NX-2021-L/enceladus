@@ -14,9 +14,11 @@
  *  - "Awaiting checkout": reuses the generic tracker list route
  *    (GET /api/v1/tracker/{project}?type=...&status=...) that
  *    api/coordination.ts's `fetchLessons` already calls with a different
- *    `type`. Scoped to record_type=task (the dominant checkoutable type) and
- *    one 200-row page -- a known, intentional undercount rather than N extra
- *    per-type list requests for a single dashboard tile.
+ *    `type`, in `mode=census` (ENC-TSK-Q17-0A / DOC-4408ED194817 §8). Scoped
+ *    to record_type=task (the dominant checkoutable type). The census walk
+ *    is bounded (CENSUS_MAX_RAW_PAGES / CENSUS_WALL_CLOCK_MS server-side) --
+ *    `count_truncated` on the response surfaces a real undercount instead of
+ *    the old silent one-page cap.
  *
  * Paused v3-prod GitHub Environment approvals and stale-lock/backfill flags
  * (ENC-TSK-M27 / ENC-FTR-130): now live, via the two read-only routes added
@@ -49,30 +51,34 @@ export async function fetchOpenP0P1Count(init?: { signal?: AbortSignal }): Promi
   return page.total_matches ?? 0
 }
 
-interface AwaitingCheckoutRecord {
-  checkout_state?: string
+interface CensusResponse {
+  success: boolean
+  mode?: string
+  count: number
+  count_truncated?: boolean
   [key: string]: unknown
 }
 
-interface TrackerListResponse {
-  success: boolean
-  records: AwaitingCheckoutRecord[]
+/** Exact-or-truncated count, per DOC-4408ED194817 §8 D3: a bounded
+ * synchronous walk that reports honestly when it hits its page/wall-clock
+ * budget instead of silently under-reporting. */
+export interface CensusCount {
   count: number
+  truncated: boolean
 }
 
 /** Open tasks not currently checked out by any agent session (i.e. eligible
- * to be picked up), capped at one 200-row page. See module docstring for the
- * task-only-type / single-page scope note. */
+ * to be picked up), via one bounded census call. See module docstring for
+ * the task-only-type scope note. */
 export async function fetchAwaitingCheckoutCount(
   projectId: string,
   init?: { signal?: AbortSignal },
-): Promise<number> {
-  const body = await getJson<TrackerListResponse>(
-    `${API_BASE}/tracker/${encodeURIComponent(projectId)}?type=task&status=open&page_size=200`,
+): Promise<CensusCount> {
+  const body = await getJson<CensusResponse>(
+    `${API_BASE}/tracker/${encodeURIComponent(projectId)}?type=task&status=open&mode=census&page_size=100`,
     init,
   )
-  const records = body.records ?? []
-  return records.filter((r) => r.checkout_state !== 'checked_out').length
+  return { count: body.count ?? 0, truncated: body.count_truncated === true }
 }
 
 /** ENC-TSK-P59 (ENC-ISS-725): cross-project awaiting-checkout count.
@@ -81,15 +87,25 @@ export async function fetchAwaitingCheckoutCount(
  * registry — agentharmony) while looking like a global number. The corpus
  * endpoint has no checkout_state filter, so exact truth is a per-project
  * fan-out over the tracker API, summed. Failed projects count 0 rather than
- * failing the whole tile. */
+ * failing the whole tile. `truncated` is true when ANY project's census hit
+ * its bound, so the tile can surface a real, honest undercount marker
+ * (ENC-TSK-Q17-0A) instead of staying silent about one. */
 export async function fetchAwaitingCheckoutCountAll(
   projectIds: string[],
   init?: { signal?: AbortSignal },
-): Promise<number> {
+): Promise<CensusCount> {
   const counts = await Promise.all(
-    projectIds.map((id) => fetchAwaitingCheckoutCount(id, init).catch(() => 0)),
+    projectIds.map((id) =>
+      fetchAwaitingCheckoutCount(id, init).catch<CensusCount>(() => ({
+        count: 0,
+        truncated: false,
+      })),
+    ),
   )
-  return counts.reduce((sum, n) => sum + n, 0)
+  return counts.reduce(
+    (acc, c) => ({ count: acc.count + c.count, truncated: acc.truncated || c.truncated }),
+    { count: 0, truncated: false },
+  )
 }
 
 /** ENC-TSK-M27 AC1: a GitHub Actions run paused on the v3-prod Environment's
