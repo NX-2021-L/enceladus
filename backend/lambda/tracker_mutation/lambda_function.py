@@ -2905,11 +2905,530 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     return _response(200, {"success": True, "record": item})
 
 
+def _add_checkout_state_ne_filter(checkout_state_ne: str, filter_parts: List[str],
+                                   expr_names: Dict[str, str], expr_values: Dict[str, Any]) -> None:
+    """ENC-TSK-Q14 (M36 tile/Feed invariant): `checkout_state_ne` query-param
+    support, shared verbatim by _handle_list_records's two branches (plain
+    list) and _census_walk's two branches (census primary walk) so a census
+    page cursor replayed into the list route excludes exactly the same rows
+    the census walk already excluded.
+
+    Appends `(attribute_not_exists(#cs) OR #cs <> :csne)` to `filter_parts`
+    -- a row with NO checkout_state attribute at all (the common case: most
+    records are never checked out) passes, and a row whose checkout_state
+    equals the given value is excluded; any other checkout_state value
+    passes. Mutates `filter_parts`/`expr_names`/`expr_values` in place;
+    no-op when `checkout_state_ne` is falsy/blank.
+
+    Deliberately does NOT touch ProjectionExpression -- DynamoDB evaluates
+    FilterExpression against the full stored item before projection is
+    applied, so a filtered-on attribute need not be projected for the
+    caller to receive back (real DynamoDB behavior; fake_ddb_paging.py's
+    PagingTable mirrors it).
+    """
+    checkout_state_ne = str(checkout_state_ne or "").strip()
+    if not checkout_state_ne:
+        return
+    filter_parts.append("(attribute_not_exists(#cs) OR #cs <> :csne)")
+    expr_names["#cs"] = "checkout_state"
+    expr_values[":csne"] = _ser_s(checkout_state_ne)
+
+
 _LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
 # budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
 # FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
 # this budget with rows still possible ALWAYS yields a next_cursor (+
 # page_truncated: true) instead of silently truncating with no way back in.
+
+
+# ENC-TSK-Q14 (O2.1) -- census mode (`mode=census`) budgets, D3. Bounded
+# synchronous walk: no async materialized census in v1. Either bound trips
+# -> count_truncated: true, exhausted: false. Env-overridable so a prod
+# incident can widen/narrow the budget without a redeploy.
+CENSUS_MAX_RAW_PAGES = int(os.environ.get("CENSUS_MAX_RAW_PAGES", "50"))
+CENSUS_WALL_CLOCK_MS = int(os.environ.get("CENSUS_WALL_CLOCK_MS", "6000"))
+_CENSUS_RAW_PAGE_LIMIT = 200  # D3: raw Query() Limit per page (max page_size).
+_CENSUS_IDS_INLINE_CAP = 500  # decisions.md: fixed constant, echoed in payload
+# (not adaptive) as `ids_inline_cap`. `ids` is included in the census
+# payload iff count <= this cap.
+
+
+def _census_walk(project_id: str, record_type: str = "", status_filter: str = "",
+                  max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                  clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.1): bounded raw walk over every matching record.
+
+    Reuses the O1 (_handle_list_records) branch selection (base table vs
+    project-type-index GSI, D6) and loop shape, but always walks to
+    exhaustion or a budget (D3) instead of stopping at one handler page --
+    this is the count/anchor source for census mode, not a paginated list.
+
+    `ProjectionExpression` trims each item to project_id, record_id,
+    record_type, status, title, updated_at (O2.1) -- census never needs the
+    full record. project_id/record_id/record_type are kept even though
+    they're constant/filtered-on because _encode_list_cursor (O1.1) needs
+    them to mint page-anchor cursors (O2.2) straight from these rows.
+    `checkout_state` is deliberately NOT added here even when
+    `checkout_state_ne` is set -- FilterExpression is evaluated against the
+    full stored item before ProjectionExpression trims it for return, so
+    filtering on checkout_state needs no projection (_add_checkout_state_ne_filter).
+    Counter rows (record_id starting with `_TRACKER_COUNTER_PREFIX`, the
+    same sentinel `_query_all_project_tasks` guards against) are dropped
+    from `rows` as they stream in, same as `_handle_list_records` drops
+    record_type == "counter" (ENC-TSK-Q13) -- counters are bookkeeping
+    rows, never census subjects.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant): applied
+    IDENTICALLY to _handle_list_records's own `checkout_state_ne` handling
+    (_add_checkout_state_ne_filter, shared) -- rows whose checkout_state
+    equals this value are excluded INSIDE the walk via FilterExpression,
+    not post-filtered in Python, so a census page cursor (O2.2) replayed
+    into _handle_list_records with the same checkout_state_ne resumes at
+    exactly the next slice this walk would have produced. The escalation
+    second walk (_census_escalation_walk) does NOT take this parameter --
+    escalation rows have no checkout_state attribute at all, so they can
+    never match a checkout_state exclusion and are always unaffected.
+
+    Returns {rows, exhausted, truncated_reason, branch}. `exhausted` is
+    True iff the FINAL DynamoDB call had no LastEvaluatedKey -- the only
+    proof the walk covered everything. `truncated_reason` is "pages",
+    "time", or None (exhausted). Budget checks happen AFTER each raw page
+    is fetched and its rows folded in (mirroring the O1 loop): a walk
+    always makes at least one raw call, and `rows` always reflects exactly
+    what was walked before the tripped bound, never a partial page.
+    """
+    ddb = _get_ddb()
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+    clock = clock or time.monotonic
+    started = clock()
+
+    if record_type and record_type in _RECORD_TYPES:
+        # GSI branch (D6): order is left unspecified -- no GSI change, no
+        # forced base-table walk.
+        branch = "gsi"
+        kwargs: Dict[str, Any] = {
+            "TableName": DYNAMODB_TABLE,
+            "IndexName": "project-type-index",
+            "KeyConditionExpression": "project_id = :pid AND record_type = :rtype",
+            "ExpressionAttributeValues": {
+                ":pid": _ser_s(project_id),
+                ":rtype": _ser_s(record_type),
+            },
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        filter_parts = []
+        if status_filter:
+            filter_parts.append("#st = :st")
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
+    else:
+        # Base-table branch (D6): record_id ascending -- order="record_id_asc".
+        branch = "base"
+        kwargs = {
+            "TableName": DYNAMODB_TABLE,
+            "KeyConditionExpression": "project_id = :pid",
+            "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
+            "ProjectionExpression": "project_id, record_id, record_type, #st, title, updated_at",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "Limit": _CENSUS_RAW_PAGE_LIMIT,
+        }
+        filter_parts = []
+        if status_filter:
+            filter_parts.append("#st = :st")
+            kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        if record_type:
+            filter_parts.append("record_type = :rtype")
+            kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
+
+    rows: List[Dict[str, Any]] = []
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        for raw in resp.get("Items", []):
+            item = _deser_item(raw)
+            rid = item.get("record_id", "")
+            if isinstance(rid, str) and rid.startswith(_TRACKER_COUNTER_PREFIX):
+                continue
+            if item.get("record_type") == "escalation":
+                # D5: escalations are counted ONLY through the dedicated
+                # _census_escalation_walk (ENC-TSK-Q14-0C) second walk, never
+                # through this general project-partition walk -- an
+                # unfiltered base-branch walk shares the same partition as
+                # escalation rows (record_id begins_with "escalation#") and
+                # would otherwise double count them.
+                continue
+            rows.append(item)
+
+        if not last_evaluated_key:
+            exhausted = True  # proof: DynamoDB walk exhausted
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"  # unproven -- wall-clock budget hit
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"  # unproven -- raw-page budget hit
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {
+        "rows": rows,
+        "exhausted": exhausted,
+        "truncated_reason": truncated_reason,
+        "branch": branch,
+        "raw_pages_fetched": raw_pages_fetched,
+    }
+
+
+def _census_pages(rows: List[Dict[str, Any]], page_size: int, branch: str) -> List[Dict[str, Any]]:
+    """ENC-TSK-Q14 (O2.2): slice a completed _census_walk's rows into page anchors.
+
+    Anchors are computed directly from `rows` -- the same rows census
+    already walked -- never re-queried. `page_size` is capped the same way
+    as _handle_list_records (min 1, raw max 200). Page k's `cursor` is the
+    O1.1 (_encode_list_cursor) encoding of the LAST row of page k-1, so
+    feeding it to _handle_list_records resumes exactly at page k's first
+    row (cross-tested against the O1.2 route). Page 0's cursor is None --
+    there is no prior row to encode. `first`/`last` carry ONLY id, status,
+    title (D placeholder in o2_spec.md), never the full row.
+    """
+    page_size = max(1, min(page_size, 200))
+    pages: List[Dict[str, Any]] = []
+    prev_cursor: Optional[str] = None
+    for start in range(0, len(rows), page_size):
+        chunk = rows[start:start + page_size]
+        if not chunk:
+            continue
+        first, last = chunk[0], chunk[-1]
+        pages.append({
+            "cursor": prev_cursor,
+            "first": {
+                "id": first.get("record_id"),
+                "status": first.get("status"),
+                "title": first.get("title"),
+            },
+            "last": {
+                "id": last.get("record_id"),
+                "status": last.get("status"),
+                "title": last.get("title"),
+            },
+            "n": len(chunk),
+        })
+        prev_cursor = _encode_list_cursor(last, branch)
+    return pages
+
+
+def _census_escalation_walk(project_id: str, status_filter: str = "",
+                             max_raw_pages: Optional[int] = None,
+                             wall_clock_ms: Optional[int] = None, clock=None) -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): bounded raw walk counting a project's escalations.
+
+    Reuses `_handle_escalation_list`'s own query shape (ENC-ISS-699:
+    KeyConditionExpression begins_with(record_id, "escalation#")) but walks
+    to exhaustion or a budget -- like _census_walk -- instead of truncating
+    to a caller page_size. Only a count is needed here (census by_type),
+    not the escalation bodies, so ProjectionExpression trims to record_id
+    (plus #st when `status_filter` is set, so the FilterExpression below has
+    something to evaluate against).
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C): applied as a raw
+    `#st = :st` FilterExpression exactly like the plain-list route
+    (_handle_list_records / _census_walk) applies its own `status_filter`
+    -- no vocabulary validation against `_ESCALATION_STATUSES` here, same
+    as the primary census walk never validates a task/issue status value.
+    Before this fix, this walk ignored the caller's status filter entirely,
+    so a `mode=census` request with `status=...` silently counted
+    escalations of every status while the primary walk correctly filtered
+    -- contradicting the "status filter applies inside the walk exactly as
+    the list route" contract in `_handle_list_census`'s docstring.
+
+    `max_raw_pages <= 0` (the caller has no budget left, e.g. the primary
+    walk already spent it all) short-circuits to a single deterministic
+    not-exhausted result with zero DynamoDB calls -- there is nothing left
+    to spend, so there is no reason to make one doomed call first.
+
+    Returns {count, exhausted, truncated_reason}. Same exhaustion/budget
+    semantics as _census_walk.
+    """
+    max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        # Nothing to walk -- the escalation primitive itself is off, not a
+        # budget/data question. Treat as a trivially exhausted empty walk.
+        return {"count": 0, "exhausted": True, "truncated_reason": None}
+
+    if max_raw_pages <= 0:
+        return {"count": 0, "exhausted": False, "truncated_reason": "pages"}
+
+    ddb = _get_ddb()
+    clock = clock or time.monotonic
+    started = clock()
+
+    kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :esc_prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":esc_prefix": _ser_s("escalation#"),
+        },
+        "ProjectionExpression": "record_id",
+        "Limit": _CENSUS_RAW_PAGE_LIMIT,
+    }
+    if status_filter:
+        kwargs["FilterExpression"] = "#st = :st"
+        kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+        kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+
+    count = 0
+    exhausted = False
+    truncated_reason: Optional[str] = None
+    raw_pages_fetched = 0
+
+    while True:
+        resp = ddb.query(**kwargs)
+        raw_pages_fetched += 1
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        count += len(resp.get("Items", []))
+
+        if not last_evaluated_key:
+            exhausted = True
+            break
+
+        elapsed_ms = (clock() - started) * 1000
+        if elapsed_ms > wall_clock_ms:
+            truncated_reason = "time"
+            break
+        if raw_pages_fetched >= max_raw_pages:
+            truncated_reason = "pages"
+            break
+
+        kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    return {"count": count, "exhausted": exhausted, "truncated_reason": truncated_reason}
+
+
+def _census_collect(project_id: str, record_type: str = "", status_filter: str = "",
+                     max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
+                     escalation_max_raw_pages: Optional[int] = None,
+                     escalation_wall_clock_ms: Optional[int] = None,
+                     clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
+    """ENC-TSK-Q14 (O2.3): primary census walk + (in-scope) escalation walk, merged.
+
+    D5: the escalation second walk runs when there is no `type` filter, or
+    `type == "escalation"` -- any other explicit type filter omits it
+    entirely (by_type then carries only that one type; no escalation walk,
+    no wasted DynamoDB calls). `type == "escalation"` skips the *primary*
+    walk instead (there is nothing for it to usefully find -- see
+    _census_walk's own escalation-row exclusion) and relies solely on the
+    escalation walk for both `by_type["escalation"]` and `count`.
+
+    Escalation and primary-walk rows never overlap (_census_walk excludes
+    escalation rows the same way it excludes counter rows), so by_type's
+    two contributions are always additive, never double-counted.
+
+    `status_filter` (review fix, ENC-TSK-Q14-0C) is passed to BOTH walks --
+    the primary walk already applied it; it is now also forwarded to
+    `_census_escalation_walk` whenever the escalation walk runs, so a
+    status-filtered census never silently mixes a filtered primary count
+    with an unfiltered escalation count under one `count`/`by_type`.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) is forwarded
+    to the PRIMARY walk only (`_census_walk`) -- never to
+    `_census_escalation_walk`. Escalation records carry no `checkout_state`
+    attribute at all (they are never checked out), so
+    `attribute_not_exists(checkout_state) OR checkout_state <> :csne`
+    would always evaluate true for every escalation row regardless of the
+    value given; forwarding it would be a no-op at best and a wasted
+    FilterExpression at worst. The escalation walk is documented here as
+    intentionally unaffected by this parameter.
+
+    Budget sharing ("under the remaining budget", per o2_spec.md O2.3):
+    unless `escalation_max_raw_pages`/`escalation_wall_clock_ms` are given
+    explicitly (tests use this to force deterministic truncation), the
+    escalation walk gets whatever raw-page/wall-clock budget the primary
+    walk did not spend out of the shared CENSUS_MAX_RAW_PAGES /
+    CENSUS_WALL_CLOCK_MS (or caller-supplied `max_raw_pages`/
+    `wall_clock_ms`) totals.
+
+    When the escalation walk truncates, its rows are excluded from `count`
+    and `by_type` entirely (D5) -- `excluded_types` is set to
+    `["escalation"]` and `count_truncated` is forced true, independent of
+    whether the primary walk itself was exhausted.
+
+    Returns {rows, exhausted, truncated_reason, branch, by_type, count,
+    count_truncated, excluded_types}. `rows` never contains escalation
+    rows -- O2.2 page anchors are built from `rows` alone, matching D5's
+    "escalation rows excluded from ... pages".
+    """
+    record_type = str(record_type or "").strip()
+    status_filter = str(status_filter or "").strip()
+    clock = clock or time.monotonic
+    started = clock()
+
+    total_max_raw_pages = CENSUS_MAX_RAW_PAGES if max_raw_pages is None else max_raw_pages
+    total_wall_clock_ms = CENSUS_WALL_CLOCK_MS if wall_clock_ms is None else wall_clock_ms
+
+    if record_type == "escalation":
+        primary = {
+            "rows": [], "exhausted": True, "truncated_reason": None,
+            "branch": "base", "raw_pages_fetched": 0,
+        }
+    else:
+        primary = _census_walk(
+            project_id, record_type=record_type, status_filter=status_filter,
+            max_raw_pages=total_max_raw_pages, wall_clock_ms=total_wall_clock_ms, clock=clock,
+            checkout_state_ne=checkout_state_ne,
+        )
+
+    by_type: Dict[str, int] = {}
+    for row in primary["rows"]:
+        rt = row.get("record_type")
+        if rt:
+            by_type[rt] = by_type.get(rt, 0) + 1
+
+    excluded_types: List[str] = []
+    escalation_truncated = False
+    include_escalations = (not record_type) or record_type == "escalation"
+
+    if include_escalations:
+        if escalation_max_raw_pages is None:
+            escalation_max_raw_pages = max(total_max_raw_pages - primary["raw_pages_fetched"], 0)
+        if escalation_wall_clock_ms is None:
+            elapsed_ms = (clock() - started) * 1000
+            escalation_wall_clock_ms = max(total_wall_clock_ms - elapsed_ms, 0)
+
+        esc = _census_escalation_walk(
+            project_id, status_filter=status_filter, max_raw_pages=escalation_max_raw_pages,
+            wall_clock_ms=escalation_wall_clock_ms, clock=clock,
+        )
+        if esc["exhausted"]:
+            by_type["escalation"] = esc["count"]
+        else:
+            excluded_types.append("escalation")
+            escalation_truncated = True
+
+    count = sum(by_type.values())
+
+    return {
+        "rows": primary["rows"],
+        "exhausted": primary["exhausted"],
+        "truncated_reason": primary["truncated_reason"],
+        "branch": primary["branch"],
+        "by_type": by_type,
+        "count": count,
+        "count_truncated": (not primary["exhausted"]) or escalation_truncated,
+        "excluded_types": excluded_types,
+    }
+
+
+_CENSUS_VALID_TYPES = _RECORD_TYPES | {"escalation"}
+
+
+def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
+    """GET /{project}?mode=census — ENC-TSK-Q14 (O2.4) payload assembly.
+
+    Ties together the O2.1-O2.3 pieces (_census_collect: primary + escalation
+    walk; _census_pages: page anchors) into the tracker.census response
+    contract (governance_data_dictionary.json tracker.census, ENC-TSK-Q14-0E):
+
+        {count, count_truncated, exhausted, pages, page_size, as_of, order,
+         by_type, ids?, ids_inline_cap: 500, excluded_types?}
+
+    Deliberately NO `records` key -- this is a bounded summary (D3), not a
+    page of records; a caller wanting the actual rows follows `pages[k]
+    .cursor` into the ordinary _handle_list_records route. `ids` is present
+    iff `count <= ids_inline_cap` (500, D-placeholder in decisions.md) --
+    the full list of primary-walk record ids, omitted entirely otherwise
+    rather than silently truncated (a caller must not mistake a capped
+    `ids` list for a complete one). `order` follows D6 (typed GSI branch:
+    "unspecified"; untyped base-table branch: "record_id_asc"). `as_of`
+    follows D4 -- watermark kind "wall_clock+max_updated_at", `started_at`
+    captured before either walk runs, `max_updated_at` the maximum
+    `updated_at` observed across every primary-walk row (escalation rows
+    are not part of the watermark scan). Status filter applies inside the
+    walk exactly as the plain-list route (D3/D5: unchanged FilterExpression
+    semantics, just walked to a budget instead of a caller page).
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) applies the
+    same way, inside the primary walk only -- see _census_collect's
+    docstring.
+    """
+    record_type = str(query_params.get("type") or "").strip()
+    if record_type and record_type not in _CENSUS_VALID_TYPES:
+        return _error(
+            400,
+            f"Unknown type filter '{record_type}' for census mode. "
+            f"Allowed: {sorted(_CENSUS_VALID_TYPES)}",
+        )
+    status_filter = str(query_params.get("status") or "").strip()
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): forwarded to _census_collect's
+    # primary walk only -- see _census_collect's docstring for why the
+    # escalation walk is unaffected.
+    checkout_state_ne = str(query_params.get("checkout_state_ne") or "").strip()
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    started_at = _now_z()
+    result = _census_collect(
+        project_id, record_type=record_type, status_filter=status_filter,
+        checkout_state_ne=checkout_state_ne,
+    )
+
+    rows = result["rows"]
+    pages = _census_pages(rows, page_size, result["branch"])
+
+    max_updated_at = ""
+    for row in rows:
+        updated_at = row.get("updated_at") or ""
+        if isinstance(updated_at, str) and updated_at > max_updated_at:
+            max_updated_at = updated_at
+
+    order = "unspecified" if result["branch"] == "gsi" else "record_id_asc"
+
+    payload: Dict[str, Any] = {
+        "count": result["count"],
+        "count_truncated": result["count_truncated"],
+        "exhausted": result["exhausted"],
+        "pages": pages,
+        "page_size": page_size,
+        "as_of": {
+            "kind": "wall_clock+max_updated_at",
+            "started_at": started_at,
+            "max_updated_at": max_updated_at,
+        },
+        "order": order,
+        "by_type": result["by_type"],
+        "ids_inline_cap": _CENSUS_IDS_INLINE_CAP,
+    }
+    if result["count"] <= _CENSUS_IDS_INLINE_CAP:
+        payload["ids"] = [row.get("record_id") for row in rows]
+    if result["excluded_types"]:
+        payload["excluded_types"] = result["excluded_types"]
+
+    return _response(200, payload)
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
@@ -2952,9 +3471,26 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     resume) and page_truncated: true is set. A response with no next_cursor
     is therefore always provably exhausted.
     """
+    # ENC-TSK-Q14 (O2.4): `mode=census` dispatches to the bounded summary
+    # walk instead of a paginated record list -- checked before anything
+    # else touches DynamoDB. Any mode value other than the default ("",
+    # meaning plain list) or "census" is a 400, never a silent plain list
+    # (o2_acs.md: "unknown mode values -> 400 envelope").
+    mode = str(query_params.get("mode") or "").strip()
+    if mode and mode != "census":
+        return _error(400, f"Unknown mode '{mode}'. Supported: census.")
+    if mode == "census":
+        return _handle_list_census(project_id, query_params)
+
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): rows whose checkout_state
+    # equals this value are excluded INSIDE the walk (FilterExpression),
+    # applied identically here and in the census primary walk
+    # (_census_walk) via the shared _add_checkout_state_ne_filter helper --
+    # see that helper's docstring for the exact clause and rationale.
+    checkout_state_ne = query_params.get("checkout_state_ne", "")
     try:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
@@ -2981,10 +3517,19 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 },
                 "Limit": page_size,
             }
+            filter_parts = []
+            expr_names: Dict[str, str] = {}
             if status_filter:
-                kwargs["FilterExpression"] = "#st = :st"
-                kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+                filter_parts.append("#st = :st")
+                expr_names["#st"] = "status"
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
+            if filter_parts:
+                kwargs["FilterExpression"] = " AND ".join(filter_parts)
+            if expr_names:
+                kwargs["ExpressionAttributeNames"] = expr_names
         else:
             # Query all records for project (base table: HASH project_id,
             # RANGE record_id). No GSI change (D6): this branch's sort order
@@ -3005,6 +3550,9 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if record_type:
                 filter_parts.append("record_type = :rtype")
                 kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
             if filter_parts:
                 kwargs["FilterExpression"] = " AND ".join(filter_parts)
             if expr_names:
