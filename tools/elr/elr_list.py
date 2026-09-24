@@ -285,15 +285,30 @@ def find_latest_census_file(
 
 
 def _extract_ids(records: Any) -> List[str]:
+    """Per record, prefer the caller-facing item id (``item_id``, else
+    ``id``). Otherwise fall back to ``record_id`` -- on the real server
+    this is the raw DynamoDB sort key, e.g. ``"task#ENC-TSK-B95"``, so
+    strip the leading ``"<type>#"`` prefix (split on the first ``"#"``)
+    to recover the plain item id that elr_batch_get --ids-file expects
+    (ENC-TSK-Q28). Order is preserved; an id that comes out empty is
+    never emitted.
+    """
     ids: List[str] = []
     if not isinstance(records, list):
         return ids
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        record_id = rec.get("record_id") or rec.get("id")
-        if record_id:
-            ids.append(str(record_id))
+        item_id = rec.get("item_id") or rec.get("id")
+        if item_id:
+            candidate = str(item_id)
+        else:
+            record_id = rec.get("record_id")
+            if not record_id:
+                continue
+            candidate = str(record_id).split("#", 1)[-1]
+        if candidate:
+            ids.append(candidate)
     return ids
 
 
