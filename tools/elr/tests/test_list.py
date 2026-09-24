@@ -22,6 +22,7 @@ import json
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -308,6 +309,29 @@ class CensusModeTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(digest["ok"])
             self.assertEqual(list(Path(tmp).glob("*.census.json")), [])
+
+    def test_census_request_sends_mode_census_and_filters(self):
+        """The AC-mandated request contract for --census: the outgoing GET
+        must actually carry mode=census (plus the type/status/page_size
+        filters), not just parse a census-shaped response -- a regression
+        that dropped mode=census from the query dict would still pass
+        every other test in this class."""
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, _digest, mock_urlopen, _stderr = _run_main(
+                ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--census"],
+                [_ok(self._census_body())],
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_urlopen.call_count, 2)  # health + the census request
+            req = mock_urlopen.call_args_list[1][0][0]
+            parts = urllib.parse.urlsplit(req.full_url)
+            self.assertEqual(parts.path, "/api/v1/tracker/enceladus")
+            query = urllib.parse.parse_qs(parts.query)
+            self.assertEqual(query["mode"], ["census"])
+            self.assertEqual(query["type"], ["task"])
+            self.assertEqual(query["status"], ["open"])
+            self.assertEqual(query["page_size"], ["100"])
+            self.assertNotIn("next_cursor", query)
 
 
 class PageModeTests(unittest.TestCase):
