@@ -15,7 +15,11 @@
  *    (GET /api/v1/tracker/{project}?type=...&status=...) that
  *    api/coordination.ts's `fetchLessons` already calls with a different
  *    `type`, in `mode=census` (ENC-TSK-Q17-0A / DOC-4408ED194817 §8). Scoped
- *    to record_type=task (the dominant checkoutable type). The census walk
+ *    to record_type=task (the dominant checkoutable type), with
+ *    `checkout_state_ne=checked_out` applied server-side inside the walk so
+ *    the tile count and the Feed's OPEN_TASKS_SEARCH destination filter
+ *    (HomeRoute.tsx) share the exact same checkout_state != checked_out
+ *    exclusion -- the M36 tile-count == Feed-rows invariant. The census walk
  *    is bounded (CENSUS_MAX_RAW_PAGES / CENSUS_WALL_CLOCK_MS server-side) --
  *    `count_truncated` on the response surfaces a real undercount instead of
  *    the old silent one-page cap.
@@ -69,13 +73,21 @@ export interface CensusCount {
 
 /** Open tasks not currently checked out by any agent session (i.e. eligible
  * to be picked up), via one bounded census call. See module docstring for
- * the task-only-type scope note. */
+ * the task-only-type scope note.
+ *
+ * ENC-TSK-Q17-0A review fix (M36 invariant): the census walk now carries
+ * `checkout_state_ne=checked_out` (applied server-side inside the walk, not
+ * as a client-side post-filter), so the tile count and the Feed's
+ * `OPEN_TASKS_SEARCH` destination filter (HomeRoute.tsx) apply the exact
+ * same checkout_state != checked_out exclusion. Without this param the
+ * bounded census counted checked-out tasks too, so the tile could show a
+ * higher number than the Feed rows it links to. */
 export async function fetchAwaitingCheckoutCount(
   projectId: string,
   init?: { signal?: AbortSignal },
 ): Promise<CensusCount> {
   const body = await getJson<CensusResponse>(
-    `${API_BASE}/tracker/${encodeURIComponent(projectId)}?type=task&status=open&mode=census&page_size=100`,
+    `${API_BASE}/tracker/${encodeURIComponent(projectId)}?type=task&status=open&checkout_state_ne=checked_out&mode=census&page_size=100`,
     init,
   )
   return { count: body.count ?? 0, truncated: body.count_truncated === true }

@@ -45,6 +45,16 @@ describe('fetchAwaitingCheckoutCount (ENC-TSK-Q17-0A)', () => {
     expect(result).toEqual({ count: 7, truncated: false })
   })
 
+  it('carries checkout_state_ne=checked_out so the tile matches the Feed rows (M36 invariant)', async () => {
+    const fetchMock = fetchResponder({
+      enceladus: { success: true, mode: 'census', count: 7, count_truncated: false },
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchAwaitingCheckoutCount('enceladus')
+    const calledUrl = fetchMock.mock.calls[0]![0] as string
+    expect(calledUrl).toContain('checkout_state_ne=checked_out')
+  })
+
   it('surfaces count_truncated as truncated: true', async () => {
     vi.stubGlobal(
       'fetch',
