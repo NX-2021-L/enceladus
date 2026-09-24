@@ -2919,6 +2919,9 @@ _LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
 CENSUS_MAX_RAW_PAGES = int(os.environ.get("CENSUS_MAX_RAW_PAGES", "50"))
 CENSUS_WALL_CLOCK_MS = int(os.environ.get("CENSUS_WALL_CLOCK_MS", "6000"))
 _CENSUS_RAW_PAGE_LIMIT = 200  # D3: raw Query() Limit per page (max page_size).
+_CENSUS_IDS_INLINE_CAP = 500  # decisions.md: fixed constant, echoed in payload
+# (not adaptive) as `ids_inline_cap`. `ids` is included in the census
+# payload iff count <= this cap.
 
 
 def _census_walk(project_id: str, record_type: str = "", status_filter: str = "",
@@ -3250,6 +3253,84 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
     }
 
 
+_CENSUS_VALID_TYPES = _RECORD_TYPES | {"escalation"}
+
+
+def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
+    """GET /{project}?mode=census — ENC-TSK-Q14 (O2.4) payload assembly.
+
+    Ties together the O2.1-O2.3 pieces (_census_collect: primary + escalation
+    walk; _census_pages: page anchors) into the tracker.census response
+    contract (governance_data_dictionary.json tracker.census, ENC-TSK-Q14-0E):
+
+        {count, count_truncated, exhausted, pages, page_size, as_of, order,
+         by_type, ids?, ids_inline_cap: 500, excluded_types?}
+
+    Deliberately NO `records` key -- this is a bounded summary (D3), not a
+    page of records; a caller wanting the actual rows follows `pages[k]
+    .cursor` into the ordinary _handle_list_records route. `ids` is present
+    iff `count <= ids_inline_cap` (500, D-placeholder in decisions.md) --
+    the full list of primary-walk record ids, omitted entirely otherwise
+    rather than silently truncated (a caller must not mistake a capped
+    `ids` list for a complete one). `order` follows D6 (typed GSI branch:
+    "unspecified"; untyped base-table branch: "record_id_asc"). `as_of`
+    follows D4 -- watermark kind "wall_clock+max_updated_at", `started_at`
+    captured before either walk runs, `max_updated_at` the maximum
+    `updated_at` observed across every primary-walk row (escalation rows
+    are not part of the watermark scan). Status filter applies inside the
+    walk exactly as the plain-list route (D3/D5: unchanged FilterExpression
+    semantics, just walked to a budget instead of a caller page).
+    """
+    record_type = str(query_params.get("type") or "").strip()
+    if record_type and record_type not in _CENSUS_VALID_TYPES:
+        return _error(
+            400,
+            f"Unknown type filter '{record_type}' for census mode. "
+            f"Allowed: {sorted(_CENSUS_VALID_TYPES)}",
+        )
+    status_filter = str(query_params.get("status") or "").strip()
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    started_at = _now_z()
+    result = _census_collect(project_id, record_type=record_type, status_filter=status_filter)
+
+    rows = result["rows"]
+    pages = _census_pages(rows, page_size, result["branch"])
+
+    max_updated_at = ""
+    for row in rows:
+        updated_at = row.get("updated_at") or ""
+        if isinstance(updated_at, str) and updated_at > max_updated_at:
+            max_updated_at = updated_at
+
+    order = "unspecified" if result["branch"] == "gsi" else "record_id_asc"
+
+    payload: Dict[str, Any] = {
+        "count": result["count"],
+        "count_truncated": result["count_truncated"],
+        "exhausted": result["exhausted"],
+        "pages": pages,
+        "page_size": page_size,
+        "as_of": {
+            "kind": "wall_clock+max_updated_at",
+            "started_at": started_at,
+            "max_updated_at": max_updated_at,
+        },
+        "order": order,
+        "by_type": result["by_type"],
+        "ids_inline_cap": _CENSUS_IDS_INLINE_CAP,
+    }
+    if result["count"] <= _CENSUS_IDS_INLINE_CAP:
+        payload["ids"] = [row.get("record_id") for row in rows]
+    if result["excluded_types"]:
+        payload["excluded_types"] = result["excluded_types"]
+
+    return _response(200, payload)
+
+
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     """GET /{project} — list records with optional type/status filters.
 
@@ -3290,6 +3371,17 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     resume) and page_truncated: true is set. A response with no next_cursor
     is therefore always provably exhausted.
     """
+    # ENC-TSK-Q14 (O2.4): `mode=census` dispatches to the bounded summary
+    # walk instead of a paginated record list -- checked before anything
+    # else touches DynamoDB. Any mode value other than the default ("",
+    # meaning plain list) or "census" is a 400, never a silent plain list
+    # (o2_acs.md: "unknown mode values -> 400 envelope").
+    mode = str(query_params.get("mode") or "").strip()
+    if mode and mode != "census":
+        return _error(400, f"Unknown mode '{mode}'. Supported: census.")
+    if mode == "census":
+        return _handle_list_census(project_id, query_params)
+
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
