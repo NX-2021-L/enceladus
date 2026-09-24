@@ -166,6 +166,13 @@
   letter-spacing: var(--tracking-label);
 }
 
+/* ENC-TSK-Q17-0A: marks a census count that hit its bounded-walk budget
+ * (count_truncated) -- an honest undercount signal, not an error state. */
+.home-route__count-truncated {
+  color: var(--v2-status-warning, #c9a15c);
+  margin-left: var(--space-1);
+}
+
 @media (min-width: 48.0625rem) {
   .home-route__counts {
     grid-template-columns: repeat(2, minmax(0, 220px));

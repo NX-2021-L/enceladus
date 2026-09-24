@@ -95,7 +95,7 @@ export function CoordinationRoute() {
   // cheap array filters over small (<=200 row) datasets.
   const sessions = applyTokens(sessionsQuery.data ?? [], filterQuery)
   const agentTypes = applyTokens(agentTypesQuery.data ?? [], filterQuery)
-  const lessons = applyTokens(lessonsQuery.data ?? [], filterQuery)
+  const lessons = applyTokens(lessonsQuery.data?.records ?? [], filterQuery)
   const escalations = applyTokens(escalationsQuery.data ?? [], filterQuery)
   const crqDocs = applyTokens(crqQuery.data ?? [], filterQuery)
 
@@ -164,7 +164,9 @@ export function CoordinationRoute() {
     },
     {
       id: 'lessons',
-      label: 'Lessons',
+      // ENC-TSK-Q17-0D: an honest-cursors truncation marker beats a Lessons
+      // tab that quietly under-reports past the bounded page-follow cap.
+      label: lessonsQuery.data?.truncated ? 'Lessons (truncated)' : 'Lessons',
       count: lessons.length,
       content: (
         <Cards<LessonRecord>

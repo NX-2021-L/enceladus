@@ -193,17 +193,57 @@ interface TrackerListResponse {
   success: boolean
   records: LessonRecord[]
   count: number
+  /** Honest-cursors contract (ENC-TSK-Q17-0D / O1.2): true when this page's
+   * DynamoDB walk hit its own internal page bound before filling page_size,
+   * so a short page here is NOT necessarily a complete result -- distinct
+   * from `next_cursor`, which signals more pages exist beyond this one. */
+  page_truncated?: boolean
+  next_cursor?: string
+}
+
+/** Bounded page-follow cap (ENC-TSK-Q17-0D): never an unbounded loop. Hitting
+ * this with a `next_cursor` still pending counts as truncated too. */
+const LESSONS_MAX_PAGES = 10
+
+export interface FetchLessonsResult {
+  records: LessonRecord[]
+  /** True when the fetched records are NOT a complete, honest view of every
+   * lesson for this project -- either a page reported `page_truncated`, or
+   * pagination hit LESSONS_MAX_PAGES while a `next_cursor` still remained. */
+  truncated: boolean
 }
 
 export async function fetchLessons(
   projectId: string,
   init?: { signal?: AbortSignal },
-): Promise<LessonRecord[]> {
-  const body = await getJson<TrackerListResponse>(
-    `${API_BASE}/tracker/${encodeURIComponent(projectId)}?type=lesson&page_size=200`,
-    init,
-  )
-  return body.records ?? []
+): Promise<FetchLessonsResult> {
+  const records: LessonRecord[] = []
+  let cursor: string | undefined
+  let truncated = false
+
+  for (let page = 0; page < LESSONS_MAX_PAGES; page++) {
+    const qs = new URLSearchParams({ type: 'lesson', page_size: '200' })
+    if (cursor) qs.set('next_cursor', cursor)
+    const body = await getJson<TrackerListResponse>(
+      `${API_BASE}/tracker/${encodeURIComponent(projectId)}?${qs.toString()}`,
+      init,
+    )
+    records.push(...(body.records ?? []))
+    if (body.page_truncated) truncated = true
+
+    if (!body.next_cursor) {
+      cursor = undefined
+      break
+    }
+    cursor = body.next_cursor
+    if (page === LESSONS_MAX_PAGES - 1) {
+      // Bound reached with more pages still available -- surface honestly
+      // rather than silently treating this as the complete set.
+      truncated = true
+    }
+  }
+
+  return { records, truncated }
 }
 
 // ---------------------------------------------------------------------------
