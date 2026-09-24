@@ -2905,6 +2905,13 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     return _response(200, {"success": True, "record": item})
 
 
+_LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
+# budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
+# FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
+# this budget with rows still possible ALWAYS yields a next_cursor (+
+# page_truncated: true) instead of silently truncating with no way back in.
+
+
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     """GET /{project} — list records with optional type/status filters.
 
@@ -2914,6 +2921,36 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     more records remain. Prior behavior exhausted LastEvaluatedKey and returned
     everything, causing the pre-existing 413 surfaced during the 2026-04-20
     io-override session.
+
+    ENC-TSK-Q13 (O1.2): the cursor is now a value-based boundary (see
+    _encode_list_cursor/_decode_list_cursor) built from the last item this
+    call actually RETURNED, never a raw DynamoDB LastEvaluatedKey. The old
+    version had two honesty bugs mirroring ENC-ISS-699's escalation-list
+    fix:
+
+      1. When a single query() response already held >= page_size raw items
+         *and* was DynamoDB's last page (no LastEvaluatedKey), the old loop
+         condition (`len(items) < page_size`) never re-entered, so the
+         `if len(items) >= page_size: encode cursor` branch inside the loop
+         never ran either -- no cursor was ever emitted even though `items`
+         had already been silently trimmed to page_size, discarding
+         whatever came after in that same raw page.
+      2. The cursor (when emitted at all) was the raw LastEvaluatedKey of
+         whichever raw page happened to trip the page_size threshold --
+         positioned after everything DynamoDB had scanned so far, not after
+         everything this call actually returned to the caller. Combined
+         with (1) this meant a caller could lose rows with no signal.
+
+    Loop invariant here: keep pulling raw pages (bounded by
+    _LIST_RECORDS_MAX_RAW_PAGES) until either (a) accumulated items exceed
+    page_size -- proof at least one more match exists past the page
+    boundary, (b) DynamoDB reports no LastEvaluatedKey -- proof the walk is
+    exhausted, or (c) the raw-page budget runs out with LastEvaluatedKey
+    still present -- unproven, so next_cursor is still emitted (from the
+    last returned item, or -- if zero rows matched this call at all -- from
+    the last EVALUATED key re-encoded through the codec so the walk can
+    resume) and page_truncated: true is set. A response with no next_cursor
+    is therefore always provably exhausted.
     """
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
@@ -2926,7 +2963,14 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
     try:
         if record_type and record_type in _RECORD_TYPES:
-            # Query using GSI
+            # Query using GSI (project-type-index: HASH project_id, RANGE
+            # record_type). LastEvaluatedKey/ExclusiveStartKey for a GSI
+            # query carries the index's own key (project_id, record_type)
+            # PLUS the base table's primary key (project_id, record_id) --
+            # DynamoDB requires the base key to disambiguate position within
+            # the index. That's why the gsi-branch cursor payload carries
+            # record_type (`t`) alongside project_id/record_id.
+            branch = "gsi"
             kwargs: Dict[str, Any] = {
                 "TableName": DYNAMODB_TABLE,
                 "IndexName": "project-type-index",
@@ -2942,7 +2986,10 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 kwargs["ExpressionAttributeNames"] = {"#st": "status"}
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
         else:
-            # Query all records for project
+            # Query all records for project (base table: HASH project_id,
+            # RANGE record_id). No GSI change (D6): this branch's sort order
+            # is record_id ascending, unmodified.
+            branch = "base"
             kwargs = {
                 "TableName": DYNAMODB_TABLE,
                 "KeyConditionExpression": "project_id = :pid",
@@ -2965,41 +3012,56 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
         if cursor:
             try:
-                import base64
-                kwargs["ExclusiveStartKey"] = json.loads(
-                    base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-                )
+                decoded_cursor = _decode_list_cursor(cursor, branch, record_type)
+            except ListCursorBranchMismatch:
+                raise
             except Exception:
                 return _error(400, "Invalid next_cursor")
+            exclusive_start: Dict[str, Any] = {
+                "project_id": _ser_s(decoded_cursor["p"]),
+                "record_id": _ser_s(decoded_cursor["r"]),
+            }
+            if branch == "gsi":
+                exclusive_start["record_type"] = _ser_s(decoded_cursor["t"])
+            kwargs["ExclusiveStartKey"] = exclusive_start
 
         items: List[Dict[str, Any]] = []
-        next_cursor = ""
-        # Accumulate up to page_size post-filter items. DDB Limit caps the
-        # pre-filter scan, so we may need multiple pages to fill page_size when
-        # a FilterExpression is applied. Bound the loop to prevent runaway.
-        max_pages = 10
-        while len(items) < page_size and max_pages > 0:
+        page_truncated = False
+        last_evaluated_key: Optional[Dict[str, Any]] = None
+        raw_pages_fetched = 0
+        while True:
             resp = ddb.query(**kwargs)
             items.extend(resp.get("Items", []))
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
-            max_pages -= 1
-            if len(items) >= page_size:
-                # Encode cursor for caller
-                import base64
-                next_cursor = base64.urlsafe_b64encode(
-                    json.dumps(last_key).encode("utf-8")
-                ).decode("ascii")
-                break
+            raw_pages_fetched += 1
+            last_evaluated_key = resp.get("LastEvaluatedKey")
+            if len(items) > page_size:
+                break  # proof: at least one more match exists past page_size
+            if not last_evaluated_key:
+                break  # proof: DynamoDB walk exhausted
+            if raw_pages_fetched >= _LIST_RECORDS_MAX_RAW_PAGES:
+                page_truncated = True
+                break  # unproven -- budget hit, more may still exist
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
 
-        # Trim to page_size exactly
-        items = items[:page_size]
+        next_cursor = ""
+        if len(items) > page_size:
+            visible_raw = items[:page_size]
+            next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+        elif last_evaluated_key:
+            visible_raw = items
+            if visible_raw:
+                next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+            else:
+                # Zero rows matched this call, budget hit -- re-encode the
+                # last EVALUATED key (not a returned item) so the walk can
+                # still resume past everything already scanned.
+                next_cursor = _encode_list_cursor(_deser_item(last_evaluated_key), branch)
+        else:
+            visible_raw = items
 
-        # Deserialize and filter out counter records
+        # Deserialize and filter out counter records.
         records = []
-        for raw in items:
+        for raw in visible_raw:
             item = _deser_item(raw)
             if item.get("record_type") == "counter":
                 continue
@@ -3013,8 +3075,26 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
         }
         if next_cursor:
             payload["next_cursor"] = next_cursor
+        if page_truncated:
+            payload["page_truncated"] = True
         return _response(200, payload)
 
+    except ListCursorBranchMismatch:
+        # ENC-TSK-Q13 (O1.3): a cursor minted on the other branch (base
+        # table walk vs project-type-index walk) is caller/version skew,
+        # not a decode failure or a server error -- surface it as a 400
+        # with enough self-correcting guidance to retry, same as every
+        # other operator-facing 400 in this file (see document_api's
+        # recommended_next_actions convention).
+        return _error(
+            400,
+            "next_cursor was issued for a different list query (base table "
+            "vs project-type-index) than this request. Restart the walk "
+            "without a cursor.",
+            code="CURSOR_BRANCH_MISMATCH",
+            retryable=False,
+            recommended_next_actions=["restart the walk without a cursor"],
+        )
     except Exception as exc:
         logger.error("list failed: %s", exc)
         return _error(500, "Database query failed.")
@@ -7996,6 +8076,107 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
     if not item:
         return _error(404, f"Escalation not found: {escalation_id}")
     return _response(200, {"success": True, "escalation": _escalation_public(item)})
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q13 (O1.1) — value-based cursor codec for _handle_list_records.
+#
+# Same ENC-ISS-699 idea as the escalation-list cursor above (a boundary built
+# from the last item actually RETURNED, never a raw DynamoDB
+# LastEvaluatedKey), generalized to _handle_list_records' two query shapes:
+#
+#   "base" — KeyConditionExpression on project_id alone (base table; sort
+#            key is record_id).
+#   "gsi"  — KeyConditionExpression on project-type-index (project_id +
+#            record_type); its ExclusiveStartKey must additionally carry the
+#            base table's own primary key (project_id, record_id) per
+#            DynamoDB's GSI-pagination contract, which is why record_type
+#            (`t`) rides along on the gsi branch only.
+#
+# A cursor minted on one branch is meaningless key material on the other
+# (different KeyConditionExpression, different required key attributes), so
+# decoding validates the branch instead of silently reinterpreting it.
+# ---------------------------------------------------------------------------
+
+class ListCursorBranchMismatch(Exception):
+    """A _handle_list_records next_cursor was minted for the other branch.
+
+    ("base" table walk vs "gsi" project-type-index walk.) Raised by
+    _decode_list_cursor; the route maps this to a 400, never a 500 or a
+    silent reinterpretation against the wrong key schema.
+    """
+
+
+def _encode_list_cursor(item: Dict[str, Any], branch: str) -> str:
+    """Encode a _handle_list_records next_cursor from the last RETURNED item.
+
+    `item` is a plain (already-deserialized) record dict carrying at least
+    project_id/record_id, plus record_type when branch == "gsi". Payload:
+    {"b": branch, "p": project_id, "r": record_id, "t": record_type?}
+    """
+    if branch not in ("base", "gsi"):
+        raise ValueError(f"Unknown list cursor branch: {branch!r}")
+    import base64
+    payload: Dict[str, Any] = {
+        "b": branch,
+        "p": item["project_id"],
+        "r": item["record_id"],
+    }
+    if branch == "gsi":
+        payload["t"] = item["record_type"]
+    return base64.urlsafe_b64encode(
+        json.dumps(payload).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_list_cursor(
+    token: str, branch: str, record_type: str = ""
+) -> Dict[str, str]:
+    """Decode + validate a _handle_list_records next_cursor.
+
+    `branch` is the branch the *current* request would query ("base" or
+    "gsi"). Raises ListCursorBranchMismatch when the token was minted on the
+    other branch. Any other malformed-token failure (bad base64, bad JSON,
+    missing keys) propagates as a plain exception — the route maps both
+    cases to 400, never 500.
+
+    ENC-TSK-Q13-0A review fix: `branch` alone ("base" vs "gsi") is not
+    query-shape-granular enough on the gsi branch. Two gsi requests with
+    different `type` filters both compare equal on branch (both "gsi"), so
+    without this check a cursor minted under type=task and replayed under
+    type=issue would decode as a match, then feed a decoded['t']=="task"
+    ExclusiveStartKey.record_type into a Query whose
+    ExpressionAttributeValues[':rtype'] is "issue" -- two different values
+    in the same call, producing a falsely-exhausted, wrong page (or a raw
+    ValidationException from real DynamoDB, masked into an opaque 500 by
+    the route's generic except-Exception handler) instead of the documented
+    400 CURSOR_BRANCH_MISMATCH. `record_type` is the CURRENT request's type
+    filter; passing "" (the default, e.g. from the codec's own round-trip
+    tests) skips this extra check and preserves prior behavior.
+    """
+    import base64
+    cursor_obj = json.loads(
+        base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+    )
+    cursor_branch = cursor_obj["b"]
+    if cursor_branch != branch:
+        raise ListCursorBranchMismatch(
+            f"next_cursor branch '{cursor_branch}' does not match this "
+            f"query's branch '{branch}'"
+        )
+    decoded = {
+        "b": cursor_branch,
+        "p": str(cursor_obj["p"]),
+        "r": str(cursor_obj["r"]),
+    }
+    if cursor_branch == "gsi":
+        decoded["t"] = str(cursor_obj["t"])
+        if record_type and decoded["t"] != record_type:
+            raise ListCursorBranchMismatch(
+                f"next_cursor record_type '{decoded['t']}' does not match "
+                f"this query's record_type '{record_type}'"
+            )
+    return decoded
 
 
 _ESCALATION_LIST_MAX_PAGES = 50  # ENC-ISS-699: bounded exhaustion guard,
