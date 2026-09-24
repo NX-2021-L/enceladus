@@ -3,8 +3,10 @@
 # Schema validated by tools/cfn-guard/manifest-shape.guard.
 
 env_name: v4-gamma
-architecture: arm64
-runtime: python3.12
+# ENC-TSK-Q19 FR-1: architecture/runtime are no longer declared per-env.
+# See envs/architecture.yaml (the ONE declaration) -- this env resolves to
+# the "gamma" plane there.
+architecture_plane: gamma
 # Gen2 _deploy.yml (ENC-TSK-M03) calls update-function-configuration to arm64/py3.12
 # before publishing artifacts — covers OOB Lambdas not yet in CFN.
 

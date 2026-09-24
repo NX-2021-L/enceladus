@@ -125,8 +125,24 @@ jobs:
 
           ROLE=$(_parse deploy_role_arn)
           ENV=$(_parse environment)
-          ARCH=$(_parse architecture)
-          RUNTIME=$(_parse runtime)
+
+          # ENC-TSK-Q19 FR-1: envs/architecture.yaml is now the ONE canonical
+          # architecture declaration; envs/<env>.yaml no longer carries
+          # `architecture:`/`runtime:` literals (see architecture_plane
+          # instead). The two `_parse` reads below are a backward-compat
+          # first read for any manifest that still has the literal keys.
+          # `_parse` is `grep -E ... | head | sed | tr`, and grep exits
+          # non-zero when the key is absent -- `|| true` stops that from
+          # aborting this step under `set -euo pipefail`; the resulting
+          # empty string is what triggers the declaration fallback below.
+          ARCH=$(_parse architecture || true)
+          RUNTIME=$(_parse runtime || true)
+          if [[ -z "$ARCH" || -z "$RUNTIME" ]]; then
+            ARCH=$(python3 tools/arch_declaration.py --env "$TARGET" --field arch)
+            RUNTIME=$(python3 tools/arch_declaration.py --env "$TARGET" --field runtime)
+          fi
+          [[ -n "$ARCH" ]] || { echo "::error::Could not resolve architecture for $TARGET (checked $MANIFEST literal and envs/architecture.yaml)"; exit 1; }
+          [[ -n "$RUNTIME" ]] || { echo "::error::Could not resolve runtime for $TARGET (checked $MANIFEST literal and envs/architecture.yaml)"; exit 1; }
           PY="${RUNTIME#python}"
           CANARY=$(_parse canary_preference)
           # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy fields

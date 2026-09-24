@@ -1371,5 +1371,100 @@ class TestLiveReconciliationCliIntegration(unittest.TestCase):
             )
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q19 FR-2: envs/architecture.yaml declaration cross-validation.
+# ---------------------------------------------------------------------------
+
+_CFN_HEADER_WITH_CONDITION = (
+    "AWSTemplateFormatVersion: '2010-09-09'\n"
+    "Conditions:\n"
+    '  IsArm64: !Equals ["arm64", "arm64"]\n'
+    "Resources:\n"
+)
+
+TEMPLATE_LITERAL_ARM_FUNCTION = _CFN_HEADER_WITH_CONDITION + """\
+  LiteralArmFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "literal-arm-fn${EnvironmentSuffix}"
+      Runtime: python3.12
+      Architectures:
+        - arm64
+"""
+
+TEMPLATE_LITERAL_X86_FUNCTION = _CFN_HEADER_WITH_CONDITION + """\
+  LiteralX86Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "literal-x86-fn${EnvironmentSuffix}"
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+"""
+
+
+class TestDeclarationConsistency(unittest.TestCase):
+    """ENC-TSK-Q19 FR-2: envs/architecture.yaml is the ONE declaration;
+    _validate_declaration() cross-checks it against envs/*.yaml, the
+    02-compute.yaml IsArm64 resolution, and per-function literal-or-!If
+    values."""
+
+    def test_ok_passes_and_names_path_and_values(self):
+        """On the real repo state, the check must pass and its stdout must
+        name both the declaration path and the resolved per-plane values --
+        never a bare/silent pass."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = vlap._validate_declaration()
+        self.assertEqual(errors, [])
+        output = buf.getvalue()
+        self.assertIn("declaration envs/architecture.yaml:", output)
+        self.assertIn("prod=arm64/python3.12", output)
+        self.assertIn("gamma=arm64/python3.12", output)
+
+    def test_declared_mismatch_against_cfn_condition_fails(self):
+        """A declaration whose plane values disagree with what IsArm64
+        actually resolves to must fail, naming the condition."""
+        bogus = vlap.arch_declaration.ArchDeclaration(
+            schema_version=1,
+            planes={
+                "prod": {"arch": "x86_64", "runtime": "python3.11", "runner": "ubuntu-24.04-arm"},
+                "gamma": {"arch": "arm64", "runtime": "python3.12", "runner": "ubuntu-24.04-arm"},
+            },
+            env_plane={"v3-prod": "prod", "v4-prod": "prod", "v4-gamma": "gamma"},
+        )
+        with mock.patch.object(vlap.arch_declaration, "load_declaration", return_value=bogus):
+            errors = vlap._validate_declaration()
+        self.assertTrue(errors)
+        joined = "\n".join(errors)
+        self.assertIn("IsArm64", joined)
+        self.assertIn("x86_64", joined)
+
+    def test_literal_arch_runtime_form_passes(self):
+        """Phase D will literalize the template; a function that already
+        hardcodes Architectures/Runtime to the declared value must pass,
+        not just the !If [IsArm64, ...] form."""
+        path = _write_template(TEMPLATE_LITERAL_ARM_FUNCTION)
+        try:
+            with mock.patch.object(vlap, "COMPUTE_TEMPLATE", path):
+                errors = vlap._validate_declaration()
+            self.assertEqual(errors, [])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_x86_literal_fails(self):
+        """A hardcoded x86_64/python3.11 literal (not a named exception)
+        must fail against the arm64/python3.12 declaration."""
+        path = _write_template(TEMPLATE_LITERAL_X86_FUNCTION)
+        try:
+            with mock.patch.object(vlap, "COMPUTE_TEMPLATE", path):
+                errors = vlap._validate_declaration()
+            self.assertTrue(errors)
+            joined = "\n".join(errors)
+            self.assertIn("x86_64", joined)
+        finally:
+            path.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

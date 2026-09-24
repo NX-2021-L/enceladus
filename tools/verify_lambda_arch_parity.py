@@ -29,6 +29,15 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+# ENC-TSK-Q19 FR-1/FR-2: envs/architecture.yaml is the ONE canonical
+# declaration; this module cross-validates against it via the stdlib-only
+# loader. verify_lambda_arch_parity.py is always run as
+# `python3 tools/verify_lambda_arch_parity.py` (or with tools/ pre-pended to
+# sys.path by the test module), so tools/ is already importable as a plain
+# module path -- same convention the test file uses for `import
+# verify_lambda_arch_parity as vlap`.
+import arch_declaration
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
@@ -687,14 +696,17 @@ def _validate_build_invocation_flags() -> List[str]:
 
 
 def _validate_manifest_expectations() -> List[str]:
-    """Cross-validate manifest expected_architecture/expected_runtime against CFN and deploy scripts.
+    """Cross-validate manifest expected_architecture/expected_runtime against
+    envs/architecture.yaml (ENC-TSK-Q19 FR-3).
 
-    The manifest serves as the single source of truth for what each environment should use.
-    This check ensures the manifest expectations are internally consistent and that the
-    CFN template's IsArm64 conditionals resolve to the manifest's declared values
-    (arm64/python3.12 on both planes since ENC-TSK-P38).
+    The manifest serves as the single source of truth for what each Lambda
+    should use; envs/architecture.yaml (ENC-TSK-Q19 FR-1) is now the single
+    source of truth for what each PLANE should use. This check ensures the
+    two don't drift: the manifest's expected_architecture/expected_runtime
+    per plane must equal the declaration's planes[<plane>].arch/runtime.
 
-    Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7.
+    Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7,
+    re-sourced from the declaration by ENC-TSK-Q19 FR-3.
     """
     errors: List[str] = []
 
@@ -720,35 +732,33 @@ def _validate_manifest_expectations() -> List[str]:
             "(ENC-TSK-O83)."
         ]
 
-    # Validate manifest expectations match the IsArm64 conditional contract.
-    # ENC-TSK-P38 (ENC-PLN-082 cutover): the IsArm64 condition definition is now
-    # unconditionally TRUE, so the CFN pattern !If [IsArm64, <arm64_value>, <x86_value>]
-    # resolves its arm64 branch on EVERY plane. Both planes must therefore declare
-    # arm64/python3.12 — x86_64 on prod is a FAILURE from the cutover commit forward.
-    if expected_arch.get("prod") != "arm64":
-        errors.append(
-            f"Manifest expected_architecture.prod={expected_arch.get('prod')}, "
-            f"but CFN IsArm64 (unconditionally true since ENC-TSK-P38) resolves prod to arm64"
-        )
-    if expected_arch.get("gamma") != "arm64":
-        errors.append(
-            f"Manifest expected_architecture.gamma={expected_arch.get('gamma')}, "
-            f"but CFN IsArm64 resolves gamma to arm64"
-        )
-    if expected_runtime.get("prod") != "python3.12":
-        errors.append(
-            f"Manifest expected_runtime.prod={expected_runtime.get('prod')}, "
-            f"but CFN IsArm64 (unconditionally true since ENC-TSK-P38) resolves prod to python3.12"
-        )
-    if expected_runtime.get("gamma") != "python3.12":
-        errors.append(
-            f"Manifest expected_runtime.gamma={expected_runtime.get('gamma')}, "
-            f"but CFN IsArm64 resolves gamma to python3.12"
-        )
+    try:
+        decl = arch_declaration.load_declaration()
+    except arch_declaration.ArchDeclarationError as exc:
+        return [f"envs/architecture.yaml: {exc}"]
+
+    # ENC-TSK-Q19 FR-3: expectations must equal envs/architecture.yaml's
+    # per-plane declaration, not a hardcoded literal -- the declaration is
+    # now the arbiter, not this function.
+    for plane in ("prod", "gamma"):
+        declared_arch = decl.planes.get(plane, {}).get("arch")
+        declared_runtime = decl.planes.get(plane, {}).get("runtime")
+        if expected_arch.get(plane) != declared_arch:
+            errors.append(
+                f"Manifest expected_architecture.{plane}={expected_arch.get(plane)}, "
+                f"but envs/architecture.yaml declares planes[{plane!r}].arch={declared_arch!r}"
+            )
+        if expected_runtime.get(plane) != declared_runtime:
+            errors.append(
+                f"Manifest expected_runtime.{plane}={expected_runtime.get(plane)}, "
+                f"but envs/architecture.yaml declares "
+                f"planes[{plane!r}].runtime={declared_runtime!r}"
+            )
 
     if not errors:
         print(
-            f"[INFO] Manifest expectations cross-validated: "
+            f"[INFO] Manifest expectations cross-validated against "
+            f"envs/architecture.yaml: "
             f"prod={expected_arch.get('prod')}/{expected_runtime.get('prod')}, "
             f"gamma={expected_arch.get('gamma')}/{expected_runtime.get('gamma')}"
         )
@@ -1451,6 +1461,174 @@ def _validate_cross_source_reconciliation(region: str = "us-west-2"):
     return [], "RECONCILED"
 
 
+def _resolve_abi_condition(document: dict) -> Optional[bool]:
+    """Structurally resolve the 02-compute.yaml `IsArm64` condition.
+
+    Handles exactly the shape the template uses today --
+    `IsArm64: !Equals ["arm64", "arm64"]` (or any two-literal-string
+    !Equals). Returns True/False, or None when the condition isn't in that
+    recognized shape; a None means "cannot resolve" and the caller must
+    treat that as a failure, never a silent pass.
+    """
+    conditions = document.get("Conditions") or {}
+    condition = conditions.get(ABI_CONDITION)
+    if not isinstance(condition, dict):
+        return None
+    equals_args = condition.get("!Equals")
+    if not (isinstance(equals_args, list) and len(equals_args) == 2):
+        return None
+    left, right = equals_args
+    if not (isinstance(left, str) and isinstance(right, str)):
+        return None
+    return left == right
+
+
+def _validate_declaration() -> List[str]:
+    """Cross-validate envs/architecture.yaml (ENC-TSK-Q19 FR-1) against its
+    consumers: every envs/*.yaml manifest's architecture_plane + runner_label,
+    and 02-compute.yaml's IsArm64 resolution (both the structural !If form
+    and, since Phase D will literalize the template function-by-function, a
+    hardcoded literal per function -- either form must resolve to the same
+    value the declaration names, and only x86_64/python3.11 (or a condition
+    that resolves to them) is a failure).
+
+    Part of ENC-TSK-Q19 FR-2 (DOC-5368FE6515ED): the declaration and its
+    consumers must not be able to drift independently.
+    """
+    errors: List[str] = []
+
+    try:
+        decl = arch_declaration.load_declaration()
+    except arch_declaration.ArchDeclarationError as exc:
+        return [f"envs/architecture.yaml: {exc}"]
+
+    # 1. Every envs/*.yaml manifest (other than the declaration itself)
+    #    resolves to a plane the declaration knows about, and its
+    #    runner_label agrees with that plane's declared runner.
+    envs_dir = REPO_ROOT / "envs"
+    manifest_paths = sorted(
+        p for p in envs_dir.glob("*.yaml") if p.name != "architecture.yaml"
+    )
+    if not manifest_paths:
+        errors.append("no envs/*.yaml manifests found to cross-validate against the declaration")
+    for manifest_path in manifest_paths:
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        env_name = data.get("env_name")
+        if not env_name:
+            errors.append(f"{manifest_path.name}: missing env_name")
+            continue
+        if env_name not in decl.env_plane:
+            errors.append(
+                f"{manifest_path.name}: env_name={env_name!r} has no "
+                f"envs/architecture.yaml env_plane entry"
+            )
+            continue
+        expected_plane = decl.env_plane[env_name]
+        actual_plane = data.get("architecture_plane")
+        if actual_plane != expected_plane:
+            errors.append(
+                f"{manifest_path.name}: architecture_plane={actual_plane!r}, but "
+                f"envs/architecture.yaml env_plane[{env_name!r}]={expected_plane!r}"
+            )
+        expected_runner = decl.planes.get(expected_plane, {}).get("runner")
+        actual_runner = data.get("runner_label")
+        if actual_runner != expected_runner:
+            errors.append(
+                f"{manifest_path.name}: runner_label={actual_runner!r}, but "
+                f"envs/architecture.yaml planes[{expected_plane!r}].runner={expected_runner!r}"
+            )
+
+    # 2. 02-compute.yaml's IsArm64 condition must resolve to exactly what
+    #    every plane declares (today: arm64/python3.12 on both planes).
+    if not COMPUTE_TEMPLATE.is_file():
+        errors.append(f"cannot resolve {ABI_CONDITION}: {COMPUTE_TEMPLATE} not found")
+        return errors
+
+    document, _ = _load_cfn_document(COMPUTE_TEMPLATE)
+    condition_true = _resolve_abi_condition(document)
+    if condition_true is None:
+        errors.append(
+            f"cannot structurally resolve Conditions.{ABI_CONDITION} in "
+            f"{COMPUTE_TEMPLATE} (expected a two-literal-string !Equals)"
+        )
+    else:
+        resolved_arch = "arm64" if condition_true else "x86_64"
+        resolved_runtime = "python3.12" if condition_true else "python3.11"
+        for plane in ("prod", "gamma"):
+            plane_decl = decl.planes.get(plane)
+            if plane_decl is None:
+                errors.append(f"envs/architecture.yaml has no planes entry for {plane!r}")
+                continue
+            if plane_decl["arch"] != resolved_arch:
+                errors.append(
+                    f"envs/architecture.yaml planes[{plane!r}].arch={plane_decl['arch']!r}, "
+                    f"but {ABI_CONDITION} resolves to {resolved_arch!r}"
+                )
+            if plane_decl["runtime"] != resolved_runtime:
+                errors.append(
+                    f"envs/architecture.yaml planes[{plane!r}].runtime="
+                    f"{plane_decl['runtime']!r}, but {ABI_CONDITION} resolves to "
+                    f"{resolved_runtime!r}"
+                )
+
+        # 3. Per-function acceptance: a Lambda may select arch/runtime either
+        #    via the !If[IsArm64, ...] conditional (resolved above) or,
+        #    ahead of the Phase D literalization, a hardcoded literal -- but
+        #    either way the EFFECTIVE value must match the declaration.
+        #    Named architecture_exceptions defer to
+        #    _validate_architecture_exceptions, same as _validate_cfn.
+        import json
+
+        exceptions: Dict[str, Any] = {}
+        if MANIFEST_PATH.is_file():
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            exceptions = _manifest_architecture_exceptions(manifest)
+
+        for block in _parse_lambda_blocks(COMPUTE_TEMPLATE):
+            if _is_named_architecture_exception(block.function_name, exceptions):
+                continue
+            label = f"{block.function_name or block.resource_name} (line {block.line_number})"
+
+            if block.runtime == EXPECTED_RUNTIME_IF:
+                effective_runtime: Optional[str] = resolved_runtime
+            elif isinstance(block.runtime, str):
+                effective_runtime = block.runtime
+            else:
+                effective_runtime = None
+            if effective_runtime is not None and effective_runtime != resolved_runtime:
+                errors.append(
+                    f"{label}: effective runtime {effective_runtime!r} does not match "
+                    f"the declaration ({resolved_runtime!r})"
+                )
+
+            if block.architectures == EXPECTED_ARCH_IF_LIST:
+                effective_arch: Optional[str] = resolved_arch
+            elif (
+                isinstance(block.architectures, list)
+                and len(block.architectures) == 1
+                and isinstance(block.architectures[0], str)
+            ):
+                effective_arch = block.architectures[0]
+            else:
+                effective_arch = None
+            if effective_arch is not None and effective_arch != resolved_arch:
+                errors.append(
+                    f"{label}: effective architecture {effective_arch!r} does not match "
+                    f"the declaration ({resolved_arch!r})"
+                )
+
+    if not errors:
+        prod = decl.planes["prod"]
+        gamma = decl.planes["gamma"]
+        print(
+            f"declaration envs/architecture.yaml: "
+            f"prod={prod['arch']}/{prod['runtime']} "
+            f"gamma={gamma['arch']}/{gamma['runtime']} -- OK"
+        )
+
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify Lambda architecture parity between CFN, deploy scripts, and S3 artifacts."
@@ -1503,7 +1681,37 @@ def main() -> int:
         default="us-west-2",
         help="AWS region for --check-live-reconciliation's lambda:ListFunctions call (default: us-west-2).",
     )
+    parser.add_argument(
+        "--manifest-parity-only",
+        action="store_true",
+        help=(
+            "Run only the declaration (ENC-TSK-Q19 FR-2, envs/architecture.yaml "
+            "cross-validation) and manifest expectation (ENC-TSK-Q19 FR-3, "
+            "lambda_workflow_manifest.json expected_architecture/expected_runtime) "
+            "checks, skipping the full CFN/deploy-script parity sweep. For a "
+            "fast, dedicated CI step -- see ci.yml 'Manifest / declaration "
+            "parity (ENC-TSK-Q19 FR-3)'."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.manifest_parity_only:
+        parity_errors: List[str] = []
+        declaration_errors = _validate_declaration()
+        if declaration_errors:
+            parity_errors.append("=== Declaration consistency violations (ENC-TSK-Q19 FR-2) ===")
+            parity_errors.extend(declaration_errors)
+        manifest_errors = _validate_manifest_expectations()
+        if manifest_errors:
+            parity_errors.append("=== Manifest expectation violations (ENC-TSK-Q19 FR-3) ===")
+            parity_errors.extend(manifest_errors)
+        if parity_errors:
+            print("[ERROR] Manifest / declaration parity check FAILED:")
+            for err in parity_errors:
+                print(f"  {err}")
+            return 1
+        print("[SUCCESS] Manifest / declaration parity valid (ENC-TSK-Q19 FR-2/FR-3).")
+        return 0
 
     if not COMPUTE_TEMPLATE.is_file():
         print(f"[ERROR] Compute template missing: {COMPUTE_TEMPLATE}")
@@ -1534,6 +1742,12 @@ def main() -> int:
     if cfn_errors:
         errors.append("=== CFN Architecture/Runtime violations ===")
         errors.extend(cfn_errors)
+
+    # ENC-TSK-Q19 FR-2: envs/architecture.yaml declaration cross-validation
+    declaration_errors = _validate_declaration()
+    if declaration_errors:
+        errors.append("=== Declaration consistency violations (ENC-TSK-Q19 FR-2) ===")
+        errors.extend(declaration_errors)
 
     # ENC-TSK-O82: validate the two-class architecture_exceptions contract
     exceptions_errors = _validate_architecture_exceptions(blocks)
