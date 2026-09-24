@@ -25,30 +25,31 @@ from metrics import publish_lyapunov
 logger = logging.getLogger(__name__)
 _sns = boto3.client("sns")
 
-# ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): defensive cap on pagination
-# depth. Never loop unbounded against the tracker API; if this is hit the
-# read is marked truncated in the decide artifact rather than silently
-# returning a partial count as if it were complete.
-_MAX_PAGES = 50
-
-
 def _open_leaf_tasks() -> Dict[str, Any]:
-    """Cursor-exhausted paginated read of the open task backlog.
+    """Open task backlog ids via the tracker's census route (ENC-PLN-093 O5.3).
 
     ENC-TSK-N20 / BRD §4.4 (C4): the prior implementation (ENC-ISS-542) issued
     a single page_size=100 request with no cursor follow-through and filtered
     leaves using the legacy `orphan` flag heuristic — silently truncating the
     backlog on any project with more than 100 open tasks, and undercounting
-    whenever the orphan flag lagged reality. This version pages until the
-    tracker API's cursor (`next_cursor`) is exhausted, or the `_MAX_PAGES`
-    guard above is hit, and defines a leaf as a record with no `parent` field
-    set at all (explicit parent-absence) rather than the orphan flag.
+    whenever the orphan flag lagged reality. A follow-up fix paged until the
+    tracker API's cursor (`next_cursor`) was exhausted, or a defensive
+    `_MAX_PAGES` guard was hit, and defined a leaf as a record with no
+    `parent` field set at all. This version instead issues a single
+    `mode=census` request: when the open-task count is within the census
+    route's inline cap, the ids come back directly on that one call; above
+    the cap, this walks the census route's own `pages` list, replaying each
+    page's cursor against the plain (non-census) route to fetch that page's
+    records. Either way the tracker API's own server-side walk is doing the
+    heavy lifting, not a locally bounded loop.
 
-    Returns a dict: {leaves, page_count, cursor_terminus, truncated}.
-    cursor_terminus is the final outstanding next_cursor value if pagination
-    was cut short by the max_pages guard, else None (natural exhaustion) —
-    this is what makes the metric's completeness auditable from the decide
-    artifact (BRD §4.4).
+    Returns a dict: {leaves, page_count, cursor_terminus, truncated}. leaves
+    is a flat list of item id strings (e.g. "ENC-TSK-L80"). page_count is 1
+    for the inline-ids path, or the number of census pages walked otherwise.
+    cursor_terminus is always None under this contract (kept for return-shape
+    compatibility with existing callers). truncated mirrors the census
+    route's own `count_truncated` — this is what makes the metric's
+    completeness auditable from the decide artifact (BRD §4.4).
     """
     if not TRACKER_API_BASE:
         return {"leaves": [], "page_count": 0, "cursor_terminus": None, "truncated": False}
@@ -61,36 +62,39 @@ def _open_leaf_tasks() -> Dict[str, Any]:
     # page. The real route is {TRACKER_API_BASE}/{PROJECT_ID} with query
     # param "type" (the handler reads "type", not "record_type" -- confirmed
     # live).
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
-    leaves: List[Dict[str, Any]] = []
-    cursor = ""
-    page_count = 0
-    truncated = False
+    base_url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
+    census = get_json(base_url, {"status": "open", "type": "task", "mode": "census", "page_size": 100})
+    count = int(census.get("count") or 0)
+    truncated = bool(census.get("count_truncated"))
+    cap = int(census.get("ids_inline_cap") or 500)
 
-    for _ in range(_MAX_PAGES):
-        params: Dict[str, Any] = {
-            "status": "open",
-            "type": "task",
-            "page_size": 100,
-        }
-        if cursor:
-            params["next_cursor"] = cursor
-        data = get_json(url, params)
-        page_count += 1
-        records = data.get("records") or []
-        leaves.extend(r for r in records if not r.get("parent"))
-        cursor = data.get("next_cursor") or ""
-        if not cursor:
-            break
+    if count <= cap:
+        # Small backlog: the census payload already inlines every id, so no
+        # further calls are needed.
+        ids: List[str] = list(census.get("ids") or [])
+        page_count = 1
     else:
-        # Loop ran out of iterations without the cursor naturally emptying —
-        # more pages remain beyond the defensive cap.
-        truncated = bool(cursor)
+        # Large backlog: the census payload has no inline ids, only a
+        # per-page cursor. Replay each cursor against the plain route (no
+        # mode param) to pull that page's records.
+        ids = []
+        pages = census.get("pages") or []
+        for p in pages:
+            params: Dict[str, Any] = {"status": "open", "type": "task", "page_size": 100}
+            cur = p.get("cursor")
+            if cur:
+                params["next_cursor"] = cur
+            pg = get_json(base_url, params)
+            for r in pg.get("records") or []:
+                rid = r.get("item_id") or r.get("id") or str(r.get("record_id") or "").split("#")[-1]
+                if rid:
+                    ids.append(rid)
+        page_count = len(pages)
 
     return {
-        "leaves": leaves,
+        "leaves": ids,
         "page_count": page_count,
-        "cursor_terminus": cursor or None,
+        "cursor_terminus": None,
         "truncated": truncated,
     }
 

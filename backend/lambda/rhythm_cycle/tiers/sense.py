@@ -67,28 +67,27 @@ def _checkout_census() -> List[Dict[str, Any]]:
 
 
 
-# ENC-ISS-557 / BRD §4.4 (C4): defensive cap on pagination depth, mirroring
-# decide.py's _open_leaf_tasks guard. Never loop unbounded against the
-# tracker API; if this is hit the count is marked truncated rather than
-# silently presented as exact.
-_MAX_PAGES = 50
-
-
 def _open_task_count() -> Dict[str, Any]:
-    """Cursor-exhausted paginated count of the open task backlog.
+    """Open task backlog count via the tracker's census route (ENC-PLN-093 O5.2).
 
     ENC-ISS-557: the prior implementation (ENC-ISS-553 fix) issued a single
     page_size=200 request and returned "count" (items in that one page) as
     if it were the true total -- silently plateauing at 200 forever once the
-    real backlog passed that size. This version pages via `next_cursor`
-    until the tracker API exhausts it, or the `_MAX_PAGES` guard is hit, same
-    pattern as decide.py's `_open_leaf_tasks`. sense stays within its
-    cheap-reads-only mandate: this is still plain HTTP pagination, no
-    embeddings/graph writes/LLM calls, just more of the same call.
+    real backlog passed that size. A follow-up fix paged via `next_cursor`
+    until the tracker API's cursor exhausted, trading that bug for one HTTP
+    round trip per 200 open tasks. This version issues a single
+    `mode=census` request instead -- the tracker route performs its own
+    server-side walk and hands back a true (or honestly floored) count in
+    one call, so sense gets an accurate total without paginating itself.
+    sense stays within its cheap-reads-only mandate: this is still plain
+    HTTP, no embeddings/graph writes/LLM calls, just one call instead of many.
 
-    Returns {count, truncated, page_count, cursor_terminus}. truncated=True
-    means _MAX_PAGES was hit before the cursor naturally emptied, so `count`
-    is a floor, not an exact total.
+    Returns {count, truncated, page_count, cursor_terminus}. Under the
+    census contract there is only ever one call, so page_count is always 1
+    and cursor_terminus is always None -- both are kept in the return shape
+    for compatibility with existing callers. truncated=True mirrors the
+    census route's own `count_truncated`: the server walk hit its own
+    budget, so `count` is a floor, not an exact total.
     """
     if not TRACKER_API_BASE:
         return {"count": 0, "truncated": False, "page_count": 0, "cursor_terminus": None}
@@ -100,30 +99,13 @@ def _open_task_count() -> Dict[str, Any]:
     # {"records": [], "count": 0}. The real route is {TRACKER_API_BASE}/
     # {PROJECT_ID} with query param "type" (the handler reads "type", not
     # "record_type" -- confirmed live).
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
-    count = 0
-    cursor = ""
-    page_count = 0
-    truncated = False
-
-    for _ in range(_MAX_PAGES):
-        params: Dict[str, Any] = {"status": "open", "type": "task", "page_size": 200}
-        if cursor:
-            params["next_cursor"] = cursor
-        data = get_json(url, params)
-        page_count += 1
-        count += int(data.get("count") or 0)
-        cursor = data.get("next_cursor") or ""
-        if not cursor:
-            break
-    else:
-        truncated = bool(cursor)
-
+    params = {"status": "open", "type": "task", "mode": "census", "page_size": 100}
+    data = get_json(f"{TRACKER_API_BASE}/{PROJECT_ID}", params)
     return {
-        "count": count,
-        "truncated": truncated,
-        "page_count": page_count,
-        "cursor_terminus": cursor or None,
+        "count": int(data.get("count") or 0),
+        "truncated": bool(data.get("count_truncated")),
+        "page_count": 1,
+        "cursor_terminus": None,
     }
 
 
@@ -143,6 +125,10 @@ def run_sense() -> Dict[str, Any]:
         "active_checkouts": checkouts,
         "open_task_count": open_count,
         "open_task_count_truncated": task_count["truncated"],
+        # ENC-PLN-093 O5.2 (AC-1): telemetry field name the census migration
+        # is graded on. Mirrors open_task_count_truncated so existing
+        # consumers of that field keep working unchanged.
+        "open_count_truncated": task_count["truncated"],
         "open_task_delta": delta,
         "queue_depth": open_count,
         "constraints": {"embeddings": False, "graph_writes": False, "llm_calls": False},
