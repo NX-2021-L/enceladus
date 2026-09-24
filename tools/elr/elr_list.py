@@ -8,8 +8,12 @@ line in elr_batch_get.py's --ids-file format -- deliberately no --all),
 and a bounded N-page loop over a prior census's page-boundary cursors
 (--pages N, max 10).
 
-The tracker_capabilities.census preflight (so a plane that predates U1
-gets zero list requests) lands in a later commit on this same file.
+Before ANY --census/--page/--pages request, this script reads
+``tracker_capabilities.census`` off GET /api/v1/health (the same
+payload the MCP ``connection_health`` tool reports, ENC-TSK-Q14-0E /
+D9). A server that does not advertise census support gets zero list
+requests -- ELR never falls back to client-side paging on a plane that
+predates U1. See EXIT_CENSUS_UNSUPPORTED below.
 
 Usage:
     python3 tools/elr/elr_list.py --project enceladus
@@ -33,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elr_lib import profiles as elr_profiles  # noqa: E402
+from elr_lib import tls as elr_tls  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -54,6 +59,9 @@ MIN_PAGES = 1
 MAX_PAGES = 10
 
 _CURSOR_HASH_LEN = 12
+
+EXIT_CENSUS_UNSUPPORTED = 6
+CENSUS_UNSUPPORTED_MESSAGE = "CENSUS_UNSUPPORTED: server lacks census mode; ELR never walks pages"
 
 
 # --- argparse value types ----------------------------------------------------
@@ -434,38 +442,31 @@ def run_pages_loop(client: InternalClient, key_sent: bool, args: argparse.Namesp
     )
 
 
-# --- base route ----------------------------------------------------------------
+# --- capability preflight (O4.4) ----------------------------------------------
 
 
-def run_plain_list(client: InternalClient, key_sent: bool, args: argparse.Namespace) -> Dict[str, Any]:
-    """One plain GET {tracker_base}/{project} -- query params only, no
-    mode=census, no cursor. Used when no mode flag is given; --page/
-    --pages (ENC-TSK-Q16-0C) add the remaining entry points.
+def check_census_capability(client: InternalClient) -> Tuple[bool, Any, Any, str, List[str]]:
+    """Reads tracker_capabilities.census off GET /api/v1/health (D9: the
+    coordination_api Lambda serving that route). Returns
+    (supported, status, body, identity_posture, anomalies). Never issues
+    any other request -- callers must not fetch a census/page until this
+    returns supported=True.
     """
-    query: Dict[str, Any] = {"type": args.type, "status": args.status, "page_size": args.page_size}
-    encoded_project = urllib.parse.quote(str(args.project), safe="")
-    status, body = client.request("GET", "tracker", f"/{encoded_project}", query=query)
+    status, body = client.health()
+    if status == elr_tls.TLS_UNRESOLVED_STATUS:
+        return False, status, body, "unknown", ["tls_ca_bundle_missing"]
 
-    posture, anomalies = classify_internal_posture(key_sent=key_sent, status_code=status)
+    posture, anomalies = classify_internal_posture(key_sent=False, status_code=status)
     anomalies = list(anomalies)
-    ok = 200 <= status < 300 and isinstance(body, dict)
-    if isinstance(body, dict) and body.get("error"):
-        anomalies.append(f"response_error: {body['error']}")
-        ok = False
+    if not (200 <= status < 300):
+        return False, status, body, posture, anomalies
 
-    counts: Optional[Dict[str, Any]] = None
-    if ok:
-        records = body.get("records")
-        counts = {"records": len(records) if isinstance(records, list) else 0}
-
-    return build_digest(
-        "elr_list.plain",
-        ok,
-        status,
-        identity_posture=posture,
-        anomalies=anomalies,
-        counts=counts,
-    )
+    supported = False
+    if isinstance(body, dict):
+        caps = body.get("tracker_capabilities")
+        if isinstance(caps, dict):
+            supported = bool(caps.get("census"))
+    return supported, status, body, posture, anomalies
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -475,18 +476,56 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if not (args.census or args.page is not None or args.pages is not None):
+        parser.error("choose one of --census, --page CURSOR, --pages N")
+
     config = get_profile("internal", environment_profile_name=args.profile)
     client = InternalClient(config, timeout=args.timeout)
     key_sent = bool(config.key_for("tracker"))
+
+    supported, health_status, _health_body, posture, anomalies = check_census_capability(client)
+
+    if health_status == elr_tls.TLS_UNRESOLVED_STATUS:
+        digest = build_digest(
+            "elr_list.preflight",
+            False,
+            health_status,
+            identity_posture="unknown",
+            anomalies=anomalies,
+            **client.ca_bundle_digest_fields(),
+        )
+        print(json.dumps(digest, sort_keys=True))
+        return elr_tls.EXIT_CODE_TLS_UNRESOLVED
+
+    if not (200 <= health_status < 300):
+        digest = build_digest(
+            "elr_list.preflight",
+            False,
+            health_status,
+            identity_posture=posture,
+            anomalies=anomalies + ["health_check_failed"],
+        )
+        print(json.dumps(digest, sort_keys=True))
+        return 1
+
+    if not supported:
+        print(CENSUS_UNSUPPORTED_MESSAGE, file=sys.stderr)
+        digest = build_digest(
+            "elr_list.preflight",
+            False,
+            health_status,
+            identity_posture=posture,
+            anomalies=list(anomalies) + [CENSUS_UNSUPPORTED_MESSAGE],
+        )
+        print(json.dumps(digest, sort_keys=True))
+        return EXIT_CENSUS_UNSUPPORTED
 
     if args.census:
         digest = run_census(client, key_sent, args)
     elif args.page is not None:
         digest = run_single_page(client, key_sent, args)
-    elif args.pages is not None:
-        digest = run_pages_loop(client, key_sent, args)
     else:
-        digest = run_plain_list(client, key_sent, args)
+        digest = run_pages_loop(client, key_sent, args)
 
     print(json.dumps(digest, sort_keys=True))
     return 0 if digest.get("ok") else 1

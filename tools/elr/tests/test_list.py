@@ -2,15 +2,15 @@
 O4). No network access -- urlopen is mocked via unittest.mock.patch,
 matching elr_batch_get.py's/elr_sync.py's test style.
 
-ENC-TSK-Q16-0A: parser skeleton (--project/--type/--status/--page-size),
-the --project '_' sentinel rejection, and the base plain-list route.
-ENC-TSK-Q16-0B adds --census's digest-exact-keys and side-file contract.
-ENC-TSK-Q16-0C adds --page (single raw page, ids-file loadable by
+ENC-TSK-Q16-0A: parser skeleton (--project/--type/--status/--page-size)
+and the --project '_' sentinel rejection.
+ENC-TSK-Q16-0B: --census's digest-exact-keys and side-file contract.
+ENC-TSK-Q16-0C: --page (single raw page, ids-file loadable by
 elr_batch_get.py --ids-file) and --pages N (a bounded loop over a prior
---census side file's page-boundary cursors). The capability preflight
-(0D) extends this file in a later commit -- these tests call the modes
-directly, with no health-check mock, since the preflight does not exist
-yet at this leaf.
+--census side file's page-boundary cursors).
+ENC-TSK-Q16-0D: the tracker_capabilities.census preflight -- every mode
+test below now runs through _run_main(), which prepends the health
+check's mocked response automatically.
 """
 
 from __future__ import annotations
@@ -65,21 +65,27 @@ def _http_error(code, body=b""):
     )
 
 
+_HEALTH_CENSUS_TRUE = _ok({"tracker_capabilities": {"census": True, "list_cursor_v2": True}, "governance_hash": "gh1"})
+_HEALTH_CENSUS_FALSE = _ok({"tracker_capabilities": {"census": False, "list_cursor_v2": True}})
+_HEALTH_CENSUS_ABSENT = _ok({})
+
+
 def _records(ids):
     return [{"record_id": rid, "record_type": "task", "status": "open", "title": rid} for rid in ids]
 
 
-def _run_no_preflight(argv, responses):
-    """Runs elr_list.main() at a stage before the capability preflight
-    exists (ENC-TSK-Q16-0C) -- the first mocked response is the actual
-    mode's own request, not a health check."""
+def _run_main(argv, responses):
+    """Runs elr_list.main(), with the tracker_capabilities.census preflight
+    call (ENC-TSK-Q16-0D) prepended to `responses` -- callers supply only
+    the mode's own response(s)."""
     stdout = io.StringIO()
-    with patch(_URLOPEN, side_effect=responses) as mock_urlopen:
-        with contextlib.redirect_stdout(stdout):
+    stderr = io.StringIO()
+    with patch(_URLOPEN, side_effect=[_HEALTH_CENSUS_TRUE, *responses]) as mock_urlopen:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             exit_code = elr_list.main(argv)
     lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
     digest = json.loads(lines[-1]) if lines else None
-    return exit_code, digest, mock_urlopen
+    return exit_code, digest, mock_urlopen, stderr.getvalue()
 
 
 class AllowAbbrevAndHelpTests(unittest.TestCase):
@@ -95,12 +101,12 @@ class AllowAbbrevAndHelpTests(unittest.TestCase):
                 parser.parse_args(["--help"])
         self.assertEqual(ctx.exception.code, 0)
         rendered = stdout.getvalue()
-        for flag in ("--project", "--type", "--status", "--page-size"):
+        for flag in ("--project", "--type", "--status", "--page-size", "--census", "--page", "--pages"):
             self.assertIn(flag, rendered)
 
     def test_default_page_size_is_100(self):
         parser = elr_list.build_parser()
-        args = parser.parse_args(["--project", "enceladus"])
+        args = parser.parse_args(["--project", "enceladus", "--census"])
         self.assertEqual(args.page_size, 100)
 
 
@@ -110,7 +116,7 @@ class ProjectSentinelRejectionTests(unittest.TestCase):
         stderr = io.StringIO()
         with self.assertRaises(SystemExit) as ctx:
             with contextlib.redirect_stderr(stderr):
-                parser.parse_args(["--project", "_"])
+                parser.parse_args(["--project", "_", "--census"])
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("not a valid project id", stderr.getvalue())
 
@@ -120,129 +126,35 @@ class ProjectSentinelRejectionTests(unittest.TestCase):
         with patch(_URLOPEN) as mock_urlopen:
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    elr_list.main(["--project", "_"])
+                    elr_list.main(["--project", "_", "--census"])
         mock_urlopen.assert_not_called()
 
     def test_ordinary_project_id_accepted(self):
         parser = elr_list.build_parser()
-        args = parser.parse_args(["--project", "enceladus"])
+        args = parser.parse_args(["--project", "enceladus", "--census"])
         self.assertEqual(args.project, "enceladus")
 
 
-class PageSizeBoundsTests(unittest.TestCase):
+class PageSizeAndPagesBoundsTests(unittest.TestCase):
     def test_page_size_over_max_rejected(self):
         parser = elr_list.build_parser()
         with self.assertRaises(SystemExit) as ctx:
             with contextlib.redirect_stderr(io.StringIO()):
-                parser.parse_args(["--project", "p", "--page-size", "201"])
+                parser.parse_args(["--project", "p", "--page-size", "201", "--census"])
         self.assertEqual(ctx.exception.code, 2)
 
     def test_page_size_max_accepted(self):
         parser = elr_list.build_parser()
-        args = parser.parse_args(["--project", "p", "--page-size", "200"])
+        args = parser.parse_args(["--project", "p", "--page-size", "200", "--census"])
         self.assertEqual(args.page_size, 200)
 
     def test_page_size_zero_rejected(self):
         parser = elr_list.build_parser()
         with self.assertRaises(SystemExit) as ctx:
             with contextlib.redirect_stderr(io.StringIO()):
-                parser.parse_args(["--project", "p", "--page-size", "0"])
+                parser.parse_args(["--project", "p", "--page-size", "0", "--census"])
         self.assertEqual(ctx.exception.code, 2)
 
-
-class CensusModeTests(unittest.TestCase):
-    def _census_body(self):
-        return {
-            "count": 70,
-            "count_truncated": False,
-            "exhausted": True,
-            "pages": [
-                {"cursor": None, "first": {"id": "ENC-TSK-1", "status": "open", "title": "t1"}, "last": {"id": "ENC-TSK-50", "status": "open", "title": "t50"}, "n": 50},
-                {"cursor": "CURSOR-1", "first": {"id": "ENC-TSK-51", "status": "open", "title": "t51"}, "last": {"id": "ENC-TSK-70", "status": "open", "title": "t70"}, "n": 20},
-            ],
-            "page_size": 50,
-            "as_of": {"kind": "wall_clock+max_updated_at", "started_at": "2026-09-24T05:00:00Z", "max_updated_at": "2026-09-24T05:00:01Z"},
-            "order": "record_id_asc",
-            "by_type": {"task": 70, "issue": 0, "feature": 0, "plan": 0, "lesson": 0, "escalation": 0},
-            "ids_inline_cap": 500,
-        }
-
-    def test_census_digest_keys_exactly_the_six(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch(_URLOPEN, side_effect=[_ok(self._census_body())]):
-                stdout = io.StringIO()
-                with contextlib.redirect_stdout(stdout):
-                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
-        self.assertEqual(exit_code, 0)
-        digest = json.loads(stdout.getvalue().strip())
-        optional_keys = set(digest.keys()) - _STABLE_KEYS
-        self.assertEqual(optional_keys, {"count", "exhausted", "count_truncated", "pages", "as_of", "by_type"})
-        self.assertEqual(digest["count"], 70)
-        self.assertEqual(digest["exhausted"], True)
-        self.assertEqual(digest["count_truncated"], False)
-        self.assertEqual(len(digest["pages"]), 2)
-        self.assertEqual(digest["by_type"]["task"], 70)
-
-    def test_census_writes_verbatim_side_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            body = self._census_body()
-            with patch(_URLOPEN, side_effect=[_ok(body)]):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    exit_code = elr_list.main(
-                        ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--census"]
-                    )
-            self.assertEqual(exit_code, 0)
-            expected_path = Path(tmp) / "enceladus_task_open_2026-09-24T05:00:00Z.census.json"
-            self.assertTrue(expected_path.is_file())
-            on_disk = json.loads(expected_path.read_text(encoding="utf-8"))
-            self.assertEqual(on_disk, body)
-
-    def test_census_file_uses_all_when_no_type_or_status(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch(_URLOPEN, side_effect=[_ok(self._census_body())]):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
-            self.assertEqual(exit_code, 0)
-            expected_path = Path(tmp) / "enceladus_all_all_2026-09-24T05:00:00Z.census.json"
-            self.assertTrue(expected_path.is_file())
-
-    def test_census_server_error_reported_not_written(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch(_URLOPEN, side_effect=[_http_error(500, json.dumps({"error": "boom"}).encode())]):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
-            self.assertEqual(exit_code, 1)
-            self.assertEqual(list(Path(tmp).glob("*.census.json")), [])
-
-
-class PlainListRouteTests(unittest.TestCase):
-    def test_plain_list_calls_tracker_route_with_query_params_only(self):
-        body = {"success": True, "records": [{"record_id": "ENC-TSK-1"}, {"record_id": "ENC-TSK-2"}], "count": 2, "page_size": 100}
-        with patch(_URLOPEN, side_effect=[_ok(body)]) as mock_urlopen:
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = elr_list.main(["--project", "enceladus", "--type", "task", "--status", "open"])
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(mock_urlopen.call_count, 1)
-        request = mock_urlopen.call_args[0][0]
-        self.assertIn("/enceladus", request.full_url)
-        self.assertIn("type=task", request.full_url)
-        self.assertIn("status=open", request.full_url)
-        digest = json.loads(stdout.getvalue().strip())
-        self.assertTrue(digest["ok"])
-        self.assertEqual(digest["counts"], {"records": 2})
-
-    def test_plain_list_server_error_reported(self):
-        with patch(_URLOPEN, side_effect=[_http_error(500, json.dumps({"error": "boom"}).encode())]):
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = elr_list.main(["--project", "enceladus"])
-        self.assertEqual(exit_code, 1)
-        digest = json.loads(stdout.getvalue().strip())
-        self.assertFalse(digest["ok"])
-
-
-class PagesArgBoundsTests(unittest.TestCase):
     def test_pages_eleven_rejected(self):
         parser = elr_list.build_parser()
         with self.assertRaises(SystemExit) as ctx:
@@ -270,18 +182,140 @@ class PagesArgBoundsTests(unittest.TestCase):
                 parser.parse_args(["--project", "p", "--census", "--page", "X"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_no_mode_flag_errors(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch(_URLOPEN) as mock_urlopen:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as ctx:
+                    elr_list.main(["--project", "enceladus"])
+        self.assertEqual(ctx.exception.code, 2)
+        mock_urlopen.assert_not_called()
+
+
+class CapabilityPreflightTests(unittest.TestCase):
+    def test_capability_absent_exits_6_with_zero_list_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with patch(_URLOPEN, side_effect=[_HEALTH_CENSUS_ABSENT]) as mock_urlopen:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--census"])
+        self.assertEqual(exit_code, elr_list.EXIT_CENSUS_UNSUPPORTED)
+        self.assertEqual(mock_urlopen.call_count, 1)  # only the health call
+        self.assertIn(elr_list.CENSUS_UNSUPPORTED_MESSAGE, stderr.getvalue())
+        digest = json.loads(stdout.getvalue().strip())
+        self.assertFalse(digest["ok"])
+        self.assertIn(elr_list.CENSUS_UNSUPPORTED_MESSAGE, digest["anomalies"])
+
+    def test_capability_false_exits_6_with_zero_list_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            with patch(_URLOPEN, side_effect=[_HEALTH_CENSUS_FALSE]) as mock_urlopen:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                    exit_code = elr_list.main(["--project", "enceladus", "--lists-dir", tmp, "--page", "somecursor"])
+        self.assertEqual(exit_code, elr_list.EXIT_CENSUS_UNSUPPORTED)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_capability_true_proceeds_to_census_request(self):
+        census_body = {
+            "count": 0,
+            "count_truncated": False,
+            "exhausted": True,
+            "pages": [],
+            "page_size": 100,
+            "as_of": {"kind": "wall_clock+max_updated_at", "started_at": "2026-09-24T05:00:00Z", "max_updated_at": None},
+            "order": "record_id_asc",
+            "by_type": {"task": 0, "issue": 0, "feature": 0, "plan": 0, "lesson": 0, "escalation": 0},
+            "ids_inline_cap": 500,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--census"],
+                [_ok(census_body)],
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertTrue(digest["ok"])
+
+
+class CensusModeTests(unittest.TestCase):
+    def _census_body(self):
+        return {
+            "count": 70,
+            "count_truncated": False,
+            "exhausted": True,
+            "pages": [
+                {"cursor": None, "first": {"id": "ENC-TSK-1", "status": "open", "title": "t1"}, "last": {"id": "ENC-TSK-50", "status": "open", "title": "t50"}, "n": 50},
+                {"cursor": "CURSOR-1", "first": {"id": "ENC-TSK-51", "status": "open", "title": "t51"}, "last": {"id": "ENC-TSK-70", "status": "open", "title": "t70"}, "n": 20},
+            ],
+            "page_size": 50,
+            "as_of": {"kind": "wall_clock+max_updated_at", "started_at": "2026-09-24T05:00:00Z", "max_updated_at": "2026-09-24T05:00:01Z"},
+            "order": "record_id_asc",
+            "by_type": {"task": 70, "issue": 0, "feature": 0, "plan": 0, "lesson": 0, "escalation": 0},
+            "ids_inline_cap": 500,
+        }
+
+    def test_census_digest_keys_exactly_the_six(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--census"],
+                [_ok(self._census_body())],
+            )
+        self.assertEqual(exit_code, 0)
+        optional_keys = set(digest.keys()) - _STABLE_KEYS
+        self.assertEqual(optional_keys, {"count", "exhausted", "count_truncated", "pages", "as_of", "by_type"})
+        self.assertEqual(digest["count"], 70)
+        self.assertEqual(digest["exhausted"], True)
+        self.assertEqual(digest["count_truncated"], False)
+        self.assertEqual(len(digest["pages"]), 2)
+        self.assertEqual(digest["by_type"]["task"], 70)
+
+    def test_census_writes_verbatim_side_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            body = self._census_body()
+            exit_code, _digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--census"],
+                [_ok(body)],
+            )
+            self.assertEqual(exit_code, 0)
+            expected_path = Path(tmp) / "enceladus_task_open_2026-09-24T05:00:00Z.census.json"
+            self.assertTrue(expected_path.is_file())
+            on_disk = json.loads(expected_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk, body)
+
+    def test_census_file_uses_all_when_no_type_or_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, _digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--census"],
+                [_ok(self._census_body())],
+            )
+            self.assertEqual(exit_code, 0)
+            expected_path = Path(tmp) / "enceladus_all_all_2026-09-24T05:00:00Z.census.json"
+            self.assertTrue(expected_path.is_file())
+
+    def test_census_server_error_reported_not_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code, digest, _mock, _stderr = _run_main(
+                ["--project", "enceladus", "--lists-dir", tmp, "--census"],
+                [_http_error(500, json.dumps({"error": "boom"}).encode())],
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(digest["ok"])
+            self.assertEqual(list(Path(tmp).glob("*.census.json")), [])
+
 
 class PageModeTests(unittest.TestCase):
     def test_single_page_writes_ids_file_loadable_by_batch_get(self):
         ids = [f"ENC-TSK-{i}" for i in range(51, 71)]
         page_body = {"success": True, "records": _records(ids), "count": len(ids), "page_size": 50}
         with tempfile.TemporaryDirectory() as tmp:
-            exit_code, digest, mock_urlopen = _run_no_preflight(
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", "CURSOR-1"],
                 [_ok(page_body)],
             )
             self.assertEqual(exit_code, 0)
-            self.assertEqual(mock_urlopen.call_count, 1)
+            self.assertEqual(mock_urlopen.call_count, 2)  # health + the one page fetch
             optional_keys = set(digest.keys()) - _STABLE_KEYS
             self.assertEqual(optional_keys, {"n"})  # no next_cursor -> page_truncated/next_cursor omitted
             self.assertEqual(digest["n"], 20)
@@ -301,7 +335,7 @@ class PageModeTests(unittest.TestCase):
             "next_cursor": "CURSOR-2",
         }
         with tempfile.TemporaryDirectory() as tmp:
-            exit_code, digest, _mock = _run_no_preflight(
+            exit_code, digest, _mock, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", "CURSOR-1"],
                 [_ok(page_body)],
             )
@@ -314,7 +348,7 @@ class PageModeTests(unittest.TestCase):
         # that as "start of the walk" and still produce a stable file name.
         page_body = {"success": True, "records": _records(["ENC-TSK-1"]), "count": 1, "page_size": 50}
         with tempfile.TemporaryDirectory() as tmp:
-            exit_code, _digest, _mock = _run_no_preflight(
+            exit_code, _digest, _mock, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", ""],
                 [_ok(page_body)],
             )
@@ -351,12 +385,12 @@ class PagesLoopTests(unittest.TestCase):
             self._write_census_file(tmp)
             page0 = {"success": True, "records": _records([f"ENC-TSK-{i}" for i in range(1, 51)]), "count": 50, "page_size": 50}
             page1 = {"success": True, "records": _records([f"ENC-TSK-{i}" for i in range(51, 71)]), "count": 20, "page_size": 50}
-            exit_code, digest, mock_urlopen = _run_no_preflight(
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
                 ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--pages", "2"],
                 [_ok(page0), _ok(page1)],
             )
             self.assertEqual(exit_code, 0)
-            self.assertEqual(mock_urlopen.call_count, 2)
+            self.assertEqual(mock_urlopen.call_count, 3)  # health + 2 page fetches
             self.assertTrue(digest["ok"])
             self.assertTrue(digest["lower_bound"])
             self.assertEqual(digest["n"], 70)
@@ -372,24 +406,24 @@ class PagesLoopTests(unittest.TestCase):
             page0 = {"success": True, "records": _records(["ENC-TSK-1"]), "count": 1, "page_size": 50}
             page1 = {"success": True, "records": _records(["ENC-TSK-2"]), "count": 1, "page_size": 50}
             page2 = {"success": True, "records": _records(["ENC-TSK-3"]), "count": 1, "page_size": 50}
-            exit_code, digest, mock_urlopen = _run_no_preflight(
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
                 ["--project", "enceladus", "--type", "task", "--status", "open", "--lists-dir", tmp, "--pages", "3"],
                 [_ok(page0), _ok(page1), _ok(page2)],
             )
             self.assertEqual(exit_code, 0)
-            self.assertEqual(mock_urlopen.call_count, 3)
+            self.assertEqual(mock_urlopen.call_count, 4)
             self.assertNotIn("lower_bound", digest)
 
     def test_pages_with_no_matching_census_file_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
-            exit_code, digest, mock_urlopen = _run_no_preflight(
+            exit_code, digest, mock_urlopen, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--pages", "2"],
                 [],
             )
             self.assertEqual(exit_code, 1)
             self.assertFalse(digest["ok"])
             self.assertIn("no_matching_census_file", digest["anomalies"])
-            self.assertEqual(mock_urlopen.call_count, 0)
+            self.assertEqual(mock_urlopen.call_count, 1)  # only the health preflight
 
 
 class RoundTripTests(unittest.TestCase):
@@ -411,7 +445,7 @@ class RoundTripTests(unittest.TestCase):
                 "by_type": {"task": 70},
                 "ids_inline_cap": 500,
             }
-            exit_code, census_digest, _mock = _run_no_preflight(
+            exit_code, census_digest, _mock, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--census"],
                 [_ok(census_body)],
             )
@@ -421,7 +455,7 @@ class RoundTripTests(unittest.TestCase):
 
             page_ids = [f"ENC-TSK-{i}" for i in range(51, 71)]
             page_body = {"success": True, "records": _records(page_ids), "count": 20, "page_size": 50}
-            exit_code, _page_digest, _mock = _run_no_preflight(
+            exit_code, _page_digest, _mock, _stderr = _run_main(
                 ["--project", "enceladus", "--lists-dir", tmp, "--page", second_page_cursor],
                 [_ok(page_body)],
             )
