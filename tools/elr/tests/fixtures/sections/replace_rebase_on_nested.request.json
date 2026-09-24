@@ -1,0 +1,10 @@
+{
+  "anchor": {
+    "heading_path": [
+      "Beta"
+    ]
+  },
+  "op": "replace",
+  "body": "# Sub One\n\ntext\n\n## Sub Two\n\nmore\n\n```\n# fenced not a heading\n```\n",
+  "rebase_headings": true
+}

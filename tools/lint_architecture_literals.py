@@ -18,7 +18,7 @@ Excluded classes (path pattern -> one-line reason), applied before scanning:
                                      good and the bad literal forms
   tools/cfn-guard/**              -- cfn-guard rule files must name every
                                      allowed/forbidden literal in their enums
-  tools/verify_*.py, tools/ci_selftest_*.py, tools/lint_architecture_literals.py,
+  tools/verify_*.py, tools/ci_selftest_*.py, tools/assert_*.py, tools/lint_architecture_literals.py,
   tools/arch_declaration.py       -- validator tools must name the forbidden
                                      value in order to detect it
   infrastructure/lambda-live-inventory-*.json,
@@ -99,6 +99,7 @@ EXCLUDED_GLOBS = (
     "infrastructure/lambda-manifests/*.json",
     "tools/verify_*.py",
     "tools/ci_selftest_*.py",
+    "tools/assert_*.py",
 )
 EXCLUDED_TOOL_FILES = (
     "tools/lint_architecture_literals.py",

@@ -1,10 +1,35 @@
 name: Promote v4-gamma success to v3-prod request
 
 # ENC-TSK-G71: Listens for successful v4-gamma deploys (push events on v4/main)
-# and dispatches _deploy.yml with target_environment=v3-prod. The dispatch hits
-# the v3-prod GitHub Environment's required-reviewer rule and pauses until
-# io approves. The approval click is the cutover toggle: stop approving =>
-# v4 work stays in gamma without any workflow rewiring.
+# and offers to promote the gamma-validated commit to main.
+#
+# ENC-TSK-Q21 FR-8 (DOC-5368FE6515ED): "promote is a merge". This used to
+# dispatch _deploy.yml directly with target_environment=v3-prod off the raw
+# v4/main sha. It now instead opens a PR base=main head=auto/promote-
+# v4main-to-main-<sha8> carrying the gamma head_sha, and merging THAT PR is
+# what triggers the v3-prod deploy (promote-merged-dispatch.yml, on
+# pull_request closed+merged). This makes the prod-bound content visible as
+# an ordinary reviewable main PR (diff, checks, required-reviewer merge
+# gate) instead of an opaque dispatch, and gives main a real, auditable
+# ancestor of every commit that ever ran in prod. GITHUB_TOKEN-authored PRs
+# never trigger pull_request workflows, so this job also directly
+# workflow_dispatches pr-commit-gate.yml against the PR it just opened —
+# otherwise the required "PR Commit Gate" check would never report and the
+# PR could never satisfy branch protection. The other required checks (CI,
+# Secrets Scan, Governance Dictionary Guard) already ran on this sha when it
+# was pushed to v4/main and their check runs carry over to the PR.
+#
+# ENC-TSK-H58: a successful gamma DEPLOY is necessary but NOT sufficient to offer
+# promotion. Before opening the promote PR we run the GAMMA VALIDATION GATE
+# (tools/gamma_validation_gate.sh) — a runtime probe of the live gamma environment:
+# smoke (ingress 200) + graph-probe (the full hybrid trio is live and PPR-ranked:
+# graph_algorithm=gds_pagerank after warming the on-demand standing projection) +
+# env-parity (no deploy-critical gamma var the next compute deploy would strip).
+# The gate is FAIL-CLOSED: a red gate fails this job, so the PR is never opened
+# and promotion is not offered. Promotion itself stays human-approved (the PR
+# merge, plus the v3-prod Environment required-reviewer gate on the dispatched
+# deploy) — the gate only makes it AVAILABLE.
+# Bound to ENC-LSN-039 (pre-probe gamma before prod handoffs).
 
 on:
   workflow_run:
@@ -12,12 +37,17 @@ on:
     types: [completed]
 
 permissions:
-  actions: write
-  contents: read
+  actions: write        # dispatch pr-commit-gate.yml against the promote PR
+  contents: write        # ENC-TSK-Q21: create/force-update the promote branch
+  pull-requests: write   # ENC-TSK-Q21: open/close the promote PR, comment
+  id-token: write   # ENC-TSK-H58: OIDC for the gamma validation gate's AWS calls
 
 concurrency:
   group: promote-gamma-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
 
 jobs:
   promote:
@@ -26,25 +56,100 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'v4/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15   # ENC-TSK-H58: +gate warm-projection latency budget
     steps:
-      - name: Dispatch v3-prod deploy request
+      # ENC-TSK-H58: check out the DEFAULT branch (main), where the gate tooling
+      # lives. MUST use ref: main explicitly — in workflow_run events github.sha is
+      # the triggering workflow's HEAD SHA (v4/main), NOT main's HEAD. Without ref:main
+      # the checkout grabs the v4/main SHA which is FORKED (PLN-006 fork-mode,
+      # sync-main-to-v4main disabled) and may lack the latest gate tooling on main.
+      # The gate probes the LIVE gamma environment, so it does not need the deployed tree.
+      - name: Checkout gate tooling (default branch / main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ENC-TSK-H58: THE validation gate. Fail-closed — no continue-on-error, so a
+      # red gate fails the job and the dispatch step below never runs. The gate
+      # warms the on-demand gamma standing projection, then asserts smoke + the
+      # full hybrid trio (graph_algorithm=gds_pagerank) + env-parity.
+      - name: Gamma validation gate (smoke + graph-probe + env-parity)
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: bash tools/gamma_validation_gate.sh --region "${AWS_REGION}"
+
+      - name: Open promote PR + supersede older ones (ENC-TSK-Q21 FR-8)
+        id: promote_pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           GAMMA_RUN_ID: ${{ github.event.workflow_run.id }}
+          GAMMA_RUN_URL: ${{ github.event.workflow_run.html_url }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          echo "Gamma success run=$GAMMA_RUN_ID sha=$SHA — dispatching v3-prod request"
+          echo "Gamma validation gate GREEN. Run=$GAMMA_RUN_ID sha=$SHA — opening promote PR"
 
-          # gh api is used here (not gh workflow run) because there's no
-          # checkout in this job and gh workflow run requires a local git
-          # context. Workflow ID 263796502 = Deploy Lambda Artifacts (Gen2).
+          SHA8="${SHA:0:8}"
+          BRANCH="auto/promote-v4main-to-main-${SHA8}"
+          OWNER="${REPO%%/*}"
+
+          # a) create/force-update the promote branch to point at gamma's head_sha.
+          if gh api "/repos/$REPO/git/refs/heads/$BRANCH" >/dev/null 2>&1; then
+            gh api -X PATCH "/repos/$REPO/git/refs/heads/$BRANCH" -f sha="$SHA" -F force=true
+            echo "Force-updated existing branch $BRANCH -> $SHA"
+          else
+            gh api -X POST "/repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$SHA"
+            echo "Created branch $BRANCH -> $SHA"
+          fi
+
+          # b) open the promote PR base=main head=$BRANCH (reuse if one is
+          # already open for this exact sha8 -- e.g. a re-run of this job).
+          PR_NUMBER=$(gh api "/repos/$REPO/pulls?state=open&base=main&head=${OWNER}:${BRANCH}" \
+            --jq '.[0].number // empty' 2>/dev/null || true)
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Promote PR #$PR_NUMBER already open for $BRANCH — reusing."
+          else
+            BODY=$(printf 'Target: v3-prod\n\nPromotes v4/main @ %s (gamma-validated) to main.\n\nGamma run: %s\n\nMerge with a merge commit; merging dispatches the v3-prod deploy (see promote-merged-dispatch.yml, which reads the merge commit sha as commit_sha and this branch head sha as gamma_sha).\n\nThis PR is exempt from the PR Commit Gate CCI requirement via head_ref pattern auto/promote-v4main-to-main-* (ENC-TSK-Q21 FR-8): the commit was already CCI-gated when it landed on v4/main. pr-commit-gate.yml additionally asserts this PR head is an ancestor-or-equal of v4/main before waiving the requirement.\n' "$SHA" "$GAMMA_RUN_URL")
+
+            PR_URL=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+              --title "Promote v4/main ${SHA8} to main (ENC-TSK-Q21 FR-8)" \
+              --body "$BODY")
+            PR_NUMBER="${PR_URL##*/}"
+            echo "Opened promote PR #$PR_NUMBER: $PR_URL"
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          # c) supersede any OTHER open auto/promote-v4main-to-main-* PR.
+          OLDER=$(gh pr list --repo "$REPO" --base main --state open \
+            --json number,headRefName | \
+            jq -r --arg keep "$PR_NUMBER" --arg prefix "auto/promote-v4main-to-main-" \
+              '.[] | select(.headRefName | startswith($prefix)) | select((.number|tostring) != $keep) | .number')
+
+          if [ -n "$OLDER" ]; then
+            while read -r N; do
+              [ -z "$N" ] && continue
+              gh pr comment "$N" --repo "$REPO" --body "Superseded by #$PR_NUMBER."
+              gh pr close "$N" --repo "$REPO"
+              echo "Closed superseded promote PR #$N (superseded by #$PR_NUMBER)"
+            done <<< "$OLDER"
+          fi
+
+          # d) dispatch pr-commit-gate.yml directly against this PR -- a
+          # GITHUB_TOKEN-authored PR never fires pull_request workflows, so
+          # without this the required "PR Commit Gate" check never reports
+          # and branch protection can never be satisfied.
           gh api -X POST \
-            "/repos/$REPO/actions/workflows/263796502/dispatches" \
-            -f ref=main \
-            -f "inputs[target_environment]=v3-prod" \
-            -f "inputs[commit_sha]=$SHA"
+            "/repos/$REPO/actions/workflows/pr-commit-gate.yml/dispatches" \
+            -f ref="$BRANCH" \
+            -f "inputs[pr_number]=$PR_NUMBER"
 
-          echo "v3-prod deploy request dispatched. Awaiting reviewer approval on the GitHub Environment."
+          echo "Dispatched PR Commit Gate for #$PR_NUMBER (ref=$BRANCH). Awaiting required checks + reviewer merge."

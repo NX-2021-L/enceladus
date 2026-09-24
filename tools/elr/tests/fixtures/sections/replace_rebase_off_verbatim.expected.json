@@ -1,0 +1,24 @@
+{
+  "name": "replace_rebase_off_verbatim",
+  "request": {
+    "anchor": {
+      "heading_path": [
+        "Beta"
+      ]
+    },
+    "op": "replace",
+    "body": "# Verbatim Heading\n\nNot rebased.",
+    "rebase_headings": false
+  },
+  "ok": true,
+  "bytes_changed": 67,
+  "stamped": true,
+  "block_id_was_none_before": true,
+  "anchor_resolved": {
+    "heading_path": [
+      "Beta"
+    ],
+    "level": 2,
+    "ordinal": 1
+  }
+}

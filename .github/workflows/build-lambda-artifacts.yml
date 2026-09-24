@@ -8,6 +8,10 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - 'tools/enceladus-mcp-server/server.py'
+      - 'tools/enceladus-mcp-server/manifest_projection.py'
+      - 'tools/enceladus-mcp-server/dispatch_plan_generator.py'
+      - '.github/workflows/build-lambda-artifacts.yml'
   push:
     branches: [main]
     paths:
@@ -15,6 +19,10 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - 'tools/enceladus-mcp-server/server.py'
+      - 'tools/enceladus-mcp-server/manifest_projection.py'
+      - 'tools/enceladus-mcp-server/dispatch_plan_generator.py'
+      - '.github/workflows/build-lambda-artifacts.yml'
   workflow_call:
     outputs:
       artifact_prefix:
@@ -29,7 +37,7 @@ jobs:
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.parse.outputs.matrix }}
+      functions: ${{ steps.parse.outputs.functions }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,16 +48,41 @@ jobs:
       - name: Parse manifest into matrix
         id: parse
         run: |
-          matrix=$(jq -c '{include: [.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: (.package_extra_files // "")}]}' \
+          # Emit a bare JSON array of per-function objects so `function` can be a
+          # real matrix dimension below. The previous `{include: [...]}` shape
+          # collapsed under GitHub Actions matrix-merge semantics: include entries
+          # share no key with the base arch_tag dimension, so each was merged into
+          # the 2 arch combinations and later functions overwrote earlier ones,
+          # leaving only the LAST manifest function building (ENC-ISS-402).
+          #
+          # Only include functions this workflow can actually package: those with a
+          # backend/lambda/<dir>/lambda_function.py. Out-of-band Lambdas such as
+          # enceladus-mcp-code / enceladus-mcp-streamable (deployed via
+          # tools/enceladus-mcp-server, no lambda_function.py) have no handler here,
+          # and packaging them would hard-fail tools/package_lambda_artifact.sh.
+          #
+          # package_extra_files is joined to a comma-separated string here because
+          # tools/package_lambda_artifact.sh parses its 4th arg with IFS=','.
+          present=$(find backend/lambda -maxdepth 2 -name lambda_function.py \
+            | sed -E 's|/lambda_function\.py$||' | jq -R . | jq -cs .)
+          functions=$(jq -c --argjson present "$present" \
+            '[.functions[]
+               | select(.lambda_dir as $d | ($present | index($d)) != null)
+               | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: ((.package_extra_files // []) | join(","))}]' \
             infrastructure/lambda_workflow_manifest.json)
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "Parsed matrix:" >&2
-          echo "${matrix}" | jq . >&2
+          echo "functions=${functions}" >> "$GITHUB_OUTPUT"
+          echo "Included $(echo "${functions}" | jq 'length') packageable functions of $(jq '.functions | length' infrastructure/lambda_workflow_manifest.json) in manifest." >&2
+          echo "Skipped (no lambda_function.py — built out-of-band):" >&2
+          jq -r --argjson present "$present" '.functions[] | select(.lambda_dir as $d | ($present | index($d)) == null) | "  - \(.function_name) (\(.lambda_dir))"' infrastructure/lambda_workflow_manifest.json >&2
+          echo "${functions}" | jq . >&2
 
   build:
     needs: setup-matrix
     runs-on: ubuntu-latest
     strategy:
+      # Don't let one function's packaging failure cancel the other 50+ jobs and
+      # wipe every artifact — each function builds and uploads independently.
+      fail-fast: false
       max-parallel: 10
       matrix:
         # ENC-TSK-Q20: legacy x86 build target retired -- arm64-py312 only.
@@ -68,10 +101,10 @@ jobs:
         id: package
         run: |
           zip_path=$(bash tools/package_lambda_artifact.sh \
-            "${{ matrix.function_name }}" \
-            "${{ matrix.lambda_dir }}" \
+            "${{ matrix.function.function_name }}" \
+            "${{ matrix.function.lambda_dir }}" \
             "${{ matrix.arch_tag }}" \
-            "${{ matrix.package_extra_files }}")
+            "${{ matrix.function.package_extra_files }}")
           echo "zip_path=${zip_path}" >> "$GITHUB_OUTPUT"
 
       - name: Derive expected architecture
@@ -94,12 +127,56 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lambda-${{ matrix.function_name }}-${{ matrix.arch_tag }}
+          name: lambda-${{ matrix.function.function_name }}-${{ matrix.arch_tag }}
           path: ${{ steps.package.outputs.zip_path }}
           retention-days: 7
 
+  # ---------------------------------------------------------------------------
+  # BUILD-MCP-CODE — packages enceladus-mcp-code from tools/enceladus-mcp-server/
+  # (ENC-TSK-I39). See _build.yml build-mcp-code for rationale.
+  # ---------------------------------------------------------------------------
+  build-mcp-code:
+    runs-on: ubuntu-24.04-arm  # ENC-TSK-Q21 C1: legacy mcp-code build moved to the declared arm64 target (ENC-TSK-Q20)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Package enceladus-mcp-code
+        run: |
+          set -euo pipefail
+          BUILD=$(mktemp -d)
+          cp tools/enceladus-mcp-server/server.py              "$BUILD/"
+          cp tools/enceladus-mcp-server/manifest_projection.py "$BUILD/"
+          cp tools/enceladus-mcp-server/dispatch_plan_generator.py "$BUILD/"
+          cp backend/lambda/shared_layer/python/enceladus_shared/appconfig_flags.py "$BUILD/"
+          python -m pip install \
+            --platform manylinux2014_aarch64 \
+            --implementation cp \
+            --python-version 3.12 \
+            --only-binary=:all: \
+            --upgrade \
+            --target "$BUILD" \
+            -r backend/lambda/mcp_code/requirements.txt \
+            --quiet
+          ZIP="/tmp/enceladus-mcp-code.zip"
+          (cd "$BUILD" && zip -qrX "$ZIP" .)
+          echo "zip_path=${ZIP}" >> "$GITHUB_OUTPUT"
+        id: package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-enceladus-mcp-code-arm64-py312
+          path: /tmp/enceladus-mcp-code.zip
+          retention-days: 7
+
   upload-artifacts:
-    needs: build
+    needs: [build, build-mcp-code]
     # Upload on push to main (standalone) or when called via workflow_call (from deploy-orchestration)
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||

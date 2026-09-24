@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 3,
+    "section_bytes": 38
+  },
+  {
+    "heading_path": [
+      "Last Heading With Nothing After It"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 4,
+    "line_end": 3,
+    "section_bytes": 0
+  }
+]

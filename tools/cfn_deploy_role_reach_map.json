@@ -320,72 +320,6 @@
   "exceptions": [
     {
       "template": "01-data.yaml",
-      "logical_id": "CoordinationRequestsTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "ProjectsTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/projects",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "DocumentsTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/documents",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "GovernancePoliciesTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "ComponentRegistryTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/component-registry",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "AgentComplianceViolationsTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-compliance-violations",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
       "logical_id": "CoordinationDeadLetterTopic",
       "type": "AWS::SNS::Topic",
       "action": "sns:CreateTopic",
@@ -408,43 +342,10 @@
     },
     {
       "template": "01-data.yaml",
-      "logical_id": "AgentSessionsTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-sessions",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "AgentTypesTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-types",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
       "logical_id": "AgentCredentialsTable",
       "type": "AWS::DynamoDB::Table",
       "action": "dynamodb:CreateTable",
       "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-credentials",
-      "plane": "production",
-      "recorded": "2026-08-23",
-      "owner_record": "ENC-ISS-662",
-      "reason": "Pre-existing on v4/main, recorded by ENC-TSK-O99 rather than silently widened. enceladus-data manages this resource under a physical name predating the enceladus-*/devops-* naming convention (verified live 2026-08-23: enceladus-data/ProjectsTable -> physical `projects`, UPDATE_COMPLETE), and DynamoDBTableOps/SnsTopicOps reach only those two prefixes. The stack deploys today because these resources are not being modified -- but any change to them, or any replacement, fails at apply and rolls the stack back, which is exactly the ENC-ISS-660 hazard sitting on the production data plane. Closing it means widening the deploy role onto production data tables, which is a security decision for io and NOT something ENC-TSK-O99 takes unilaterally. Tracked by ENC-ISS-662. The gamma renderings are already reachable via table/*-gamma, so only the production plane is exposed."
-    },
-    {
-      "template": "01-data.yaml",
-      "logical_id": "GovernanceVersionTable",
-      "type": "AWS::DynamoDB::Table",
-      "action": "dynamodb:CreateTable",
-      "arn": "arn:aws:dynamodb:us-west-2:356364570033:table/governance-version",
       "plane": "production",
       "recorded": "2026-08-23",
       "owner_record": "ENC-ISS-662",

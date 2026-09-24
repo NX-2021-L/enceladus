@@ -1,0 +1,115 @@
+name: IAM CFN Deploy Role — NAT Gateway Patch
+
+# ENC-TSK-L43 Option A: attach a managed policy with NAT + route-table grants.
+# Durable fix: OpenSearchNatGatewayPolicy in 04-github-roles.yaml (deploy via
+# cloudformation-github-roles-stack-deploy.yml). This one-off dispatch applies
+# the grant live ahead of the next github-roles stack deploy. The backend deploy
+# role lacks iam:CreatePolicy — if this workflow fails AccessDenied, apply with
+# product-lead/admin credentials or dispatch github-roles stack deploy instead.
+# io-gated: environment v3-prod (required reviewer).
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Attach managed NAT gateway policy for enceladus-compute-gamma (ENC-TSK-L43)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with NAT gateway EC2 permissions
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Create or update managed policy — OpenSearch NAT (gamma)
+        run: |
+          set -euo pipefail
+          POLICY_NAME="enceladus-cfn-deploy-opensearch-nat-gamma"
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
+
+          cat > /tmp/opensearch-nat-managed.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "OpenSearchNatEc2Describe",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:DescribeVpcs",
+                  "ec2:DescribeSubnets",
+                  "ec2:DescribeRouteTables",
+                  "ec2:DescribeNatGateways",
+                  "ec2:DescribeAddresses"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "OpenSearchNatEc2MutateGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:AllocateAddress",
+                  "ec2:ReleaseAddress",
+                  "ec2:CreateNatGateway",
+                  "ec2:DeleteNatGateway",
+                  "ec2:CreateRouteTable",
+                  "ec2:DeleteRouteTable",
+                  "ec2:CreateRoute",
+                  "ec2:ReplaceRoute",
+                  "ec2:DeleteRoute",
+                  "ec2:AssociateRouteTable",
+                  "ec2:DisassociateRouteTable"
+                ],
+                "Resource": "*",
+                "Condition": {
+                  "StringEquals": {
+                    "aws:RequestedRegion": "us-west-2"
+                  }
+                }
+              }
+            ]
+          }
+          JSON
+
+          if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+            VERSIONS="$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text)"
+            for vid in $VERSIONS; do
+              aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$vid"
+            done
+            aws iam create-policy-version \
+              --policy-arn "$POLICY_ARN" \
+              --policy-document file:///tmp/opensearch-nat-managed.json \
+              --set-as-default
+          else
+            aws iam create-policy \
+              --policy-name "$POLICY_NAME" \
+              --policy-document file:///tmp/opensearch-nat-managed.json \
+              --description "ENC-TSK-L43 gamma NAT gateway EC2 grants for CFN deploy role"
+          fi
+
+          aws iam attach-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-arn "$POLICY_ARN" 2>/dev/null || true
+
+      - name: Verify managed policy attached
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query 'AttachedPolicies[?PolicyName==`enceladus-cfn-deploy-opensearch-nat-gamma`]' \
+            --output table

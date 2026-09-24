@@ -1,0 +1,22 @@
+[
+  {
+    "heading_path": [],
+    "level": 1,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 2,
+    "line_end": 7,
+    "section_bytes": 65
+  },
+  {
+    "heading_path": [
+      "Setext Subsection"
+    ],
+    "level": 2,
+    "ordinal": 1,
+    "block_id": null,
+    "line_start": 5,
+    "line_end": 7,
+    "section_bytes": 27
+  }
+]
