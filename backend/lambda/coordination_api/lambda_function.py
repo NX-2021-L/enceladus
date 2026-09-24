@@ -16684,6 +16684,21 @@ def _handle_health() -> Dict[str, Any]:
     except Exception as exc:
         health["governance_hash"] = f"error: {exc}"
 
+    # ENC-TSK-Q14 (O2.5/D9): feature-detectable tracker capability flags,
+    # mirroring the mcp_server docstore_capabilities pattern (ENC-TSK-P73)
+    # -- a caller checks this block instead of probing with a throwaway
+    # mode=census / next_cursor call. Static (not registry-derived, unlike
+    # docstore_capabilities) because these ship as one Q13/Q14 pair, not an
+    # independently-togglable action registry. tools/enceladus-mcp-server's
+    # connection_health() merges this whole /api/v1/health response
+    # (_health_api_request()) as-is, so this key passes through
+    # automatically with no server.py change; ELR reads /api/v1/health
+    # directly and sees it the same way.
+    health["tracker_capabilities"] = {
+        "census": True,          # ENC-TSK-Q14: GET /{project}?mode=census
+        "list_cursor_v2": True,  # ENC-TSK-Q13: value-based next_cursor codec
+    }
+
     health["checked_at"] = _now_z()
     return _response(200, health)
 

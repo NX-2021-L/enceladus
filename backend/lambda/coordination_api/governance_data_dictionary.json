@@ -1,7 +1,7 @@
 {
-  "version": "2026-09-24.02",
-  "updated_at": "2026-09-24T09:15:00Z",
-  "last_change_summary": "ENC-TSK-Q13 (O1.1-O1.3, ENC-PLN-093 objective O1): tracker_mutation._handle_list_records (GET /api/v1/tracker/{project}) now returns honest, value-based next_cursor pagination -- _encode_list_cursor/_decode_list_cursor (beside the ENC-ISS-699 escalation-list codec) build a base64url boundary from the last item actually RETURNED, never a raw DynamoDB LastEvaluatedKey, so a response with no next_cursor is always provably exhausted. The accumulate loop keeps pulling raw pages (bounded by _LIST_RECORDS_MAX_RAW_PAGES=10) until accumulated items exceed page_size, LastEvaluatedKey is absent, or the raw-page budget runs out with LastEvaluatedKey still present (page_truncated: true). A cursor minted on the base-table branch replayed against the project-type-index branch (or vice versa) raises ListCursorBranchMismatch, mapped to HTTP 400 CURSOR_BRANCH_MISMATCH rather than a 500 or a silent reinterpret against the wrong key schema. New entity tracker.list_cursor. feed_query/corpus.py is not touched (D1). Review fix (ENC-TSK-Q13-0A): ENC-TSK-Q13-0A (review fix, ENC-PLN-093 objective O1): _decode_list_cursor's branch check compared only the cursor's stored 'b' (\"base\" vs \"gsi\"), never the gsi branch's own record_type ('t') against the CURRENT request's type filter -- two gsi requests with different type params both compare equal on branch, so a cursor minted under type=task and replayed under type=issue decoded successfully, then fed a stale decoded['t'] into ExclusiveStartKey.record_type while the Query's own KeyConditionExpression equality value used the current type -- two different values in one ddb.query() call, producing a falsely-exhausted 200 against PagingTable (or risking an opaque 500 against real DynamoDB) instead of the documented 400 CURSOR_BRANCH_MISMATCH this dictionary's own CURSOR_BRANCH_MISMATCH entry already described. _decode_list_cursor now takes an optional record_type and raises ListCursorBranchMismatch on a gsi-branch type mismatch too, closing the gap between the documented contract and the implementation. No entity shape change -- tracker.list_cursor's fields and CURSOR_BRANCH_MISMATCH error_codes were already accurate; this version bump satisfies the dictionary-sync gate for a lambda_function.py-only fix. PREVIOUS: ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
+  "version": "2026-09-24.03",
+  "updated_at": "2026-09-24T09:45:00Z",
+  "last_change_summary": "ENC-TSK-Q14 (O2.1-O2.5, ENC-PLN-093 objective O2, stacked on O1/ENC-TSK-Q13): GET /api/v1/tracker/{project}?mode=census -- a bounded synchronous project summary (tracker_mutation._handle_list_census). New _census_walk (O2.1) mirrors the O1 branch selection (base table vs project-type-index GSI, D6) but always walks to exhaustion or a budget (D3: CENSUS_MAX_RAW_PAGES=50, CENSUS_WALL_CLOCK_MS=6000, both env-overridable) instead of stopping at one handler page; counter and escalation rows are excluded as they stream in. New _census_pages (O2.2) slices the walk's rows into page anchors -- {cursor, first, last, n} -- without re-querying, cross-tested against tracker.list_cursor's _handle_list_records (a page's cursor resumes at exactly that page's first row). New _census_escalation_walk + _census_collect (O2.3, D5) run a second bounded walk over a project's escalations (mirroring the ENC-ISS-699 begins_with(record_id, \"escalation#\") query shape) under whatever raw-page/wall-clock budget the primary walk did not spend, and merge into a by_type breakdown; a truncated escalation walk excludes escalation rows from count/by_type/pages entirely and sets excluded_types: [\"escalation\"]. New _handle_list_census (O2.4) assembles the response -- {count, count_truncated, exhausted, pages, page_size, as_of, order, by_type, ids?, ids_inline_cap: 500, excluded_types?}, deliberately with NO records key -- and _handle_list_records now dispatches mode=census to it before touching DynamoDB (any other non-empty mode value is a 400, never a silent plain list). Schema fixture committed: backend/lambda/tracker_mutation/tests/fixtures/census_v1.schema.json. D9 RESOLVED (O2.5): GET /api/v1/health is served by backend/lambda/coordination_api/lambda_function.py _handle_health (NOT tracker_mutation) -- it gains a sibling tracker_capabilities: {census: true, list_cursor_v2: true} field, static (unlike mcp_server's registry-derived docstore_capabilities), passed through automatically to MCP connection_health() callers and read directly by ELR. New entity tracker.census. feed_query/corpus.py is not touched (D1, unchanged from O1). PREVIOUS: ENC-TSK-Q13 (O1.1-O1.3, ENC-PLN-093 objective O1): tracker_mutation._handle_list_records (GET /api/v1/tracker/{project}) now returns honest, value-based next_cursor pagination -- _encode_list_cursor/_decode_list_cursor (beside the ENC-ISS-699 escalation-list codec) build a base64url boundary from the last item actually RETURNED, never a raw DynamoDB LastEvaluatedKey, so a response with no next_cursor is always provably exhausted. The accumulate loop keeps pulling raw pages (bounded by _LIST_RECORDS_MAX_RAW_PAGES=10) until accumulated items exceed page_size, LastEvaluatedKey is absent, or the raw-page budget runs out with LastEvaluatedKey still present (page_truncated: true). A cursor minted on the base-table branch replayed against the project-type-index branch (or vice versa) raises ListCursorBranchMismatch, mapped to HTTP 400 CURSOR_BRANCH_MISMATCH rather than a 500 or a silent reinterpret against the wrong key schema. New entity tracker.list_cursor. feed_query/corpus.py is not touched (D1). Review fix (ENC-TSK-Q13-0A): ENC-TSK-Q13-0A (review fix, ENC-PLN-093 objective O1): _decode_list_cursor's branch check compared only the cursor's stored 'b' (\"base\" vs \"gsi\"), never the gsi branch's own record_type ('t') against the CURRENT request's type filter -- two gsi requests with different type params both compare equal on branch, so a cursor minted under type=task and replayed under type=issue decoded successfully, then fed a stale decoded['t'] into ExclusiveStartKey.record_type while the Query's own KeyConditionExpression equality value used the current type -- two different values in one ddb.query() call, producing a falsely-exhausted 200 against PagingTable (or risking an opaque 500 against real DynamoDB) instead of the documented 400 CURSOR_BRANCH_MISMATCH this dictionary's own CURSOR_BRANCH_MISMATCH entry already described. _decode_list_cursor now takes an optional record_type and raises ListCursorBranchMismatch on a gsi-branch type mismatch too, closing the gap between the documented contract and the implementation. No entity shape change -- tracker.list_cursor's fields and CURSOR_BRANCH_MISMATCH error_codes were already accurate; this version bump satisfies the dictionary-sync gate for a lambda_function.py-only fix. PREVIOUS: ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9294,10 +9294,130 @@
         ],
         "note": "Leaves O1.1 (0A, codec) / O1.2 (0B, accumulate-loop rewrite) / O1.3 (0C, branch-mismatch 400). Cursor shape borrowed conceptually from feed_query corpus's (sort_value, record_key) idea per plan decision D1 -- feed_query/corpus.py itself is not touched."
       }
+    },
+    "tracker.census": {
+      "description": "ENC-TSK-Q14 (O2.1-O2.4, ENC-PLN-093 objective O2, stacked on O1/ENC-TSK-Q13): GET /api/v1/tracker/{project}?mode=census -- a bounded synchronous summary (tracker_mutation._handle_list_census, dispatched from _handle_list_records when the mode query param equals 'census'; any other non-empty mode value is a 400, never a silent plain list). D3: bounded walk, budgets CENSUS_MAX_RAW_PAGES=50 (raw ddb.query() Limit=200 each) and CENSUS_WALL_CLOCK_MS=6000 -- both env-overridable (os.environ), read once per Lambda cold start as module constants. Either bound tripping before exhaustion sets count_truncated: true, exhausted: false; there is no async materialized census in v1. Deliberately carries NO `records` key -- this is a summary, not a page of records; a caller wanting the actual rows follows `pages[k].cursor` into the ordinary tracker.list_cursor route (feeding a page's cursor there resumes exactly at that page's first row, cross-tested against _handle_list_records). Eventual consistency: list reads (both branches) are eventually consistent -- the project-type-index (GSI) branch in particular cannot be made strongly consistent at all (DynamoDB GSI query() has no ConsistentRead=true option), so `as_of` is a watermark, not a consistency guarantee.",
+      "fields": {
+        "count": {
+          "type": "integer",
+          "definition": "Total matching records walked: primary-walk rows plus the escalation second-walk's count (D5), unless the escalation walk itself truncated -- then its rows are excluded from count entirely (see excluded_types)."
+        },
+        "count_truncated": {
+          "type": "boolean",
+          "definition": "True iff either the primary walk's own budget (D3: CENSUS_MAX_RAW_PAGES or CENSUS_WALL_CLOCK_MS) tripped before exhaustion, OR the escalation second walk (D5) truncated before exhaustion. Independent of `exhausted`, which reflects only the primary walk."
+        },
+        "exhausted": {
+          "type": "boolean",
+          "definition": "True iff the primary walk's FINAL DynamoDB call had no LastEvaluatedKey -- the only proof the primary walk covered its full scope. Does not reflect the escalation second walk's own exhaustion (see excluded_types for that signal)."
+        },
+        "pages": {
+          "type": "array",
+          "definition": "Page anchors (O2.2, _census_pages) sliced from the primary walk's rows at `page_size`, computed directly from those rows -- never re-queried. Escalation rows are never part of `pages` (D5: excluded from pages same as from count).",
+          "items": {
+            "type": "object",
+            "fields": {
+              "cursor": {
+                "type": "string",
+                "nullable": true,
+                "definition": "The tracker.list_cursor (O1.1 _encode_list_cursor) encoding of the LAST row of the PRECEDING page. null for page 0 (there is no preceding row). Feeding page k's cursor to GET /{project} (plain list mode) resumes at exactly page k's first row."
+              },
+              "first": {
+                "type": "object",
+                "definition": "{id, status, title} of this page's first row. ONLY these three fields -- a fixed placeholder per decisions.md, not the full record."
+              },
+              "last": {
+                "type": "object",
+                "definition": "{id, status, title} of this page's last row. Same three-field shape as `first`."
+              },
+              "n": {
+                "type": "integer",
+                "definition": "Row count in this page (<= page_size)."
+              }
+            }
+          }
+        },
+        "page_size": {
+          "type": "integer",
+          "definition": "Anchor page size used to slice `pages` (default 50, max 200, same caps as tracker.list_cursor's page_size). Does not bound the walk itself -- that is CENSUS_MAX_RAW_PAGES/CENSUS_WALL_CLOCK_MS (D3)."
+        },
+        "as_of": {
+          "type": "object",
+          "definition": "D4 watermark, NOT a strong-consistency guarantee (list reads are eventually consistent; the GSI branch cannot be made strongly consistent at all).",
+          "fields": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "wall_clock+max_updated_at"
+              ],
+              "definition": "Watermark method identifier -- reserved for a future alternate kind, always this value in v1."
+            },
+            "started_at": {
+              "type": "string",
+              "definition": "ISO8601 timestamp captured immediately before the primary walk begins."
+            },
+            "max_updated_at": {
+              "type": "string",
+              "definition": "Maximum `updated_at` observed across every primary-walk row (not escalation rows). Empty string when the primary walk returned zero rows."
+            }
+          }
+        },
+        "order": {
+          "type": "enum",
+          "enum": [
+            "record_id_asc",
+            "unspecified"
+          ],
+          "definition": "D6. 'record_id_asc' on the untyped base-table branch (KeyConditionExpression on project_id alone). 'unspecified' on the typed project-type-index GSI branch (a `type` filter naming one of task/issue/feature/lesson/plan/generation) -- no GSI schema change, no forced base-table walk. `type=escalation` census skips the primary walk entirely (see tracker_capabilities note below) and reports 'record_id_asc' as a placeholder default (the branch field is never actually queried in that case)."
+        },
+        "by_type": {
+          "type": "object",
+          "definition": "Per-record-type counts, additiveProperties integer. Keys are a subset of task/issue/feature/plan/lesson (from the primary walk, grouped by each row's own record_type) plus 'escalation' (from the dedicated second walk, D5) -- present only when the escalation walk ran (no `type` filter, or type == 'escalation') AND completed (exhausted); if it truncated, 'escalation' is omitted from by_type entirely rather than reporting a partial count (see excluded_types). A `type` filter naming one non-escalation type yields by_type with only that one key."
+        },
+        "ids": {
+          "type": "array",
+          "definition": "Present iff count <= ids_inline_cap (500). The FULL list of primary-walk record ids -- never a partial/truncated list; omitted entirely (not truncated) when count exceeds the cap. Never includes escalation ids."
+        },
+        "ids_inline_cap": {
+          "type": "integer",
+          "enum": [
+            500
+          ],
+          "definition": "Fixed constant (decisions.md), always echoed as 500 -- not adaptive, not env-overridable (unlike the CENSUS_* walk budgets)."
+        },
+        "excluded_types": {
+          "type": "array",
+          "definition": "Present ONLY when the escalation second walk (D5) truncated before exhaustion -- always exactly [\"escalation\"] in v1 (the only type with a second walk). When present, count_truncated is also forced true and escalation rows are excluded from count/by_type/pages entirely, never reported as a partial figure."
+        },
+        "tracker_capabilities": {
+          "type": "object",
+          "definition": "ENC-TSK-Q14-0E (O2.5/D9): GET /api/v1/health (backend/lambda/coordination_api/lambda_function.py _handle_health, NOT tracker_mutation) gains a sibling field tracker_capabilities: {census: bool, list_cursor_v2: bool} -- static feature-detection flags (unlike mcp_server.documents_patch_section's connection_health_docstore_capabilities, which is computed live from an action registry) so a caller checks this block instead of probing with a throwaway mode=census/next_cursor call. tools/enceladus-mcp-server's connection_health() merges the whole /api/v1/health response (_health_api_request()) as-is, so this field passes through to MCP callers automatically with no server.py change; the Enceladus Local Runner (ELR) reads /api/v1/health directly and sees the same block."
+        }
+      },
+      "error_codes": {
+        "INVALID_INPUT": {
+          "http_status": 400,
+          "definition": "mode=census with an unrecognized `type` filter (not one of task/issue/feature/lesson/plan/generation/escalation), or a query param `mode` value other than the empty default or 'census' -- the latter on the plain _handle_list_records dispatch point itself, before mode=census is even reached, so an unknown mode never silently falls through to a plain list."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-Q14"
+        ],
+        "plans": [
+          "ENC-PLN-093"
+        ],
+        "note": "Leaves O2.1 (0A, _census_walk bounded core) / O2.2 (0B, _census_pages page anchors, cross-tested against tracker.list_cursor) / O2.3 (0C, _census_escalation_walk + _census_collect by_type merge, D5) / O2.4 (0D, _handle_list_census payload assembly + tests/fixtures/census_v1.schema.json) / O2.5 (0E, this entity + tracker_capabilities, D9 RESOLVED: GET /api/v1/health is served by coordination_api, not tracker_mutation). D2: ENC-TSK-Q10 (project-sentinel prefix resolution) is a mandatory prerequisite -- already merged to main before this plan's O1 (ENC-TSK-Q13) landed. D7 (MCP exhaust=true re-implemented over the census count, deleting the old 50-page walk) and D8 (documents pagination + census, U3) are explicitly out of scope for this plan -- spun into their own follow-on plans per decisions.md."
+      }
     }
   },
   "change_summary": "ENC-TSK-Q26 section-13 lockstep: version bump to match governance://agents.md 2026-09-24.01 after the ENC-TSK-Q23 ELR Read Routing write. Entities unchanged. Required by tools/check_governance_dictionary_sync.py because this PR modifies backend/lambda/coordination_api/lambda_function.py. NOTE: the S3 mirror governance/live/governance_data_dictionary.json carries 215 entities against this bundled artifact's 205 (11 only in S3, 1 only here); that content divergence predates this task and is tracked separately -- only the version label is reconciled here.",
   "change_log": [
+    {
+      "version": "2026-09-24.03",
+      "date": "2026-09-24",
+      "summary": "ENC-TSK-Q14 (O2.1-O2.5, ENC-PLN-093 objective O2, stacked on O1/ENC-TSK-Q13): GET /api/v1/tracker/{project}?mode=census -- a bounded synchronous project summary (tracker_mutation._handle_list_census). New _census_walk (O2.1) mirrors the O1 branch selection (base table vs project-type-index GSI, D6) but always walks to exhaustion or a budget (D3: CENSUS_MAX_RAW_PAGES=50, CENSUS_WALL_CLOCK_MS=6000, both env-overridable) instead of stopping at one handler page; counter and escalation rows are excluded as they stream in. New _census_pages (O2.2) slices the walk's rows into page anchors -- {cursor, first, last, n} -- without re-querying, cross-tested against tracker.list_cursor's _handle_list_records (a page's cursor resumes at exactly that page's first row). New _census_escalation_walk + _census_collect (O2.3, D5) run a second bounded walk over a project's escalations (mirroring the ENC-ISS-699 begins_with(record_id, \"escalation#\") query shape) under whatever raw-page/wall-clock budget the primary walk did not spend, and merge into a by_type breakdown; a truncated escalation walk excludes escalation rows from count/by_type/pages entirely and sets excluded_types: [\"escalation\"]. New _handle_list_census (O2.4) assembles the response -- {count, count_truncated, exhausted, pages, page_size, as_of, order, by_type, ids?, ids_inline_cap: 500, excluded_types?}, deliberately with NO records key -- and _handle_list_records now dispatches mode=census to it before touching DynamoDB (any other non-empty mode value is a 400, never a silent plain list). Schema fixture committed: backend/lambda/tracker_mutation/tests/fixtures/census_v1.schema.json. D9 RESOLVED (O2.5): GET /api/v1/health is served by backend/lambda/coordination_api/lambda_function.py _handle_health (NOT tracker_mutation) -- it gains a sibling tracker_capabilities: {census: true, list_cursor_v2: true} field, static (unlike mcp_server's registry-derived docstore_capabilities), passed through automatically to MCP connection_health() callers and read directly by ELR. New entity tracker.census. feed_query/corpus.py is not touched (D1, unchanged from O1).",
+      "task_id": "ENC-TSK-Q14"
+    },
     {
       "version": "2026-09-24.02",
       "date": "2026-09-24",
