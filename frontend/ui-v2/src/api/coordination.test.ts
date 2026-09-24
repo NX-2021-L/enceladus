@@ -17,6 +17,21 @@ function mockFetchOnce(body: unknown, status = 200) {
   return fetchMock
 }
 
+/** Distinct response per call, in order -- for pagination tests where
+ * successive fetches must return different pages. */
+function mockFetchSequence(bodies: unknown[]) {
+  const fetchMock = vi.fn()
+  for (const body of bodies) {
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+    }))
+  }
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -72,12 +87,58 @@ describe('fetchAgentTypes', () => {
 })
 
 describe('fetchLessons', () => {
-  it('queries the generic tracker list route with type=lesson', async () => {
+  it('queries the generic tracker list route with type=lesson (existing behaviour, green)', async () => {
     const fetchMock = mockFetchOnce({ success: true, records: [{ item_id: 'ENC-LSN-001' }], count: 1 })
     const result = await fetchLessons('enceladus')
     const calledUrl = fetchMock.mock.calls[0]![0] as string
     expect(calledUrl).toContain('/tracker/enceladus?type=lesson')
-    expect(result).toEqual([{ item_id: 'ENC-LSN-001' }])
+    expect(result).toEqual({ records: [{ item_id: 'ENC-LSN-001' }], truncated: false })
+  })
+
+  // ENC-TSK-Q17-0D: honour the O1.2 honest-cursors contract.
+  it('surfaces page_truncated as truncated: true', async () => {
+    mockFetchOnce({
+      success: true,
+      records: [{ item_id: 'ENC-LSN-001' }],
+      count: 1,
+      page_truncated: true,
+    })
+    const result = await fetchLessons('enceladus')
+    expect(result).toEqual({ records: [{ item_id: 'ENC-LSN-001' }], truncated: true })
+  })
+
+  it('follows next_cursor with a follow-up fetch and concatenates records', async () => {
+    const fetchMock = mockFetchSequence([
+      {
+        success: true,
+        records: [{ item_id: 'ENC-LSN-001' }],
+        count: 1,
+        next_cursor: 'cursor-1',
+      },
+      { success: true, records: [{ item_id: 'ENC-LSN-002' }], count: 1 },
+    ])
+    const result = await fetchLessons('enceladus')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const secondUrl = fetchMock.mock.calls[1]![0] as string
+    expect(secondUrl).toContain('next_cursor=cursor-1')
+    expect(result).toEqual({
+      records: [{ item_id: 'ENC-LSN-001' }, { item_id: 'ENC-LSN-002' }],
+      truncated: false,
+    })
+  })
+
+  it('caps pagination at 10 pages and surfaces truncation when next_cursor still remains', async () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({
+      success: true,
+      records: [{ item_id: `ENC-LSN-${i}` }],
+      count: 1,
+      next_cursor: `cursor-${i + 1}`,
+    }))
+    const fetchMock = mockFetchSequence(pages)
+    const result = await fetchLessons('enceladus')
+    expect(fetchMock).toHaveBeenCalledTimes(10)
+    expect(result.records).toHaveLength(10)
+    expect(result.truncated).toBe(true)
   })
 })
 
