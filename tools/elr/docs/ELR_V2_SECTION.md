@@ -158,3 +158,63 @@ cheap live governed READ per profile) -- the `--help` invocation above
 is the closest available offline verification that the fresh-HOME
 install path itself is sound; the actual `--all-profiles` live run
 against prod and v4-gamma is the coordinator-owned evidence capture.
+
+## `elr list` (ENC-TSK-Q16, U2)
+
+`elr_list.py` reads the tracker list surface (`GET /{project}`,
+`tools/enceladus-mcp-server`'s `tracker_mutation` raw route) without
+ever re-implementing client-side "walk every page" pagination -- that
+pattern is exactly what produced the silent undercount this whole plan
+(ENC-PLN-093) exists to fix. It offers three explicit modes instead:
+
+**`elr_list.py --project P [--type T] [--status S] --census`**
+Runs ONE bounded, server-side census walk (`mode=census`, U1). The full
+census payload (`{count, count_truncated, exhausted, pages, page_size,
+as_of, order, by_type, ids?, ids_inline_cap, excluded_types?}`) is
+written **verbatim** to
+`~/.enceladus/lists/<project>_<type|all>_<status|all>_<as_of.started_at>.census.json`
+(`--lists-dir` overrides the base directory). Only a compact digest is
+ever printed to stdout: exactly `count`, `exhausted`, `count_truncated`,
+`pages`, `as_of`, `by_type` (plus the standard stable digest keys) --
+`pages` already carries each page-boundary cursor indexed by list
+position, so no separate cursor listing is printed.
+
+**`elr_list.py --project P --page CURSOR`**
+Fetches exactly ONE raw page for a caller-supplied cursor (typically a
+`pages[i].cursor` value from a prior `--census` run) and writes one
+record id per line to
+`~/.enceladus/lists/<project>_<sha256(cursor)[:12]>.ids` -- the exact
+format `elr_batch_get.py --ids-file` already loads. There is
+deliberately **no `--all`** here; ELR never auto-walks this route.
+Digest: `n` (ids written) plus `next_cursor` / `page_truncated`
+(present only when the server reports more rows remain beyond this one
+page).
+
+**`elr_list.py --project P [--type T] [--status S] --pages N`** (N: 1-10)
+A bounded convenience loop: reads the **most recent** `--census` side
+file matching the same `--project`/`--type`/`--status`, fetches its
+first N page-boundary cursors (one raw-page request each), and writes
+the combined ids to one
+`~/.enceladus/lists/<project>_<type|all>_<status|all>_pagesN.ids` file.
+Digest carries `n` (total ids across the N pages), `next_cursor` /
+`page_truncated` from the last page fetched, and `lower_bound: true`
+whenever `N` is less than the census file's actual page count (the
+caller's id set is a lower bound on the true total, not the whole
+walk).
+
+**Capability preflight (every mode, before any list/census request):**
+`elr_list.py` reads `tracker_capabilities.census` off `GET
+/api/v1/health` (the same payload MCP's `connection_health` tool
+reports). A server that does not advertise `census: true` gets **zero**
+list/census requests -- ELR never falls back to walking pages itself on
+a plane that predates U1.
+
+Exit codes (`elr_list.py`):
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Generic refusal: unreachable/5xx/unexpected HTTP status, a server-reported `error` body, or (for `--pages`) no matching `--census` side file found |
+| 2 | Argparse rejection: bad flag, `--project _` (the reserved tracker-sentinel segment), `--page-size` > 200, `--pages` outside 1-10, or more than one of `--census`/`--page`/`--pages` given |
+| 4 | TLS CA bundle could not be resolved (ENC-TSK-P76, same contract as every other ELR CLI) |
+| 6 | `CENSUS_UNSUPPORTED` -- the target server's `/api/v1/health` does not advertise `tracker_capabilities.census`; ELR never walks pages as a fallback |

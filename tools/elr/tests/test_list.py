@@ -238,6 +238,11 @@ class CapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 2)
         self.assertTrue(digest["ok"])
 
+    def test_exit_code_documented_in_docs_section(self):
+        docs = (Path(__file__).resolve().parent.parent / "docs" / "ELR_V2_SECTION.md").read_text(encoding="utf-8")
+        self.assertIn("CENSUS_UNSUPPORTED", docs)
+        self.assertIn("elr_list", docs)
+
 
 class CensusModeTests(unittest.TestCase):
     def _census_body(self):
