@@ -289,6 +289,11 @@ jobs:
           python3 tools/prod_gate_coverage_guard.py
           python3 -m unittest tools.test_prod_gate_coverage_guard
 
+      - name: v3-prod promote preflight self-tests (ENC-TSK-Q21 FR-8)
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.test_promote_preflight -v
+
       # ENC-TSK-P08 / ENC-ISS-665: nothing wired this harness into CI before
       # this task (git grep verify_arm64_validation_harness in
       # .github/workflows/ returned nothing) -- so its non-passing discipline

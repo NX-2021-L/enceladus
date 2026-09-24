@@ -18,6 +18,18 @@ on:
     branches:
       - main
       - 'v[0-9]*/main'
+  workflow_dispatch:
+    # ENC-TSK-Q21 FR-8 (DOC-5368FE6515ED): PRs and pushes made with
+    # GITHUB_TOKEN never trigger pull_request workflows, so a promote PR
+    # opened by promote-gamma-to-prod-request.yml (itself GITHUB_TOKEN) would
+    # never get this required "PR Commit Gate" check run. That workflow
+    # dispatches this one directly with the PR number instead, so the check
+    # actually executes and reports on the promote commit.
+    inputs:
+      pr_number:
+        description: "PR number to run the gate against"
+        type: string
+        required: true
 
 jobs:
   commit-gate:
@@ -25,28 +37,149 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ENC-TSK-Q21: normalize PR_NUMBER/HEAD_REF/BASE_REF/HEAD_SHA/BODY from
+      # whichever trigger fired -- the pull_request event context directly,
+      # or (workflow_dispatch) a GitHub API read of inputs.pr_number -- so
+      # every step below reads one source regardless of trigger.
+      - name: Resolve PR context (event or dispatch)
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          EVT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVT_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -z "$DISPATCH_PR_NUMBER" ]]; then
+              echo "::error::workflow_dispatch requires input pr_number."
+              exit 1
+            fi
+            PR_NUMBER="$DISPATCH_PR_NUMBER"
+            PR_JSON=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}")
+            HEAD_REF=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['ref'])")
+            BASE_REF=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['base']['ref'])")
+            HEAD_SHA=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])")
+            BODY=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
+          else
+            PR_NUMBER="$EVT_PR_NUMBER"
+            HEAD_REF="$EVT_HEAD_REF"
+            BASE_REF="$EVT_BASE_REF"
+            HEAD_SHA="$EVT_HEAD_SHA"
+            BODY="$EVT_BODY"
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<PRBODY_EOF"
+            echo "$BODY"
+            echo "PRBODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved PR #$PR_NUMBER: head=$HEAD_REF base=$BASE_REF head_sha=$HEAD_SHA (event=$EVENT_NAME)"
+
       # ENC-TSK-G71: sync-main-to-v4main.yml opens transient PRs base=v4/main
       # head=auto/sync-main-to-v4main-* to forward-sync v4/main without bypass
       # actors. These PRs are not task-bound and have no CCI. Recognize the
       # pattern + base and short-circuit the gate as a pass.
-      - name: Detect auto sync PR (CCI-exempt)
+      # ENC-TSK-Q21 FR-8: promote-gamma-to-prod-request.yml opens transient
+      # PRs base=main head=auto/promote-v4main-to-main-* to promote an
+      # already gamma-validated v4/main commit. Same waiver rationale -- no
+      # tracker task/CCI for a PR the relay itself opened -- but the promote
+      # class additionally asserts the head sha is gamma-validated (below),
+      # which the sync class does not need (it never leaves v4/main).
+      - name: Classify PR (CCI-exempt classes)
         id: classify
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          # ENC-TSK-Q21 review fix: branch name alone is spoofable -- any
+          # same-repo PR author (or, before this fix, even a fork, since
+          # head_repo was never checked) can name a branch
+          # auto/promote-v4main-to-main-* and point it at any commit that
+          # has ever landed on v4/main (trivially an ancestor of the current
+          # tip), waiving CCI on a PR the promote relay never opened. Require
+          # the head repo to be this repo (never a fork) AND the PR author to
+          # be the promote relay's own actor (github-actions[bot], the
+          # GITHUB_TOKEN identity promote-gamma-to-prod-request.yml runs as)
+          # before granting the waiver.
+          HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_USER_LOGIN: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
+          set -euo pipefail
+          # On the pull_request event these come straight from the event
+          # context; on workflow_dispatch (promote's own trigger path) the
+          # event context has no PR payload, so resolve the same fields via
+          # the API for the dispatched pr_number.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            PR_JSON=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}")
+            HEAD_REPO_FULL_NAME=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['repo']['full_name'])")
+            PR_USER_LOGIN=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['login'])")
+          fi
+
           if [[ "$HEAD_REF" == auto/sync-main-to-v4main-* && "$BASE_REF" == "v4/main" ]]; then
             echo "Auto-sync PR detected (head=$HEAD_REF base=$BASE_REF) — CCI requirement waived."
             echo "auto_sync=true" >> "$GITHUB_OUTPUT"
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$HEAD_REF" == auto/promote-v4main-to-main-* && "$BASE_REF" == "main" ]]; then
+            if [[ "$HEAD_REPO_FULL_NAME" != "$REPO" ]]; then
+              echo "::error::ENC-TSK-Q21 FR-8: promote-pattern PR head=$HEAD_REF is from a fork ($HEAD_REPO_FULL_NAME), not $REPO -- refusing to waive CCI."
+              exit 1
+            fi
+            if [[ "$PR_USER_LOGIN" != "github-actions[bot]" ]]; then
+              echo "::error::ENC-TSK-Q21 FR-8: promote-pattern PR head=$HEAD_REF was opened by '$PR_USER_LOGIN', not the promote relay (github-actions[bot]) -- refusing to waive CCI."
+              exit 1
+            fi
+            echo "Promote PR detected (head=$HEAD_REF base=$BASE_REF, opened by $PR_USER_LOGIN from $HEAD_REPO_FULL_NAME) — CCI requirement waived (ancestry asserted separately)."
+            echo "auto_sync=false" >> "$GITHUB_OUTPUT"
+            echo "promote=true" >> "$GITHUB_OUTPUT"
           else
             echo "auto_sync=false" >> "$GITHUB_OUTPUT"
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ENC-TSK-Q21 FR-8: the promote class skips ONLY CCI extraction/
+      # validation (below) -- every other step, including deploy-target
+      # declaration, still runs. This step proves the waiver is safe: the
+      # promote PR's head commit must already be part of gamma's validated
+      # history, not an arbitrary commit smuggled onto the promote branch.
+      - name: Checkout (promote ancestry check only)
+        if: steps.classify.outputs.promote == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert promote PR head is ancestor-or-equal of v4/main (ENC-TSK-Q21 FR-8)
+        if: steps.classify.outputs.promote == 'true'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin v4/main --quiet
+          git fetch origin "$HEAD_SHA" --quiet || true
+          if git merge-base --is-ancestor "$HEAD_SHA" origin/v4/main; then
+            echo "OK: promote PR head $HEAD_SHA is an ancestor-or-equal of origin/v4/main."
+          else
+            echo "::error::ENC-TSK-Q21 FR-8: promote PR head $HEAD_SHA is not an ancestor-or-equal of origin/v4/main -- refusing to waive CCI for a non-gamma-validated commit."
+            exit 1
           fi
 
       - name: Extract commit-complete-id from PR body
         id: extract_cci
-        if: steps.classify.outputs.auto_sync != 'true'
+        if: steps.classify.outputs.auto_sync != 'true' && steps.classify.outputs.promote != 'true'
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BODY: ${{ steps.pr.outputs.body }}
         run: |
           # Extract CCI token: pattern CCI-{32 lowercase hex chars}
           CCI_ID=$(echo "$PR_BODY" | grep -oE 'CCI-[0-9a-f]{32}' | head -1 || true)
@@ -63,7 +196,7 @@ jobs:
           echo "cci_id=$CCI_ID" >> "$GITHUB_OUTPUT"
 
       - name: Validate commit-complete-id with checkout service
-        if: steps.classify.outputs.auto_sync != 'true'
+        if: steps.classify.outputs.auto_sync != 'true' && steps.classify.outputs.promote != 'true'
         env:
           CCI_ID: ${{ steps.extract_cci.outputs.cci_id }}
           CHECKOUT_SERVICE_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/checkout
@@ -108,7 +241,7 @@ jobs:
       - name: Validate deploy target declaration
         if: steps.classify.outputs.auto_sync != 'true'
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           DEPLOY_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
         run: |
@@ -132,10 +265,10 @@ jobs:
 
       # ENC-TSK-963: Agent provenance validation for Bedrock-authored PRs
       - name: Validate agent provenance (Bedrock PRs)
-        if: startsWith(github.event.pull_request.head.ref, 'agent/')
+        if: startsWith(steps.pr.outputs.head_ref, 'agent/')
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BODY: ${{ steps.pr.outputs.body }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           echo "Agent-authored PR detected: $HEAD_REF"
 

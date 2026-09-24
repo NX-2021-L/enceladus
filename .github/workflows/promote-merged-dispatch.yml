@@ -1,0 +1,77 @@
+name: Promote merged -> v3-prod dispatch
+
+# ENC-TSK-Q21 FR-8 (DOC-5368FE6515ED): "promote is a merge". When a promote
+# PR (opened by promote-gamma-to-prod-request.yml, base=main head=auto/
+# promote-v4main-to-main-*) is merged, THAT merge is what triggers the
+# v3-prod deploy dispatch -- not a raw workflow_dispatch off an unmerged
+# v4/main sha. This workflow is the relay: it performs no AWS mutation
+# itself (the dispatched _deploy.yml v3-prod lane is the environment-gated
+# mutating job, same as every other promote-* relay -- see
+# tools/prod_gate_baseline.json). It carries both the main merge commit
+# (commit_sha, what actually landed) and the gamma head sha the promote PR
+# was cut from (gamma_sha) so _deploy.yml's promote_preflight job (FR-8) can
+# assert the merge didn't smuggle in anything beyond what gamma validated.
+#
+# Any OTHER PR merged to main (not a promote PR) is a no-op here -- main
+# accepts ordinary PRs (docs, governance, this very workflow's own changes)
+# that never touch v4/main or v3-prod.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  actions: write   # dispatch _deploy.yml
+  contents: write  # delete the merged promote branch
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'auto/promote-v4main-to-main-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch v3-prod deploy (ENC-TSK-Q21 FR-8/FR-10)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          GAMMA_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MERGE_SHA" ]; then
+            echo "::error::PR #$PR_NUMBER reports merged=true but has no merge_commit_sha -- refusing to dispatch."
+            exit 1
+          fi
+
+          echo "Promote PR #$PR_NUMBER merged. merge_commit_sha=$MERGE_SHA gamma_sha=$GAMMA_SHA -- dispatching v3-prod deploy"
+
+          # _deploy.yml's promote_preflight job (ENC-TSK-Q21 FR-8) re-verifies
+          # both ancestry facts independently -- this dispatch does not skip
+          # or replace that check, it only supplies the inputs it reads.
+          gh api -X POST \
+            "/repos/$REPO/actions/workflows/_deploy.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[target_environment]=v3-prod" \
+            -f "inputs[commit_sha]=$MERGE_SHA" \
+            -f "inputs[gamma_sha]=$GAMMA_SHA" \
+            -f "inputs[merged_at]=$MERGED_AT"
+
+          echo "v3-prod deploy dispatched (ref=main commit_sha=$MERGE_SHA gamma_sha=$GAMMA_SHA). Awaiting reviewer approval on the GitHub Environment."
+
+      - name: Delete merged promote branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          gh api -X DELETE "/repos/$REPO/git/refs/heads/${BRANCH}" \
+            && echo "Deleted merged promote branch $BRANCH" \
+            || echo "::warning::Could not delete branch $BRANCH (already gone?) -- non-fatal"
