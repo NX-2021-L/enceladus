@@ -2905,6 +2905,13 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     return _response(200, {"success": True, "record": item})
 
 
+_LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
+# budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
+# FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
+# this budget with rows still possible ALWAYS yields a next_cursor (+
+# page_truncated: true) instead of silently truncating with no way back in.
+
+
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     """GET /{project} — list records with optional type/status filters.
 
@@ -2914,6 +2921,36 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     more records remain. Prior behavior exhausted LastEvaluatedKey and returned
     everything, causing the pre-existing 413 surfaced during the 2026-04-20
     io-override session.
+
+    ENC-TSK-Q13 (O1.2): the cursor is now a value-based boundary (see
+    _encode_list_cursor/_decode_list_cursor) built from the last item this
+    call actually RETURNED, never a raw DynamoDB LastEvaluatedKey. The old
+    version had two honesty bugs mirroring ENC-ISS-699's escalation-list
+    fix:
+
+      1. When a single query() response already held >= page_size raw items
+         *and* was DynamoDB's last page (no LastEvaluatedKey), the old loop
+         condition (`len(items) < page_size`) never re-entered, so the
+         `if len(items) >= page_size: encode cursor` branch inside the loop
+         never ran either -- no cursor was ever emitted even though `items`
+         had already been silently trimmed to page_size, discarding
+         whatever came after in that same raw page.
+      2. The cursor (when emitted at all) was the raw LastEvaluatedKey of
+         whichever raw page happened to trip the page_size threshold --
+         positioned after everything DynamoDB had scanned so far, not after
+         everything this call actually returned to the caller. Combined
+         with (1) this meant a caller could lose rows with no signal.
+
+    Loop invariant here: keep pulling raw pages (bounded by
+    _LIST_RECORDS_MAX_RAW_PAGES) until either (a) accumulated items exceed
+    page_size -- proof at least one more match exists past the page
+    boundary, (b) DynamoDB reports no LastEvaluatedKey -- proof the walk is
+    exhausted, or (c) the raw-page budget runs out with LastEvaluatedKey
+    still present -- unproven, so next_cursor is still emitted (from the
+    last returned item, or -- if zero rows matched this call at all -- from
+    the last EVALUATED key re-encoded through the codec so the walk can
+    resume) and page_truncated: true is set. A response with no next_cursor
+    is therefore always provably exhausted.
     """
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
@@ -2926,7 +2963,14 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
     try:
         if record_type and record_type in _RECORD_TYPES:
-            # Query using GSI
+            # Query using GSI (project-type-index: HASH project_id, RANGE
+            # record_type). LastEvaluatedKey/ExclusiveStartKey for a GSI
+            # query carries the index's own key (project_id, record_type)
+            # PLUS the base table's primary key (project_id, record_id) --
+            # DynamoDB requires the base key to disambiguate position within
+            # the index. That's why the gsi-branch cursor payload carries
+            # record_type (`t`) alongside project_id/record_id.
+            branch = "gsi"
             kwargs: Dict[str, Any] = {
                 "TableName": DYNAMODB_TABLE,
                 "IndexName": "project-type-index",
@@ -2942,7 +2986,10 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 kwargs["ExpressionAttributeNames"] = {"#st": "status"}
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
         else:
-            # Query all records for project
+            # Query all records for project (base table: HASH project_id,
+            # RANGE record_id). No GSI change (D6): this branch's sort order
+            # is record_id ascending, unmodified.
+            branch = "base"
             kwargs = {
                 "TableName": DYNAMODB_TABLE,
                 "KeyConditionExpression": "project_id = :pid",
@@ -2965,41 +3012,56 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
 
         if cursor:
             try:
-                import base64
-                kwargs["ExclusiveStartKey"] = json.loads(
-                    base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-                )
+                decoded_cursor = _decode_list_cursor(cursor, branch)
+            except ListCursorBranchMismatch:
+                raise
             except Exception:
                 return _error(400, "Invalid next_cursor")
+            exclusive_start: Dict[str, Any] = {
+                "project_id": _ser_s(decoded_cursor["p"]),
+                "record_id": _ser_s(decoded_cursor["r"]),
+            }
+            if branch == "gsi":
+                exclusive_start["record_type"] = _ser_s(decoded_cursor["t"])
+            kwargs["ExclusiveStartKey"] = exclusive_start
 
         items: List[Dict[str, Any]] = []
-        next_cursor = ""
-        # Accumulate up to page_size post-filter items. DDB Limit caps the
-        # pre-filter scan, so we may need multiple pages to fill page_size when
-        # a FilterExpression is applied. Bound the loop to prevent runaway.
-        max_pages = 10
-        while len(items) < page_size and max_pages > 0:
+        page_truncated = False
+        last_evaluated_key: Optional[Dict[str, Any]] = None
+        raw_pages_fetched = 0
+        while True:
             resp = ddb.query(**kwargs)
             items.extend(resp.get("Items", []))
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
-            max_pages -= 1
-            if len(items) >= page_size:
-                # Encode cursor for caller
-                import base64
-                next_cursor = base64.urlsafe_b64encode(
-                    json.dumps(last_key).encode("utf-8")
-                ).decode("ascii")
-                break
+            raw_pages_fetched += 1
+            last_evaluated_key = resp.get("LastEvaluatedKey")
+            if len(items) > page_size:
+                break  # proof: at least one more match exists past page_size
+            if not last_evaluated_key:
+                break  # proof: DynamoDB walk exhausted
+            if raw_pages_fetched >= _LIST_RECORDS_MAX_RAW_PAGES:
+                page_truncated = True
+                break  # unproven -- budget hit, more may still exist
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
 
-        # Trim to page_size exactly
-        items = items[:page_size]
+        next_cursor = ""
+        if len(items) > page_size:
+            visible_raw = items[:page_size]
+            next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+        elif last_evaluated_key:
+            visible_raw = items
+            if visible_raw:
+                next_cursor = _encode_list_cursor(_deser_item(visible_raw[-1]), branch)
+            else:
+                # Zero rows matched this call, budget hit -- re-encode the
+                # last EVALUATED key (not a returned item) so the walk can
+                # still resume past everything already scanned.
+                next_cursor = _encode_list_cursor(_deser_item(last_evaluated_key), branch)
+        else:
+            visible_raw = items
 
-        # Deserialize and filter out counter records
+        # Deserialize and filter out counter records.
         records = []
-        for raw in items:
+        for raw in visible_raw:
             item = _deser_item(raw)
             if item.get("record_type") == "counter":
                 continue
@@ -3013,6 +3075,8 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
         }
         if next_cursor:
             payload["next_cursor"] = next_cursor
+        if page_truncated:
+            payload["page_truncated"] = True
         return _response(200, payload)
 
     except Exception as exc:
