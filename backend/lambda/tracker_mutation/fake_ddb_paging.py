@@ -20,12 +20,20 @@ item budget is min(kwargs Limit, raw_page_size). Real DynamoDB can return
 fewer items than a caller's Limit for its own reasons (the 1MB response
 cap, chiefly); this lets a test force that without inventing giant items.
 
+ENC-TSK-Q14 (checkout_state_ne, M36 tile/Feed invariant) widened the
+evaluator beyond a flat ANDed-equality shape: it now also understands one
+level of parenthesized `(clause OR clause ...)` grouping ANDed alongside
+the flat clauses, plus `attr <> :placeholder` and
+`attribute_not_exists(attr)` inside a clause -- exactly (and only) the
+shape `_add_checkout_state_ne_filter` emits:
+`(attribute_not_exists(#cs) OR #cs <> :csne)`.
+
 Intentionally NOT implemented: multiple partitions/projects sharing one
 table instance behaving independently is fine (KeyConditionExpression on
 project_id is honoured), but arbitrary FilterExpression syntax is not --
-only the simple `attr = :placeholder [AND attr = :placeholder ...]` shape
-_handle_list_records emits (optionally via an ExpressionAttributeNames
-placeholder like "#st") is evaluated.
+nesting deeper than one level of parens, `attribute_exists`, `begins_with`
+inside a FilterExpression (only used in KeyConditionExpression by this
+codebase), or any operator besides `=`/`<>` is not evaluated.
 """
 from __future__ import annotations
 
@@ -75,20 +83,82 @@ class PagingTable:
     # -- filter evaluation ----------------------------------------------
 
     @staticmethod
-    def _eval_filter(expr: Optional[str], item: Dict[str, Any],
+    def _split_top_level(expr: str, sep: str) -> List[str]:
+        """Split `expr` on `sep` (" AND " / " OR "), ignoring any `sep`
+        occurrence inside parentheses -- so a parenthesized OR-group ANDed
+        alongside flat equality clauses is kept intact for `_eval_filter`
+        to hand to the OR-group branch instead of being split apart."""
+        parts: List[str] = []
+        depth = 0
+        current = ""
+        i = 0
+        while i < len(expr):
+            ch = expr[i]
+            if ch == "(":
+                depth += 1
+                current += ch
+                i += 1
+            elif ch == ")":
+                depth -= 1
+                current += ch
+                i += 1
+            elif depth == 0 and expr[i:i + len(sep)] == sep:
+                parts.append(current)
+                current = ""
+                i += len(sep)
+            else:
+                current += ch
+                i += 1
+        parts.append(current)
+        return parts
+
+    @staticmethod
+    def _eval_clause(clause: str, item: Dict[str, Any],
                       expr_values: Dict[str, Any], expr_names: Dict[str, str]) -> bool:
-        """Evaluate the simple ANDed-equality FilterExpression shape
-        _handle_list_records builds. Not a general parser."""
-        if not expr:
-            return True
-        for clause in expr.split(" AND "):
-            attr, _, placeholder = clause.strip().partition("=")
+        """Evaluate one non-parenthesized clause: `attr = :ph`,
+        `attr <> :ph`, or `attribute_not_exists(attr)`."""
+        clause = clause.strip()
+        if clause.startswith("attribute_not_exists(") and clause.endswith(")"):
+            attr = clause[len("attribute_not_exists("):-1].strip()
+            if attr.startswith("#"):
+                attr = expr_names.get(attr, attr)
+            return attr not in item
+        if "<>" in clause:
+            attr, _, placeholder = clause.partition("<>")
             attr = attr.strip()
             placeholder = placeholder.strip()
             if attr.startswith("#"):
                 attr = expr_names.get(attr, attr)
             want = expr_values.get(placeholder)
-            if want is None or item.get(attr) != want:
+            return item.get(attr) != want
+        attr, _, placeholder = clause.partition("=")
+        attr = attr.strip()
+        placeholder = placeholder.strip()
+        if attr.startswith("#"):
+            attr = expr_names.get(attr, attr)
+        want = expr_values.get(placeholder)
+        if want is None or item.get(attr) != want:
+            return False
+        return True
+
+    @classmethod
+    def _eval_filter(cls, expr: Optional[str], item: Dict[str, Any],
+                      expr_values: Dict[str, Any], expr_names: Dict[str, str]) -> bool:
+        """Evaluate the ANDed-equality FilterExpression shape
+        _handle_list_records/_census_walk build, now also handling one
+        parenthesized `(clause OR clause ...)` group ANDed alongside the
+        flat clauses (ENC-TSK-Q14 checkout_state_ne). Not a general parser."""
+        if not expr:
+            return True
+        for clause in cls._split_top_level(expr, " AND "):
+            clause = clause.strip()
+            if clause.startswith("(") and clause.endswith(")"):
+                sub_clauses = cls._split_top_level(clause[1:-1], " OR ")
+                if not any(
+                    cls._eval_clause(sc, item, expr_values, expr_names) for sc in sub_clauses
+                ):
+                    return False
+            elif not cls._eval_clause(clause, item, expr_values, expr_names):
                 return False
         return True
 

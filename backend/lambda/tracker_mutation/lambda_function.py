@@ -2905,6 +2905,35 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     return _response(200, {"success": True, "record": item})
 
 
+def _add_checkout_state_ne_filter(checkout_state_ne: str, filter_parts: List[str],
+                                   expr_names: Dict[str, str], expr_values: Dict[str, Any]) -> None:
+    """ENC-TSK-Q14 (M36 tile/Feed invariant): `checkout_state_ne` query-param
+    support, shared verbatim by _handle_list_records's two branches (plain
+    list) and _census_walk's two branches (census primary walk) so a census
+    page cursor replayed into the list route excludes exactly the same rows
+    the census walk already excluded.
+
+    Appends `(attribute_not_exists(#cs) OR #cs <> :csne)` to `filter_parts`
+    -- a row with NO checkout_state attribute at all (the common case: most
+    records are never checked out) passes, and a row whose checkout_state
+    equals the given value is excluded; any other checkout_state value
+    passes. Mutates `filter_parts`/`expr_names`/`expr_values` in place;
+    no-op when `checkout_state_ne` is falsy/blank.
+
+    Deliberately does NOT touch ProjectionExpression -- DynamoDB evaluates
+    FilterExpression against the full stored item before projection is
+    applied, so a filtered-on attribute need not be projected for the
+    caller to receive back (real DynamoDB behavior; fake_ddb_paging.py's
+    PagingTable mirrors it).
+    """
+    checkout_state_ne = str(checkout_state_ne or "").strip()
+    if not checkout_state_ne:
+        return
+    filter_parts.append("(attribute_not_exists(#cs) OR #cs <> :csne)")
+    expr_names["#cs"] = "checkout_state"
+    expr_values[":csne"] = _ser_s(checkout_state_ne)
+
+
 _LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
 # budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
 # FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
@@ -2926,7 +2955,7 @@ _CENSUS_IDS_INLINE_CAP = 500  # decisions.md: fixed constant, echoed in payload
 
 def _census_walk(project_id: str, record_type: str = "", status_filter: str = "",
                   max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
-                  clock=None) -> Dict[str, Any]:
+                  clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
     """ENC-TSK-Q14 (O2.1): bounded raw walk over every matching record.
 
     Reuses the O1 (_handle_list_records) branch selection (base table vs
@@ -2939,11 +2968,26 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
     full record. project_id/record_id/record_type are kept even though
     they're constant/filtered-on because _encode_list_cursor (O1.1) needs
     them to mint page-anchor cursors (O2.2) straight from these rows.
+    `checkout_state` is deliberately NOT added here even when
+    `checkout_state_ne` is set -- FilterExpression is evaluated against the
+    full stored item before ProjectionExpression trims it for return, so
+    filtering on checkout_state needs no projection (_add_checkout_state_ne_filter).
     Counter rows (record_id starting with `_TRACKER_COUNTER_PREFIX`, the
     same sentinel `_query_all_project_tasks` guards against) are dropped
     from `rows` as they stream in, same as `_handle_list_records` drops
     record_type == "counter" (ENC-TSK-Q13) -- counters are bookkeeping
     rows, never census subjects.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant): applied
+    IDENTICALLY to _handle_list_records's own `checkout_state_ne` handling
+    (_add_checkout_state_ne_filter, shared) -- rows whose checkout_state
+    equals this value are excluded INSIDE the walk via FilterExpression,
+    not post-filtered in Python, so a census page cursor (O2.2) replayed
+    into _handle_list_records with the same checkout_state_ne resumes at
+    exactly the next slice this walk would have produced. The escalation
+    second walk (_census_escalation_walk) does NOT take this parameter --
+    escalation rows have no checkout_state attribute at all, so they can
+    never match a checkout_state exclusion and are always unaffected.
 
     Returns {rows, exhausted, truncated_reason, branch}. `exhausted` is
     True iff the FINAL DynamoDB call had no LastEvaluatedKey -- the only
@@ -2975,9 +3019,16 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
             "ExpressionAttributeNames": {"#st": "status"},
             "Limit": _CENSUS_RAW_PAGE_LIMIT,
         }
+        filter_parts = []
         if status_filter:
-            kwargs["FilterExpression"] = "#st = :st"
+            filter_parts.append("#st = :st")
             kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
+        if filter_parts:
+            kwargs["FilterExpression"] = " AND ".join(filter_parts)
     else:
         # Base-table branch (D6): record_id ascending -- order="record_id_asc".
         branch = "base"
@@ -2996,6 +3047,10 @@ def _census_walk(project_id: str, record_type: str = "", status_filter: str = ""
         if record_type:
             filter_parts.append("record_type = :rtype")
             kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+        _add_checkout_state_ne_filter(
+            checkout_state_ne, filter_parts, kwargs["ExpressionAttributeNames"],
+            kwargs["ExpressionAttributeValues"],
+        )
         if filter_parts:
             kwargs["FilterExpression"] = " AND ".join(filter_parts)
 
@@ -3178,7 +3233,7 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
                      max_raw_pages: Optional[int] = None, wall_clock_ms: Optional[int] = None,
                      escalation_max_raw_pages: Optional[int] = None,
                      escalation_wall_clock_ms: Optional[int] = None,
-                     clock=None) -> Dict[str, Any]:
+                     clock=None, checkout_state_ne: str = "") -> Dict[str, Any]:
     """ENC-TSK-Q14 (O2.3): primary census walk + (in-scope) escalation walk, merged.
 
     D5: the escalation second walk runs when there is no `type` filter, or
@@ -3198,6 +3253,16 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
     `_census_escalation_walk` whenever the escalation walk runs, so a
     status-filtered census never silently mixes a filtered primary count
     with an unfiltered escalation count under one `count`/`by_type`.
+
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) is forwarded
+    to the PRIMARY walk only (`_census_walk`) -- never to
+    `_census_escalation_walk`. Escalation records carry no `checkout_state`
+    attribute at all (they are never checked out), so
+    `attribute_not_exists(checkout_state) OR checkout_state <> :csne`
+    would always evaluate true for every escalation row regardless of the
+    value given; forwarding it would be a no-op at best and a wasted
+    FilterExpression at worst. The escalation walk is documented here as
+    intentionally unaffected by this parameter.
 
     Budget sharing ("under the remaining budget", per o2_spec.md O2.3):
     unless `escalation_max_raw_pages`/`escalation_wall_clock_ms` are given
@@ -3234,6 +3299,7 @@ def _census_collect(project_id: str, record_type: str = "", status_filter: str =
         primary = _census_walk(
             project_id, record_type=record_type, status_filter=status_filter,
             max_raw_pages=total_max_raw_pages, wall_clock_ms=total_wall_clock_ms, clock=clock,
+            checkout_state_ne=checkout_state_ne,
         )
 
     by_type: Dict[str, int] = {}
@@ -3304,6 +3370,9 @@ def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
     are not part of the watermark scan). Status filter applies inside the
     walk exactly as the plain-list route (D3/D5: unchanged FilterExpression
     semantics, just walked to a budget instead of a caller page).
+    `checkout_state_ne` (ENC-TSK-Q14, M36 tile/Feed invariant) applies the
+    same way, inside the primary walk only -- see _census_collect's
+    docstring.
     """
     record_type = str(query_params.get("type") or "").strip()
     if record_type and record_type not in _CENSUS_VALID_TYPES:
@@ -3313,13 +3382,20 @@ def _handle_list_census(project_id: str, query_params: Dict) -> Dict:
             f"Allowed: {sorted(_CENSUS_VALID_TYPES)}",
         )
     status_filter = str(query_params.get("status") or "").strip()
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): forwarded to _census_collect's
+    # primary walk only -- see _census_collect's docstring for why the
+    # escalation walk is unaffected.
+    checkout_state_ne = str(query_params.get("checkout_state_ne") or "").strip()
     try:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
         page_size = 50
 
     started_at = _now_z()
-    result = _census_collect(project_id, record_type=record_type, status_filter=status_filter)
+    result = _census_collect(
+        project_id, record_type=record_type, status_filter=status_filter,
+        checkout_state_ne=checkout_state_ne,
+    )
 
     rows = result["rows"]
     pages = _census_pages(rows, page_size, result["branch"])
@@ -3409,6 +3485,12 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
+    # ENC-TSK-Q14 (M36 tile/Feed invariant): rows whose checkout_state
+    # equals this value are excluded INSIDE the walk (FilterExpression),
+    # applied identically here and in the census primary walk
+    # (_census_walk) via the shared _add_checkout_state_ne_filter helper --
+    # see that helper's docstring for the exact clause and rationale.
+    checkout_state_ne = query_params.get("checkout_state_ne", "")
     try:
         page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
     except (TypeError, ValueError):
@@ -3435,10 +3517,19 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 },
                 "Limit": page_size,
             }
+            filter_parts = []
+            expr_names: Dict[str, str] = {}
             if status_filter:
-                kwargs["FilterExpression"] = "#st = :st"
-                kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+                filter_parts.append("#st = :st")
+                expr_names["#st"] = "status"
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
+            if filter_parts:
+                kwargs["FilterExpression"] = " AND ".join(filter_parts)
+            if expr_names:
+                kwargs["ExpressionAttributeNames"] = expr_names
         else:
             # Query all records for project (base table: HASH project_id,
             # RANGE record_id). No GSI change (D6): this branch's sort order
@@ -3459,6 +3550,9 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if record_type:
                 filter_parts.append("record_type = :rtype")
                 kwargs["ExpressionAttributeValues"][":rtype"] = _ser_s(record_type)
+            _add_checkout_state_ne_filter(
+                checkout_state_ne, filter_parts, expr_names, kwargs["ExpressionAttributeValues"],
+            )
             if filter_parts:
                 kwargs["FilterExpression"] = " AND ".join(filter_parts)
             if expr_names:
