@@ -103,6 +103,18 @@ and stable, never a raw document body.
 the U1 bounded-census payload's own small, stable summary fields verbatim
 (the full census response is written to a local side file under
 --lists-dir; these six are the ONLY census fields echoed to stdout).
+
+``n`` and ``next_cursor`` (also ENC-TSK-Q16, elr_list.py's ``--page``/
+``--pages`` modes) are the single-page/loop counterparts of census's
+count/pages: n is the number of ids written to the local ids file by this
+run, next_cursor is the raw list route's own opaque continuation cursor
+(never decoded or re-derived client-side) when the server reports one.
+``lower_bound`` and ``page_truncated`` are small booleans, present only
+when True: lower_bound means a ``--pages N`` run fetched fewer pages than
+its census side file actually has, so its accumulated id count is a
+lower bound, not a total; page_truncated means the raw page(s) just
+fetched carried a next_cursor -- more rows remain beyond what was
+written to the local ids file.
 """
 
 from __future__ import annotations
@@ -159,6 +171,10 @@ _OPTIONAL_FIELDS = (
     "pages",
     "as_of",
     "by_type",
+    "n",
+    "next_cursor",
+    "lower_bound",
+    "page_truncated",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")

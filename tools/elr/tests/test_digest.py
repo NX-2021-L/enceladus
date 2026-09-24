@@ -127,6 +127,37 @@ class CensusFieldsTests(unittest.TestCase):
         self.assertFalse(d["count_truncated"])
 
 
+class PageAndPagesFieldsTests(unittest.TestCase):
+    """ENC-TSK-Q16-0C: the n/next_cursor/lower_bound/page_truncated digest
+    fields elr_list.py's --page/--pages modes need.
+    """
+
+    def test_n_and_next_cursor_included_when_supplied(self):
+        d = elr_digest.build_digest("elr_list.page", True, 200, n=37, next_cursor="opaque-cursor-value")
+        self.assertEqual(d["n"], 37)
+        self.assertEqual(d["next_cursor"], "opaque-cursor-value")
+
+    def test_n_zero_is_not_treated_as_absent(self):
+        d = elr_digest.build_digest("elr_list.page", True, 200, n=0)
+        self.assertIn("n", d)
+        self.assertEqual(d["n"], 0)
+
+    def test_n_and_next_cursor_omitted_when_none(self):
+        d = elr_digest.build_digest("elr_list.page", False, 500)
+        self.assertNotIn("n", d)
+        self.assertNotIn("next_cursor", d)
+
+    def test_lower_bound_and_page_truncated_included_when_true(self):
+        d = elr_digest.build_digest("elr_list.pages", True, 200, lower_bound=True, page_truncated=True)
+        self.assertTrue(d["lower_bound"])
+        self.assertTrue(d["page_truncated"])
+
+    def test_lower_bound_and_page_truncated_omitted_when_none(self):
+        d = elr_digest.build_digest("elr_list.pages", True, 200)
+        self.assertNotIn("lower_bound", d)
+        self.assertNotIn("page_truncated", d)
+
+
 class ContentDigestTests(unittest.TestCase):
     def test_content_digest_shape_and_matches_hashlib(self):
         import hashlib

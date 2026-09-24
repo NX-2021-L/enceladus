@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
 """elr_list.py -- ELR tracker list (ENC-TSK-Q16, plan ENC-PLN-093 objective
-O4, U2). Base route (--project/--type/--status/--page-size) plus the
-bounded server-side census walk (--census, U1, mode=census): the full
-census payload is written verbatim to a local side file under
---lists-dir; only a compact digest ({count, exhausted, count_truncated,
-pages, as_of, by_type}) is ever printed.
+O4, U2). Base route (--project/--type/--status/--page-size), the bounded
+server-side census walk (--census, U1, mode=census; full payload written
+verbatim to a local side file, only a compact digest printed), an
+explicit single raw-page read (--page CURSOR; writes one record id per
+line in elr_batch_get.py's --ids-file format -- deliberately no --all),
+and a bounded N-page loop over a prior census's page-boundary cursors
+(--pages N, max 10).
 
-The explicit single-page read (--page), the bounded N-page loop
-(--pages), and the tracker_capabilities.census preflight land in later
-commits on this same file.
+The tracker_capabilities.census preflight (so a plane that predates U1
+gets zero list requests) lands in a later commit on this same file.
 
 Usage:
     python3 tools/elr/elr_list.py --project enceladus
     python3 tools/elr/elr_list.py --project enceladus --type task --status open --census
+    python3 tools/elr/elr_list.py --project enceladus --page <cursor>
+    python3 tools/elr/elr_list.py --project enceladus --type task --status open --pages 3
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Allow running this file directly (python3 tools/elr/elr_list.py) without
 # requiring tools/elr to already be on sys.path.
@@ -46,6 +50,11 @@ DEFAULT_PAGE_SIZE = 100
 
 DEFAULT_LISTS_DIR = "~/.enceladus/lists"
 
+MIN_PAGES = 1
+MAX_PAGES = 10
+
+_CURSOR_HASH_LEN = 12
+
 
 # --- argparse value types ----------------------------------------------------
 
@@ -68,6 +77,16 @@ def _page_size_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(
             f"--page-size must be between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}, got {parsed}"
         )
+    return parsed
+
+
+def _pages_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--pages must be an integer, got {value!r}") from exc
+    if not (MIN_PAGES <= parsed <= MAX_PAGES):
+        raise argparse.ArgumentTypeError(f"--pages must be between {MIN_PAGES} and {MAX_PAGES}, got {parsed}")
     return parsed
 
 
@@ -101,11 +120,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PAGE_SIZE,
         help=f"Rows per raw/census page (default: {DEFAULT_PAGE_SIZE}, max: {MAX_PAGE_SIZE}).",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--census",
         action="store_true",
         default=False,
         help="Run one bounded server-side census walk (mode=census) and write its payload to disk.",
+    )
+    mode.add_argument(
+        "--page",
+        default=None,
+        metavar="CURSOR",
+        help="Fetch exactly one raw page for this cursor (e.g. a cursor from a prior --census run).",
+    )
+    mode.add_argument(
+        "--pages",
+        type=_pages_arg,
+        default=None,
+        metavar="N",
+        help=(
+            f"Fetch the first N (max {MAX_PAGES}) page-boundary cursors from the most recent "
+            "matching --census side file (same --project/--type/--status)."
+        ),
     )
     parser.add_argument(
         "--lists-dir",
@@ -207,6 +243,197 @@ def run_census(client: InternalClient, key_sent: bool, args: argparse.Namespace)
     )
 
 
+# --- side-file naming (--page / --pages) ---------------------------------
+
+
+def cursor_hash(cursor: Optional[str]) -> str:
+    """Short, filesystem-safe id for a cursor value (empty/None cursor -- the
+    start of the walk, e.g. census pages[0] -- hashes the empty string)."""
+    return hashlib.sha256((cursor or "").encode("utf-8")).hexdigest()[:_CURSOR_HASH_LEN]
+
+
+def page_ids_file_path(lists_dir: str, project: str, cursor: Optional[str]) -> Path:
+    return Path(lists_dir).expanduser() / f"{project}_{cursor_hash(cursor)}.ids"
+
+
+def pages_ids_file_path(lists_dir: str, project: str, type_: Optional[str], status: Optional[str], n: int) -> Path:
+    return Path(lists_dir).expanduser() / f"{project}_{_slug_or_all(type_)}_{_slug_or_all(status)}_pages{n}.ids"
+
+
+def find_latest_census_file(
+    lists_dir: str, project: str, type_: Optional[str], status: Optional[str]
+) -> Optional[Path]:
+    """Most recent matching --census side file for the same filters, per
+    O4.3's "same filters" requirement. Census side-file names embed the
+    server-reported ``as_of.started_at`` timestamp, which is ISO8601 and
+    therefore sorts lexicographically in chronological order -- the last
+    glob match (sorted ascending) is the most recent run.
+    """
+    matches = census_glob(lists_dir, project, type_, status)
+    return matches[-1] if matches else None
+
+
+# --- record id extraction / ids-file writing ---------------------------------
+
+
+def _extract_ids(records: Any) -> List[str]:
+    ids: List[str] = []
+    if not isinstance(records, list):
+        return ids
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        record_id = rec.get("record_id") or rec.get("id")
+        if record_id:
+            ids.append(str(record_id))
+    return ids
+
+
+def _write_ids_file(path: Path, ids: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{i}\n" for i in ids), encoding="utf-8")
+
+
+# --- raw page fetch (shared by --page and --pages) ----------------------------
+
+
+def _fetch_raw_page(
+    client: InternalClient,
+    project: str,
+    type_: Optional[str],
+    status_filter: Optional[str],
+    page_size: int,
+    cursor: Optional[str],
+) -> Tuple[int, Any]:
+    query: Dict[str, Any] = {
+        "type": type_,
+        "status": status_filter,
+        "page_size": page_size,
+        "next_cursor": cursor,
+    }
+    encoded_project = urllib.parse.quote(str(project), safe="")
+    return client.request("GET", "tracker", f"/{encoded_project}", query=query)
+
+
+# --- --page ----------------------------------------------------------------
+
+
+def run_single_page(client: InternalClient, key_sent: bool, args: argparse.Namespace) -> Dict[str, Any]:
+    status, body = _fetch_raw_page(client, args.project, args.type, args.status, args.page_size, args.page)
+
+    posture, anomalies = classify_internal_posture(key_sent=key_sent, status_code=status)
+    anomalies = list(anomalies)
+    ok = 200 <= status < 300 and isinstance(body, dict)
+    if isinstance(body, dict) and body.get("error"):
+        anomalies.append(f"response_error: {body['error']}")
+        ok = False
+
+    n = next_cursor = page_truncated = None
+    if ok:
+        ids = _extract_ids(body.get("records"))
+        n = len(ids)
+        next_cursor = body.get("next_cursor") or None
+        # A next_cursor means the server has more rows for this walk than
+        # this one page returned -- from this single --page call's point of
+        # view that page is "truncated" relative to the full remaining set.
+        page_truncated = True if next_cursor else None
+        out_path = page_ids_file_path(args.lists_dir, args.project, args.page)
+        _write_ids_file(out_path, ids)
+
+    return build_digest(
+        "elr_list.page",
+        ok,
+        status,
+        identity_posture=posture,
+        anomalies=anomalies,
+        n=n,
+        next_cursor=next_cursor,
+        page_truncated=page_truncated,
+    )
+
+
+# --- --pages N -----------------------------------------------------------------
+
+
+def run_pages_loop(client: InternalClient, key_sent: bool, args: argparse.Namespace) -> Dict[str, Any]:
+    census_path = find_latest_census_file(args.lists_dir, args.project, args.type, args.status)
+    if census_path is None:
+        return build_digest(
+            "elr_list.pages",
+            False,
+            0,
+            identity_posture="unknown",
+            anomalies=["no_matching_census_file"],
+        )
+
+    try:
+        census_body = json.loads(census_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return build_digest(
+            "elr_list.pages",
+            False,
+            0,
+            identity_posture="unknown",
+            anomalies=["census_side_file_unreadable"],
+        )
+
+    all_pages = census_body.get("pages")
+    if not isinstance(all_pages, list) or not all_pages:
+        return build_digest(
+            "elr_list.pages",
+            False,
+            0,
+            identity_posture="unknown",
+            anomalies=["census_side_file_has_no_pages"],
+        )
+
+    census_page_size = census_body.get("page_size") or args.page_size
+    to_fetch = all_pages[: args.pages]
+
+    all_ids: List[str] = []
+    last_status = 0
+    last_next_cursor: Optional[str] = None
+    aggregate_ok = True
+    anomalies: List[str] = []
+    posture = "unknown"
+
+    for entry in to_fetch:
+        cursor = entry.get("cursor") if isinstance(entry, dict) else None
+        status, body = _fetch_raw_page(client, args.project, args.type, args.status, census_page_size, cursor)
+        page_posture, page_anomalies = classify_internal_posture(key_sent=key_sent, status_code=status)
+        posture = page_posture
+        anomalies.extend(page_anomalies)
+        last_status = status
+        page_ok = 200 <= status < 300 and isinstance(body, dict)
+        if isinstance(body, dict) and body.get("error"):
+            anomalies.append(f"response_error: {body['error']}")
+            page_ok = False
+        if not page_ok:
+            aggregate_ok = False
+            break
+        all_ids.extend(_extract_ids(body.get("records")))
+        last_next_cursor = body.get("next_cursor") or None
+
+    lower_bound = True if (aggregate_ok and len(to_fetch) < len(all_pages)) else None
+    page_truncated = True if last_next_cursor else None
+
+    if aggregate_ok:
+        out_path = pages_ids_file_path(args.lists_dir, args.project, args.type, args.status, args.pages)
+        _write_ids_file(out_path, all_ids)
+
+    return build_digest(
+        "elr_list.pages",
+        aggregate_ok,
+        last_status,
+        identity_posture=posture,
+        anomalies=anomalies,
+        n=len(all_ids) if aggregate_ok else None,
+        next_cursor=last_next_cursor,
+        page_truncated=page_truncated,
+        lower_bound=lower_bound,
+    )
+
+
 # --- base route ----------------------------------------------------------------
 
 
@@ -254,6 +481,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.census:
         digest = run_census(client, key_sent, args)
+    elif args.page is not None:
+        digest = run_single_page(client, key_sent, args)
+    elif args.pages is not None:
+        digest = run_pages_loop(client, key_sent, args)
     else:
         digest = run_plain_list(client, key_sent, args)
 
