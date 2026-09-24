@@ -3079,6 +3079,22 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             payload["page_truncated"] = True
         return _response(200, payload)
 
+    except ListCursorBranchMismatch:
+        # ENC-TSK-Q13 (O1.3): a cursor minted on the other branch (base
+        # table walk vs project-type-index walk) is caller/version skew,
+        # not a decode failure or a server error -- surface it as a 400
+        # with enough self-correcting guidance to retry, same as every
+        # other operator-facing 400 in this file (see document_api's
+        # recommended_next_actions convention).
+        return _error(
+            400,
+            "next_cursor was issued for a different list query (base table "
+            "vs project-type-index) than this request. Restart the walk "
+            "without a cursor.",
+            code="CURSOR_BRANCH_MISMATCH",
+            retryable=False,
+            recommended_next_actions=["restart the walk without a cursor"],
+        )
     except Exception as exc:
         logger.error("list failed: %s", exc)
         return _error(500, "Database query failed.")
