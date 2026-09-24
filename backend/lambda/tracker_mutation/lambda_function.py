@@ -7998,6 +7998,86 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
     return _response(200, {"success": True, "escalation": _escalation_public(item)})
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q13 (O1.1) — value-based cursor codec for _handle_list_records.
+#
+# Same ENC-ISS-699 idea as the escalation-list cursor above (a boundary built
+# from the last item actually RETURNED, never a raw DynamoDB
+# LastEvaluatedKey), generalized to _handle_list_records' two query shapes:
+#
+#   "base" — KeyConditionExpression on project_id alone (base table; sort
+#            key is record_id).
+#   "gsi"  — KeyConditionExpression on project-type-index (project_id +
+#            record_type); its ExclusiveStartKey must additionally carry the
+#            base table's own primary key (project_id, record_id) per
+#            DynamoDB's GSI-pagination contract, which is why record_type
+#            (`t`) rides along on the gsi branch only.
+#
+# A cursor minted on one branch is meaningless key material on the other
+# (different KeyConditionExpression, different required key attributes), so
+# decoding validates the branch instead of silently reinterpreting it.
+# ---------------------------------------------------------------------------
+
+class ListCursorBranchMismatch(Exception):
+    """A _handle_list_records next_cursor was minted for the other branch.
+
+    ("base" table walk vs "gsi" project-type-index walk.) Raised by
+    _decode_list_cursor; the route maps this to a 400, never a 500 or a
+    silent reinterpretation against the wrong key schema.
+    """
+
+
+def _encode_list_cursor(item: Dict[str, Any], branch: str) -> str:
+    """Encode a _handle_list_records next_cursor from the last RETURNED item.
+
+    `item` is a plain (already-deserialized) record dict carrying at least
+    project_id/record_id, plus record_type when branch == "gsi". Payload:
+    {"b": branch, "p": project_id, "r": record_id, "t": record_type?}
+    """
+    if branch not in ("base", "gsi"):
+        raise ValueError(f"Unknown list cursor branch: {branch!r}")
+    import base64
+    payload: Dict[str, Any] = {
+        "b": branch,
+        "p": item["project_id"],
+        "r": item["record_id"],
+    }
+    if branch == "gsi":
+        payload["t"] = item["record_type"]
+    return base64.urlsafe_b64encode(
+        json.dumps(payload).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_list_cursor(token: str, branch: str) -> Dict[str, str]:
+    """Decode + validate a _handle_list_records next_cursor.
+
+    `branch` is the branch the *current* request would query ("base" or
+    "gsi"). Raises ListCursorBranchMismatch when the token was minted on the
+    other branch. Any other malformed-token failure (bad base64, bad JSON,
+    missing keys) propagates as a plain exception — the route maps both
+    cases to 400, never 500.
+    """
+    import base64
+    cursor_obj = json.loads(
+        base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+    )
+    cursor_branch = cursor_obj["b"]
+    if cursor_branch != branch:
+        raise ListCursorBranchMismatch(
+            f"next_cursor branch '{cursor_branch}' does not match this "
+            f"query's branch '{branch}'"
+        )
+    decoded = {
+        "b": cursor_branch,
+        "p": str(cursor_obj["p"]),
+        "r": str(cursor_obj["r"]),
+    }
+    if cursor_branch == "gsi":
+        decoded["t"] = str(cursor_obj["t"])
+    return decoded
+
+
 _ESCALATION_LIST_MAX_PAGES = 50  # ENC-ISS-699: bounded exhaustion guard,
 # mirrors the tools/enceladus-mcp-server/server.py _TRACKER_LIST_MAX_EXHAUST_PAGES
 # pattern (never walk LastEvaluatedKey unbounded).
