@@ -224,6 +224,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          TARGET="${{ inputs.target_environment || 'v4-gamma' }}"
           SHA="${{ steps.sha.outputs.commit_sha }}"
           ARCH="${{ steps.manifest.outputs.arch }}"
           PY="${{ steps.manifest.outputs.py_version }}"
@@ -261,6 +262,34 @@ jobs:
           fi
 
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
+
+          # ENC-TSK-Q20 FR-7 / DOC-5368FE6515ED: independently re-derive the
+          # declared arch/runtime for this plane straight from
+          # tools/arch_declaration.py -- NOT via the "Parse environment
+          # manifest" step's _parse/fallback path -- and assert every
+          # resolved key's arch segment matches it, BEFORE the S3
+          # head-object existence probe and therefore before the deploy job
+          # can ever run. This catches drift if a manifest still carries a
+          # stale literal architecture:/runtime: value that the fallback in
+          # that earlier step didn't need to reach.
+          DECL_ARCH=$(python3 tools/arch_declaration.py --env "$TARGET" --field arch)
+          DECL_RUNTIME=$(python3 tools/arch_declaration.py --env "$TARGET" --field runtime)
+          DECL_PY="${DECL_RUNTIME#python}"
+          DECL_SEGMENT="${DECL_ARCH}-py${DECL_PY}"
+          PLANE_NAME=$(python3 -c "import sys; sys.path.insert(0, 'tools'); from arch_declaration import load_declaration; print(load_declaration().plane_for_env('$TARGET'))")
+
+          assert_mismatch=0
+          for fn in "${FNS[@]}"; do
+            segment="${ARCH}-py${PY}"
+            if [[ "$segment" != "$DECL_SEGMENT" ]]; then
+              echo "::error::resolve arch assertion FAILED for fn=$fn: key segment=$segment declared=$DECL_SEGMENT (envs/architecture.yaml plane=$PLANE_NAME)"
+              assert_mismatch=1
+            fi
+          done
+          if [[ "$assert_mismatch" -eq 1 ]]; then
+            exit 1
+          fi
+          echo "resolve arch assertion: ${#FNS[@]} keys == ${DECL_SEGMENT} (envs/architecture.yaml plane=${PLANE_NAME}) -- OK"
 
           MISSING=()
           > /tmp/vid_map.txt

@@ -661,9 +661,10 @@ def _validate_pr_merged(
 
 # ENC-TSK-E29: S3 artifact key validation (E20 AC-6)
 # Arch tags correspond to the split-artifact build pipeline output structure:
-#   lambda-artifacts/{git_sha}/x86_64-py311/{function_name}.zip  (prod)
-#   lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip   (gamma)
-ARTIFACT_ARCH_TAGS = {"prod": "x86_64-py311", "gamma": "arm64-py312"}
+#   lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip  (prod and gamma)
+# ENC-TSK-Q20: prod's legacy x86 tag retired -- both planes deploy from the
+# same arm64-py312 artifact family (see envs/architecture.yaml).
+ARTIFACT_ARCH_TAGS = {"prod": "arm64-py312", "gamma": "arm64-py312"}
 VALID_ARTIFACT_ARCH_TAGS = frozenset(ARTIFACT_ARCH_TAGS.values())
 _ARTIFACT_S3_KEY_RE = re.compile(
     r"^lambda-artifacts/[0-9a-f]{7,40}/([a-zA-Z0-9_-]+)/[a-zA-Z0-9_.-]+\.zip$"
