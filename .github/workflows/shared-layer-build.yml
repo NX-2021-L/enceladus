@@ -32,8 +32,8 @@ name: Build enceladus-shared Layer (ENC-TSK-P13)
 #      emit a layer would mean teaching a function-shaped pipeline a second,
 #      structurally different output type.
 #
-#   2. NO ARCHITECTURE MATRIX NEEDED. _build.yml's x86_64/py3.11 +
-#      arm64/py3.12 matrix exists because PER-FUNCTION artifacts pip-install
+#   2. NO ARCHITECTURE MATRIX NEEDED. _build.yml's (pre-ENC-TSK-Q20) two-row
+#      matrix existed because PER-FUNCTION artifacts pip-install
 #      compiled dependencies with `--platform`/`--only-binary=:all:` (ABI-pinned
 #      per ENC-ISS-213/198). This workflow's build step (below) verified by
 #      downloading and inspecting the live :11 and :12 zips during ENC-TSK-P13
@@ -220,8 +220,8 @@ jobs:
           echo "source commit:            ${GITHUB_SHA}"
           echo "zip sha256:                ${{ needs.verify-and-build.outputs.zip_sha256 }}"
           echo "module count:              ${{ needs.verify-and-build.outputs.module_count }}"
-          echo "compatible-runtimes:       python3.11 python3.12"
-          echo "compatible-architectures:  x86_64 arm64"
+          echo "compatible-runtimes:       python3.12"
+          echo "compatible-architectures:  arm64"
           echo "dispatched by:             ${{ github.actor }}"
           echo "reason:                    ${{ inputs.reason }}"
           echo "dry_run:                   ${{ inputs.dry_run }}"
@@ -240,8 +240,8 @@ jobs:
             --region us-west-2 \
             --layer-name enceladus-shared \
             --description "enceladus_shared pure-Python package, built by CI from commit ${GITHUB_SHA} (ENC-TSK-P13)" \
-            --compatible-runtimes python3.11 python3.12 \
-            --compatible-architectures x86_64 arm64 \
+            --compatible-runtimes python3.12 \
+            --compatible-architectures arm64 \
             --zip-file "fileb:///tmp/enceladus-shared-layer.zip" \
             --query 'LayerVersionArn' --output text)"
           echo "Published: ${version_arn}"

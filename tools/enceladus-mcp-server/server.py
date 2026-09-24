@@ -4787,7 +4787,7 @@ async def list_tools() -> list[Tool]:
                         "description": (
                             "Optional S3 key for a pre-built Lambda artifact zip. "
                             "Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip "
-                            "where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). "
+                            "where arch_tag is arm64-py312 (prod and gamma). "
                             "When present, deploy_intake validates the arch tag matches "
                             "the target environment."
                         ),

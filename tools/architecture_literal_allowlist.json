@@ -16,38 +16,8 @@
     "reason": "AppSync Lambda resolvers still select arch/runtime via the IsArm64 !If conditional pending Phase D literalization."
   },
   {
-    "path": ".github/workflows/_build.yml",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "Two-row build matrix (x86_64/py3.11 + arm64/py3.12) retained until ENC-TSK-Q20 collapses it to one row."
-  },
-  {
-    "path": ".github/workflows/build-lambda-artifacts.yml",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "Per-function build workflow still parameterized on both arches; retired with the Q20 matrix collapse."
-  },
-  {
-    "path": ".github/workflows/shared-layer-build.yml",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "Shared layer build still publishes both x86_64 and arm64 layer versions; retired with Q20."
-  },
-  {
-    "path": "tools/package_lambda_artifact.sh",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "Local packaging script still accepts an x86_64 target for parity with the pre-Q20 build matrix."
-  },
-  {
-    "path": "backend/lambda/deploy_intake/lambda_function.py",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "ARTIFACT_ARCH_TAGS still pins prod to x86_64-py311 pending the Q20 matrix collapse; deploy_intake validates artifact keys against it today."
-  },
-  {
     "path": "infrastructure/component_dependency_closure.json",
     "retired_by": "ENC-TSK-Q22",
     "reason": "appconfig-extension-x86 external layer entry: the x86 AppConfig Extension layer is only reachable through the IsArm64 false branch of 02-compute.yaml; Phase D literalization drops that branch and this entry with it."
-  },
-  {
-    "path": "tools/enceladus-mcp-server/server.py",
-    "retired_by": "ENC-TSK-Q20",
-    "reason": "deploy.submit source_artifact_s3_key description mirrors deploy_intake ARTIFACT_ARCH_TAGS (prod x86_64-py311); updated together when ENC-TSK-Q20 retires the legacy x86 tag (same PR carries the governance dictionary bump)."
   }
 ]

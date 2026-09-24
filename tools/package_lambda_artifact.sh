@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Usage: package_lambda_artifact.sh <function_name> <lambda_dir> <arch_tag> [extra_files_comma_separated]
 #
-# arch_tag: x86_64-py311 | arm64-py312
+# arch_tag: arm64-py312 (only -- ENC-TSK-Q20 retired the legacy build target)
 # Output:   prints the zip path to stdout
 
 FUNCTION_NAME="${1:?Usage: package_lambda_artifact.sh <function_name> <lambda_dir> <arch_tag> [extra_files]}"
@@ -18,18 +18,13 @@ REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 
 # Derive pip platform flags from arch_tag
 case "${ARCH_TAG}" in
-  x86_64-py311)
-    PIP_PLATFORM="manylinux2014_x86_64"
-    PIP_PYTHON_VERSION="3.11"
-    PIP_ABI="cp311"
-    ;;
   arm64-py312)
     PIP_PLATFORM="manylinux2014_aarch64"
     PIP_PYTHON_VERSION="3.12"
     PIP_ABI="cp312"
     ;;
   *)
-    echo "ERROR: Unknown arch_tag '${ARCH_TAG}'. Expected x86_64-py311 or arm64-py312." >&2
+    echo "ERROR: Unknown arch_tag '${ARCH_TAG}'. ENC-TSK-Q20 retired the legacy build target -- only arm64-py312 is supported." >&2
     exit 1
     ;;
 esac
