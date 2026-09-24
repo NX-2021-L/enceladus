@@ -9975,6 +9975,21 @@ async def _component_propose(args: dict) -> list[TextContent]:
         payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
     if args.get("category"):
         payload["category"] = args["category"]
+    # ENC-TSK-Q24 (ENC-ISS-797): v3 component-address fields were accepted by
+    # this tool's args but silently dropped before reaching coordination_api
+    # -- forward them (and their rationale) whenever the caller supplies them.
+    if args.get("component_address"):
+        payload["component_address"] = args["component_address"]
+    if args.get("component_repo_dir"):
+        payload["component_repo_dir"] = args["component_repo_dir"]
+    if args.get("component_address_class"):
+        payload["component_address_class"] = args["component_address_class"]
+    if args.get("component_class"):
+        payload["component_class"] = args["component_class"]
+    if args.get("requested_required_transition_type"):
+        payload["requested_required_transition_type"] = args["requested_required_transition_type"]
+    if args.get("required_transition_type_rationale"):
+        payload["required_transition_type_rationale"] = args["required_transition_type_rationale"]
 
     resp = _coordination_api_request(
         "POST", "/components/propose", payload=payload,
