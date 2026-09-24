@@ -71,21 +71,24 @@ def _esc_item(n):
 
 
 def test_tracker_list_escalation_paginates_past_a_single_page(monkeypatch):
-    """3 fake backend pages of 25/25/25 escalations (001..075); tracker.list
-    with exhaust=True must walk all three via next_cursor and report the
-    true total, reaching ENC-ESC-075."""
-    pages = [
-        {"escalations": [_esc_item(n) for n in range(1, 26)], "next_cursor": "cur1"},
-        {"escalations": [_esc_item(n) for n in range(26, 51)], "next_cursor": "cur2"},
-        {"escalations": [_esc_item(n) for n in range(51, 76)]},
-    ]
+    """ENC-TSK-Q15 (O3.3): tracker.list(record_type="escalation", exhaust=True)
+    no longer walks next_cursor across the dedicated /escalation/list endpoint
+    itself -- it gets the true total from the census fast path (mode=census,
+    which per D5 covers escalations via its own bounded server-side walk over
+    the base project route, NOT /escalation/list) and then fetches only page 1
+    of rows from /escalation/list as before. This is the regression coverage
+    for the original "capped at ENC-ESC-050" pagination defect, now expressed
+    against the census-backed contract instead of a client-side page walk."""
     calls = []
 
     def _fake_tracker_api_request(method, path, query=None, **kwargs):
         assert method == "GET"
+        calls.append((path, query.get("next_cursor") if query else None))
+        if path == "/enceladus":
+            assert query.get("mode") == "census"
+            return {"count": 75, "count_truncated": False, "pages": []}
         assert path == "/enceladus/escalation/list"
-        calls.append(query.get("next_cursor") if query else None)
-        return pages[len(calls) - 1]
+        return {"escalations": [_esc_item(n) for n in range(1, 26)], "next_cursor": "cur1"}
 
     monkeypatch.setattr(server, "_tracker_api_request", _fake_tracker_api_request)
 
@@ -97,14 +100,12 @@ def test_tracker_list_escalation_paginates_past_a_single_page(monkeypatch):
     }))
     result = json.loads(result_text[0].text)
 
-    assert calls == [None, "cur1", "cur2"]
+    assert calls == [("/enceladus", None), ("/enceladus/escalation/list", None)]
     assert result["total"] == 75
     assert "total_is_lower_bound" not in result
-    assert "next_cursor" not in result
+    assert "exhaustion_truncated" not in result
     ids = {rec["id"] for rec in result["records"]}
-    # Non-exhaust summary only reflects the first page; the walked total is
-    # what proves every page was actually reached.
-    assert "ENC-ESC-025" in ids or result["total"] == 75
+    assert "ENC-ESC-025" in ids
 
 
 def test_tracker_list_escalation_single_page_reports_lower_bound(monkeypatch):

@@ -133,6 +133,15 @@ def result_metadata(payload: Any) -> Dict[str, Any]:
         metadata["budget"] = payload.get("budget")
     if isinstance(payload.get("warnings"), list) and payload.get("warnings"):
         metadata["warnings"] = payload.get("warnings")
+    # ENC-TSK-Q15 (O3.2): lift the census-only fields (a plain list payload
+    # never carries these, so this is a strict addition -- byte-identical
+    # metadata for non-census payloads).
+    if payload.get("exhausted") is not None:
+        metadata["exhausted"] = payload.get("exhausted")
+    if payload.get("count_truncated") is not None:
+        metadata["count_truncated"] = payload.get("count_truncated")
+    if payload.get("excluded_types") is not None:
+        metadata["excluded_types"] = payload.get("excluded_types")
     return metadata
 
 
