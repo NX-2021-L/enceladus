@@ -2282,7 +2282,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "embedding_coverage_sample": {covered: N, total_ranked: N},
         "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks, ...,
                               k_corr, b_corr, final_score, final_rank}},
-        "corroboration_weber_k": 0.3,
+        "corroboration_alpha": 0.02,
+        "s_top":             <max fused_score in this call>,
       }
 
     ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
@@ -2320,10 +2321,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # never re-probes AppConfig more than once.
     energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
 
-    # ENC-TSK-I92 (ENC-FTR-110 Ph1): resolve the corroboration Weber_k bonus
-    # weight once per call, same one-AppConfig-probe-per-call discipline as
-    # the energy lambda weights above.
-    corroboration_weber_k = corroboration.load_weber_k()
+    # ENC-TSK-I92 / ENC-TSK-Q46 (ENC-FTR-110, ENC-ISS-836): resolve the
+    # call-relative corroboration alpha once per call, same one-AppConfig-probe-
+    # per-call discipline as the energy lambda weights above.
+    corroboration_alpha = corroboration.load_alpha()
 
     # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
     # pool is live before dispatching to any of the three signal functions.
@@ -2511,10 +2512,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "energy_lambda_weights": {
                 "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
             },
-            # ENC-TSK-I92 (ENC-FTR-110 Ph1): the Weber_k bonus weight used for
-            # this call, surfaced even with zero candidates for observability
-            # parity with energy_lambda_weights above.
-            "corroboration_weber_k": corroboration_weber_k,
+            # ENC-TSK-Q46 (ENC-ISS-836): the corroboration alpha used for this
+            # call and the call's top fused score (0.0 with zero candidates),
+            # surfaced for observability parity with energy_lambda_weights.
+            "corroboration_alpha": corroboration_alpha,
+            "s_top": 0.0,
             "facets": facets,
             "facets_source": facets_source,
             "keyword_source": keyword_source,
@@ -2577,8 +2579,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         if node_by_rid.get(rid) and node_by_rid[rid].get(_EMBEDDING_PROPERTY)
     }
     corroboration_counts = corroboration.compute_corroboration_counts(embeddings_by_rid)
+    # ENC-TSK-Q46 (ENC-ISS-836): call-relative bound B_corr <= alpha * S_top,
+    # S_top = the call's maximum fused (pure-RRF) score.
+    s_top = max((float(i["fused_score"]) for i in top_fused), default=0.0)
     corroboration_bonuses = corroboration.compute_bonuses(
-        corroboration_counts, weber_k=corroboration_weber_k,
+        corroboration_counts, s_top=s_top, alpha=corroboration_alpha,
     )
     for item in top_fused:
         rid = item["record_id"]
@@ -2749,10 +2754,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "energy_lambda_weights": {
             "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
         },
-        # ENC-TSK-I92 (ENC-FTR-110 Ph1): Weber_k bonus weight used for this
-        # call's corroboration bonus (see per_node_fusion[*].b_corr/k_corr and
-        # nodes[*]._b_corr/_corroboration_count/_final_score/_final_rank).
-        "corroboration_weber_k": corroboration_weber_k,
+        # ENC-TSK-Q46 (ENC-ISS-836): alpha and S_top used for this call's
+        # corroboration bonus, so any client can verify B_corr <= alpha * S_top
+        # (see per_node_fusion[*].b_corr/k_corr and nodes[*]._b_corr/
+        # _corroboration_count/_final_score/_final_rank).
+        "corroboration_alpha": corroboration_alpha,
+        "s_top": s_top,
         "facets": facets,
         "facets_source": facets_source,
         "keyword_source": keyword_source,
@@ -3044,6 +3051,37 @@ SEARCH_HANDLERS = {
 # Route handlers
 # ---------------------------------------------------------------------------
 
+# ENC-TSK-Q49 (BRD Phase 2, T7): hybrid fields=compact response projection.
+VALID_FIELDS_MODES = {"full", "compact"}
+_COMPACT_NODE_KEYS = (
+    "record_id", "record_type", "title", "status", "updated_at",
+    "_fused_rank", "_fused_score", "_final_rank", "_final_score",
+    "_per_signal_ranks", "_corroboration_count", "_b_corr",
+)
+_COMPACT_DROP_KEYS = (
+    "edges", "paths", "pathway", "facets", "query_cypher", "edge_participation",
+)
+
+
+def _project_hybrid_compact(response_body: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a hybrid response to the compact shape (ranking fields only).
+
+    Pure response projection: fusion/ranking is already complete. per_node_fusion
+    is limited to the returned node ids; node rows keep identity + ranking keys.
+    """
+    out = {k: v for k, v in response_body.items() if k not in _COMPACT_DROP_KEYS}
+    nodes = [
+        {k: n[k] for k in _COMPACT_NODE_KEYS if k in n}
+        for n in response_body.get("nodes", [])
+    ]
+    out["nodes"] = nodes
+    fusion = response_body.get("per_node_fusion")
+    if isinstance(fusion, dict):
+        keep = {n.get("record_id") for n in nodes}
+        out["per_node_fusion"] = {k: v for k, v in fusion.items() if k in keep}
+    return out
+
+
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
@@ -3061,6 +3099,10 @@ def _handle_search(event: Dict) -> Dict:
     search_type = qs.get("search_type", "")
     if search_type not in VALID_SEARCH_TYPES:
         return _error(400, f"search_type must be one of: {', '.join(sorted(VALID_SEARCH_TYPES))}")
+
+    fields_mode = (qs.get("fields") or "full").strip().lower() or "full"
+    if fields_mode not in VALID_FIELDS_MODES:
+        return _error(400, f"fields must be one of: {', '.join(sorted(VALID_FIELDS_MODES))}")
 
     depth = qs.get("depth")
     if depth is not None:
@@ -3146,6 +3188,10 @@ def _handle_search(event: Dict) -> Dict:
         "facets",
         "facets_source",
         "keyword_source",
+        # ENC-TSK-Q46 (ENC-ISS-836): call-relative corroboration bound inputs,
+        # so any client can verify max(b_corr) <= corroboration_alpha * s_top.
+        "corroboration_alpha",
+        "s_top",
         # ENC-TSK-I88: adjacency export pagination + corpus-size fields.
         "node_count",
         "edge_count",
@@ -3176,6 +3222,8 @@ def _handle_search(event: Dict) -> Dict:
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
+    if fields_mode == "compact" and search_type == "hybrid":
+        response_body = _project_hybrid_compact(response_body)
     return _response(200, response_body)
 
 
@@ -3469,6 +3517,7 @@ def _handle_health(event: Dict) -> Dict:
             "response_ms": duration_ms,
             "signals": signals,
             "graph_projection": graph_projection,
+            "hybrid_fields_compact": True,  # ENC-TSK-Q49
         })
     except Exception as e:
         logger.warning("[WARNING] Graph health check failed: %s", e)

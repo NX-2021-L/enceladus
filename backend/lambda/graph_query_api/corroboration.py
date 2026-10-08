@@ -35,14 +35,21 @@ Term definitions
     call), and the greedy packing is exact for the test scenarios this module
     is built against (a single near-duplicate cluster, or a handful of
     genuinely dispersed corroborators).
-  * ``B_corr(x) = Weber_k * ln(1 + k_corr(x)) / ln(1 + k_max)`` — a
-    Weber-Fechner-law-style logarithmic diminishing-returns curve: the jump
-    from 0 -> 1 corroborator matters far more than 5 -> 6. ``k_max`` is the
-    largest ``k_corr`` observed across the candidates fused in *this call*
-    (the same call-relative normalization convention ``energy_function`` uses
-    for ``E_PPR`` / ``E_keyword`` — see that module's docstring), so the best-
-    corroborated candidate in a given result set always receives the full
-    ``Weber_k`` bonus and ``k_max == 0`` (nobody in this call has any
+  * ``B_corr(x) = alpha * S_top * ln(1 + k_corr(x)) / ln(1 + k_max)`` — a
+    Weber-Fechner-law-style logarithmic diminishing-returns curve (the jump
+    from 0 -> 1 corroborator matters far more than 5 -> 6) scaled by the call's
+    own top fused score. ``S_top`` is the maximum RRF ``fused_score`` across
+    the candidates fused in *this call*; ``k_max`` is the largest ``k_corr``
+    observed in this call (the same call-relative normalization convention
+    ``energy_function`` uses for ``E_PPR`` / ``E_keyword``). Because
+    ``ln(1 + k_corr) <= ln(1 + k_max)``, ``B_corr <= alpha * S_top`` ALWAYS
+    holds: the bonus is dimensionless and bounded by a fixed fraction of the
+    call's top RRF score, so it can never swamp the RRF signal regardless of
+    how RRF magnitudes scale (ENC-ISS-836: the retired absolute ``Weber_k``
+    constant, 0.3, was ~4.6x the maximum possible RRF score of ~0.0656 and
+    let any k >= 1 candidate overtake everything). Consequently no candidate
+    with ``k_corr >= 1`` can overtake one whose ``fused_score`` exceeds its own
+    by more than ``alpha * S_top``. ``k_max == 0`` (nobody in this call has any
     corroboration) degrades to ``B_corr == 0.0`` for everyone rather than a
     division by zero.
 
@@ -57,18 +64,23 @@ corroboration can be outranked, post-bonus, by a moderately-ranked candidate
 that several genuinely distinct records independently point at — exactly the
 spurious-attractor case this signal exists to dampen.
 
-Weber_k (configurable, AppConfig-backed)
-------------------------------------------
-``Weber_k`` is resolved at call time via ``load_weber_k()``, mirroring the
+alpha (configurable, AppConfig-backed)
+---------------------------------------
+``alpha`` is resolved at call time via ``load_alpha()``, mirroring the
 AppConfig-with-env-var-fallback idiom already used by
 ``backend/lambda/coordination_api/budget_hierarchy.py``
 (``_appconfig_budget_config`` / ``load_scale_budgets``) and
 ``energy_function.load_lambda_weights``:
 
   1. AppConfig ``corroboration-function`` configuration profile key
-     ``weber_k`` (via the AppConfig Lambda extension at ``localhost:2772``).
-  2. Environment variable ``CORROBORATION_WEBER_K``.
-  3. Hard-coded default ``DEFAULT_WEBER_K`` (0.3).
+     ``corroboration_alpha`` (via the AppConfig Lambda extension at
+     ``localhost:2772``).
+  2. Environment variable ``CORROBORATION_ALPHA``.
+  3. Hard-coded default ``DEFAULT_ALPHA`` (0.02).
+
+The resolved value is clamped to ``[0, MAX_ALPHA]`` (0.2). Activation is
+``k_corr >= 1`` and dispersion is cosine distance >= 0.3 (the FTR-110 AC-1
+contract DOC-90C4269BB62B is amended to match, ENC-TSK-Q46).
 
 This module is pure-Python and dependency-free (no numpy, no boto3 import at
 module load), matching the ``energy_function`` / ``drift_telemetry`` /
@@ -92,15 +104,16 @@ from typing import Dict, List, Optional, Sequence
 
 __all__ = [
     "CORROBORATION_SCHEMA",
-    "DEFAULT_WEBER_K",
+    "DEFAULT_ALPHA",
+    "MAX_ALPHA",
     "DEFAULT_SIMILARITY_THRESHOLD",
     "DISPERSION_MIN_DISTANCE",
-    "load_weber_k",
+    "load_alpha",
     "cosine_similarity",
     "cosine_distance",
     "count_corroborators",
     "compute_corroboration_counts",
-    "weber_bonus",
+    "corroboration_bonus",
     "compute_bonuses",
 ]
 
@@ -109,8 +122,14 @@ __all__ = [
 # by any downstream telemetry contract.
 CORROBORATION_SCHEMA = "enceladus.retrieval.corroboration.v1"
 
-# Hard-coded fallback default for Weber_k (see module docstring).
-DEFAULT_WEBER_K: float = 0.3
+# Hard-coded fallback default for alpha (see module docstring): the maximum
+# bonus as a fraction of the call's top fused RRF score (ENC-TSK-Q46, architect
+# ruling R2 on the measured replay DOC-AAD863ABD0F6).
+DEFAULT_ALPHA: float = 0.02
+
+# Upper clamp for alpha so a mis-set AppConfig value can never let the bonus
+# exceed 20% of the call's top fused score.
+MAX_ALPHA: float = 0.2
 
 # "High vector similarity to it" floor (module docstring term 1): a record
 # below this cosine similarity to the candidate is not considered supporting
@@ -122,12 +141,12 @@ DEFAULT_SIMILARITY_THRESHOLD: float = 0.80
 
 # The dispersion constraint (ENC-FTR-110 AC-2): two records count as
 # corroborating each other only if their pairwise cosine distance is >= this
-# value. Fixed per the AC, not AppConfig-tunable like Weber_k.
+# value. Fixed per the AC, not AppConfig-tunable like alpha.
 DISPERSION_MIN_DISTANCE: float = 0.3
 
 
 # ---------------------------------------------------------------------------
-# AppConfig-backed configurable Weber_k
+# AppConfig-backed configurable alpha
 # ---------------------------------------------------------------------------
 
 def _appconfig_corroboration_config() -> Dict[str, object]:
@@ -151,29 +170,30 @@ def _appconfig_corroboration_config() -> Dict[str, object]:
         return {}
 
 
-def load_weber_k() -> float:
-    """Resolve ``Weber_k`` at runtime.
+def load_alpha() -> float:
+    """Resolve ``alpha`` at runtime.
 
     Resolution order, highest precedence first:
       1. AppConfig ``corroboration-function`` configuration profile key
-         ``weber_k``.
-      2. Environment variable ``CORROBORATION_WEBER_K``.
-      3. Hard-coded default (``DEFAULT_WEBER_K``).
+         ``corroboration_alpha``.
+      2. Environment variable ``CORROBORATION_ALPHA``.
+      3. Hard-coded default (``DEFAULT_ALPHA``).
 
-    Always returns a non-negative float so the caller never has to handle a
-    partial/invalid config.
+    Always returns a float in ``[0, MAX_ALPHA]`` so the caller never has to
+    handle a partial/invalid config: a malformed or non-finite value falls
+    back to the default; a negative value or one above ``MAX_ALPHA`` is clamped.
     """
     appconfig = _appconfig_corroboration_config()
-    raw = appconfig.get("weber_k")
+    raw = appconfig.get("corroboration_alpha")
     if raw is None:
-        raw = os.environ.get("CORROBORATION_WEBER_K")
+        raw = os.environ.get("CORROBORATION_ALPHA")
     try:
-        value = float(raw) if raw is not None else DEFAULT_WEBER_K
+        value = float(raw) if raw is not None else DEFAULT_ALPHA
     except (TypeError, ValueError):
-        value = DEFAULT_WEBER_K
-    if value < 0.0:
-        value = DEFAULT_WEBER_K
-    return value
+        value = DEFAULT_ALPHA
+    if not math.isfinite(value):
+        value = DEFAULT_ALPHA
+    return max(0.0, min(MAX_ALPHA, value))
 
 
 # ---------------------------------------------------------------------------
@@ -297,36 +317,39 @@ def compute_corroboration_counts(
 # B_corr(x) — the Weber-Fechner bonus
 # ---------------------------------------------------------------------------
 
-def weber_bonus(k_corr: int, k_max: int, weber_k: float = DEFAULT_WEBER_K) -> float:
-    """B_corr(x) = Weber_k * ln(1 + k_corr) / ln(1 + k_max).
+def corroboration_bonus(
+    k_corr: int, k_max: int, s_top: float, alpha: float = DEFAULT_ALPHA,
+) -> float:
+    """B_corr(x) = alpha * S_top * ln(1 + k_corr) / ln(1 + k_max).
 
-    Call-relative normalization (mirrors ``energy_function``'s E_PPR/
-    E_keyword convention): the best-corroborated candidate in this call's
-    result set (``k_corr == k_max``) always receives the full ``Weber_k``
-    bonus. When ``k_max <= 0`` (no candidate in this call has any
-    corroboration), the bonus is 0.0 for everyone rather than a division by
-    zero — there is nothing to normalize against.
+    Call-relative and dimensionless: ``S_top`` is the call's maximum fused RRF
+    score and ``k_max`` the call's maximum corroborator count, so the result is
+    always in ``[0, alpha * S_top]``. Returns 0.0 when ``k_max <= 0``,
+    ``k_corr <= 0`` or ``S_top <= 0`` (nothing to normalize against).
     """
     if k_max is None or k_max <= 0 or k_corr is None or k_corr <= 0:
         return 0.0
-    k_corr = max(0, int(k_corr))
+    if s_top is None or s_top <= 0.0:
+        return 0.0
     k_max = max(0, int(k_max))
-    return weber_k * math.log1p(k_corr) / math.log1p(k_max)
+    k_corr = min(max(0, int(k_corr)), k_max)
+    return alpha * s_top * math.log1p(k_corr) / math.log1p(k_max)
 
 
 def compute_bonuses(
     counts: Dict[str, int],
     *,
-    weber_k: Optional[float] = None,
+    s_top: float,
+    alpha: Optional[float] = None,
 ) -> Dict[str, Dict[str, float]]:
     """B_corr breakdown for every candidate in ``counts`` (one result set).
 
-    Returns ``{record_id: {"schema", "k_corr", "k_max", "weber_k", "b_corr"}}``
-    so a caller (or a unit test) can inspect the full provenance of each
-    bonus, not just its final value.
+    Returns ``{record_id: {"schema", "k_corr", "k_max", "alpha", "s_top",
+    "b_corr"}}`` so a caller (or a unit test) can inspect the full provenance
+    of each bonus, not just its final value.
     """
-    if weber_k is None:
-        weber_k = load_weber_k()
+    if alpha is None:
+        alpha = load_alpha()
     k_max = max(counts.values()) if counts else 0
     out: Dict[str, Dict[str, float]] = {}
     for rid, k_corr in counts.items():
@@ -334,7 +357,8 @@ def compute_bonuses(
             "schema": CORROBORATION_SCHEMA,
             "k_corr": k_corr,
             "k_max": k_max,
-            "weber_k": weber_k,
-            "b_corr": weber_bonus(k_corr, k_max, weber_k),
+            "alpha": alpha,
+            "s_top": s_top,
+            "b_corr": corroboration_bonus(k_corr, k_max, s_top, alpha),
         }
     return out

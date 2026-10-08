@@ -8,6 +8,7 @@ Routes (API Gateway HTTP API):
     POST    /api/v1/coordination/requests/{requestId}/dispatch
     POST    /api/v1/coordination/requests/{requestId}/callback
     GET     /api/v1/coordination/capabilities
+    GET     /api/v1/coordination/context/compact
     OPTIONS /api/v1/coordination/*
 
 Primary responsibilities:
@@ -1620,6 +1621,9 @@ def _load_mcp_server_module():
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # ENC-TSK-Q47: this process IS the compact-context route host; the module
+    # must compose locally and never call its own route back over HTTP.
+    setattr(module, "COMPACT_CONTEXT_ROUTE_DISABLED", True)
     _ENCELADUS_MCP_SERVER_MODULE = module
     return _ENCELADUS_MCP_SERVER_MODULE
 
@@ -16697,10 +16701,260 @@ def _handle_health() -> Dict[str, Any]:
     health["tracker_capabilities"] = {
         "census": True,          # ENC-TSK-Q14: GET /{project}?mode=census
         "list_cursor_v2": True,  # ENC-TSK-Q13: value-based next_cursor codec
+        "compact_context": True,  # ENC-TSK-Q47: GET /api/v1/coordination/context/compact
     }
 
     health["checked_at"] = _now_z()
     return _response(200, health)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-Q47 (ENC-FTR-147 / BRD DOC-412AB7081565 Phase 2): context.compact
+# single assembler route.
+# ---------------------------------------------------------------------------
+
+_COMPACT_CONTEXT_MODES = frozenset(
+    {"record", "issue", "task", "feature", "lesson", "project", "document", "topic"}
+)
+_COMPACT_CONTEXT_STR_PARAMS = (
+    "mode", "record_id", "project_id", "document_id", "query", "anchor_record_id",
+    "record_type", "governance_entity", "domain", "keyword", "title", "related", "section",
+)
+_COMPACT_CONTEXT_INT_PARAMS = (
+    "top_n", "max_tokens", "history_limit", "page_size", "context_lines",
+    "max_results", "max_excerpt_tokens",
+)
+_COMPACT_CONTEXT_BOOL_PARAMS = (
+    "include_components", "include_architecture", "include_recent_history",
+    "include_code_map", "include_related_documents", "include_governance",
+    "include_below_threshold", "include_hybrid_retrieval",
+)
+_COMPACT_CONTEXT_SIGNAL_KEYS = {"vector": "v", "graph": "g", "keyword": "k"}
+
+
+def _compact_context_parse_args(params: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Map query-string params to the get_compact_context argument set."""
+    args: Dict[str, Any] = {}
+    for key in _COMPACT_CONTEXT_STR_PARAMS:
+        value = str(params.get(key) or "").strip()
+        if value:
+            args[key] = value
+    for key in _COMPACT_CONTEXT_INT_PARAMS:
+        raw = params.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            args[key] = int(str(raw).strip())
+        except ValueError:
+            return args, f"Query parameter '{key}' must be an integer."
+    for key in _COMPACT_CONTEXT_BOOL_PARAMS:
+        raw = params.get(key)
+        if raw in (None, ""):
+            continue
+        token = str(raw).strip().lower()
+        if token in ("true", "1", "yes"):
+            args[key] = True
+        elif token in ("false", "0", "no"):
+            args[key] = False
+        else:
+            return args, f"Query parameter '{key}' must be true or false."
+    domains = str(params.get("domains") or "").strip()
+    if domains:
+        args["domains"] = [d.strip() for d in domains.split(",") if d.strip()]
+    return args, None
+
+
+def _compact_context_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _compact_context_round(value: Any, places: int) -> Any:
+    try:
+        return round(float(value), places)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_compact_context_digest(
+    composed: Dict[str, Any],
+    args: Dict[str, Any],
+    *,
+    hybrid_raw: Optional[Dict[str, Any]],
+    wall_ms: int,
+    governance_hash: str = "",
+) -> Dict[str, Any]:
+    """Project the composer payload onto the elr.compact_context_digest schema (BRD 7.3).
+
+    Pure: copies values from the composer output (``nodes[*]._final_rank`` etc.)
+    and never recomputes a score or re-sorts, so ``ranking`` is the composer's
+    ``hybrid_retrieval.nodes`` order verbatim (BRD FR-13 / M-1).
+    """
+    context = composed.get("result") if isinstance(composed.get("result"), dict) else {}
+    hybrid = context.get("hybrid_retrieval") if isinstance(context.get("hybrid_retrieval"), dict) else None
+    raw = hybrid_raw if isinstance(hybrid_raw, dict) else {}
+
+    ranking: List[List[Any]] = []
+    if hybrid:
+        for node in hybrid.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            rid = str(node.get("record_id") or node.get("id") or "")
+            rtype = str(node.get("record_type") or "")
+            if not rtype and rid.count("-") >= 2:
+                rtype = rid.split("-")[1].lower()
+            per_signal = node.get("_per_signal_ranks") if isinstance(node.get("_per_signal_ranks"), dict) else {}
+            signal_row = {
+                short: per_signal[long]
+                for long, short in _COMPACT_CONTEXT_SIGNAL_KEYS.items()
+                if per_signal.get(long) is not None
+            }
+            ranking.append([
+                rid[:16],
+                rtype,
+                node.get("_final_rank"),
+                node.get("_fused_rank"),
+                _compact_context_round(node.get("_fused_score"), 6),
+                _compact_context_round(node.get("_final_score"), 6),
+                signal_row,
+                node.get("_corroboration_count"),
+                _compact_context_round(node.get("_b_corr"), 3),
+                bool(node.get("_below_t3")),
+                " ".join(str(node.get("title") or "").split())[:64],
+            ])
+
+    retrieval: Dict[str, Any] = {}
+    if hybrid:
+        availability = hybrid.get("signal_availability") if isinstance(hybrid.get("signal_availability"), dict) else {}
+        candidates = {"vector": 0, "graph": 0, "keyword": 0}
+        match = re.search(
+            r"vector=(\d+), graph=(\d+), keyword=(\d+)", str(hybrid.get("summary") or "")
+        )
+        if match:
+            candidates = {
+                "vector": int(match.group(1)),
+                "graph": int(match.group(2)),
+                "keyword": int(match.group(3)),
+            }
+        pathway = raw.get("pathway") if isinstance(raw.get("pathway"), dict) else {}
+        retrieval = {
+            "rrf_k": hybrid.get("rrf_k"),
+            "fsrs_t3_threshold": hybrid.get("fsrs_t3_threshold"),
+            "include_below_threshold": hybrid.get("include_below_threshold"),
+            "weber_k": raw.get("corroboration_weber_k"),
+            "graph_algorithm": hybrid.get("graph_algorithm"),
+            "signals_present": sorted(k for k, v in availability.items() if v),
+            "signals_absent": {k: "unavailable" for k, v in sorted(availability.items()) if not v},
+            "candidates": candidates,
+            "embedding_coverage_sample": hybrid.get("embedding_coverage_sample") or {},
+            "intent_signature": pathway.get("intent_signature"),
+            "wave_id": pathway.get("wave_id"),
+            "pathway_edge_count": pathway.get("edge_count"),
+            "query_source": hybrid.get("query_source"),
+        }
+
+    sections_summary = {
+        name: {
+            "bytes": len(_compact_context_json_bytes(body)),
+            "sha256": hashlib.sha256(_compact_context_json_bytes(body)).hexdigest(),
+        }
+        for name, body in context.items()
+    }
+    warnings = [str(w) for w in (composed.get("warnings") or [])]
+    anchor = str(args.get("anchor_record_id") or args.get("record_id") or args.get("document_id") or "")
+    return {
+        "success": True,
+        "schema": "elr.compact_context_digest",
+        "operation": "context.compact",
+        "header": {
+            "run_id": uuid.uuid4().hex[:12],
+            "mode": composed.get("mode") or args.get("mode"),
+            "anchor": anchor,
+            "query_head": str((hybrid or {}).get("query_head") or args.get("query") or "")[:120],
+            "governance_hash": governance_hash,
+            "partial": bool(composed.get("partial")),
+            "truncated": False,
+            "wall_ms": wall_ms,
+            "server_duration_ms": (hybrid or {}).get("duration_ms"),
+        },
+        "retrieval": retrieval,
+        "ranking": ranking,
+        "sections_summary": sections_summary,
+        "warnings": warnings,
+    }
+
+
+def _handle_context_compact(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/context/compact (ENC-TSK-Q47, BRD Phase 2).
+
+    Single assembler: runs the SAME composer the MCP ``get_compact_context``
+    meta-tool uses (tools/enceladus-mcp-server/mcp_server/tools/context.py,
+    loaded via _load_mcp_server_module -- coordination_api already packages
+    server.py + mcp_server/) and returns the elr.compact_context_digest
+    projection. ``fields=digest`` (default) returns the digest only;
+    ``fields=full`` adds ``sections`` (the composer's context map, verbatim)
+    plus ``underlying_calls``/``metadata`` so thin clients can reconstruct the
+    legacy MCP response. Auth is enforced by the shared gate in lambda_handler.
+    """
+    params = event.get("queryStringParameters") or {}
+    fields = str(params.get("fields") or "digest").strip().lower()
+    if fields not in ("digest", "full"):
+        return _error(400, "Query parameter 'fields' must be 'digest' or 'full'.", code="VALIDATION_ERROR")
+
+    args, parse_err = _compact_context_parse_args(params)
+    if parse_err:
+        return _error(400, parse_err, code="VALIDATION_ERROR")
+
+    mode = args.get("mode", "").lower() if args.get("mode") else ""
+    if mode and mode not in _COMPACT_CONTEXT_MODES:
+        return _error(
+            400,
+            f"Unknown context mode '{mode}'. Valid modes: {', '.join(sorted(_COMPACT_CONTEXT_MODES))}.",
+            code="VALIDATION_ERROR",
+        )
+    if mode:
+        args["mode"] = mode
+
+    hybrid_capture: Dict[str, Any] = {}
+    composer_args = dict(args)
+    composer_args["_hybrid_capture"] = hybrid_capture
+    started = time.monotonic()
+    try:
+        module = _load_mcp_server_module()
+        composer = getattr(module, "get_compact_context_meta")
+        result = _run_async(composer(composer_args))
+        text = "".join(getattr(item, "text", "") for item in result)
+        composed = json.loads(text)
+    except Exception as exc:
+        logger.exception("[ERROR] context.compact composer failed")
+        return _error(502, f"Compact context composer failed: {exc}", code="UPSTREAM_ERROR")
+    wall_ms = int((time.monotonic() - started) * 1000)
+
+    if not isinstance(composed, dict) or composed.get("success") is False:
+        err = (composed or {}).get("error") if isinstance(composed, dict) else None
+        err = err if isinstance(err, dict) else {}
+        code = str(err.get("code") or "").lower()
+        message = str(err.get("message") or "Compact context composition failed.")
+        if code in ("invalid_input", "unknown_mode"):
+            return _error(400, message, code="VALIDATION_ERROR")
+        if code == "boundary_denied":
+            return _error(403, message, code="PERMISSION_DENIED")
+        return _error(502, message, code="UPSTREAM_ERROR", details=err.get("details"))
+
+    governance_hash = ""
+    try:
+        governance_hash = _compute_governance_hash_local()
+    except Exception:
+        governance_hash = ""
+
+    digest = _build_compact_context_digest(
+        composed, args, hybrid_raw=hybrid_capture, wall_ms=wall_ms, governance_hash=governance_hash
+    )
+    digest["fields"] = fields
+    if fields == "full":
+        digest["sections"] = composed.get("result") or {}
+        digest["underlying_calls"] = composed.get("underlying_calls") or []
+        digest["metadata"] = composed.get("metadata") or {}
+    return _response(200, digest)
 
 
 # ---------------------------------------------------------------------------
@@ -17157,6 +17411,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return auth_err
 
     # --- Phase 2b: Governance routes (auth required) ---
+
+    # GET /api/v1/coordination/context/compact (ENC-TSK-Q47): single assembler
+    # for MCP get_compact_context / ELR / PWA; same auth gate as other reads.
+    if method == "GET" and path == "/api/v1/coordination/context/compact":
+        return _handle_context_compact(event)
 
     # GET /api/v1/governance/hash
     if method == "GET" and path == "/api/v1/governance/hash":

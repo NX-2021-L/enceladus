@@ -1,0 +1,36 @@
+name: Requirements Pin Guard
+
+# ENC-TSK-Q42 / ENC-ISS-835: an unpinned `mcp` resolved to 2.3.0 and broke the
+# coordination MCP gateway. Fail any PR that adds a bare unversioned requirement
+# or an `mcp` line without an exact == pin in backend/lambda/*/requirements.txt.
+
+on:
+  pull_request:
+    branches: [main, 'v[0-9]*/main']
+    paths:
+      - 'backend/lambda/**/requirements.txt'
+      - 'tools/check_requirements_pins.py'
+      - 'tools/test_check_requirements_pins.py'
+      - '.github/workflows/requirements-pin-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Lambda requirements pins
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unit test guard
+        run: python3 -m unittest tools/test_check_requirements_pins.py -v
+
+      - name: Check requirements pins
+        run: python3 tools/check_requirements_pins.py

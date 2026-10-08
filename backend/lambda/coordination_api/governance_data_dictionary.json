@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-08.01",
-  "updated_at": "2026-10-08T04:30:00Z",
-  "last_change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
+  "version": "2026-10-08.02",
+  "updated_at": "2026-10-08T18:00:00Z",
+  "last_change_summary": "ENC-TSK-Q46 (ENC-ISS-836): retrieval.hybrid_pipeline corroboration bonus is now call-relative, B_corr = alpha * S_top * ln(1 + k_corr) / ln(1 + k_max), alpha 0.02 (AppConfig corroboration_alpha, clamped [0, 0.2]); the absolute Weber_k (0.3) is retired. Activation k >= 1, dispersion cosine distance 0.3. Hybrid response carries corroboration_alpha and s_top.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2561,12 +2561,12 @@
       }
     },
     "mcp_server.context_assembly": {
-      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support.",
+      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support. Consumers (ENC-TSK-Q47): coordination_api context.compact route (GET /api/v1/coordination/context/compact), MCP get_compact_context (route client with local fallback), ELR compact_context.",
       "fields": {
         "get_compact_context": {
           "type": "tool",
-          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope. ENC-TSK-B92: extended with optional three-signal hybrid retrieval — when `query` and/or `anchor_record_id` is supplied, the response includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion (k=60) over vector (HNSW cosine via graph_query_api), graph (Personalized PageRank via GDS or Cypher fallback), and keyword (title/intent/description contains) signals. Backward-compat: callers not passing `query`/`anchor_record_id` receive the legacy context shape unchanged.",
-          "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged. Hybrid retrieval opt-in: pass `query` (text) or `anchor_record_id` (graph anchor) to enable. Auto-anchors to `record_id` for record modes when `anchor_record_id` is not supplied. Use `top_n` (default 20, max 50), `record_type` filter (task/issue/feature/plan/lesson/document), and `include_below_threshold` (default false) to tune results. Set `include_hybrid_retrieval=false` to force-disable even when query/anchor supplied."
+          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope. ENC-TSK-B92: extended with optional three-signal hybrid retrieval — when `query` and/or `anchor_record_id` is supplied, the response includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion (k=60) over vector (HNSW cosine via graph_query_api), graph (Personalized PageRank via GDS or Cypher fallback), and keyword (title/intent/description contains) signals. Backward-compat: callers not passing `query`/`anchor_record_id` receive the legacy context shape unchanged. ENC-TSK-Q47 (ENC-FTR-147, BRD DOC-412AB7081565 Phase 2): the composer is now served by ONE server route, GET /api/v1/coordination/context/compact (coordination_api _handle_context_compact), which loads this same composer via _load_mcp_server_module and returns the elr.compact_context_digest projection (ranking rows copied verbatim from hybrid_retrieval.nodes) plus a `sections` map when fields=full. Consumers: MCP get_compact_context (re-pointed at the route when /api/v1/health tracker_capabilities.compact_context is true, with automatic local-compose fallback and legacy response shape preserved), ELR compact_context, and the v5 Approval Cockpit.",
+          "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged. Hybrid retrieval opt-in: pass `query` (text) or `anchor_record_id` (graph anchor) to enable. Auto-anchors to `record_id` for record modes when `anchor_record_id` is not supplied. Use `top_n` (default 20, max 50), `record_type` filter (task/issue/feature/plan/lesson/document), and `include_below_threshold` (default false) to tune results. Set `include_hybrid_retrieval=false` to force-disable even when query/anchor supplied. ENC-TSK-Q43 (ENC-ISS-837): in record-oriented modes (record|issue|task|feature|lesson) when the caller supplies no `query`, the server derives query := normalize(record title + intent)[:300] (whitespace collapsed; title alone if no intent; no query if neither) from the fetched record so vector, keyword and graph signals all fire, with anchor_record_id still the record_id. A caller-supplied `query` passes through unchanged. The hybrid_retrieval section reports `query_source` (derived_from_record|caller|none) and `query_head` (first 80 chars of the query used)."
         },
         "get_issue_context": {
           "type": "tool",
@@ -3729,6 +3729,11 @@
     "tracker.graphsearch": {
       "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-TSK-L53 / ENC-ISS-489: graph_query_api JWT gate accepts enceladus_id_token from APIGW HTTP API v2 event.cookies[] as well as headers.cookie (ui-v2 credentials:include cookie-only hybrid tier). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate. ENC-PLN-046 hybrid-retrieval remediation: the keyword signal tokenizes multi-word queries and scores per-token field-weighted CONTAINS (ENC-ISS-310); the anchored graph signal is deadline-bounded (_GRAPH_SIGNAL_DEADLINE_S) and degrades to graph_algorithm='timeout' rather than timing out the response (ENC-ISS-311); the /health endpoint reports per-signal availability via a functional probe (ENC-ISS-312). ENC-FTR-101 (Option B, ENC-TSK-H35): an optional pre-materialized standing named projection (enabled via env GDS_STANDING_PROJECTION_PREFIX), refreshed out-of-band by a single-writer action=refresh_projection invoke, lets anchored hybrid queries run gds.pageRank.stream warm against the standing projection (graph_algorithm='gds_pagerank') instead of building a per-query AGA session; the request path falls back to the existing per-query projection then the cypher proxy under _GRAPH_SIGNAL_DEADLINE_S when the standing projection is unconfigured or absent (no regression), and /health gains a graph_projection block reporting projection existence + last-refresh staleness. The standing projection carries weight + flow_weight=1.0 relationship properties (flow_weight is the ENC-FTR-108 adaptive-weight slot). ENC-FTR-108 Ph2 (ENC-TSK-J02): action=refresh_flow_weight invokes graph_query_api.flow_weight_refresh.run_refresh, which reads FTR-082's existing edge_participation[] pathway-telemetry (retrieval_outcome=='hit' entries) from S3 since a persisted watermark, aggregates traversal counts per edge_id, and applies the Ph1 Tero current-reinforcement law (flow_weight = flow_weight + delta*flow - mu*flow_weight, delta=mu=0.2 by default, env-overridable via FLOW_WEIGHT_DELTA/FLOW_WEIGHT_MU) via a single chunked UNWIND-batched Cypher write for touched edges plus one full-corpus decay-only statement (scoped to GRAPH_EDGE_WEIGHTS relationship types, excluding touched edge_ids) for untouched edges — never per-edge transactions. The whole cycle is a no-op when no new telemetry exists since the watermark (idempotent). The watermark is stored as a property on the pre-existing GdsProjectionMeta marker node (name='flow_weight_refresh') rather than a new label, and no new relationship type or node label is introduced anywhere in the write path (OGTM preflight for ENC-TSK-J02: _ALLOWED_EDGE_TYPES and GRAPH_EDGE_WEIGHTS are unchanged before/after).",
       "fields": {
+        "fields_projection": {
+          "type": "enum",
+          "enum": ["full", "compact"],
+          "definition": "ENC-TSK-Q49: response projection for search_type=hybrid via the 'fields' query parameter. full (default, also when absent) is the unchanged response. compact limits per_node_fusion to the returned top_n node ids, reduces node rows to record_id, record_type, title, status, updated_at plus _fused_rank, _fused_score, _final_rank, _final_score, _per_signal_ranks, _corroboration_count, _b_corr, and drops edges, paths, pathway, facets, query_cypher and edge_participation; ranking and all other top-level fields are unchanged. Unknown values return HTTP 400. Support is advertised as hybrid_fields_compact=true on GET /api/v1/tracker/graphsearch/health."
+        },
         "search_type": {
           "type": "enum",
           "enum": [
@@ -6100,8 +6105,13 @@
       }
     },
     "retrieval.hybrid_pipeline": {
-      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context.",
+      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. ENC-TSK-Q46 (ENC-ISS-836): a fifth, additive corroboration bonus B_corr is layered on the fused RRF score to produce final_score (see field corroboration). Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context. Consumers (ENC-TSK-Q47): MCP get_compact_context, coordination_api context.compact route (GET /api/v1/coordination/context/compact), ELR compact_context (reads the route digest ranking, which is nodes order verbatim).",
       "fields": {
+        "fields_projection": {
+          "type": "enum",
+          "enum": ["full", "compact"],
+          "definition": "ENC-TSK-Q49: response projection for search_type=hybrid via the 'fields' query parameter. full (default, also when absent) is the unchanged response. compact limits per_node_fusion to the returned top_n node ids, reduces node rows to record_id, record_type, title, status, updated_at plus _fused_rank, _fused_score, _final_rank, _final_score, _per_signal_ranks, _corroboration_count, _b_corr, and drops edges, paths, pathway, facets, query_cypher and edge_participation; ranking and all other top-level fields are unchanged. Unknown values return HTTP 400. Support is advertised as hybrid_fields_compact=true on GET /api/v1/tracker/graphsearch/health."
+        },
         "rrf_k": {
           "type": "integer",
           "definition": "Reciprocal Rank Fusion exponent offset. score = sum(1 / (k + rank_i)) over signals where the record appears in top-N. Locked at 60 per ENC-TSK-B62 description. Rank-based, not score-based — signals do not need score normalization.",
@@ -6121,8 +6131,13 @@
           "type": "object",
           "definition": "Resilience contract. (a) Vector signal is skipped when query text is missing or embedding helper returns None — RRF still works with graph + keyword. (b) Graph signal first attempts gds.pageRank.stream; on GDS unavailable or empty result, falls back to a per-relationship-type weighted Cypher hop-sum within depth 3 with damping^distance decay. (c) Keyword signal degrades gracefully when no records match. (d) When all three signals are empty, the response includes a 'No signals returned candidates' summary instead of a 500. (e) embedding_coverage_sample.{covered,total_ranked} reports observed embedding density per query so callers can detect sparse-coverage degradation."
         },
+        "corroboration": {
+          "type": "object",
+          "definition": "ENC-TSK-Q46 (ENC-ISS-836, FTR-110 AC-1 contract DOC-90C4269BB62B section 8 amendment): call-relative corroboration bonus added to each candidate's pure-RRF fused_score to produce final_score (nodes are ordered by final_score; fused_score/fused_rank stay pure RRF). B_corr(x) = alpha * S_top * ln(1 + k_corr(x)) / ln(1 + k_max), where S_top is the maximum fused_score in this call, k_corr(x) is the dispersion-constrained corroborator count (candidates in the same result set with cosine similarity >= 0.80 to x, greedily packed so each accepted pair has cosine distance >= 0.3), and k_max is the largest k_corr in this call. B_corr = 0 when k_max == 0 or k_corr == 0. Activation threshold k >= 1 (supersedes the contract's k >= 2); dispersion metric cosine distance 0.3 (supersedes graph hops). Guarantee: max B_corr <= alpha * S_top, so no candidate with k_corr >= 1 can overtake one whose fused_score exceeds its own by more than alpha * S_top. alpha defaults to 0.02 and is resolved per call from AppConfig profile corroboration-function key corroboration_alpha, then env CORROBORATION_ALPHA, then the default, clamped to [0, 0.2]. The retired absolute Weber_k constant (0.3) and the response key corroboration_weber_k no longer exist.",
+          "usage_guidance": "Hybrid response top-level fields corroboration_alpha (alpha used) and s_top (call's max fused_score; 0.0 with no candidates) let any client verify the bound; per_node_fusion[*] and nodes[*] carry k_corr/b_corr/final_score/final_rank (nodes: _corroboration_count/_b_corr/_final_score/_final_rank)."
+        },
         "fsrs_t3_threshold": {
-          "type": "number",
+          "type": "number Both are on the HTTP graphsearch allow-list (lambda_function._handle_search hybrid passthrough), so they survive fields=full and fields=compact.",
           "definition": "FSRS-6 retrieval-invisible stability threshold for Lesson records (ENC-TSK-B62 scope item #4). Default 0.7. Lessons with stability < T3 (or, when stability is absent, resonance_score < T3 per the ENC-LSN-029 pre-FSRS-6 convention) are suppressed from the fused result unless include_below_threshold=true is passed.",
           "usage_guidance": "Override per-query via include_below_threshold=true on get_compact_context or the hybrid graphsearch query. Lesson rehydration / direct lookup paths are unaffected — T3 only filters retrieval surfaces."
         },
@@ -9164,6 +9179,43 @@
           "ENC-TSK-P82"
         ],
         "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "elr.compact_context_digest": {
+      "description": "ENC-TSK-Q47 (ENC-FTR-147, BRD DOC-412AB7081565 section 7.3): compact digest returned by GET /api/v1/coordination/context/compact (coordination_api _handle_context_compact). Produced by the same composer as MCP get_compact_context; the digest is a projection, never a recomputation: ranking rows are copied from hybrid_retrieval.nodes[*] (_final_rank, _fused_rank, _fused_score, _final_score, _per_signal_ranks, _corroboration_count, _b_corr, _below_t3) in the composer's order. Query params: the get_compact_context argument set (mode, record_id, project_id, document_id, query, anchor_record_id, record_type, top_n, max_tokens, include_* flags, domains as comma list, ...) plus fields=digest (default) | full. fields=full adds `sections` (composer context map verbatim), `underlying_calls` and `metadata` so thin clients can rebuild the legacy MCP response. Capability: /api/v1/health tracker_capabilities.compact_context=true. Errors: 400 VALIDATION_ERROR (bad mode/fields/integer/boolean), 403 on boundary_denied, 502 UPSTREAM_ERROR on composer failure.",
+      "fields": {
+        "header": {
+          "type": "object",
+          "definition": "run_id (12 hex), mode, anchor (anchor_record_id|record_id|document_id), query_head (<=120 chars), governance_hash, partial (composer warnings present), truncated (always false server-side), wall_ms (composer wall time in the route), server_duration_ms (graph_query_api hybrid duration_ms)."
+        },
+        "retrieval": {
+          "type": "object",
+          "definition": "rrf_k (60), fsrs_t3_threshold (0.7), include_below_threshold, weber_k (retired by ENC-TSK-Q46, always null; hybrid now carries corroboration_alpha and s_top), graph_algorithm, signals_present[], signals_absent{signal: reason}, candidates{vector, graph, keyword} (parsed from the hybrid summary), embedding_coverage_sample{covered, total_ranked}, intent_signature, wave_id, pathway_edge_count, query_source (caller | derived_from_record | none). Empty object when no hybrid retrieval ran."
+        },
+        "ranking": {
+          "type": "array",
+          "definition": "One array row per returned node in hybrid_retrieval.nodes order (final_rank order, NOT re-sorted): [record_id (<=16), record_type, final_rank, fused_rank, fused_score (6 dp), final_score (6 dp), {v: rank, g: rank, k: rank}, k_corr, b_corr (3 dp), below_t3, title (<=64 chars)]. Rows are arrays so field names are paid once in this schema, not top_n times per digest (BRD M-3: <=192 bytes per row)."
+        },
+        "sections_summary": {
+          "type": "object",
+          "definition": "Map of composer section name (record_context, project, code_map, related_documents, governance, documents, reference, architecture, hybrid_retrieval, ...) to {bytes, sha256} of the section's compact JSON. Names are the composer's own keys; clients alias them (record_context -> record, hybrid_retrieval -> hybrid)."
+        },
+        "sections": {
+          "type": "object",
+          "definition": "Present only when fields=full: the composer context map verbatim (section bodies)."
+        },
+        "warnings": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Composer warnings (best-effort section failures, hybrid retrieval unavailable)."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-Q47",
+          "ENC-TSK-Q48"
+        ],
+        "reference_doc": "DOC-412AB7081565"
       }
     },
     "document.history": {
