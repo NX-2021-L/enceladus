@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CacheEngine,
+  DOCUMENT_COUNTER_SENTINEL_ID,
   corpusItemToTier1,
   resetCacheEngineForTests,
   tier1FromFeedEvent,
 } from './cacheEngine'
 import type { FeedCorpusItem } from './types'
+import { listTier1 as idbListTier1, putTier1 as idbPutTier1 } from './idbStore'
 
 describe('corpusItemToTier1', () => {
   it('maps corpus items to tier1 rows', () => {
@@ -278,5 +280,43 @@ describe('CacheEngine versioned tombstones (ENC-TSK-Q34 AC-1)', () => {
     expect(engine.searchIndex.all()).toHaveLength(0)
     await engine.ingestCorpusPage([doc(190, 'Restored')])
     expect(engine.searchIndex.all().map((r) => r.title)).toEqual(['Restored'])
+  })
+})
+
+describe('CacheEngine purges the counter-sentinel phantom (ENC-TSK-Q34)', () => {
+  beforeEach(() => {
+    resetCacheEngineForTests()
+  })
+
+  it('drops a cached __COUNTER__VERSION_SEQ__ row left by a pre-Q34 corpus', async () => {
+    const engine = new CacheEngine()
+    // What an older corpus wrote: the counter row served as a document.
+    await idbPutTier1({
+      projectId: 'global',
+      recordId: DOCUMENT_COUNTER_SENTINEL_ID,
+      recordType: 'document',
+      title: DOCUMENT_COUNTER_SENTINEL_ID,
+      updatedAt: null,
+      source: 'document',
+      recordKey: `document::${DOCUMENT_COUNTER_SENTINEL_ID}`,
+      versionSeq: '0',
+      attrs: { status: 'active' },
+    })
+    await engine.ingestCorpusPage([
+      { record_id: 'DOC-REAL', record_type: 'document', project_id: 'devops', title: 'Real', source: 'document', record_key: 'document::DOC-REAL', updated_at: '2026-10-08T05:00:00Z' },
+    ])
+
+    await engine.loadSearchSlice()
+    expect(engine.searchIndex.all().map((r) => r.recordId)).toEqual(['DOC-REAL'])
+    expect(await idbListTier1(100)).toHaveLength(1)
+
+    await engine.finalizeWarm()
+    expect(engine.searchIndex.all().map((r) => r.recordId)).toEqual(['DOC-REAL'])
+  })
+
+  it('never ingests the sentinel from a corpus item', () => {
+    expect(
+      corpusItemToTier1({ record_id: DOCUMENT_COUNTER_SENTINEL_ID, record_type: 'document', project_id: '', title: '', source: 'document', record_key: 'document::x' }),
+    ).toBeNull()
   })
 })
