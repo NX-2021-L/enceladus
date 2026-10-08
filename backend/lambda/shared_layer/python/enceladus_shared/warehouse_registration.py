@@ -115,9 +115,10 @@ Two clocks (DVP-TSK-765, DVP-ISS-134)
     to tell them apart:
 
     * ``write_timestamp`` -- the STATE clock. It moves only with a new
-      generation (``storage_changed`` or ``catalog_changed``), exactly like
-      ``write_seq`` and the ``previous_*`` fields. An invocation that found the
-      table already current keeps the last generation's value.
+      generation (``storage_changed`` or ``catalog_changed``, or content the
+      prior record does not describe), exactly like ``write_seq`` and the
+      ``previous_*`` fields. An invocation that found the table already
+      current keeps the last generation's value.
     * ``last_verified_at`` -- the OBSERVATION clock. Stamped on every
       invocation, so "checked at T and found current" stays expressible
       without masquerading as "changed at T".
@@ -1026,7 +1027,7 @@ class RegistrationRecord:
     ``write_timestamp`` is the clock of the invocation that produced the
     CURRENT generation; ``last_verified_at`` is the clock of THIS invocation
     (see "Two clocks" in the module docstring). They are equal exactly when
-    this invocation wrote a new generation.
+    this invocation recorded a new generation.
     """
 
     project: str
@@ -1252,8 +1253,20 @@ def register_table(
     # freshness reader consults was the one generation field a no-op still
     # advanced (DVP-ISS-134). This invocation's own clock goes to
     # last_verified_at instead, which is stamped every time.
+    #
+    # A digest the prior record does not carry is a generation too, even with
+    # both flags false: a run whose data PutObject landed but whose sidecar
+    # emit failed leaves the bytes current and the record describing the
+    # generation before them. The retry StorageWriteError invites must record
+    # that generation, not hold the stale record's clock over content it never
+    # described. With no prior record this resolves exactly as the no-op
+    # fallback below would (write_seq 1, this clock, empty previous_*).
     previous = previous or {}
-    new_generation = storage_changed or catalog_changed
+    new_generation = (
+        storage_changed
+        or catalog_changed
+        or (previous.get("content_sha256") or "") != digest
+    )
     if new_generation:
         write_seq = int(previous.get("write_seq") or 0) + 1
         written_at = stamp

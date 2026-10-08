@@ -108,6 +108,8 @@ class FakeS3:
         self.objects = {}
         self.data_puts = 0
         self.record_puts = 0
+        #: Fail the next sidecar PutObject: the data lands, the record does not.
+        self.fail_next_record_put = False
 
     def head_object(self, Bucket, Key):
         if (Bucket, Key) not in self.objects:
@@ -125,6 +127,9 @@ class FakeS3:
         if Key.endswith(".parquet"):
             self.data_puts += 1
         else:
+            if self.fail_next_record_put:
+                self.fail_next_record_put = False
+                raise RuntimeError("simulated sidecar PutObject failure")
             self.record_puts += 1
         self.objects[(Bucket, Key)] = (Body, kwargs.get("Metadata", {}))
         return {}
@@ -303,8 +308,12 @@ class _ObserverClockCases:
         self.assertFalse(replay.catalog_changed)
         self.assertEqual(before, s3.sidecar_bytes())
 
-    def test_a_version_one_sidecar_is_held_not_overwritten(self):
-        """Upgrade path: a pre-DVP-TSK-765 record has no last_verified_at."""
+    def test_a_version_one_sidecar_holds_write_timestamp_and_upgrades_in_place(self):
+        """Upgrade path: a pre-DVP-TSK-765 record has no last_verified_at.
+
+        The state clock is held; the record itself is rewritten as the current
+        version with last_verified_at added.
+        """
         s3, glue = FakeS3(), FakeGlue()
         call(s3, glue, T1)
         legacy = s3.sidecar()
@@ -317,7 +326,59 @@ class _ObserverClockCases:
         self.assertFalse(later.storage_changed)
         self.assertEqual(later.write_timestamp, iso(T1))
         self.assertEqual(later.last_verified_at, iso(T2))
-        self.assertEqual(s3.sidecar()["record_version"], REGISTRATION_RECORD_VERSION)
+        sidecar = s3.sidecar()
+        self.assertEqual(sidecar["record_version"], REGISTRATION_RECORD_VERSION)
+        self.assertEqual(sidecar["write_timestamp"], iso(T1))
+        self.assertEqual(sidecar["last_verified_at"], iso(T2))
+
+    def test_a_retry_after_a_failed_sidecar_emit_records_the_new_generation(self):
+        """Data landed, the record did not: the retry must not hold the old clock.
+
+        Neither flag is set on the retry (the bytes and the catalog are already
+        current), so only the digest mismatch against the prior record marks
+        the generation. Without it the sidecar would describe the new content
+        under the previous generation's write_timestamp and write_seq.
+        """
+        s3, glue = FakeS3(), FakeGlue()
+        call(s3, glue, T1)
+        s3.fail_next_record_put = True
+        with self.assertRaises(wr.StorageWriteError):
+            call(s3, glue, T2, rows=CHANGED_ROWS)
+        self.assertEqual(s3.data_puts, 2)
+        self.assertEqual(s3.sidecar()["write_timestamp"], iso(T1))
+
+        retry = call(s3, glue, T3, rows=CHANGED_ROWS)
+
+        self.assertFalse(retry.storage_changed)
+        self.assertFalse(retry.catalog_changed)
+        self.assertEqual(retry.write_seq, 2)
+        self.assertEqual(retry.write_timestamp, iso(T3))
+        self.assertEqual(retry.last_verified_at, iso(T3))
+        self.assertEqual(retry.previous_write_timestamp, iso(T1))
+        self.assertEqual(retry.previous_row_count, len(OWNED_ROWS))
+        sidecar = s3.sidecar()
+        self.assertEqual(sidecar["content_sha256"], retry.content_sha256)
+        self.assertEqual(sidecar["row_count"], len(CHANGED_ROWS))
+        self.assertEqual(sidecar["write_timestamp"], iso(T3))
+        self.assertEqual(sidecar["write_seq"], 2)
+
+    def test_current_data_without_a_prior_record_starts_at_generation_one(self):
+        """No sidecar to hold: the digest rule and the no-op fallback agree."""
+        s3, glue = FakeS3(), FakeGlue()
+        first = call(s3, glue, T1)
+        del s3.objects[(BUCKET, RECORD_KEY)]
+
+        later = call(s3, glue, T2)
+
+        self.assertFalse(later.storage_changed)
+        self.assertFalse(later.catalog_changed)
+        self.assertEqual(later.content_sha256, first.content_sha256)
+        self.assertEqual(later.write_seq, 1)
+        self.assertEqual(later.write_timestamp, iso(T2))
+        self.assertEqual(later.last_verified_at, iso(T2))
+        self.assertEqual(later.previous_write_timestamp, "")
+        self.assertIsNone(later.previous_row_count)
+        self.assertEqual(later.previous_content_sha256, "")
 
     def test_the_record_declares_its_schema_version(self):
         s3, glue = FakeS3(), FakeGlue()
