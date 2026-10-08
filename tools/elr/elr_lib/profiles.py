@@ -53,16 +53,22 @@ VALID_ENVIRONMENT_PROFILES: Tuple[str, ...] = (PROFILE_PROD, PROFILE_V4_GAMMA)
 
 _PROD_API_HOST = "https://jreese.net"
 _GAMMA_API_HOST = "https://enceladus-gamma.jreese.net"
+# Direct API Gateway execute-api host of the PROD plane (ENC-TSK-Q51, BRD
+# NFR-3). Prod keeps graph_query and the compact_context document reads on it
+# because the Cloudflare path (jreese.net) returned intermittent HTTP 403s on
+# documents/search in 3 of 4 calls during the 2026-10-08 measurements, while the
+# direct host answered every call. Gamma has no such split: its direct host IS
+# enceladus-gamma.jreese.net (hybrid verified 200 in 1.1 s; the raw execute-api
+# id hi0dzmvqrc was 11.5 s cold), so gamma points both at that host.
+_PROD_DIRECT_HOST = "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com"
 
 # Path suffixes mirrored verbatim from elr_lib.config._API_BASE_DEFAULTS
 # for every api whose PROD default already lives under
-# <host>/api/v1/<path>. "graph_query" is DELIBERATELY EXCLUDED: its prod
-# default is a direct API-Gateway execute-api URL
-# (https://8nkzqkmxqc.../api/v1/tracker/graphsearch), not a jreese.net
-# path, and no verified v4-gamma execute-api id was available at
-# authoring time -- under the v4-gamma profile it silently falls back to
-# config.py's own (prod) graph_query default until that gap is closed
-# (tracked as a follow-up, not part of FR-B4-10's ask).
+# <host>/api/v1/<path>. "graph_query" and "document_direct" are NOT in
+# this table (their prod bases are direct API-Gateway URLs, not
+# jreese.net paths); they are set explicitly per profile in _direct_overrides()
+# (ENC-TSK-Q51 closed the gap that previously let graph_query fall through to
+# the PROD host under the v4-gamma profile).
 _MIRRORED_API_PATHS: Dict[str, str] = {
     "coordination": "/api/v1/coordination",
     "document": "/api/v1/documents",
@@ -79,6 +85,15 @@ _MIRRORED_API_PATHS: Dict[str, str] = {
 
 def _mirrored_overrides(host: str) -> Dict[str, str]:
     return {api: f"{host}{path}" for api, path in _MIRRORED_API_PATHS.items()}
+
+
+def _direct_overrides(host: str) -> Dict[str, str]:
+    """graph_query (hybrid retrieval route) and document_direct (the
+    compact_context document reads) on a plane's DIRECT host."""
+    return {
+        "graph_query": f"{host}/api/v1/tracker/graphsearch",
+        "document_direct": f"{host}/api/v1/documents",
+    }
 
 
 @dataclass(frozen=True)
@@ -98,13 +113,13 @@ _PROFILES: Dict[str, EnvironmentProfile] = {
         name=PROFILE_PROD,
         mcp_base_url="https://mcp.jreese.net",
         coordination_base_url=f"{_PROD_API_HOST}/api/v1/coordination",
-        api_base_overrides=_mirrored_overrides(_PROD_API_HOST),
+        api_base_overrides={**_mirrored_overrides(_PROD_API_HOST), **_direct_overrides(_PROD_DIRECT_HOST)},
     ),
     PROFILE_V4_GAMMA: EnvironmentProfile(
         name=PROFILE_V4_GAMMA,
         mcp_base_url="https://mcp-gamma.jreese.net",
         coordination_base_url=f"{_GAMMA_API_HOST}/api/v1/coordination",
-        api_base_overrides=_mirrored_overrides(_GAMMA_API_HOST),
+        api_base_overrides={**_mirrored_overrides(_GAMMA_API_HOST), **_direct_overrides(_GAMMA_API_HOST)},
         sentinel_document_id="DOC-EF02AE82AD3A",
     ),
 }

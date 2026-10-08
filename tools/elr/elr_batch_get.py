@@ -73,6 +73,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # without requiring tools/elr to already be on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from elr_lib import context_store  # noqa: E402
 from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
@@ -569,6 +570,40 @@ def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -
     )
 
 
+# --- Read-through ledger (ENC-TSK-Q52, FR-10) ----------------------------------
+
+
+def record_read_through(ids_file: Optional[str], digest: Dict[str, Any], root: Optional[Path] = None) -> bool:
+    """When ``ids_file`` lives under ``<context root>/<run_id>/`` (the file an
+    ``elr compact_context`` run landed), append {ts, run_id, event:
+    "read_through", ids} to the context ledger so the read-through rate (M-6
+    metric R) can be joined to the run that ranked those ids. ``ids`` are the
+    ids this batch actually read (outcome "found"). Any other ids file is a
+    no-op, and a ledger failure never fails the read. Returns True when a line
+    was appended."""
+    if not ids_file:
+        return False
+    context_root = root if root is not None else context_store.context_root()
+    run_id = context_store.run_id_for_path(ids_file, context_root)
+    if run_id is None:
+        return False
+    read_ids = [
+        str(row.get("id"))
+        for row in (digest.get("rows") or [])
+        if isinstance(row, dict) and row.get("outcome") == OUTCOME_FOUND and row.get("id")
+    ]
+    if not read_ids:
+        return False
+    try:
+        context_store.append_ledger(
+            context_root,
+            {"ts": context_store.utc_now_iso(), "run_id": run_id, "event": "read_through", "ids": read_ids},
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
@@ -631,6 +666,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ids = collect_ids(args.ids, args.ids_file)
 
     digest = run_batch_get(ids, args.profile, args.timeout)
+    record_read_through(args.ids_file, digest)
 
     if args.json:
         print(json.dumps(digest, sort_keys=True))
