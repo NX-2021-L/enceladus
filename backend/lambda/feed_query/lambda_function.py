@@ -1035,6 +1035,22 @@ def _is_stale_closed(item: Dict[str, Any], cutoff: dt.datetime) -> bool:
     return parsed < cutoff
 
 
+def _observation_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+    """DVP-TSK-765: the observation clock, carried by every full-record transform.
+
+    Written only by POST .../log with observation_only=true, which moves neither
+    updated_at nor version_seq -- an observation is not a change. So neither the
+    ``since=`` feed nor the version_seq delta re-surfaces a record for one: the
+    values here are as fresh as the fetch that carried the record, and a reader
+    that needs the live observation clock GETs the record. The minimal snapshot
+    and corpus/delta entries deliberately do not carry them.
+    """
+    return {
+        "last_observed_at": _ddb_str(item, "last_observed_at") or None,
+        "observation_count": _ddb_int(item, "observation_count"),
+    }
+
+
 def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "task_id": _ddb_str(item, "item_id"),
@@ -1073,6 +1089,7 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         # ENC-TSK-P60: component chips ride the corpus; lenient reader coerces
         # the string-typed anomaly instead of hiding it (ENC-ISS-714).
         "components": _ddb_str_list_lenient(item, "components"),
+        **_observation_fields(item),
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -1104,6 +1121,7 @@ def _transform_issue_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str
         "intent": _ddb_str(item, "intent") or None,
         "primary_task": _ddb_str(item, "primary_task") or None,
         "evidence": _ddb_list_of_maps(item, "evidence"),
+        **_observation_fields(item),
     }
 
 
@@ -1132,6 +1150,7 @@ def _transform_feature_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[s
         "user_story": _ddb_str(item, "user_story") or None,
         "primary_task": _ddb_str(item, "primary_task") or None,
         "acceptance_criteria": _ddb_list_of_maps(item, "acceptance_criteria"),
+        **_observation_fields(item),
     }
 
 
@@ -1163,6 +1182,7 @@ def _transform_plan_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
+        **_observation_fields(item),
     }
 
 
@@ -1214,6 +1234,7 @@ def _transform_lesson_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[st
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
+        **_observation_fields(item),
     }
 
 
