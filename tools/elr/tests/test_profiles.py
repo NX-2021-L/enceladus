@@ -60,9 +60,22 @@ class GetEnvironmentProfileTests(unittest.TestCase):
             gamma_suffix = gamma.api_base_overrides[api].split("jreese.net", 1)[1]
             self.assertEqual(prod_suffix, gamma_suffix)
 
-    def test_graph_query_intentionally_excluded_from_overrides(self):
+    def test_direct_hosts_per_profile_for_graph_query_and_document_direct(self):
+        # ENC-TSK-Q51 (BRD NFR-3): prod stays on the direct API Gateway host
+        # (Cloudflare returned intermittent 403s); gamma uses its own host.
+        prod = elr_profiles.get_environment_profile("prod")
         gamma = elr_profiles.get_environment_profile("v4-gamma")
-        self.assertNotIn("graph_query", gamma.api_base_overrides)
+        apigw = "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com"
+        self.assertEqual(prod.api_base_overrides["graph_query"], f"{apigw}/api/v1/tracker/graphsearch")
+        self.assertEqual(prod.api_base_overrides["document_direct"], f"{apigw}/api/v1/documents")
+        self.assertEqual(
+            gamma.api_base_overrides["graph_query"], "https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch"
+        )
+        self.assertEqual(
+            gamma.api_base_overrides["document_direct"], "https://enceladus-gamma.jreese.net/api/v1/documents"
+        )
+        # The ordinary document base (batch_get, doc_get, doc_patch) is untouched on prod.
+        self.assertEqual(prod.api_base_overrides["document"], "https://jreese.net/api/v1/documents")
 
 
 class InternalProfileConfigEnvironmentThreadingTests(unittest.TestCase):
@@ -95,12 +108,34 @@ class InternalProfileConfigEnvironmentThreadingTests(unittest.TestCase):
         self.assertEqual(cfg.base_url("tracker"), "https://enceladus-gamma.jreese.net/api/v1/tracker")
         self.assertEqual(cfg.base_url("document"), "https://enceladus-gamma.jreese.net/api/v1/documents")
         self.assertEqual(cfg.environment_profile.name, "v4-gamma")
-        # graph_query has no gamma override -- falls back to the static
-        # (prod) default, documented as a known gap.
-        self.assertEqual(
-            cfg.base_url("graph_query"),
-            "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",
-        )
+        # ENC-TSK-Q51: graph_query and document_direct are mirrored to gamma too.
+        self.assertEqual(cfg.base_url("graph_query"), "https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch")
+        self.assertEqual(cfg.base_url("document_direct"), "https://enceladus-gamma.jreese.net/api/v1/documents")
+
+    def test_explicit_graph_query_env_var_still_wins_on_every_profile(self):
+        for name in ("prod", "v4-gamma"):
+            with self.subTest(profile=name):
+                with patch.dict(os.environ, {"ENCELADUS_GRAPH_QUERY_API_BASE": "https://override.invalid/gq"}):
+                    cfg = elr_config.InternalProfileConfig(environment_profile=elr_profiles.get_environment_profile(name))
+                self.assertEqual(cfg.base_url("graph_query"), "https://override.invalid/gq")
+
+    def test_document_direct_override_chain(self):
+        prod = elr_profiles.get_environment_profile("prod")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ENCELADUS_")}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                elr_config.InternalProfileConfig(environment_profile=prod).base_url("document_direct"),
+                "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/documents",
+            )
+        with patch.dict(os.environ, {**env, "ENCELADUS_DOCUMENT_API_BASE": "https://double.invalid/docs"}, clear=True):
+            cfg = elr_config.InternalProfileConfig(environment_profile=prod)
+            self.assertEqual(cfg.base_url("document_direct"), "https://double.invalid/docs")
+        with patch.dict(
+            os.environ,
+            {**env, "ENCELADUS_DOCUMENT_API_BASE": "https://double.invalid/docs", "ENCELADUS_DOCUMENT_DIRECT_API_BASE": "https://direct.invalid/d"},
+            clear=True,
+        ):
+            self.assertEqual(elr_config.InternalProfileConfig(environment_profile=prod).base_url("document_direct"), "https://direct.invalid/d")
 
     def test_explicit_env_var_wins_over_environment_profile(self):
         gamma = elr_profiles.get_environment_profile("v4-gamma")

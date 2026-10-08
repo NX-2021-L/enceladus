@@ -2,8 +2,8 @@
   "files": [
     {
       "path": "tools/elr/README.md",
-      "sha256": "ded66279f07ed1fc13908884f98ddabf4e42431b970ec76b5f4a397684ad75f1",
-      "size_bytes": 3535
+      "sha256": "bdfc919beabd7ca8b55d7e531405d33e48eb8e6d5c8a632c87d34ca976385fe6",
+      "size_bytes": 4678
     },
     {
       "path": "tools/elr/elr",
@@ -12,8 +12,13 @@
     },
     {
       "path": "tools/elr/elr_batch_get.py",
-      "sha256": "b7734fcdd3a96e9f83c4b0bd6c10af5fe3698a307753cb0d026415c009f8723e",
-      "size_bytes": 25193
+      "sha256": "3528499aabc7001eb3948087256c783f3d34faaa27c3b429774b6b37057a8b4a",
+      "size_bytes": 26685
+    },
+    {
+      "path": "tools/elr/elr_compact_context.py",
+      "sha256": "455e89bec871e8e9c2aa30c493738649da205e29a94beb045b0ea0fd29739153",
+      "size_bytes": 41334
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -42,13 +47,18 @@
     },
     {
       "path": "tools/elr/elr_lib/config.py",
-      "sha256": "cc20be93a57ac07269b65a840ad6fae014c13f6a504db3d67bc448609bc89574",
-      "size_bytes": 13421
+      "sha256": "a20ab4cc5f5d1d9450ebbde0289236697a0f18130435ddf90f3cb052cd4880ff",
+      "size_bytes": 14654
+    },
+    {
+      "path": "tools/elr/elr_lib/context_store.py",
+      "sha256": "b3944839b1f64f5f04fa9ad4c406147809340821647ce20ef7e1c940bee03a24",
+      "size_bytes": 8863
     },
     {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "2b467e19c87ae90e7766d7793c1d4cf8376541741fedd8453e16c923cd8e4554",
-      "size_bytes": 10480
+      "sha256": "ea274dc97a29e8ab08689d44657159e6b6f23b8f517a5022680bd956b44983ac",
+      "size_bytes": 11255
     },
     {
       "path": "tools/elr/elr_lib/identity.py",
@@ -67,8 +77,8 @@
     },
     {
       "path": "tools/elr/elr_lib/profiles.py",
-      "sha256": "5badda061f8dcc08380a0acda5ccca3a36f1997f14901247d00b1852d4dd9470",
-      "size_bytes": 5603
+      "sha256": "a748024615697d57d9e8e8f42d18a1f70e8747bdbc644e8532c74dae6af3aa73",
+      "size_bytes": 6508
     },
     {
       "path": "tools/elr/elr_lib/sections.py",
@@ -131,7 +141,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-24T07:50:18-07:00",
+  "generated_at": "2026-10-08T06:55:47-07:00",
   "manifest_version": 1,
-  "source_ref": "62782e7bc36da40ad49c8183f42d841552309645"
+  "source_ref": "1d91d90b6252efa419287663b5ca4dcad88f3445"
 }

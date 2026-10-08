@@ -50,6 +50,17 @@ _API_BASE_DEFAULTS: Dict[str, Tuple[str, str]] = {
         "ENCELADUS_GRAPH_QUERY_API_BASE",
         "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",
     ),
+    # ENC-TSK-Q51 (NFR-3): the document API reached on a DIRECT host, used by
+    # elr_compact_context's document reads. Prod default is the direct API
+    # Gateway host because the Cloudflare path (jreese.net) returned
+    # intermittent HTTP 403s on documents/search during the 2026-10-08
+    # measurements; gamma's direct host is enceladus-gamma.jreese.net (see
+    # elr_lib.profiles). An explicit ENCELADUS_DOCUMENT_API_BASE still wins when
+    # ENCELADUS_DOCUMENT_DIRECT_API_BASE is unset (see InternalProfileConfig).
+    "document_direct": (
+        "ENCELADUS_DOCUMENT_DIRECT_API_BASE",
+        "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/documents",
+    ),
     "health": ("ENCELADUS_HEALTH_API_URL", "https://jreese.net/api/v1/health"),
     "github": ("ENCELADUS_GITHUB_API_BASE", "https://jreese.net/api/v1/github"),
 }
@@ -63,6 +74,7 @@ _DEDICATED_KEY_ENV: Dict[str, Optional[str]] = {
     "tracker": "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
     "checkout": "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
     "document": "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
+    "document_direct": "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
     "deploy": "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
     "governance": "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
     "projects": "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
@@ -204,6 +216,12 @@ class InternalProfileConfig:
             )
             for api, (env_name, default) in _API_BASE_DEFAULTS.items()
         }
+        # An explicit ENCELADUS_DOCUMENT_API_BASE (a test double, a local
+        # stack) is a deliberate redirect of ALL document traffic: it also
+        # governs document_direct unless that has its own explicit override.
+        explicit_document = os.environ.get("ENCELADUS_DOCUMENT_API_BASE", "").strip()
+        if explicit_document and not os.environ.get("ENCELADUS_DOCUMENT_DIRECT_API_BASE", "").strip():
+            self._bases["document_direct"] = explicit_document
         self._keys: Dict[str, str] = {api: self._resolve_key(api) for api in _API_BASE_DEFAULTS}
 
     @staticmethod
