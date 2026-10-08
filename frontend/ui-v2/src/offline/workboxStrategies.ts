@@ -1,11 +1,24 @@
 /**
  * B67 AC-17 — canonical Workbox strategy map (DOC-E470AC8CE9A8 §7.1).
- * vite.config.ts runtimeCaching must stay aligned with these six entries.
+ * src/offline/runtimeCaching.ts must stay aligned with these entries.
+ *
+ * ENC-TSK-Q33 (ENC-ISS-830): the feed corpus and delta moved off
+ * StaleWhileRevalidate. A service worker answers before fetch's
+ * `cache: 'no-store'` applies, so SWR handed the corpus seed the previous
+ * visit's first page — exactly the newest records. They are NetworkOnly now
+ * (IndexedDB tier1 is the offline tier); other feed reads are NetworkFirst.
  */
 export const WORKBOX_STRATEGY_MAP = [
   { id: 'static-assets', handler: 'CacheFirst', routes: 'Vite content-hashed JS/CSS (precache + media)' },
   { id: 's3-payloads', handler: 'CacheFirst', routes: '/mobile/v1/reference/*' },
-  { id: 'feed-api', handler: 'StaleWhileRevalidate', routes: '/api/v1/feed*, /feed/corpus*, /mobile/v1/*.json' },
+  { id: 'feed-sync', handler: 'NetworkOnly', routes: '/api/v1/feed/corpus*, /api/v1/feed/delta*' },
+  {
+    id: 'feed-api',
+    handler: 'NetworkFirst',
+    routes: '/api/v1/feed* (other reads), /feed/*',
+    timeoutSeconds: 3,
+  },
+  { id: 'mobile-feed', handler: 'StaleWhileRevalidate', routes: '/mobile/v1/*.json' },
   {
     id: 'record-detail',
     handler: 'NetworkFirst',

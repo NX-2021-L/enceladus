@@ -46,11 +46,21 @@ def query_version_delta(
     is_stale_closed: Callable[[Mapping[str, Any], Any], bool],
     transform_record: Callable[[Mapping[str, Any], str], Optional[Dict[str, Any]]],
     cutoff: Any,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
-    """Return (items, tombstones, latest_version_seq)."""
+    max_items: int = MAX_DELTA_ITEMS,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, bool]:
+    """Return (items, tombstones, latest_version_seq, truncated).
+
+    ENC-TSK-Q34 (AC-3): at most ``max_items`` index rows are consumed per
+    response. The query walks version_seq ascending, so when the window fills
+    ``latest_version_seq`` is the seq of the last row consumed and
+    ``truncated`` is True; the caller resumes with since=latest.
+    """
     changed_keys: List[Dict[str, Dict[str, str]]] = []
     tombstones: List[Dict[str, Any]] = []
     latest = since
+    consumed = 0
+    truncated = False
+    cap = max(1, int(max_items))
 
     paginator = ddb.get_paginator("query")
     for page in paginator.paginate(
@@ -64,7 +74,7 @@ def query_version_delta(
         ProjectionExpression="project_id, record_id, record_type, item_id, version_seq, "
         "target_project_id, target_record_id, target_record_type, updated_at",
         ScanIndexForward=True,
-        Limit=MAX_DELTA_ITEMS,
+        Limit=cap,
     ):
         for item in page.get("Items", []):
             seq_raw = _ddb_str(item, "version_seq")
@@ -72,6 +82,10 @@ def query_version_delta(
                 seq = int(seq_raw)
             except (TypeError, ValueError):
                 continue
+            if consumed >= cap:
+                truncated = True
+                break
+            consumed += 1
             latest = max(latest, seq)
             record_type = _ddb_str(item, "record_type")
             if record_type == FEED_TOMBSTONE_RECORD_TYPE:
@@ -100,9 +114,11 @@ def query_version_delta(
                 changed_keys.append(
                     {"project_id": {"S": pid}, "record_id": {"S": rid}}
                 )
+        if truncated:
+            break
 
     if not changed_keys and not tombstones:
-        return [], [], latest
+        return [], [], latest, truncated
 
     items: List[Dict[str, Any]] = []
     for batch_start in range(0, len(changed_keys), 100):
@@ -148,4 +164,67 @@ def query_version_delta(
             transformed["version_seq"] = seq
             items.append(transformed)
 
-    return items, tombstones, latest
+    return items, tombstones, latest, truncated
+
+
+def query_document_delta(
+    documents: Sequence[Mapping[str, Any]],
+    since: int,
+    *,
+    build_entry: Callable[[Mapping[str, Any]], Optional[Dict[str, Any]]],
+    is_counter_row: Callable[[Mapping[str, Any]], bool],
+    max_items: int = MAX_DELTA_ITEMS,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, bool]:
+    """Document half of the delta (ENC-TSK-Q34 AC-1 / ENC-ISS-765).
+
+    document_api stamps every document write with a version_seq drawn from its
+    own DOCUMENTS_TABLE counter, a sequence space independent of the tracker
+    counter, so documents travel on their own cursor (``doc_since``) and are
+    never compared with tracker seqs. Documents are soft-deleted by status, so
+    an archived/deleted row at a newer seq becomes a tombstone. Rows written
+    before ENC-TSK-P72 carry no version_seq; they reach clients through the
+    corpus seed and get a seq on their next write.
+
+    Return shape matches query_version_delta: (items, tombstones, latest, truncated).
+    """
+    cap = max(1, int(max_items))
+    changed: List[Tuple[int, Mapping[str, Any]]] = []
+    for document in documents:
+        if is_counter_row(document):
+            continue
+        try:
+            seq = int(document.get("version_seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seq > since:
+            changed.append((seq, document))
+    changed.sort(key=lambda pair: pair[0])
+    truncated = len(changed) > cap
+    window = changed[:cap]
+
+    items: List[Dict[str, Any]] = []
+    tombstones: List[Dict[str, Any]] = []
+    latest = since
+    for seq, document in window:
+        latest = max(latest, seq)
+        document_id = str(document.get("document_id") or "").strip()
+        if not document_id:
+            continue
+        status = str(document.get("status") or "active").strip().lower()
+        if status in {"deleted", "archived"}:
+            tombstones.append(
+                {
+                    "record_key": f"document::{document_id}",
+                    "record_id": document_id,
+                    "record_type": "document",
+                    "project_id": str(document.get("project_id") or ""),
+                    "version_seq": seq,
+                }
+            )
+            continue
+        entry = build_entry(document)
+        if entry is None:
+            continue
+        entry["version_seq"] = seq
+        items.append(entry)
+    return items, tombstones, latest, truncated

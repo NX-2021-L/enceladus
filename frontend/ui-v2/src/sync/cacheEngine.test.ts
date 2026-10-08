@@ -199,3 +199,84 @@ describe('CacheEngine finalizeWarm recency selection (ENC-ISS-711)', () => {
     expect(ids).not.toContain('DVP-TSK-1')
   })
 })
+
+describe('CacheEngine accept gate heals frozen rows (ENC-TSK-Q34 AC-4)', () => {
+  beforeEach(() => {
+    resetCacheEngineForTests()
+  })
+
+  function trackerItem(overrides: Partial<FeedCorpusItem> = {}): FeedCorpusItem {
+    return {
+      record_id: 'ENC-TSK-7',
+      record_type: 'task',
+      project_id: 'enceladus',
+      title: 'Fresh title',
+      updated_at: '2026-10-08T03:00:00Z',
+      source: 'tracker',
+      record_key: 'tracker:enceladus:ENC-TSK-7',
+      attrs: { status: 'in-progress' },
+      ...overrides,
+    }
+  }
+
+  async function freezeRow(engine: CacheEngine, versionSeq: string): Promise<void> {
+    // A row persisted in IndexedDB by the pre-Q34 delta path.
+    const row = corpusItemToTier1(trackerItem({ title: 'Frozen title', updated_at: '2026-09-01T00:00:00Z' }))!
+    await engine.upsertTier1({ ...row, versionSeq })
+  }
+
+  it('accepts a corpus refresh across a digit boundary ("850" -> 5101)', async () => {
+    const engine = new CacheEngine()
+    await freezeRow(engine, '850')
+    await engine.ingestCorpusPage([trackerItem({ version_seq: 5101 })])
+    expect(engine.searchIndex.all().find((r) => r.recordId === 'ENC-TSK-7')?.title).toBe('Fresh title')
+  })
+
+  it('accepts a newer ISO-token refresh over an integer-token row ("8412" vs "2026-…")', async () => {
+    const engine = new CacheEngine()
+    await freezeRow(engine, '8412')
+    await engine.ingestCorpusPage([trackerItem()])
+    expect(engine.searchIndex.all().find((r) => r.recordId === 'ENC-TSK-7')?.title).toBe('Fresh title')
+  })
+
+  it('still rejects an older same-domain version', async () => {
+    const engine = new CacheEngine()
+    await engine.ingestCorpusPage([trackerItem({ version_seq: 5101 })])
+    await engine.ingestCorpusPage([trackerItem({ version_seq: 5100, title: 'Older title' })])
+    expect(engine.searchIndex.all().find((r) => r.recordId === 'ENC-TSK-7')?.title).toBe('Fresh title')
+  })
+})
+
+describe('CacheEngine versioned tombstones (ENC-TSK-Q34 AC-1)', () => {
+  beforeEach(() => {
+    resetCacheEngineForTests()
+  })
+
+  const doc = (version_seq: number, title: string): FeedCorpusItem => ({
+    record_id: 'DOC-ARCH',
+    record_type: 'document',
+    project_id: 'devops',
+    title,
+    updated_at: '2026-10-08T00:00:00Z',
+    source: 'document',
+    record_key: 'document::DOC-ARCH',
+    version_seq,
+  })
+
+  it('drops the cached row so a reload cannot resurrect an archived document', async () => {
+    const engine = new CacheEngine()
+    await engine.ingestCorpusPage([doc(185, 'Live')])
+    await engine.markTombstone('document::DOC-ARCH', 'DOC-ARCH', { versionSeq: '186', projectId: 'devops' })
+    await engine.loadSearchSlice()
+    expect(engine.searchIndex.all().map((r) => r.recordId)).not.toContain('DOC-ARCH')
+  })
+
+  it('lets a strictly newer version lift the tombstone (un-archive)', async () => {
+    const engine = new CacheEngine()
+    await engine.markTombstone('document::DOC-ARCH', 'DOC-ARCH', { versionSeq: '186', projectId: 'devops' })
+    await engine.ingestCorpusPage([doc(186, 'Same version')])
+    expect(engine.searchIndex.all()).toHaveLength(0)
+    await engine.ingestCorpusPage([doc(190, 'Restored')])
+    expect(engine.searchIndex.all().map((r) => r.title)).toEqual(['Restored'])
+  })
+})
