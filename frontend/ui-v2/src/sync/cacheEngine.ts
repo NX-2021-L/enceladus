@@ -39,7 +39,13 @@ function normalizeRecordType(raw: string): RecordType | null {
   return VALID_TYPES.includes(value) ? value : null
 }
 
+// ENC-TSK-Q34: document_api's version_seq counter row in DOCUMENTS_TABLE. Pre-Q34
+// corpora served it as a phantom document, and clients that cached it keep it in
+// IndexedDB because a seed only upserts. It is never a record.
+export const DOCUMENT_COUNTER_SENTINEL_ID = '__COUNTER__VERSION_SEQ__'
+
 export function corpusItemToTier1(item: FeedCorpusItem): Tier1Record | null {
+  if (item.record_id === DOCUMENT_COUNTER_SENTINEL_ID) return null
   const recordType = normalizeRecordType(item.record_type)
   if (!recordType) return null
   const versionSeq = versionSeqFromItem(item)
@@ -140,8 +146,22 @@ export class CacheEngine {
     return count
   }
 
+  /** ENC-TSK-Q34: drop the counter-sentinel phantom an older corpus left in
+   *  IndexedDB, so /docs counts equal the real document count. */
+  private async withoutCounterSentinel(rows: Tier1Record[]): Promise<Tier1Record[]> {
+    const kept: Tier1Record[] = []
+    for (const row of rows) {
+      if (row.recordId === DOCUMENT_COUNTER_SENTINEL_ID) {
+        await idb.deleteTier1(row.projectId, row.recordId)
+        continue
+      }
+      kept.push(row)
+    }
+    return kept
+  }
+
   async finalizeWarm(): Promise<void> {
-    const rows = await idb.listTier1(this.budget.tier1Max)
+    const rows = await this.withoutCounterSentinel(await idb.listTier1(this.budget.tier1Max))
     if (rows.length > this.budget.searchIndexMax) {
       // ENC-ISS-711: never truncate silently -- a future corpus that outgrows
       // the budget would otherwise reintroduce a hidden band with no signal.
@@ -164,7 +184,7 @@ export class CacheEngine {
     // key order) so the recency sort selects the most-recent records before the
     // rebuild applies the cap. Reading only searchIndexMax rows here would drop
     // the ENC-* tail before it could be considered.
-    const rows = await idb.listTier1(this.budget.tier1Max)
+    const rows = await this.withoutCounterSentinel(await idb.listTier1(this.budget.tier1Max))
     this.searchIndex.rebuild(sortByRecencyDesc(rows))
     if (rows.length > 0 && !this.warmedAt) {
       this.warmedAt = Date.now()
