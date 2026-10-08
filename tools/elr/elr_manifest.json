@@ -2,8 +2,8 @@
   "files": [
     {
       "path": "tools/elr/README.md",
-      "sha256": "ded66279f07ed1fc13908884f98ddabf4e42431b970ec76b5f4a397684ad75f1",
-      "size_bytes": 3535
+      "sha256": "4a6c11d0174505b0cb57d5bfa2d9d00d2a50852bbc471dea863ef201d10093bf",
+      "size_bytes": 4320
     },
     {
       "path": "tools/elr/elr",
@@ -14,6 +14,11 @@
       "path": "tools/elr/elr_batch_get.py",
       "sha256": "b7734fcdd3a96e9f83c4b0bd6c10af5fe3698a307753cb0d026415c009f8723e",
       "size_bytes": 25193
+    },
+    {
+      "path": "tools/elr/elr_compact_context.py",
+      "sha256": "e836b61f1df68f72a064c69f6dcb92639c7b11c92d26325e2c262864586ddeed",
+      "size_bytes": 39099
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -46,9 +51,14 @@
       "size_bytes": 13421
     },
     {
+      "path": "tools/elr/elr_lib/context_store.py",
+      "sha256": "85ea928fa49704d0cef658650f5f0cd1316e62fa5af3c7216bc07eca81f3bdfd",
+      "size_bytes": 2991
+    },
+    {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "2b467e19c87ae90e7766d7793c1d4cf8376541741fedd8453e16c923cd8e4554",
-      "size_bytes": 10480
+      "sha256": "ea274dc97a29e8ab08689d44657159e6b6f23b8f517a5022680bd956b44983ac",
+      "size_bytes": 11255
     },
     {
       "path": "tools/elr/elr_lib/identity.py",
@@ -131,7 +141,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-24T07:50:18-07:00",
+  "generated_at": "2026-10-07T22:23:53-07:00",
   "manifest_version": 1,
-  "source_ref": "62782e7bc36da40ad49c8183f42d841552309645"
+  "source_ref": "f607ca361f44c84108dedd5dd9bb82bdb4e7b814"
 }

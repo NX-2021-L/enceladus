@@ -30,7 +30,7 @@ io provisions the key file once per host (agents never do):
 python3 tools/elr/elr_provision_key.py          # prompts with no echo; or pipe the key on stdin
 ```
 
-With no credential, every auth-required read (`list`, `batch_get`,
+With no credential, every auth-required read (`list`, `batch_get`, `compact_context`,
 `doc_get`, `doc_digest`, `doc_patch`) refuses locally with exit code 7 and
 anomaly `no_credential_configured`, before any network request.
 `elr_smoke` issues one authenticated probe besides the health GET and is ok
@@ -72,3 +72,16 @@ prefix-map cache left under `~/.enceladus` by older installs and lists it in
 `found` (2xx), `not_found` (404 -- reported, never an anomaly), `forbidden`
 (401/403), or `error` (5xx, unreachable, unsupported id shape, or a plane that
 predates the sentinel route, flagged `sentinel_route_unsupported_by_server`).
+
+## Compact context (ENC-TSK-Q50)
+
+`elr compact_context --mode task --record-id ENC-TSK-Q33 --top-n 10` performs the
+governed GET reads behind MCP `get_compact_context` (record, components,
+governance, related documents, project, reference, and the graphsearch hybrid
+call with query AND anchor), lands every section under
+`~/.enceladus/context/<run_id>/` (override with `--out-dir` or
+`ELR_CONTEXT_DIR`), and prints one digest: the server-ordered ranking as array
+rows, `signals_present` / `signals_absent` with reasons, and the on-disk section
+index. `<run_id>.ids` in that directory feeds `elr batch_get --ids-file`.
+Digest bytes are bounded by `1024 + 192 * top_n`. Exit codes: 4 TLS, 6
+`hybrid_unsupported_by_server`, 7 no credential, 8 `response_shape_drift`.
