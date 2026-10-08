@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-08.01",
-  "updated_at": "2026-10-08T04:30:00Z",
-  "last_change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
+  "version": "2026-10-08.02",
+  "updated_at": "2026-10-08T18:00:00Z",
+  "last_change_summary": "ENC-TSK-Q46 (ENC-ISS-836): retrieval.hybrid_pipeline corroboration bonus is now call-relative, B_corr = alpha * S_top * ln(1 + k_corr) / ln(1 + k_max), alpha 0.02 (AppConfig corroboration_alpha, clamped [0, 0.2]); the absolute Weber_k (0.3) is retired. Activation k >= 1, dispersion cosine distance 0.3. Hybrid response carries corroboration_alpha and s_top.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6105,7 +6105,7 @@
       }
     },
     "retrieval.hybrid_pipeline": {
-      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context. Consumers (ENC-TSK-Q47): MCP get_compact_context, coordination_api context.compact route (GET /api/v1/coordination/context/compact), ELR compact_context (reads the route digest ranking, which is nodes order verbatim).",
+      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. ENC-TSK-Q46 (ENC-ISS-836): a fifth, additive corroboration bonus B_corr is layered on the fused RRF score to produce final_score (see field corroboration). Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context. Consumers (ENC-TSK-Q47): MCP get_compact_context, coordination_api context.compact route (GET /api/v1/coordination/context/compact), ELR compact_context (reads the route digest ranking, which is nodes order verbatim).",
       "fields": {
         "fields_projection": {
           "type": "enum",
@@ -6130,6 +6130,11 @@
         "fallback_modes": {
           "type": "object",
           "definition": "Resilience contract. (a) Vector signal is skipped when query text is missing or embedding helper returns None — RRF still works with graph + keyword. (b) Graph signal first attempts gds.pageRank.stream; on GDS unavailable or empty result, falls back to a per-relationship-type weighted Cypher hop-sum within depth 3 with damping^distance decay. (c) Keyword signal degrades gracefully when no records match. (d) When all three signals are empty, the response includes a 'No signals returned candidates' summary instead of a 500. (e) embedding_coverage_sample.{covered,total_ranked} reports observed embedding density per query so callers can detect sparse-coverage degradation."
+        },
+        "corroboration": {
+          "type": "object",
+          "definition": "ENC-TSK-Q46 (ENC-ISS-836, FTR-110 AC-1 contract DOC-90C4269BB62B section 8 amendment): call-relative corroboration bonus added to each candidate's pure-RRF fused_score to produce final_score (nodes are ordered by final_score; fused_score/fused_rank stay pure RRF). B_corr(x) = alpha * S_top * ln(1 + k_corr(x)) / ln(1 + k_max), where S_top is the maximum fused_score in this call, k_corr(x) is the dispersion-constrained corroborator count (candidates in the same result set with cosine similarity >= 0.80 to x, greedily packed so each accepted pair has cosine distance >= 0.3), and k_max is the largest k_corr in this call. B_corr = 0 when k_max == 0 or k_corr == 0. Activation threshold k >= 1 (supersedes the contract's k >= 2); dispersion metric cosine distance 0.3 (supersedes graph hops). Guarantee: max B_corr <= alpha * S_top, so no candidate with k_corr >= 1 can overtake one whose fused_score exceeds its own by more than alpha * S_top. alpha defaults to 0.02 and is resolved per call from AppConfig profile corroboration-function key corroboration_alpha, then env CORROBORATION_ALPHA, then the default, clamped to [0, 0.2]. The retired absolute Weber_k constant (0.3) and the response key corroboration_weber_k no longer exist.",
+          "usage_guidance": "Hybrid response top-level fields corroboration_alpha (alpha used) and s_top (call's max fused_score; 0.0 with no candidates) let any client verify the bound; per_node_fusion[*] and nodes[*] carry k_corr/b_corr/final_score/final_rank (nodes: _corroboration_count/_b_corr/_final_score/_final_rank)."
         },
         "fsrs_t3_threshold": {
           "type": "number",
@@ -9185,7 +9190,7 @@
         },
         "retrieval": {
           "type": "object",
-          "definition": "rrf_k (60), fsrs_t3_threshold (0.7), include_below_threshold, weber_k (graph_query_api corroboration_weber_k), graph_algorithm, signals_present[], signals_absent{signal: reason}, candidates{vector, graph, keyword} (parsed from the hybrid summary), embedding_coverage_sample{covered, total_ranked}, intent_signature, wave_id, pathway_edge_count, query_source (caller | derived_from_record | none). Empty object when no hybrid retrieval ran."
+          "definition": "rrf_k (60), fsrs_t3_threshold (0.7), include_below_threshold, weber_k (retired by ENC-TSK-Q46, always null; hybrid now carries corroboration_alpha and s_top), graph_algorithm, signals_present[], signals_absent{signal: reason}, candidates{vector, graph, keyword} (parsed from the hybrid summary), embedding_coverage_sample{covered, total_ranked}, intent_signature, wave_id, pathway_edge_count, query_source (caller | derived_from_record | none). Empty object when no hybrid retrieval ran."
         },
         "ranking": {
           "type": "array",

@@ -2282,7 +2282,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "embedding_coverage_sample": {covered: N, total_ranked: N},
         "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks, ...,
                               k_corr, b_corr, final_score, final_rank}},
-        "corroboration_weber_k": 0.3,
+        "corroboration_alpha": 0.02,
+        "s_top":             <max fused_score in this call>,
       }
 
     ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
@@ -2320,10 +2321,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # never re-probes AppConfig more than once.
     energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
 
-    # ENC-TSK-I92 (ENC-FTR-110 Ph1): resolve the corroboration Weber_k bonus
-    # weight once per call, same one-AppConfig-probe-per-call discipline as
-    # the energy lambda weights above.
-    corroboration_weber_k = corroboration.load_weber_k()
+    # ENC-TSK-I92 / ENC-TSK-Q46 (ENC-FTR-110, ENC-ISS-836): resolve the
+    # call-relative corroboration alpha once per call, same one-AppConfig-probe-
+    # per-call discipline as the energy lambda weights above.
+    corroboration_alpha = corroboration.load_alpha()
 
     # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
     # pool is live before dispatching to any of the three signal functions.
@@ -2511,10 +2512,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "energy_lambda_weights": {
                 "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
             },
-            # ENC-TSK-I92 (ENC-FTR-110 Ph1): the Weber_k bonus weight used for
-            # this call, surfaced even with zero candidates for observability
-            # parity with energy_lambda_weights above.
-            "corroboration_weber_k": corroboration_weber_k,
+            # ENC-TSK-Q46 (ENC-ISS-836): the corroboration alpha used for this
+            # call and the call's top fused score (0.0 with zero candidates),
+            # surfaced for observability parity with energy_lambda_weights.
+            "corroboration_alpha": corroboration_alpha,
+            "s_top": 0.0,
             "facets": facets,
             "facets_source": facets_source,
             "keyword_source": keyword_source,
@@ -2577,8 +2579,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         if node_by_rid.get(rid) and node_by_rid[rid].get(_EMBEDDING_PROPERTY)
     }
     corroboration_counts = corroboration.compute_corroboration_counts(embeddings_by_rid)
+    # ENC-TSK-Q46 (ENC-ISS-836): call-relative bound B_corr <= alpha * S_top,
+    # S_top = the call's maximum fused (pure-RRF) score.
+    s_top = max((float(i["fused_score"]) for i in top_fused), default=0.0)
     corroboration_bonuses = corroboration.compute_bonuses(
-        corroboration_counts, weber_k=corroboration_weber_k,
+        corroboration_counts, s_top=s_top, alpha=corroboration_alpha,
     )
     for item in top_fused:
         rid = item["record_id"]
@@ -2749,10 +2754,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "energy_lambda_weights": {
             "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
         },
-        # ENC-TSK-I92 (ENC-FTR-110 Ph1): Weber_k bonus weight used for this
-        # call's corroboration bonus (see per_node_fusion[*].b_corr/k_corr and
-        # nodes[*]._b_corr/_corroboration_count/_final_score/_final_rank).
-        "corroboration_weber_k": corroboration_weber_k,
+        # ENC-TSK-Q46 (ENC-ISS-836): alpha and S_top used for this call's
+        # corroboration bonus, so any client can verify B_corr <= alpha * S_top
+        # (see per_node_fusion[*].b_corr/k_corr and nodes[*]._b_corr/
+        # _corroboration_count/_final_score/_final_rank).
+        "corroboration_alpha": corroboration_alpha,
+        "s_top": s_top,
         "facets": facets,
         "facets_source": facets_source,
         "keyword_source": keyword_source,
