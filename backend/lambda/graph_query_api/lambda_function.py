@@ -3188,6 +3188,10 @@ def _handle_search(event: Dict) -> Dict:
         "facets",
         "facets_source",
         "keyword_source",
+        # ENC-TSK-Q46 (ENC-ISS-836): call-relative corroboration bound inputs,
+        # so any client can verify max(b_corr) <= corroboration_alpha * s_top.
+        "corroboration_alpha",
+        "s_top",
         # ENC-TSK-I88: adjacency export pagination + corpus-size fields.
         "node_count",
         "edge_count",
