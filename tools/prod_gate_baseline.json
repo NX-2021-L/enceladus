@@ -332,6 +332,10 @@
       ],
       "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
     },
+    "requirements-pin-guard.yml": {
+      "class": "inert",
+      "notes": "guard (ENC-TSK-Q42): fails PRs with bare requirement lines or an unpinned mcp"
+    },
     "secrets-guardrail.yml": {
       "class": "inert",
       "notes": "guard"
