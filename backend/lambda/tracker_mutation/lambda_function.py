@@ -1110,12 +1110,6 @@ _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature
 # Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
 _F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
 
-# DVP-TSK-765: the observation clock, written only by POST .../log with
-# observation_only=true (see _record_observation). Reserved the same way as the
-# F41 counters: a client-set last_observed_at forges the clock, and a non-numeric
-# observation_count makes every later observation's ADD fail as a retryable 500.
-_DVP765_RESERVED_OBSERVATION_FIELDS = frozenset({"last_observed_at", "observation_count"})
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -3824,20 +3818,6 @@ def _handle_create_record(
                 reason="server_side_only",
                 rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
             )
-    for _obs_field in sorted(_DVP765_RESERVED_OBSERVATION_FIELDS):
-        if _obs_field in body:
-            return _error(
-                400,
-                (
-                    f"Field '{_obs_field}' is server-side only and must not be "
-                    f"supplied at create time. It is written only by "
-                    f"POST .../log with observation_only=true."
-                ),
-                code="RESERVED_FIELD",
-                field=_obs_field,
-                reason="server_side_only",
-                rule_citation="DVP-TSK-765",
-            )
 
     priority = body.get("priority")
     description = str(body.get("description") or "")
@@ -5371,19 +5351,6 @@ def _handle_update_field(
             reason="server_side_only",
             rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
         )
-    if field in _DVP765_RESERVED_OBSERVATION_FIELDS:
-        return _error(
-            400,
-            (
-                f"Field '{field}' is server-side only. It is written only by "
-                f"POST .../log with observation_only=true and is not writable "
-                f"via tracker.set / tracker.create."
-            ),
-            code="RESERVED_FIELD",
-            field=field,
-            reason="server_side_only",
-            rule_citation="DVP-TSK-765",
-        )
 
     # ENC-FTR-052: Lesson append-only mutation enforcement
     if record_type == "lesson":
@@ -6712,29 +6679,10 @@ def _handle_log(
     body: Dict,
     event: Optional[Dict] = None,
 ) -> Dict:
-    """POST /{project}/{type}/{id}/log — append worklog entry to history.
-
-    DVP-TSK-765: with ``observation_only: true`` the call records an
-    OBSERVATION instead of a worklog entry (see ``_record_observation``), and
-    ``description`` becomes optional because nothing is appended. Absent or
-    false, this handler behaves exactly as it did before the flag existed.
-    """
-    # DVP-TSK-765: refuse a non-boolean rather than coerce it -- the string
-    # "false" is truthy, and reading it as true would silently drop a worklog.
-    observation_only = body.get("observation_only")
-    if observation_only is not None and not isinstance(observation_only, bool):
-        return _error(400, "Field 'observation_only' must be a boolean.")
-    if observation_only:
-        # Nothing is appended, so description is optional and a null one reads
-        # as absent (it must not reach .strip()). Any other non-string is
-        # refused, never coerced. The else branch is the pre-flag code verbatim.
-        description = body.get("description")
-        if description is not None and not isinstance(description, str):
-            return _error(400, "Field 'description' must be a string.")
-    else:
-        description = body.get("description", "").strip()
-        if not description:
-            return _error(400, "Field 'description' is required.")
+    """POST /{project}/{type}/{id}/log — append worklog entry to history."""
+    description = body.get("description", "").strip()
+    if not description:
+        return _error(400, "Field 'description' is required.")
     _normalize_write_source(body)
 
     # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate — agent-origin worklog
@@ -6792,12 +6740,6 @@ def _handle_log(
         if current_session_id != provider:
             return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
 
-    # DVP-TSK-765: the SCI gate, existence check and ownership enforcement
-    # above apply to an observation exactly as to a worklog append; only the
-    # write differs.
-    if observation_only:
-        return _record_observation(ddb, key, record_id)
-
     now = _now_z()
     history_entry = {"M": {
         "timestamp": _ser_s(now), "status": _ser_s("worklog"),
@@ -6839,51 +6781,6 @@ def _handle_log(
     _mirror_worklog_to_session(provider, record_type, record_id, description, now)
 
     return _response(200, {"success": True, "record_id": record_id, "updated_at": now})
-
-
-def _record_observation(ddb: Any, key: Dict, record_id: str) -> Dict:
-    """DVP-TSK-765: the ``observation_only`` branch of POST .../log.
-
-    An observation says "this record was looked at and found current". It is
-    not a change to the record, so it must not move the record's state clock:
-    a worklog append bumps updated_at and sync_version and allocates a
-    version_seq, and a periodic observer doing that makes an unchanged record
-    read as freshly modified (the observer-clock defect class, DVP-TSK-736
-    defect 1 -- the same repair as warehouse_registration's
-    write_timestamp / last_verified_at split).
-
-    So this touches exactly two attributes: ``last_observed_at`` (SET, UTC
-    ISO-8601) and ``observation_count`` (ADD 1). No history entry, no
-    write_source, and updated_at, sync_version, version_seq and every field
-    content_hash covers are left untouched. GET returns the full deserialized
-    item, so both fields are readable without a projection change; the
-    feed_query full-record transforms carry them too (``_observation_fields``).
-
-    Conditional on the record still existing: an UpdateItem on a missing key
-    creates an item, and a delete racing the read in ``_handle_log`` must not
-    leave one behind carrying only the two observation fields.
-    """
-    observed_at = _now_z()
-    try:
-        resp = ddb.update_item(
-            TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression="SET last_observed_at = :obs ADD observation_count :one",
-            ConditionExpression="attribute_exists(record_id)",
-            ExpressionAttributeValues={":obs": _ser_s(observed_at), ":one": {"N": "1"}},
-            ReturnValues="UPDATED_NEW",
-        )
-    except Exception as exc:
-        if _is_conditional_check_failed(exc):
-            return _error(404, f"Record not found: {record_id}")
-        logger.error("update_item (observation) failed: %s", exc)
-        return _error(500, "Database write failed.")
-
-    attrs = resp.get("Attributes") or {}
-    observation_count = _deser_val(attrs["observation_count"]) if "observation_count" in attrs else None
-    return _response(200, {
-        "success": True, "record_id": record_id, "observation_only": True,
-        "last_observed_at": observed_at, "observation_count": observation_count,
-    })
 
 
 def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
