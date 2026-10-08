@@ -412,7 +412,7 @@ def fetch_project_documents(client: Any, project_id: str) -> Section:
     the first page (page_size 10). The document API has no server-side page,
     so the first page is taken from the full list, as the server tool does."""
     started = time.monotonic()
-    status, body = _get(client, "document", "", {"project": project_id})
+    status, body = _get(client, "document_direct", "", {"project": project_id})
     ms = int((time.monotonic() - started) * 1000)
     docs = body.get("documents") if isinstance(body, dict) else body if isinstance(body, list) else None
     if not (200 <= status < 300) or not isinstance(docs, list):
@@ -423,12 +423,12 @@ def fetch_project_documents(client: Any, project_id: str) -> Section:
 
 def fetch_reference(client: Any, project_id: str, query: str) -> Section:
     started = time.monotonic()
-    status, found = _get(client, "document", "/search", {"project": project_id, "keyword": "reference"})
+    status, found = _get(client, "document_direct", "/search", {"project": project_id, "keyword": "reference"})
     docs = found.get("documents") if isinstance(found, dict) else None
     if not (200 <= status < 300) or not docs:
         return Section("reference", status if not (200 <= status < 300) else 404, found, int((time.monotonic() - started) * 1000))
     doc_id = str(docs[0].get("document_id") or "")
-    status, doc = _get(client, "document", f"/{_quote(doc_id)}", {"include_content": "true"})
+    status, doc = _get(client, "document_direct", f"/{_quote(doc_id)}", {"include_content": "true"})
     content = doc.get("content", "") if isinstance(doc, dict) else ""
     if not (200 <= status < 300) or not content:
         return Section("reference", status if not (200 <= status < 300) else 404, doc, int((time.monotonic() - started) * 1000))
@@ -521,7 +521,7 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
             add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": entity}))
         if include("no_related_documents"):
             rel_query = {"project_id": project_id, "related": record_id} if project_id else {"related": record_id}
-            add("related_documents", lambda: _get(client, "document", "/search", rel_query))
+            add("related_documents", lambda: _get(client, "document_direct", "/search", rel_query))
         if project_id:
             add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
     elif mode == "project":
@@ -536,7 +536,7 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
         document_id = (args.document_id or "").strip()
         if not document_id:
             return _fail_digest(EXIT_UNUSABLE, 400, ["document_id_required"], args, profile, key_source)
-        add("document", lambda: _get(client, "document", f"/{_quote(document_id)}", {"include_content": "true"}))
+        add("document", lambda: _get(client, "document_direct", f"/{_quote(document_id)}", {"include_content": "true"}))
     elif mode == "topic":
         if not query and not project_id:
             return _fail_digest(EXIT_UNUSABLE, 400, ["topic_requires_query_or_project_id"], args, profile, key_source)
@@ -546,7 +546,7 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
             doc_query: Dict[str, Any] = {"title": query} if query else {}
             if project_id:
                 doc_query["project_id"] = project_id
-            add("documents", lambda: _get(client, "document", "/search", doc_query))
+            add("documents", lambda: _get(client, "document_direct", "/search", doc_query))
         if project_id and query:
             tasks["reference"] = lambda: fetch_reference(client, project_id, query)
         if (args.governance_entity or "").strip() and include("no_governance"):

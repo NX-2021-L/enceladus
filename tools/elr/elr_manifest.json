@@ -17,8 +17,8 @@
     },
     {
       "path": "tools/elr/elr_compact_context.py",
-      "sha256": "e836b61f1df68f72a064c69f6dcb92639c7b11c92d26325e2c262864586ddeed",
-      "size_bytes": 39099
+      "sha256": "19b5bcd2880476d65e1602a8eaa9d9a0dd7dd5197c169448bd4aa1258de8de01",
+      "size_bytes": 39141
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -47,8 +47,8 @@
     },
     {
       "path": "tools/elr/elr_lib/config.py",
-      "sha256": "cc20be93a57ac07269b65a840ad6fae014c13f6a504db3d67bc448609bc89574",
-      "size_bytes": 13421
+      "sha256": "a20ab4cc5f5d1d9450ebbde0289236697a0f18130435ddf90f3cb052cd4880ff",
+      "size_bytes": 14654
     },
     {
       "path": "tools/elr/elr_lib/context_store.py",
@@ -77,8 +77,8 @@
     },
     {
       "path": "tools/elr/elr_lib/profiles.py",
-      "sha256": "5badda061f8dcc08380a0acda5ccca3a36f1997f14901247d00b1852d4dd9470",
-      "size_bytes": 5603
+      "sha256": "a748024615697d57d9e8e8f42d18a1f70e8747bdbc644e8532c74dae6af3aa73",
+      "size_bytes": 6508
     },
     {
       "path": "tools/elr/elr_lib/sections.py",
@@ -141,7 +141,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-10-07T22:23:53-07:00",
+  "generated_at": "2026-10-08T06:53:00-07:00",
   "manifest_version": 1,
-  "source_ref": "f607ca361f44c84108dedd5dd9bb82bdb4e7b814"
+  "source_ref": "5dff335d728a39205f63f178e72d93a50d7eebe9"
 }

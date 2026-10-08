@@ -103,7 +103,7 @@ def record_routes(hybrid=None, extra=None):
             {"components": [{"component_id": "comp-a", "x": 1}, {"component_id": "comp-b"}], "count": 2},
         ),
         ("governance", "/dictionary"): (200, {"entity": "tracker.task", "definition": {}}),
-        ("document", "/search"): (200, {"success": True, "documents": [], "count": 0}),
+        ("document_direct", "/search"): (200, {"success": True, "documents": [], "count": 0}),
         ("coordination", "/projects/enceladus"): (200, {"project": {"project_id": "enceladus"}}),
         ("graph_query", ""): (200, hybrid if hybrid is not None else hybrid_body()),
         ("health", ""): (200, {"governance_hash": "f" * 64}),
@@ -234,7 +234,7 @@ class RecordModeRunTests(unittest.TestCase):
             self.assertEqual(len(json.loads((run_dir / "record.json").read_text())["record"]["history"]), 2)
 
     def test_failed_section_makes_a_partial_composition_that_still_exits_zero(self):
-        client = FakeClient(record_routes(extra={("document", "/search"): (500, {"error": "boom"})}))
+        client = FakeClient(record_routes(extra={("document_direct", "/search"): (500, {"error": "boom"})}))
         with tempfile.TemporaryDirectory() as tmp:
             digest, code = run_verb(["--record-id", "ENC-TSK-Q33"], client, tmp)
         self.assertEqual(code, 0)
@@ -261,7 +261,7 @@ class TopicModeTests(unittest.TestCase):
         )
         routes = {
             ("coordination", "/projects/enceladus"): (200, {"project": {}}),
-            ("document", "/search"): (200, {"documents": []}),
+            ("document_direct", "/search"): (200, {"documents": []}),
             ("graph_query", ""): (200, body),
             ("health", ""): (200, {}),
         }
@@ -292,10 +292,10 @@ class TopicModeTests(unittest.TestCase):
     def test_reference_section_is_a_plain_grep_of_the_reference_document(self):
         routes = {
             ("coordination", "/projects/enceladus"): (200, {"project": {}}),
-            ("document", "/search"): lambda q: (
+            ("document_direct", "/search"): lambda q: (
                 (200, {"documents": [{"document_id": "DOC-REF"}]}) if q.get("keyword") == "reference" else (200, {"documents": []})
             ),
-            ("document", "/DOC-REF"): (200, {"content": "# Top\nalpha\nElr compact context here\nomega"}),
+            ("document_direct", "/DOC-REF"): (200, {"content": "# Top\nalpha\nElr compact context here\nomega"}),
             ("graph_query", ""): (200, hybrid_body(1)),
             ("health", ""): (200, {}),
         }
@@ -314,7 +314,7 @@ class ProjectAndDocumentModeTests(unittest.TestCase):
         docs = [{"document_id": f"DOC-{i}"} for i in range(25)]
         routes = {
             ("coordination", "/projects/enceladus"): (200, {"project": {}}),
-            ("document", ""): (200, {"documents": docs}),
+            ("document_direct", ""): (200, {"documents": docs}),
             ("health", ""): (200, {}),
         }
         client = FakeClient(routes)
@@ -330,7 +330,7 @@ class ProjectAndDocumentModeTests(unittest.TestCase):
         self.assertNotIn("ids_file", digest)
 
     def test_document_mode_lands_the_document(self):
-        routes = {("document", "/DOC-X"): (200, {"document_id": "DOC-X", "content": "body"}), ("health", ""): (200, {})}
+        routes = {("document_direct", "/DOC-X"): (200, {"document_id": "DOC-X", "content": "body"}), ("health", ""): (200, {})}
         client = FakeClient(routes)
         with tempfile.TemporaryDirectory() as tmp:
             digest, code = run_verb(["--document-id", "DOC-X"], client, tmp)
