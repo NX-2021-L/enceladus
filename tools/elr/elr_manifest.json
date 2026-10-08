@@ -17,8 +17,8 @@
     },
     {
       "path": "tools/elr/elr_compact_context.py",
-      "sha256": "455e89bec871e8e9c2aa30c493738649da205e29a94beb045b0ea0fd29739153",
-      "size_bytes": 41334
+      "sha256": "61e31fb959808079e7b4774299f78f520c8a373e8b4d80dbde3231d1c4a34705",
+      "size_bytes": 50828
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -141,7 +141,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-10-08T06:55:47-07:00",
+  "generated_at": "2026-10-08T07:06:43-07:00",
   "manifest_version": 1,
-  "source_ref": "1d91d90b6252efa419287663b5ca4dcad88f3445"
+  "source_ref": "685a8a1492878a51c9c2df3899951791bbda64c4"
 }
