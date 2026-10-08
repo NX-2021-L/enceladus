@@ -177,6 +177,36 @@ export async function putTombstone(record: TombstoneRecord): Promise<void> {
   }
 }
 
+export async function getTombstone(recordKey: string): Promise<TombstoneRecord | null> {
+  try {
+    const result = (await withStore('tombstones', 'readonly', (store) => store.get(recordKey))) as
+      | TombstoneRecord
+      | undefined
+    if (result) return result
+  } catch {
+    /* fall through */
+  }
+  return getMemoryDb().tombstones.get(recordKey) ?? null
+}
+
+export async function deleteTombstone(recordKey: string): Promise<void> {
+  try {
+    await withStore('tombstones', 'readwrite', (store) => store.delete(recordKey))
+  } catch {
+    /* fall through */
+  }
+  getMemoryDb().tombstones.delete(recordKey)
+}
+
+export async function deleteTier1(projectId: string, recordId: string): Promise<void> {
+  try {
+    await withStore('tier1', 'readwrite', (store) => store.delete(cacheKey(projectId, recordId)))
+  } catch {
+    /* fall through */
+  }
+  getMemoryDb().tier1.delete(cacheKey(projectId, recordId))
+}
+
 export async function hasTombstone(recordKey: string): Promise<boolean> {
   try {
     const result = (await withStore('tombstones', 'readonly', (store) => store.get(recordKey))) as

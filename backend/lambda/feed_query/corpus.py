@@ -219,18 +219,22 @@ def paginate_corpus(
 
     public_items = []
     for row in page:
-        public_items.append(
-            {
-                "record_id": row.get("record_id"),
-                "record_type": row.get("record_type"),
-                "project_id": row.get("project_id"),
-                "title": row.get("title"),
-                "updated_at": row.get("updated_at"),
-                "source": row.get("source"),
-                "record_key": row.get("record_key"),
-                "attrs": row.get("attrs") or {},
-            }
-        )
+        item = {
+            "record_id": row.get("record_id"),
+            "record_type": row.get("record_type"),
+            "project_id": row.get("project_id"),
+            "title": row.get("title"),
+            "updated_at": row.get("updated_at"),
+            "source": row.get("source"),
+            "record_key": row.get("record_key"),
+            "attrs": row.get("attrs") or {},
+        }
+        # ENC-TSK-Q34 (AC-2): carry version_seq so the client can seed its
+        # per-space delta cursors (tracker vs document counters) instead of
+        # healing from since=0 on every load.
+        if row.get("version_seq") is not None:
+            item["version_seq"] = row.get("version_seq")
+        public_items.append(item)
 
     return {
         "items": public_items,
@@ -273,9 +277,31 @@ def build_tracker_entry(
     return entry
 
 
+# ENC-TSK-P72: document_api keeps its version_seq counter as a sentinel row in
+# DOCUMENTS_TABLE itself. It is bookkeeping, not a document.
+DOCUMENT_COUNTER_SENTINEL_ID = "__COUNTER__VERSION_SEQ__"
+
+
+def is_document_counter_row(item: Mapping[str, Any]) -> bool:
+    """ENC-TSK-Q34 (AC-5): the counter sentinel must never surface as a document."""
+    document_id = str(item.get("document_id") or "").strip()
+    record_type = str(item.get("record_type") or "").strip().lower()
+    return document_id == DOCUMENT_COUNTER_SENTINEL_ID or record_type == "counter"
+
+
+def coerce_version_seq(raw: Any) -> Optional[int]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def build_document_entry(item: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     document_id = str(item.get("document_id") or "").strip()
-    if not document_id:
+    if not document_id or is_document_counter_row(item):
         return None
     status = str(item.get("status") or "active").lower()
     if status in {"deleted", "archived"}:
@@ -290,7 +316,7 @@ def build_document_entry(item: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     subtypepattern = str(item.get("subtypepattern") or "").strip()
     if subtypepattern:
         attrs["subtypepattern"] = subtypepattern
-    return {
+    entry = {
         "record_id": document_id,
         "record_type": "document",
         "project_id": str(item.get("project_id") or ""),
@@ -300,6 +326,12 @@ def build_document_entry(item: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         "record_key": document_record_key(document_id),
         "attrs": attrs,
     }
+    # Document version_seq comes from the DOCUMENTS_TABLE counter, a sequence
+    # space independent of the tracker counter (ENC-TSK-Q34).
+    version_seq = coerce_version_seq(item.get("version_seq"))
+    if version_seq is not None:
+        entry["version_seq"] = version_seq
+    return entry
 
 
 def normalize_str_list(value: Any, record_id: str = "", field: str = "") -> List[str]:
@@ -365,6 +397,7 @@ def build_tracker_entries_from_records(
                     str(record.get("title") or record_id),
                     record.get("updated_at"),
                     attrs,
+                    coerce_version_seq(record.get("version_seq")),
                 )
             )
 

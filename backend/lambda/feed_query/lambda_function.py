@@ -132,6 +132,8 @@ _PROJECT_CACHE_TTL = 300.0
 
 _corpus_cache_entries: Optional[List[Dict[str, Any]]] = None
 _corpus_cache_at: float = 0.0
+_document_cache_items: Optional[List[Dict[str, Any]]] = None
+_document_cache_at: float = 0.0
 _CORPUS_CACHE_TTL = 30.0
 
 _ddb = None
@@ -1280,6 +1282,11 @@ def _query_project_tracker_records(
                     if _is_stale_closed(raw_item, cutoff):
                         continue
                     transformed = _TRANSFORM[record_type](raw_item, pid)
+                    # ENC-TSK-Q34 (AC-2): corpus entries carry the tracker
+                    # version_seq so clients can seed their delta cursor.
+                    version_seq = _ddb_int(raw_item, "version_seq")
+                    if version_seq > 0:
+                        transformed["version_seq"] = version_seq
                 except Exception as rec_exc:  # noqa: BLE001
                     logger.error(
                         "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
@@ -1603,6 +1610,8 @@ def _deserialize_document_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "document_subtype": _ddb_str(item, "document_subtype") or "general",
         "subtypepattern": _ddb_str(item, "subtypepattern") or "",
         "keywords": _ddb_str_set(item, "keywords"),
+        "record_type": _ddb_str(item, "record_type"),
+        "version_seq": _ddb_int(item, "version_seq") or None,
     }
 
 
@@ -1627,6 +1636,19 @@ def _scan_documents_for_corpus() -> List[Dict[str, Any]]:
     return items
 
 
+def _get_document_items() -> List[Dict[str, Any]]:
+    """Deserialized DOCUMENTS_TABLE rows, cached per container for the corpus
+    TTL. Shared by the corpus and the document half of /feed/delta (ENC-TSK-Q34)
+    so a delta call on a warm container costs no extra scan."""
+    global _document_cache_items, _document_cache_at
+    now = time.time()
+    if _document_cache_items is not None and now - _document_cache_at < _CORPUS_CACHE_TTL:
+        return _document_cache_items
+    _document_cache_items = _scan_documents_for_corpus()
+    _document_cache_at = now
+    return _document_cache_items
+
+
 def _get_corpus_entries() -> List[Dict[str, Any]]:
     global _corpus_cache_entries, _corpus_cache_at
     now = time.time()
@@ -1640,7 +1662,7 @@ def _get_corpus_entries() -> List[Dict[str, Any]]:
     document_entries = [
         entry
         for entry in (
-            feed_corpus.build_document_entry(doc) for doc in _scan_documents_for_corpus()
+            feed_corpus.build_document_entry(doc) for doc in _get_document_items()
         )
         if entry
     ]
@@ -2047,13 +2069,22 @@ def _delta_corpus_entry(raw_item: Dict[str, Any], project_id: str) -> Optional[D
 
 def _handle_delta(qs: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/feed/delta?since=<version_seq> — version-ordered incremental sync (ENC-TSK-L27)."""
-    since = feed_delta.parse_since_version((qs or {}).get("since"))
+    qs = qs or {}
+    since = feed_delta.parse_since_version(qs.get("since"))
     if since is None:
         return _error(400, "'since' must be a non-negative integer version_seq")
+    # ENC-TSK-Q34 (AC-1): documents travel on their own cursor. Absent
+    # doc_since keeps the pre-Q34 tracker-only contract for older clients.
+    raw_doc_since = qs.get("doc_since")
+    doc_since: Optional[int] = None
+    if raw_doc_since is not None and str(raw_doc_since).strip() != "":
+        doc_since = feed_delta.parse_since_version(raw_doc_since)
+        if doc_since is None:
+            return _error(400, "'doc_since' must be a non-negative integer version_seq")
 
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
     try:
-        items, tombstones, latest = feed_delta.query_version_delta(
+        items, tombstones, latest, truncated = feed_delta.query_version_delta(
             _get_ddb(),
             DYNAMODB_TABLE,
             since,
@@ -2061,18 +2092,49 @@ def _handle_delta(qs: Dict[str, Any]) -> Dict[str, Any]:
             transform_record=_delta_corpus_entry,
             cutoff=cutoff,
         )
+        doc_items: List[Dict[str, Any]] = []
+        doc_tombstones: List[Dict[str, Any]] = []
+        latest_doc: Optional[int] = None
+        doc_truncated = False
+        if doc_since is not None:
+            doc_items, doc_tombstones, latest_doc, doc_truncated = feed_delta.query_document_delta(
+                _get_document_items(),
+                doc_since,
+                build_entry=feed_corpus.build_document_entry,
+                is_counter_row=feed_corpus.is_document_counter_row,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("feed delta query failed: %s", exc)
         return _error(500, "Failed to query feed delta. Please try again.")
 
-    body = {
+    logger.info(
+        "[INFO] feed delta since=%s doc_since=%s -> items=%d tombstones=%d latest=%s "
+        "truncated=%s doc_items=%d doc_tombstones=%d latest_doc=%s doc_truncated=%s",
+        since,
+        doc_since,
+        len(items),
+        len(tombstones),
+        latest,
+        truncated,
+        len(doc_items),
+        len(doc_tombstones),
+        latest_doc,
+        doc_truncated,
+    )
+
+    body: Dict[str, Any] = {
         "success": True,
         "generated_at": _now_z(),
         "since": since,
         "latest_version_seq": latest,
-        "items": items,
-        "tombstones": tombstones,
+        "truncated": truncated,
+        "items": items + doc_items,
+        "tombstones": tombstones + doc_tombstones,
     }
+    if doc_since is not None:
+        body["doc_since"] = doc_since
+        body["latest_doc_version_seq"] = latest_doc
+        body["doc_truncated"] = doc_truncated
     return {
         "statusCode": 200,
         "headers": {

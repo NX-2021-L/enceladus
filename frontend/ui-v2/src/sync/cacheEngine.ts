@@ -1,7 +1,13 @@
 import type { RecordType } from '../types/records'
 import * as idb from './idbStore'
 import { CorpusSearchIndex } from './searchIndex'
-import { cacheKey, shouldAcceptVersion, versionSeqFromItem, versionSeqFromUpdatedAt } from './recordKey'
+import {
+  isStrictlyNewerVersion,
+  shouldAcceptRecord,
+  shouldAcceptVersion,
+  versionSeqFromItem,
+  versionSeqFromUpdatedAt,
+} from './recordKey'
 import type { FeedCorpusItem, Tier1Record, Tier2Record } from './types'
 import { DEFAULT_CACHE_BUDGET } from './types'
 
@@ -70,9 +76,18 @@ export class CacheEngine {
   }
 
   async upsertTier1(record: Tier1Record): Promise<void> {
-    if (await idb.hasTombstone(record.recordKey)) return
+    const tombstone = await idb.getTombstone(record.recordKey)
+    if (tombstone) {
+      // ENC-TSK-Q34: a versioned tombstone (e.g. an archived document) yields
+      // only to a strictly newer version of the same record, so an
+      // un-archived document can come back. Unversioned tombstones are final.
+      if (!tombstone.versionSeq || !isStrictlyNewerVersion(record.versionSeq, tombstone.versionSeq)) return
+      await idb.deleteTombstone(record.recordKey)
+    }
     const existing = await idb.getTier1(record.projectId, record.recordId)
-    if (existing && !shouldAcceptVersion(existing.versionSeq, record.versionSeq)) return
+    // ENC-TSK-Q34 (ENC-ISS-731): domain-safe accept gate (no string compare
+    // across integer seq and ISO tokens).
+    if (existing && !shouldAcceptRecord(existing, record)) return
     await idb.putTier1(record)
     this.searchIndex.upsert(record)
   }
@@ -102,8 +117,15 @@ export class CacheEngine {
     return row.body
   }
 
-  async markTombstone(recordKey: string, recordId: string): Promise<void> {
-    await idb.putTombstone({ recordKey, deletedAt: Date.now() })
+  async markTombstone(
+    recordKey: string,
+    recordId: string,
+    options: { versionSeq?: string; projectId?: string } = {},
+  ): Promise<void> {
+    await idb.putTombstone({ recordKey, deletedAt: Date.now(), versionSeq: options.versionSeq })
+    // ENC-TSK-Q34: also drop the cached row, or loadSearchSlice would put a
+    // deleted/archived record back into the index on the next page load.
+    if (options.projectId) await idb.deleteTier1(options.projectId, recordId)
     this.searchIndex.remove(recordId)
   }
 
