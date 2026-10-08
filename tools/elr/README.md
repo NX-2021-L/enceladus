@@ -85,3 +85,9 @@ rows, `signals_present` / `signals_absent` with reasons, and the on-disk section
 index. `<run_id>.ids` in that directory feeds `elr batch_get --ids-file`.
 Digest bytes are bounded by `1024 + 192 * top_n`. Exit codes: 4 TLS, 6
 `hybrid_unsupported_by_server`, 7 no credential, 8 `response_shape_drift`.
+
+Every run appends one line to `~/.enceladus/context/ledger.jsonl` (created 0600;
+ids, ranks and counts only -- never a key, a body or a title) and
+`elr batch_get --ids-file <run dir>/<run_id>.ids` appends a `read_through`
+event to it (ENC-TSK-Q52). Runs are pruned oldest-first beyond 24 h or the F11
+`B_session` cap of 40.2 MB; the ledger is never pruned.

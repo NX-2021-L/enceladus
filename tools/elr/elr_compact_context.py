@@ -714,6 +714,30 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
             warnings.append("digest_over_m3_budget")
             digest = assemble(rows)
             _stamp_size(digest)
+
+    # Step 6 -- measurement and retention (FR-10, FR-11). Neither may fail the run.
+    if hybrid_body is not None:
+        entry = ledger_entry(
+            run_id=run_id,
+            mode=mode,
+            anchor=anchor,
+            profile=profile,
+            retrieval=retrieval,
+            pathway=pathway,
+            ordered=ordered[:top_n],
+            digest_bytes=digest["header"]["digest_bytes"],
+            wall_ms=wall_ms,
+        )
+        try:
+            context_store.append_ledger(root, entry)
+        except (OSError, ValueError) as exc:
+            warnings.append(f"ledger_append_failed:{exc.__class__.__name__}")
+            digest = assemble(rows)
+            _stamp_size(digest)
+    try:
+        context_store.prune_runs(root, protect=(run_id,))
+    except OSError:
+        pass
     return digest, 0
 
 
@@ -722,6 +746,45 @@ def _coverage_pair(sample: Any) -> Optional[List[int]]:
     if isinstance(sample, dict) and "covered" in sample and "total_ranked" in sample:
         return [sample["covered"], sample["total_ranked"]]
     return None
+
+
+def ledger_entry(
+    *,
+    run_id: str,
+    mode: str,
+    anchor: str,
+    profile: str,
+    retrieval: Dict[str, Any],
+    pathway: Dict[str, Any],
+    ordered: List[Dict[str, Any]],
+    digest_bytes: int,
+    wall_ms: int,
+) -> Dict[str, Any]:
+    """One FR-10 ledger line. Only ids, ranks and counts -- never a key, a
+    body or a title. ``ordered`` is the full top_n the server returned (not
+    the possibly row-truncated inline digest)."""
+    per_signal = []
+    for node in ordered:
+        ranks = node.get("_per_signal_ranks") or {}
+        per_signal.append({_SIGNAL_SHORT[s]: ranks[s] for s in SIGNALS if s in ranks})
+    return {
+        "ts": context_store.utc_now_iso(),
+        "run_id": run_id,
+        "mode": mode,
+        "anchor": anchor or None,
+        "intent_signature": pathway.get("intent_signature"),
+        "wave_id": pathway.get("wave_id"),
+        "profile": profile,
+        "signals_present": retrieval.get("signals_present"),
+        "graph_algorithm": retrieval.get("graph_algorithm"),
+        "ranked_ids": [str(n["record_id"]) for n in ordered],
+        "per_signal_ranks": per_signal,
+        "fused_ranks": [n["_fused_rank"] for n in ordered],
+        "final_ranks": [n["_final_rank"] for n in ordered],
+        "k_corr": [n["_corroboration_count"] for n in ordered],
+        "digest_bytes": digest_bytes,
+        "wall_ms": wall_ms,
+    }
 
 
 def _no_hybrid_absent(query_sent: bool, anchor_sent: bool) -> Dict[str, str]:
