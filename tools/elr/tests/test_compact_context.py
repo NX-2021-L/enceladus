@@ -165,7 +165,7 @@ class RecordModeRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             digest, code = run_verb(["--mode", "task", "--record-id", "ENC-TSK-Q33", "--top-n", "3"], client, tmp)
             self.assertEqual(code, 0)
-            (hybrid_call,) = _call(client, "graph_query")
+            (hybrid_call,) = [c for c in _call(client, "graph_query") if c[1] == ""]
             q = hybrid_call[2]
             self.assertEqual(q["search_type"], "hybrid")
             self.assertEqual(q["anchor_record_id"], "ENC-TSK-Q33")
@@ -273,7 +273,7 @@ class TopicModeTests(unittest.TestCase):
         self.assertEqual(digest["retrieval"]["signals_present"], ["vector", "keyword"])
         self.assertEqual(digest["retrieval"]["signals_absent"], {"graph": "no_anchor"})
         self.assertFalse(_call(client, "tracker"))
-        (hybrid_call,) = _call(client, "graph_query")
+        (hybrid_call,) = [c for c in _call(client, "graph_query") if c[1] == ""]
         self.assertNotIn("anchor_record_id", {k: v for k, v in hybrid_call[2].items() if v is not None})
 
     def test_absent_signal_reasons_follow_inputs_and_server_fields(self):

@@ -8,6 +8,10 @@ coordination MCP gateway defect (ENC-ISS-835) is fixed and deployed:
     ELR_PARITY_GATEWAY=https://<host>/api/v1/coordination/mcp \\
     python3.11 -m pytest tools/elr/tests/test_compact_context_parity_live.py -q
 
+ENC-TSK-Q54: ELR_PARITY_TRANSPORT=route|compose (default compose) runs the whole
+set through the context.compact route or through Phase 1 client composition;
+the route run asserts every digest reports retrieval.composer == "route".
+
 Optional: ELR_PARITY_ANCHORS_FILE (JSON; default fixtures/parity_anchors.json
 with 10 record anchors + 10 topic queries), ELR_PARITY_PROFILE (default prod).
 
@@ -44,6 +48,7 @@ from elr_lib.config import get_profile
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "parity_anchors.json"
 _LIVE = os.environ.get("ELR_PARITY_LIVE") == "1"
 TOP_N = 20
+_TRANSPORT = os.environ.get("ELR_PARITY_TRANSPORT", "compose").strip().lower()
 P95_WARM_S = 4.0
 P95_COLD_S = 12.0
 
@@ -139,11 +144,14 @@ class CompactContextLiveParityTests(unittest.TestCase):
         import time
 
         with tempfile.TemporaryDirectory() as tmp:
-            args = cc.build_parser().parse_args(argv + ["--out-dir", tmp, "--top-n", str(TOP_N)])
+            args = cc.build_parser().parse_args(argv + ["--out-dir", tmp, "--top-n", str(TOP_N), "--transport", _TRANSPORT])
             started = time.monotonic()
             digest, code = cc.run_compact_context(args, self.client, profile=self.profile, key_source="parity")
             elapsed = time.monotonic() - started
         self.assertEqual(code, 0, f"elr exit {code}: {digest.get('anomalies')}")
+        expected = "route" if _TRANSPORT == "route" else "elr-1" if _TRANSPORT == "compose" else None
+        if expected:
+            self.assertEqual(digest["retrieval"]["composer"], expected, f"transport {_TRANSPORT} fell back: {digest.get('warnings')}")
         return digest, elapsed
 
     def _record_query(self, record_id: str) -> Tuple[str, str]:
@@ -200,7 +208,7 @@ class CompactContextLiveParityTests(unittest.TestCase):
                 mismatches.append(label)
 
         summary = (
-            f"parity {20 - len(mismatches)}/20 exact | "
+            f"[{_TRANSPORT}] parity {20 - len(mismatches)}/20 exact | "
             f"p95 cold {p95(cold):.2f}s (<= {P95_COLD_S}) | p95 warm {p95(warm):.2f}s (<= {P95_WARM_S})"
         )
         print("\n[elr-parity] " + summary + (f" | MISMATCH: {', '.join(mismatches)}" if mismatches else ""))
