@@ -3044,6 +3044,37 @@ SEARCH_HANDLERS = {
 # Route handlers
 # ---------------------------------------------------------------------------
 
+# ENC-TSK-Q49 (BRD Phase 2, T7): hybrid fields=compact response projection.
+VALID_FIELDS_MODES = {"full", "compact"}
+_COMPACT_NODE_KEYS = (
+    "record_id", "record_type", "title", "status", "updated_at",
+    "_fused_rank", "_fused_score", "_final_rank", "_final_score",
+    "_per_signal_ranks", "_corroboration_count", "_b_corr",
+)
+_COMPACT_DROP_KEYS = (
+    "edges", "paths", "pathway", "facets", "query_cypher", "edge_participation",
+)
+
+
+def _project_hybrid_compact(response_body: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a hybrid response to the compact shape (ranking fields only).
+
+    Pure response projection: fusion/ranking is already complete. per_node_fusion
+    is limited to the returned node ids; node rows keep identity + ranking keys.
+    """
+    out = {k: v for k, v in response_body.items() if k not in _COMPACT_DROP_KEYS}
+    nodes = [
+        {k: n[k] for k in _COMPACT_NODE_KEYS if k in n}
+        for n in response_body.get("nodes", [])
+    ]
+    out["nodes"] = nodes
+    fusion = response_body.get("per_node_fusion")
+    if isinstance(fusion, dict):
+        keep = {n.get("record_id") for n in nodes}
+        out["per_node_fusion"] = {k: v for k, v in fusion.items() if k in keep}
+    return out
+
+
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
@@ -3061,6 +3092,10 @@ def _handle_search(event: Dict) -> Dict:
     search_type = qs.get("search_type", "")
     if search_type not in VALID_SEARCH_TYPES:
         return _error(400, f"search_type must be one of: {', '.join(sorted(VALID_SEARCH_TYPES))}")
+
+    fields_mode = (qs.get("fields") or "full").strip().lower() or "full"
+    if fields_mode not in VALID_FIELDS_MODES:
+        return _error(400, f"fields must be one of: {', '.join(sorted(VALID_FIELDS_MODES))}")
 
     depth = qs.get("depth")
     if depth is not None:
@@ -3176,6 +3211,8 @@ def _handle_search(event: Dict) -> Dict:
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
+    if fields_mode == "compact" and search_type == "hybrid":
+        response_body = _project_hybrid_compact(response_body)
     return _response(200, response_body)
 
 
@@ -3469,6 +3506,7 @@ def _handle_health(event: Dict) -> Dict:
             "response_ms": duration_ms,
             "signals": signals,
             "graph_projection": graph_projection,
+            "hybrid_fields_compact": True,  # ENC-TSK-Q49
         })
     except Exception as e:
         logger.warning("[WARNING] Graph health check failed: %s", e)
