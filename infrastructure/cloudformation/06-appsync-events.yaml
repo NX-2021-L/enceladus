@@ -57,15 +57,8 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
-  # ENC-TSK-P40 / ENC-ISS-696 — the ABI selector, separate from plane identity. Mirrors the
-  # condition of the same name in 02-compute.yaml; see that file for the full rationale.
-  # AppSyncFeedPublisherFunction below carries NO resource-level Condition, so it renders on the
-  # PROD plane and its two ABI-derived sites are part of the ENC-TSK-O11 cutover. Every prior count
-  # (ENC-TSK-O11 AC-3 and DOC-F3878E7260B6 section 3) said this template held "1 conditional"; it
-  # holds TWO — Runtime and Architectures. Introduced identical to IsGamma so the repoint was a
-  # no-op; ENC-TSK-P38 (ENC-PLN-082 cutover, io GO 2026-08-26) flipped it to unconditionally TRUE,
-  # mirroring 02-compute.yaml — both ABI sites below render arm64/python3.12 on every plane.
-  IsArm64: !Equals ["arm64", "arm64"]
+  # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
+  # plane is arm64 now; the two former conditional sites below are literal arm64/python3.12.
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -249,12 +242,12 @@ Resources:
       FunctionName: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: !If [IsArm64, python3.12, python3.11]
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 30
       Architectures:
-        - !If [IsArm64, arm64, x86_64]
+        - arm64
       Role: !GetAtt AppSyncFeedPublisherRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -264,7 +257,14 @@ Resources:
           # the AppSync API is provisioned (see ESCALATED steps). The API host is
           # available from FeedEventsApi.Dns.Http after provisioning.
           APPSYNC_EVENTS_HTTP_ENDPOINT: !GetAtt FeedEventsApi.Dns.Http
-          APPSYNC_EVENTS_API_KEY: !GetAtt FeedEventsApiKey.ApiKey
+          # ENC-TSK-Q22: derive the key id from the ApiKey ARN (Ref) instead of
+          # !GetAtt FeedEventsApiKey.ApiKey. The GetAtt makes CloudFormation call
+          # appsync:ListApiKeys, which the deploy role is denied (the grant is
+          # scoped to apikeys/* but the action authorizes on the API ARN), and
+          # the denial surfaces as "ApiKey ... not found" -> UPDATE_ROLLBACK.
+          # Ref = arn:aws:appsync:<region>:<acct>:apis/<apiId>/apikeys/<keyId>;
+          # the key id IS the key value, so the rendered env var is unchanged.
+          APPSYNC_EVENTS_API_KEY: !Select [3, !Split ["/", !Ref FeedEventsApiKey]]
           APPSYNC_EVENTS_REGION: !Ref AWS::Region
           APPSYNC_EVENTS_TIMEOUT: "5"
           DEFAULT_PROJECT_ID: enceladus

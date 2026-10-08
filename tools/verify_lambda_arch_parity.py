@@ -331,7 +331,9 @@ def _is_named_architecture_exception(function_name: str, exceptions: Dict[str, A
 def _validate_cfn(
     blocks: List[LambdaResource], architecture_exceptions: Optional[Dict[str, Any]] = None
 ) -> List[str]:
-    """Validate that all CFN Lambda declarations use IsArm64 conditionals.
+    """Validate that all CFN Lambda declarations use IsArm64 conditionals, or
+    (ENC-TSK-Q22, DOC-5368FE6515ED FR-12, Phase D) the literalized
+    arm64/python3.12 values the condition always resolved to.
 
     ENC-TSK-O83: compares the parsed Properties.Runtime / .Architectures
     values directly against the expected structural shape (EXPECTED_RUNTIME_IF
@@ -367,12 +369,18 @@ def _validate_cfn(
 
         label = f"{block.function_name or block.resource_name} ({block.resource_name}, line {block.line_number})"
 
-        # Check Runtime
-        if block.runtime != EXPECTED_RUNTIME_IF:
+        # Check Runtime. ENC-TSK-Q22 (DOC-5368FE6515ED FR-12, Phase D): a
+        # hardcoded Runtime=python3.12 is the literalized, POST-cutover form
+        # of the same !If -- it always resolved to python3.12 once IsArm64
+        # went permanently true (ENC-TSK-P38) -- and is accepted outright,
+        # never just deferred to a named exception. Any OTHER hardcoded
+        # value (x86_64-paired python3.11 above all) is still a violation.
+        if block.runtime != EXPECTED_RUNTIME_IF and block.runtime != "python3.12":
             if isinstance(block.runtime, str):
                 errors.append(
                     f"{label}: hardcoded Runtime={block.runtime}, expected "
-                    f"!If [{ABI_CONDITION}, python3.12, python3.11]"
+                    f"!If [{ABI_CONDITION}, python3.12, python3.11] or the "
+                    f"literalized python3.12"
                 )
             elif block.runtime is None:
                 errors.append(
@@ -383,11 +391,13 @@ def _validate_cfn(
             else:
                 errors.append(
                     f"{label}: unexpected Runtime value: {block.runtime!r}, "
-                    f"expected !If [{ABI_CONDITION}, python3.12, python3.11]"
+                    f"expected !If [{ABI_CONDITION}, python3.12, python3.11] or "
+                    f"the literalized python3.12"
                 )
 
-        # Check Architectures
-        if block.architectures != EXPECTED_ARCH_IF_LIST:
+        # Check Architectures. Same Phase D literal-acceptance as Runtime
+        # above: a hardcoded Architectures=[arm64] is accepted outright.
+        if block.architectures != EXPECTED_ARCH_IF_LIST and block.architectures != ["arm64"]:
             if _is_named_architecture_exception(block.function_name, architecture_exceptions):
                 pass  # ENC-TSK-O82: deferred to _validate_architecture_exceptions
             elif (
@@ -397,7 +407,8 @@ def _validate_cfn(
             ):
                 errors.append(
                     f"{label}: hardcoded Architectures=[{block.architectures[0]}], "
-                    f"expected !If [{ABI_CONDITION}, arm64, x86_64]"
+                    f"expected !If [{ABI_CONDITION}, arm64, x86_64] or the "
+                    f"literalized [arm64]"
                 )
             elif block.architectures is None:
                 errors.append(f"{label}: missing Architectures property")
@@ -1538,42 +1549,73 @@ def _validate_declaration() -> List[str]:
                 f"envs/architecture.yaml planes[{expected_plane!r}].runner={expected_runner!r}"
             )
 
-    # 2. 02-compute.yaml's IsArm64 condition must resolve to exactly what
-    #    every plane declares (today: arm64/python3.12 on both planes).
+    # 2. 02-compute.yaml's IsArm64 condition -- when still declared -- must
+    #    resolve to exactly what every plane declares (today: arm64/
+    #    python3.12 on both planes). ENC-TSK-Q22 (DOC-5368FE6515ED FR-12,
+    #    Phase D) retires the condition itself once every former !If site is
+    #    a hardcoded literal; when it's entirely absent from Conditions, that
+    #    retirement is exactly what happened, and envs/architecture.yaml
+    #    alone is authoritative -- there's no condition left to cross-check.
+    #    A single literal per function can't serve two different plane
+    #    values, so the retired-condition path requires prod and gamma to
+    #    declare the same arch/runtime.
     if not COMPUTE_TEMPLATE.is_file():
         errors.append(f"cannot resolve {ABI_CONDITION}: {COMPUTE_TEMPLATE} not found")
         return errors
 
     document, _ = _load_cfn_document(COMPUTE_TEMPLATE)
-    condition_true = _resolve_abi_condition(document)
-    if condition_true is None:
-        errors.append(
-            f"cannot structurally resolve Conditions.{ABI_CONDITION} in "
-            f"{COMPUTE_TEMPLATE} (expected a two-literal-string !Equals)"
-        )
-    else:
-        resolved_arch = "arm64" if condition_true else "x86_64"
-        resolved_runtime = "python3.12" if condition_true else "python3.11"
-        for plane in ("prod", "gamma"):
-            plane_decl = decl.planes.get(plane)
-            if plane_decl is None:
-                errors.append(f"envs/architecture.yaml has no planes entry for {plane!r}")
-                continue
-            if plane_decl["arch"] != resolved_arch:
-                errors.append(
-                    f"envs/architecture.yaml planes[{plane!r}].arch={plane_decl['arch']!r}, "
-                    f"but {ABI_CONDITION} resolves to {resolved_arch!r}"
-                )
-            if plane_decl["runtime"] != resolved_runtime:
-                errors.append(
-                    f"envs/architecture.yaml planes[{plane!r}].runtime="
-                    f"{plane_decl['runtime']!r}, but {ABI_CONDITION} resolves to "
-                    f"{resolved_runtime!r}"
-                )
+    conditions = document.get("Conditions") or {}
+    condition_declared = ABI_CONDITION in conditions
+    resolved_arch: Optional[str] = None
+    resolved_runtime: Optional[str] = None
 
+    if not condition_declared:
+        prod_decl = decl.planes.get("prod")
+        gamma_decl = decl.planes.get("gamma")
+        if prod_decl is None or gamma_decl is None:
+            errors.append("envs/architecture.yaml is missing a prod or gamma planes entry")
+        elif (prod_decl["arch"], prod_decl["runtime"]) != (gamma_decl["arch"], gamma_decl["runtime"]):
+            errors.append(
+                f"{ABI_CONDITION} is retired (fully literalized) in {COMPUTE_TEMPLATE}, "
+                f"but envs/architecture.yaml declares different values for prod "
+                f"({prod_decl['arch']}/{prod_decl['runtime']}) and gamma "
+                f"({gamma_decl['arch']}/{gamma_decl['runtime']}) -- a single literal "
+                f"cannot resolve both"
+            )
+        else:
+            resolved_arch = prod_decl["arch"]
+            resolved_runtime = prod_decl["runtime"]
+    else:
+        condition_true = _resolve_abi_condition(document)
+        if condition_true is None:
+            errors.append(
+                f"cannot structurally resolve Conditions.{ABI_CONDITION} in "
+                f"{COMPUTE_TEMPLATE} (expected a two-literal-string !Equals)"
+            )
+        else:
+            resolved_arch = "arm64" if condition_true else "x86_64"
+            resolved_runtime = "python3.12" if condition_true else "python3.11"
+            for plane in ("prod", "gamma"):
+                plane_decl = decl.planes.get(plane)
+                if plane_decl is None:
+                    errors.append(f"envs/architecture.yaml has no planes entry for {plane!r}")
+                    continue
+                if plane_decl["arch"] != resolved_arch:
+                    errors.append(
+                        f"envs/architecture.yaml planes[{plane!r}].arch={plane_decl['arch']!r}, "
+                        f"but {ABI_CONDITION} resolves to {resolved_arch!r}"
+                    )
+                if plane_decl["runtime"] != resolved_runtime:
+                    errors.append(
+                        f"envs/architecture.yaml planes[{plane!r}].runtime="
+                        f"{plane_decl['runtime']!r}, but {ABI_CONDITION} resolves to "
+                        f"{resolved_runtime!r}"
+                    )
+
+    if resolved_arch is not None and resolved_runtime is not None:
         # 3. Per-function acceptance: a Lambda may select arch/runtime either
         #    via the !If[IsArm64, ...] conditional (resolved above) or,
-        #    ahead of the Phase D literalization, a hardcoded literal -- but
+        #    since the Phase D literalization, a hardcoded literal -- but
         #    either way the EFFECTIVE value must match the declaration.
         #    Named architecture_exceptions defer to
         #    _validate_architecture_exceptions, same as _validate_cfn.
@@ -1843,8 +1885,9 @@ def main() -> int:
     print(
         f"[SUCCESS] Lambda architecture parity valid: "
         f"{len(blocks)} CFN Lambdas structurally selected and evaluated "
-        f"(count-reconciled against an independent census), all use "
-        f"{ABI_CONDITION} conditionals (prod=arm64/py3.12, gamma=arm64/py3.12)"
+        f"(count-reconciled against an independent census), all resolve to "
+        f"arm64/py3.12 (prod=arm64/py3.12, gamma=arm64/py3.12) via "
+        f"{ABI_CONDITION} conditionals or the Phase D literal"
     )
     return 0
 

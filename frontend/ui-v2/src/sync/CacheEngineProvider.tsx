@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { getCacheEngine } from './cacheEngine'
 import { seedCacheFromCorpus } from './corpusSeed'
+import { getCorpusSeededAt, setCorpusSeededAt } from './feedVersionMeta'
+import type { LocalSearchRecord } from '../types/search'
 import { attachQueryClientPersist, restorePersistedQueryClient } from './queryPersist'
 import { queryClient } from '../api/queryClient'
 
@@ -42,12 +44,23 @@ interface CacheEngineContextValue {
   isWarm: boolean
   warmDurationMs: number | null
   seedError: string | null
+  /** ENC-TSK-Q33: the search-index rows as React state. The engine replaces
+   *  its row array on every rebuild/upsert, so publishing that reference here
+   *  is what makes /docs and /feed repaint when a seed lands. Reading
+   *  getCacheEngine().searchIndex.all() during render did not: once the
+   *  IndexedDB slice set isWarm, the post-seed setIsWarm(true) was a no-op and
+   *  nothing re-rendered. */
+  indexRows: LocalSearchRecord[]
+  /** ISO time of the last corpus seed that completed on this device, or null. */
+  lastSeededAt: string | null
 }
 
 const CacheEngineContext = createContext<CacheEngineContextValue>({
   isWarm: false,
   warmDurationMs: null,
   seedError: null,
+  indexRows: [],
+  lastSeededAt: null,
 })
 
 export function useCacheEngineState(): CacheEngineContextValue {
@@ -58,6 +71,8 @@ export function CacheEngineProvider({ children }: { children: ReactNode }) {
   const [isWarm, setIsWarm] = useState(getCacheEngine().isWarm)
   const [warmDurationMs, setWarmDurationMs] = useState<number | null>(null)
   const [seedError, setSeedError] = useState<string | null>(null)
+  const [indexRows, setIndexRows] = useState<LocalSearchRecord[]>(() => getCacheEngine().searchIndex.all())
+  const [lastSeededAt, setLastSeededAt] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -66,16 +81,27 @@ export function CacheEngineProvider({ children }: { children: ReactNode }) {
     void (async () => {
       await restorePersistedQueryClient(queryClient)
       await engine.loadSearchSlice()
-      if (!cancelled) setIsWarm(engine.isWarm)
+      const seededAt = await getCorpusSeededAt()
+      if (!cancelled) {
+        setIsWarm(engine.isWarm)
+        setIndexRows(engine.searchIndex.all())
+        setLastSeededAt(seededAt)
+      }
 
       try {
         const result = await seedCacheFromCorpusWithRetry()
         if (cancelled) return
+        const completedAt = new Date().toISOString()
+        await setCorpusSeededAt(completedAt)
         setIsWarm(true)
+        setIndexRows(engine.searchIndex.all())
         setWarmDurationMs(result.durationMs)
+        setLastSeededAt(completedAt)
         setSeedError(null)
       } catch (error) {
         if (cancelled) return
+        // Rows ingested before the failure are still newer than the slice.
+        setIndexRows(engine.searchIndex.all())
         setSeedError(error instanceof Error ? error.message : 'Corpus seed failed')
       }
     })()
@@ -88,7 +114,7 @@ export function CacheEngineProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <CacheEngineContext.Provider value={{ isWarm, warmDurationMs, seedError }}>
+    <CacheEngineContext.Provider value={{ isWarm, warmDurationMs, seedError, indexRows, lastSeededAt }}>
       {children}
     </CacheEngineContext.Provider>
   )

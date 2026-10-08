@@ -308,6 +308,23 @@ class TestStructuralLambdaSelection(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(vlap._validate_cfn(blocks), [])
 
+    def test_hardcoded_arm64_literal_is_accepted(self):
+        """ENC-TSK-Q22 (DOC-5368FE6515ED FR-12, Phase D): a hardcoded
+        Architectures=[arm64] is the literalized, POST-cutover form -- it
+        always resolved to arm64 once IsArm64 went permanently true -- and
+        must be accepted outright, same as Runtime=python3.12."""
+        text = _TEMPLATE_HEADER + """\
+  LiteralArchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "literal-arch-fn${EnvironmentSuffix}"
+      Runtime: python3.12
+      Architectures:
+        - arm64
+"""
+        blocks = self._parse(text)
+        self.assertEqual(vlap._validate_cfn(blocks), [])
+
     def test_hardcoded_architecture_is_rejected(self):
         text = _TEMPLATE_HEADER + """\
   BadArchFunction:
@@ -316,12 +333,12 @@ class TestStructuralLambdaSelection(unittest.TestCase):
       FunctionName: !Sub "bad-arch-fn${EnvironmentSuffix}"
       Runtime: !If [IsArm64, python3.12, python3.11]
       Architectures:
-        - arm64
+        - x86_64
 """
         blocks = self._parse(text)
         errors = vlap._validate_cfn(blocks)
         self.assertTrue(
-            any("hardcoded Architectures=[arm64]" in e for e in errors), errors
+            any("hardcoded Architectures=[x86_64]" in e for e in errors), errors
         )
 
     def test_real_compute_template_is_selected_and_passes(self):

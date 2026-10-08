@@ -36,9 +36,15 @@ GATE = REPO_ROOT / "tools" / "verify_layer_arch_coherence.py"
 COMPUTE_REL = "infrastructure/cloudformation/02-compute.yaml"
 COMPUTE = REPO_ROOT / COMPUTE_REL
 
-# The architecture conditional as it appears in the committed template AFTER
-# ENC-TSK-P40 repointed it onto IsArm64.
-ARCH_IF = "- !If [IsArm64, arm64, x86_64]"
+# The AppConfig extension layer selector as it appears in the committed
+# template AFTER ENC-TSK-Q22 (DOC-5368FE6515ED FR-12, Phase D) literalized
+# it: a bare arm64-layer !Ref, no !If, no IsArm64. Architectures is ALSO
+# already a bare `- arm64` post-Q22 (was `!If [IsArm64, arm64, x86_64]`
+# under ENC-TSK-P40), so ENC-ISS-696's "collapse Architectures, forget the
+# AppConfig selector" shape can only be reproduced now by mutating the
+# selector back onto a reinstated, plane-bound IsArm64 -- see
+# _mutate_to_iss696.
+APPCFG_LAYER_REF = re.compile(r"^(\s*)- !Ref AppConfigExtensionLayerArnArm64\s*$", re.MULTILINE)
 
 
 def _load_gate_module():
@@ -92,35 +98,62 @@ class TestNegativeControl(unittest.TestCase):
 
     @staticmethod
     def _mutate_to_iss696() -> str:
-        """Collapse the architecture conditionals to bare arm64 while leaving the
-        AppConfig extension selector on its condition -- i.e. perform the naive
-        'collapse the 46' operation that DOC-F3878E7260B6 section 3 prescribed
-        and that ENC-ISS-696 is about. On the prod plane the AppConfig selector
-        then resolves to AWS-AppConfig-Extension:147, which declares
-        CompatibleArchitectures ["x86_64"], against an arm64 function.
+        """Reproduce the ENC-ISS-696 shape against the POST-Q22 committed
+        template: Architectures is already a bare `- arm64` literal (Phase D
+        literalized it, so there is nothing left to collapse), while the
+        AppConfig extension selector is put BACK onto a plane-bound IsArm64
+        conditional -- i.e. the naive-collapse gap DOC-F3878E7260B6 section 3
+        described, just with the two literalization passes (Architectures
+        under ENC-TSK-P40/the cutover, the AppConfig selector under
+        ENC-TSK-Q22) landing at different times instead of together. On the
+        prod plane the reinstated selector then resolves to
+        AWS-AppConfig-Extension:147, which declares CompatibleArchitectures
+        ["x86_64"], against an arm64 function.
 
-        ENC-TSK-P38: the cutover flipped the committed IsArm64 definition to an
-        unconditional TRUE, under which the historical ISS-696 condition (a
-        selector whose condition is FALSE on prod picking the x86-declared
-        extension against arm64 functions) is no longer expressible. The mutant
-        therefore ALSO reinstates the pre-cutover plane-bound definition -- in
-        memory only -- so this control keeps reproducing the exact ISS-696
-        shape and the gate must keep biting on it."""
+        ENC-TSK-P38 cutover / ENC-TSK-Q22 Phase D: the committed template no
+        longer declares IsArm64 at all, under which the historical ISS-696
+        condition (a selector whose condition is FALSE on prod, picking the
+        x86-declared extension against arm64 functions) is no longer
+        expressible. The mutant therefore reinstates the pre-cutover
+        plane-bound IsArm64 definition AND re-wraps the (now bare) AppConfig
+        selector !Ref in the old !If -- both in memory only -- so this
+        control keeps reproducing the exact ISS-696 shape and the gate must
+        keep biting on it."""
         text = COMPUTE.read_text()
-        mutant, n = re.subn(re.escape(ARCH_IF), "- arm64", text)
-        assert n == 46, f"expected to collapse 46 architecture conditionals, collapsed {n}"
+        assert "IsArm64" not in text, (
+            "committed template unexpectedly still declares IsArm64 -- "
+            "ENC-TSK-Q22 Phase D literalization must have regressed"
+        )
         mutant, m = re.subn(
-            r'(?m)^(\s*)IsArm64: !Equals \["arm64", "arm64"\]\s*$',
+            r"(?m)^(\s*)IsGamma: !Not \[!Equals \[!Ref EnvironmentSuffix, \"\"\]\]\s*$",
+            r'\1IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]\n'
             r'\1IsArm64: !Not [!Equals [!Ref EnvironmentSuffix, ""]]',
-            mutant,
+            text,
         )
         assert m == 1, (
             f"expected to reinstate exactly 1 pre-cutover IsArm64 definition "
-            f"(anchored to line start, comments excluded), reinstated {m}"
+            f"right after IsGamma, reinstated {m}"
         )
+        mutant, n = APPCFG_LAYER_REF.subn(
+            r"\1- !If [IsArm64, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]",
+            mutant,
+        )
+        assert n == 32, f"expected to re-wrap 32 AppConfig layer selectors, re-wrapped {n}"
         return mutant
 
     def test_arm64_function_with_x86_declared_layer_fails_the_gate(self):
+        """ENC-TSK-Q22 changed WHY this goes red, not THAT it goes red. Phase D
+        retired component_dependency_closure.json's appconfig-extension-x86
+        entry (it was devops-governance-mart's only x86 dependency, and the
+        x86 branch it declared is unreachable now that every AppConfig
+        selector in the committed template is a bare arm64 !Ref) -- so
+        --scope declared can no longer resolve AWS-AppConfig-Extension:147's
+        architecture and attribute a per-function [FAIL] to it the way it did
+        pre-Q22. AC-7 (fails-closed count reconciliation) is what catches the
+        mutant instead: 32 functions carry a Layers attachment the reinstated
+        IsArm64 conditional routes through, the declared-scope closure
+        resolves zero of them, and a "zero attachments evaluated" run is
+        exactly the vacuous-pass shape AC-7 exists to refuse."""
         mutant = self._mutate_to_iss696()
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "02-compute.yaml"
@@ -129,13 +162,13 @@ class TestNegativeControl(unittest.TestCase):
 
         self.assertEqual(r.returncode, 1, f"gate did NOT go red on the ENC-ISS-696 condition:\n{r.stdout}")
         fails = [l for l in r.stdout.splitlines() if l.startswith("[FAIL]")]
-        self.assertEqual(len(fails), 26, f"expected 26 incoherent prod-plane attachments, got {len(fails)}")
+        self.assertEqual(len(fails), 1, f"expected 1 fail-closed reconciliation [FAIL], got {len(fails)}:\n{r.stdout}")
+        self.assertIn("reconciliation", fails[0])
+        self.assertIn("vacuous pass", "\n".join(r.stdout.splitlines()))
 
-        # The verdict must be ATTRIBUTED, not just a count.
-        joined = "\n".join(fails)
-        self.assertIn("AWS-AppConfig-Extension:147", joined)
-        self.assertIn("declares ['x86_64']", joined)
-        self.assertIn("devops-coordination-api", joined)
+        # Still ATTRIBUTED: the AppConfig extension is why nothing resolved.
+        self.assertIn("AWS-AppConfig-Extension:147", r.stdout)
+        self.assertIn("reconciliation error", r.stdout)
 
     def test_the_negative_control_leaves_the_working_tree_untouched(self):
         """The mutation is in-memory only; the committed template must be unchanged."""

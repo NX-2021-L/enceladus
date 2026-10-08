@@ -208,3 +208,41 @@ def test_tracker_entries_omit_empty_list_fields():
     assert "tags" not in attrs
     assert attrs["status"] == "started"
     assert attrs["priority"] == "P0"
+
+
+def test_counter_sentinel_is_never_a_document():
+    """ENC-TSK-Q34 AC-5: the DOCUMENTS_TABLE counter row is bookkeeping."""
+    assert corpus.build_document_entry({"document_id": "__COUNTER__VERSION_SEQ__"}) is None
+    assert corpus.build_document_entry({"document_id": "DOC-X", "record_type": "counter"}) is None
+    entries = [
+        entry
+        for entry in (
+            corpus.build_document_entry(row)
+            for row in (
+                {"document_id": "__COUNTER__VERSION_SEQ__", "record_type": "counter"},
+                {"document_id": "DOC-A", "title": "A", "updated_at": "2026-10-08T00:00:00Z"},
+            )
+        )
+        if entry
+    ]
+    page = corpus.paginate_corpus(entries, corpus.parse_corpus_query({"limit": "10"}))
+    assert page["total_matches"] == 1
+    assert page["facets"]["record_type"] == {"document": 1}
+    assert [item["record_id"] for item in page["items"]] == ["DOC-A"]
+
+
+def test_public_items_carry_version_seq_per_space():
+    """ENC-TSK-Q34 AC-2: tracker and document entries expose their own seq."""
+    tracker = corpus.build_tracker_entries_from_records(
+        [{"task_id": "ENC-TSK-1", "project_id": "enceladus", "title": "T", "updated_at": "2026-10-08T01:00:00Z", "version_seq": 5101}],
+        [], [], [], [],
+    )
+    document = corpus.build_document_entry(
+        {"document_id": "DOC-B", "title": "B", "updated_at": "2026-10-08T02:00:00Z", "version_seq": 185}
+    )
+    legacy = corpus.build_document_entry({"document_id": "DOC-C", "title": "C", "updated_at": "2026-01-01T00:00:00Z"})
+    page = corpus.paginate_corpus(tracker + [document, legacy], corpus.parse_corpus_query({"limit": "10"}))
+    by_id = {item["record_id"]: item for item in page["items"]}
+    assert by_id["ENC-TSK-1"]["version_seq"] == 5101
+    assert by_id["DOC-B"]["version_seq"] == 185
+    assert "version_seq" not in by_id["DOC-C"]

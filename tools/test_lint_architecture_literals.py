@@ -210,9 +210,15 @@ class TestRealAllowlist(unittest.TestCase):
         for path in paths:
             self.assertTrue((REPO_ROOT / path).is_file(), path)
 
-    def test_only_03_api_is_vacuous(self):
-        vacuous_paths = {e["path"] for e in lal.load_allowlist() if e.get("vacuous")}
-        self.assertEqual(vacuous_paths, {"infrastructure/cloudformation/03-api.yaml"})
+    def test_allowlist_is_now_empty(self):
+        """ENC-TSK-Q22 (DOC-5368FE6515ED FR-12, Phase D) is the retiring task
+        this class's own docstring predicted would close the plan out: with
+        02-compute.yaml, 03-api.yaml, and 06-appsync-events.yaml literalized
+        and component_dependency_closure.json's appconfig-extension-x86
+        entry retired, nothing legitimately carries an IsArm64-conditional
+        finding anymore, so the allowlist -- 03-api.yaml's former vacuous
+        entry included -- is empty and must stay that way."""
+        self.assertEqual(lal.load_allowlist(), [])
 
 
 if __name__ == "__main__":
