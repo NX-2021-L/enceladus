@@ -7651,6 +7651,32 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _component_source_paths(comp: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a registry component's source_paths to the dict shape.
+
+    ENC-ISS-840: most components store ``{"primary", "directory", "domains",
+    "architecture_sections"}``, but some (v3 component fields, e.g.
+    comp-rhythm-cycle) store a plain list of paths, which made every
+    location-hint resolution raise "'list' object has no attribute 'get'".
+    A list becomes ``{"primary": first, "paths": list}``; a list of domains
+    becomes a dict keyed by domain name.
+    """
+    sp = comp.get("source_paths") if isinstance(comp, dict) else None
+    if isinstance(sp, list):
+        paths = [str(x) for x in sp if x]
+        sp = {"primary": paths[0] if paths else "", "paths": paths}
+    elif not isinstance(sp, dict):
+        sp = {}
+    domains = sp.get("domains")
+    if isinstance(domains, list):
+        sp = dict(sp)
+        sp["domains"] = {str(d): {} for d in domains if d}
+    elif domains is not None and not isinstance(domains, dict):
+        sp = dict(sp)
+        sp["domains"] = {}
+    return sp
+
+
 def _resolve_location_hint_to_components(
     location_hint: str, all_components: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -7677,7 +7703,7 @@ def _resolve_location_hint_to_components(
 
     for comp in all_components:
         score = 0
-        sp = comp.get("source_paths") or {}
+        sp = _component_source_paths(comp)
         domains = sp.get("domains") or {}
 
         # 1. Exact domain name match (weight 3 per hit)
@@ -7728,7 +7754,7 @@ def _resolve_location_hint_to_components(
     for score, comp, confidence in scored[:3]:
         if score < 2:
             break
-        sp = comp.get("source_paths") or {}
+        sp = _component_source_paths(comp)
         entry: Dict[str, Any] = {
             "component_id": comp.get("component_id", ""),
             "match_confidence": confidence,
@@ -8040,7 +8066,7 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
                         "match_confidence": "explicit",
                         "category": comp.get("category"),
                     }
-                    sp = comp.get("source_paths") or {}
+                    sp = _component_source_paths(comp)
                     if sp.get("primary"):
                         entry["primary"] = sp["primary"]
                     if sp.get("directory"):
