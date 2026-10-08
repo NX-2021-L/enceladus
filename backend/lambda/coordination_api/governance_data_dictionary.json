@@ -6137,7 +6137,7 @@
           "usage_guidance": "Hybrid response top-level fields corroboration_alpha (alpha used) and s_top (call's max fused_score; 0.0 with no candidates) let any client verify the bound; per_node_fusion[*] and nodes[*] carry k_corr/b_corr/final_score/final_rank (nodes: _corroboration_count/_b_corr/_final_score/_final_rank)."
         },
         "fsrs_t3_threshold": {
-          "type": "number",
+          "type": "number Both are on the HTTP graphsearch allow-list (lambda_function._handle_search hybrid passthrough), so they survive fields=full and fields=compact.",
           "definition": "FSRS-6 retrieval-invisible stability threshold for Lesson records (ENC-TSK-B62 scope item #4). Default 0.7. Lessons with stability < T3 (or, when stability is absent, resonance_score < T3 per the ENC-LSN-029 pre-FSRS-6 convention) are suppressed from the fused result unless include_below_threshold=true is passed.",
           "usage_guidance": "Override per-query via include_below_threshold=true on get_compact_context or the hybrid graphsearch query. Lesson rehydration / direct lookup paths are unaffected — T3 only filters retrieval surfaces."
         },
