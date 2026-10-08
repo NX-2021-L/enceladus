@@ -27,6 +27,9 @@ export interface Tier2Record {
 export interface TombstoneRecord {
   recordKey: string
   deletedAt: number
+  /** ENC-TSK-Q34: server version_seq of the delete/archive, when known. A
+   *  strictly newer version of the same record lifts the tombstone. */
+  versionSeq?: string
 }
 
 export interface CacheBudget {
@@ -72,6 +75,13 @@ export interface FeedDeltaPage {
   latest_version_seq: number
   items: FeedCorpusItem[]
   tombstones: FeedDeltaTombstone[]
+  /** ENC-TSK-Q34: true when the tracker half stopped at the server window. */
+  truncated?: boolean
+  /** ENC-TSK-Q34: document half, present only when doc_since was sent. The
+   *  document counter is a separate sequence space from the tracker's. */
+  doc_since?: number
+  latest_doc_version_seq?: number
+  doc_truncated?: boolean
 }
 
 export interface FeedCorpusPage {

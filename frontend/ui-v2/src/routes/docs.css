@@ -139,3 +139,9 @@
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
+
+/* ENC-TSK-Q33: non-blocking notice when the corpus seed failed and the list is
+   the IndexedDB slice. */
+.docs-route__stale {
+  margin-block: var(--space-2);
+}

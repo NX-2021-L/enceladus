@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearch } from '@tanstack/react-router'
-import { Autosuggest, Cards } from '../design-system'
+import { Alert, Autosuggest, Cards } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter, type PropertyFilterQuery } from '../search/applyPropertyFilter'
@@ -11,8 +11,8 @@ import { buildSearchCorpus } from '../search/searchCorpus'
 import { sortSearchHits } from '../search/sortSearchHits'
 import type { FeedSort } from '../search/feedSearchParams'
 import { useTieredSearch } from '../search/useTieredSearch'
-import { getCacheEngine } from '../sync/cacheEngine'
 import { useCacheEngineState } from '../sync/CacheEngineProvider'
+import { staleCorpusNotice } from '../sync/staleNotice'
 import { documentHref } from './recordLink'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { SearchResultHit } from '../types/search'
@@ -57,12 +57,14 @@ export function DocsRoute() {
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const events = useRealtimeFeedEvents()
-  const { isWarm } = useCacheEngineState()
+  const { isWarm, indexRows, seedError, lastSeededAt } = useCacheEngineState()
+  const staleNotice = staleCorpusNotice(seedError, lastSeededAt)
 
   const fromEvents = buildSearchCorpus(events, projects)
   let corpus = fromEvents
   if (isWarm) {
-    const byId = new Map(getCacheEngine().searchIndex.all().map((row) => [row.recordId, row]))
+    // ENC-TSK-Q33: indexRows is provider state, so a completed seed repaints.
+    const byId = new Map(indexRows.map((row) => [row.recordId, row]))
     for (const row of fromEvents) byId.set(row.recordId, row)
     corpus = [...byId.values()]
   }
@@ -140,6 +142,14 @@ export function DocsRoute() {
           </select>
         </label>
       </div>
+
+      {staleNotice && (
+        <div className="docs-route__stale">
+          <Alert type="warning" header="Documents may be out of date">
+            {staleNotice}
+          </Alert>
+        </div>
+      )}
 
       <FeedPropertyFilter query={filterQuery} corpus={docsCorpus} onChange={setFilterQuery} />
 

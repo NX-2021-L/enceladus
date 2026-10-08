@@ -9,6 +9,7 @@ type MemoryDb = {
   tier2: Map<string, Tier2Record>
   tombstones: Map<string, TombstoneRecord>
   queryCache: unknown | null
+  meta: Map<string, unknown>
 }
 
 let memoryDb: MemoryDb | null = null
@@ -20,6 +21,7 @@ function getMemoryDb(): MemoryDb {
       tier2: new Map(),
       tombstones: new Map(),
       queryCache: null,
+      meta: new Map(),
     }
   }
   return memoryDb
@@ -175,6 +177,36 @@ export async function putTombstone(record: TombstoneRecord): Promise<void> {
   }
 }
 
+export async function getTombstone(recordKey: string): Promise<TombstoneRecord | null> {
+  try {
+    const result = (await withStore('tombstones', 'readonly', (store) => store.get(recordKey))) as
+      | TombstoneRecord
+      | undefined
+    if (result) return result
+  } catch {
+    /* fall through */
+  }
+  return getMemoryDb().tombstones.get(recordKey) ?? null
+}
+
+export async function deleteTombstone(recordKey: string): Promise<void> {
+  try {
+    await withStore('tombstones', 'readwrite', (store) => store.delete(recordKey))
+  } catch {
+    /* fall through */
+  }
+  getMemoryDb().tombstones.delete(recordKey)
+}
+
+export async function deleteTier1(projectId: string, recordId: string): Promise<void> {
+  try {
+    await withStore('tier1', 'readwrite', (store) => store.delete(cacheKey(projectId, recordId)))
+  } catch {
+    /* fall through */
+  }
+  getMemoryDb().tier1.delete(cacheKey(projectId, recordId))
+}
+
 export async function hasTombstone(recordKey: string): Promise<boolean> {
   try {
     const result = (await withStore('tombstones', 'readonly', (store) => store.get(recordKey))) as
@@ -210,7 +242,7 @@ export async function getMeta(key: string): Promise<unknown | null> {
     const result = (await withStore('meta', 'readonly', (store) => store.get(key))) as unknown
     return result ?? null
   } catch {
-    return null
+    return getMemoryDb().meta.get(key) ?? null
   }
 }
 
@@ -218,7 +250,9 @@ export async function setMeta(key: string, value: unknown): Promise<void> {
   try {
     await withStore('meta', 'readwrite', (store) => store.put(value, key))
   } catch {
-    /* memory fallback not needed for version watermark in tests */
+    // ENC-TSK-Q33/Q34: delta cursors and the seeded-at stamp must survive in
+    // the memory fallback too (no IndexedDB, e.g. jsdom).
+    getMemoryDb().meta.set(key, value)
   }
 }
 

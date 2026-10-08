@@ -1092,3 +1092,125 @@ def test_m76_hydration_scales_with_page_not_corpus(monkeypatch):
 
     feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=75, cursor=None)
     assert len(captured["keys"]) == 76  # page_size + 1, NOT 200
+
+
+def _delta_get_event(**params: str) -> dict:
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": "/api/v1/feed/delta",
+        "headers": {"Cookie": "enceladus_id_token=test-token"},
+        "queryStringParameters": params or None,
+    }
+
+
+def _fake_tracker_delta(captured):
+    def _query(_ddb, _table, since, **kwargs):
+        captured["since"] = since
+        item = feed_query.feed_corpus.build_tracker_entry(
+            "task", "ENC-TSK-9", "enceladus", "Nine", "2026-10-08T03:00:00Z", {}, 5120
+        )
+        return [item], [], 5120, False
+
+    return _query
+
+
+def test_delta_carries_documents_on_their_own_cursor(monkeypatch):
+    """ENC-TSK-Q34 AC-1: tracker and document seqs travel separately."""
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(feed_query, "_get_ddb", lambda: object())
+    captured = {}
+    monkeypatch.setattr(feed_query.feed_delta, "query_version_delta", _fake_tracker_delta(captured))
+    monkeypatch.setattr(
+        feed_query,
+        "_get_document_items",
+        lambda: [
+            {"document_id": "__COUNTER__VERSION_SEQ__", "record_type": "counter", "version_seq": 999},
+            {"document_id": "DOC-OLD", "status": "active", "version_seq": 180, "updated_at": "2026-10-01T19:13:52Z"},
+            {"document_id": "DOC-2F56AACDD5C0", "project_id": "devops", "status": "active",
+             "version_seq": 185, "title": "New", "updated_at": "2026-10-08T02:29:33Z"},
+        ],
+    )
+
+    resp = feed_query.lambda_handler(_delta_get_event(since="5100", doc_since="180"), None)
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    assert captured["since"] == 5100
+    assert payload["latest_version_seq"] == 5120
+    assert payload["latest_doc_version_seq"] == 185
+    assert payload["doc_since"] == 180
+    assert payload["truncated"] is False and payload["doc_truncated"] is False
+    by_id = {item["record_id"]: item for item in payload["items"]}
+    assert by_id["ENC-TSK-9"]["version_seq"] == 5120
+    assert by_id["DOC-2F56AACDD5C0"]["version_seq"] == 185
+    assert "__COUNTER__VERSION_SEQ__" not in by_id and "DOC-OLD" not in by_id
+
+
+def test_delta_without_doc_since_keeps_tracker_only_contract(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(feed_query, "_get_ddb", lambda: object())
+    monkeypatch.setattr(feed_query.feed_delta, "query_version_delta", _fake_tracker_delta({}))
+
+    def _no_scan():
+        raise AssertionError("document scan must not run without doc_since")
+
+    monkeypatch.setattr(feed_query, "_get_document_items", _no_scan)
+    payload = json.loads(feed_query.lambda_handler(_delta_get_event(since="0"), None)["body"])
+    assert payload["latest_version_seq"] == 5120
+    assert "latest_doc_version_seq" not in payload and "doc_since" not in payload
+
+
+def test_delta_rejects_invalid_doc_since(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    resp = feed_query.lambda_handler(_delta_get_event(since="1", doc_since="-4"), None)
+    assert resp["statusCode"] == 400
+
+
+def test_corpus_entries_exclude_counter_and_carry_seq(monkeypatch):
+    """ENC-TSK-Q34 AC-2/AC-5 through the real corpus builder."""
+    monkeypatch.setattr(feed_query, "_corpus_cache_entries", None)
+    monkeypatch.setattr(feed_query, "_document_cache_items", None)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_corpus_tracker_records",
+        lambda: ([{"task_id": "ENC-TSK-1", "project_id": "enceladus", "title": "T",
+                   "status": "open", "updated_at": "2026-10-08T00:00:00Z", "version_seq": 5101}], [], [], [], []),
+    )
+    monkeypatch.setattr(
+        feed_query,
+        "_scan_documents_for_corpus",
+        lambda: [
+            feed_query._deserialize_document_item({"document_id": {"S": "__COUNTER__VERSION_SEQ__"},
+                                                   "record_type": {"S": "counter"}, "next_num": {"N": "185"}}),
+            feed_query._deserialize_document_item({"document_id": {"S": "DOC-A"}, "status": {"S": "active"},
+                                                   "updated_at": {"S": "2026-10-08T02:29:33Z"}, "version_seq": {"N": "185"}}),
+        ],
+    )
+    entries = feed_query._get_corpus_entries()
+    by_id = {entry["record_id"]: entry for entry in entries}
+    assert set(by_id) == {"ENC-TSK-1", "DOC-A"}
+    assert by_id["ENC-TSK-1"]["version_seq"] == 5101
+    assert by_id["DOC-A"]["version_seq"] == 185
+
+
+def test_project_tracker_query_attaches_version_seq(monkeypatch):
+    class _Pager:
+        def paginate(self, **_kwargs):
+            yield {"Items": [
+                {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-1"}, "record_type": {"S": "task"},
+                 "item_id": {"S": "ENC-TSK-1"}, "title": {"S": "T"}, "status": {"S": "open"},
+                 "updated_at": {"S": "2026-10-08T00:00:00Z"}, "version_seq": {"N": "5101"}},
+                {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-2"}, "record_type": {"S": "task"},
+                 "item_id": {"S": "ENC-TSK-2"}, "title": {"S": "Legacy"}, "status": {"S": "open"},
+                 "updated_at": {"S": "2026-01-01T00:00:00Z"}},
+            ]}
+
+    class _Ddb:
+        def get_paginator(self, _name):
+            return _Pager()
+
+    monkeypatch.setattr(feed_query, "_get_ddb", lambda: _Ddb())
+    cutoff = feed_query.dt.datetime(2020, 1, 1, tzinfo=feed_query.dt.timezone.utc)
+    tasks, *_ = feed_query._query_project_tracker_records("enceladus", cutoff)
+    by_id = {task["task_id"]: task for task in tasks}
+    assert by_id["ENC-TSK-1"]["version_seq"] == 5101
+    assert "version_seq" not in by_id["ENC-TSK-2"]

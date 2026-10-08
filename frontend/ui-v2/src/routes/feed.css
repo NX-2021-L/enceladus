@@ -274,3 +274,9 @@
 .feed-route__pane .ev2-rdh__actionbar--sticky {
   display: none;
 }
+
+/* ENC-TSK-Q33: non-blocking notice when the corpus seed failed and the list is
+   the IndexedDB slice. */
+.feed-route__stale {
+  margin-block: var(--space-2);
+}

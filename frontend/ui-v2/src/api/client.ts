@@ -212,11 +212,14 @@ export async function fetchFeedCorpusPage(
   return requestJson<FeedCorpusPage>(url, init)
 }
 
-/** Incremental feed delta (ENC-TSK-L27). */
+/** Incremental feed delta (ENC-TSK-L27). ENC-TSK-Q34: `docSince` adds the
+ *  document half on its own cursor (document_api's separate seq space). */
 export async function fetchFeedDelta(
-  since: number,
+  cursors: { since: number; docSince?: number },
   init?: FetchInit,
 ): Promise<FeedDeltaPage> {
-  const url = `${API_BASE}/feed/delta?since=${encodeURIComponent(String(since))}`
+  const qs = new URLSearchParams({ since: String(cursors.since) })
+  if (cursors.docSince != null) qs.set('doc_since', String(cursors.docSince))
+  const url = `${API_BASE}/feed/delta?${qs.toString()}`
   return requestJson<FeedDeltaPage>(url, init)
 }
