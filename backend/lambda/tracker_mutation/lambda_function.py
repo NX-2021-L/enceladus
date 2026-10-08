@@ -6856,7 +6856,8 @@ def _record_observation(ddb: Any, key: Dict, record_id: str) -> Dict:
     ISO-8601) and ``observation_count`` (ADD 1). No history entry, no
     write_source, and updated_at, sync_version, version_seq and every field
     content_hash covers are left untouched. GET returns the full deserialized
-    item, so both fields are readable without a projection change.
+    item, so both fields are readable without a projection change; the
+    feed_query full-record transforms carry them too (``_observation_fields``).
 
     Conditional on the record still existing: an UpdateItem on a missing key
     creates an item, and a delete racing the read in ``_handle_log`` must not
