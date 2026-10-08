@@ -2,13 +2,18 @@
   "files": [
     {
       "path": "tools/elr/README.md",
-      "sha256": "97a6cd6cbbc3afc779da9d2ddd7ca6aef1a722006bf61a6379a9eaa497b5f3d8",
-      "size_bytes": 2096
+      "sha256": "ded66279f07ed1fc13908884f98ddabf4e42431b970ec76b5f4a397684ad75f1",
+      "size_bytes": 3535
+    },
+    {
+      "path": "tools/elr/elr",
+      "sha256": "26ccd324c70815614da31a031ac3442547382cb0b32b55f5b941088752a5e15b",
+      "size_bytes": 1646
     },
     {
       "path": "tools/elr/elr_batch_get.py",
-      "sha256": "3f867e57c17488c5b43ba79c0dd349fae65088c10fcf462f02dd97f773f20574",
-      "size_bytes": 24437
+      "sha256": "b7734fcdd3a96e9f83c4b0bd6c10af5fe3698a307753cb0d026415c009f8723e",
+      "size_bytes": 25193
     },
     {
       "path": "tools/elr/elr_contracts.json",
@@ -17,18 +22,18 @@
     },
     {
       "path": "tools/elr/elr_doc_digest.py",
-      "sha256": "993c8778a86e02092d902cfaa06b3471ef18cc153cc38cd682ef339e2fdc61d5",
-      "size_bytes": 5466
+      "sha256": "fafc513c02100b5c6de37737601418b0fd75602e95cedd64778ec9e324242f63",
+      "size_bytes": 5881
     },
     {
       "path": "tools/elr/elr_doc_get.py",
-      "sha256": "d27bee2f7ff1aa46ee598b6fdefb29652eac2685347c92e324d9fab67da5e313",
-      "size_bytes": 10686
+      "sha256": "1d4617cdc0ca0e549455322576d0268119566a2a28c15eb9bf5e403e8e9bcd57",
+      "size_bytes": 11098
     },
     {
       "path": "tools/elr/elr_doc_patch.py",
-      "sha256": "af0ec3f440ffa919403e6c2af6d32134bc3c9ec3f83e25648a00512d538cca95",
-      "size_bytes": 25092
+      "sha256": "3314fe60bd61d113934fb346ecc417a4aa9588fe0492faba0958e854f52e473c",
+      "size_bytes": 25514
     },
     {
       "path": "tools/elr/elr_lib/__init__.py",
@@ -37,18 +42,18 @@
     },
     {
       "path": "tools/elr/elr_lib/config.py",
-      "sha256": "09ece2b91b3374858e7f2e012d7133e8262aa33283c6e75bad0c858809221cd4",
-      "size_bytes": 10546
+      "sha256": "cc20be93a57ac07269b65a840ad6fae014c13f6a504db3d67bc448609bc89574",
+      "size_bytes": 13421
     },
     {
       "path": "tools/elr/elr_lib/digest.py",
-      "sha256": "309853678b6c689cd271768b4e4b5cac69e046b579a5fd9678953966e8ec60f4",
-      "size_bytes": 10285
+      "sha256": "2b467e19c87ae90e7766d7793c1d4cf8376541741fedd8453e16c923cd8e4554",
+      "size_bytes": 10480
     },
     {
       "path": "tools/elr/elr_lib/identity.py",
-      "sha256": "5546cd3b3b2fde302625a5ee4ec00ac3e34be2ce2e31b83e218a67f6d5091a00",
-      "size_bytes": 26886
+      "sha256": "d29dedbdacb8c43515aa78739ef9d0e12ed2eed1fc6f5a9052c59e36715afe3d",
+      "size_bytes": 28399
     },
     {
       "path": "tools/elr/elr_lib/manifest.py",
@@ -97,8 +102,13 @@
     },
     {
       "path": "tools/elr/elr_list.py",
-      "sha256": "aa13ae7479a092df4d61ad8b1c3191c12b1abb381d265b7430da2172a94d618b",
-      "size_bytes": 20516
+      "sha256": "51801cf9431de471a15b8ecf62aaec334714fa76daeeb0b2d79d212adedcb3c9",
+      "size_bytes": 20999
+    },
+    {
+      "path": "tools/elr/elr_provision_key.py",
+      "sha256": "d43dc82c987b1d6f8a6b01fcb2c8da1cc252da14e971092ca4fa3746ed769da5",
+      "size_bytes": 4374
     },
     {
       "path": "tools/elr/elr_publish.py",
@@ -107,13 +117,13 @@
     },
     {
       "path": "tools/elr/elr_smoke.py",
-      "sha256": "557611e461eb79a736937a72066f75e4384bf7728faa60086889c5afb4bccba6",
-      "size_bytes": 10340
+      "sha256": "13ad99d643842d4bd953b5a8f4772e7ab51bf4ee53d8b0a3b174273e4ac6426e",
+      "size_bytes": 12746
     },
     {
       "path": "tools/elr/elr_sync.py",
-      "sha256": "5d3cd1ccb554ae205f0246f81d704af9fda552c1f9220623b62ccf10bee28fb9",
-      "size_bytes": 33083
+      "sha256": "eba6a7c7a8752180e88834089d5d316741bb5473e8c17c35a940b639826f894d",
+      "size_bytes": 35599
     },
     {
       "path": "tools/elr/elr_validate.py",
@@ -121,7 +131,7 @@
       "size_bytes": 38563
     }
   ],
-  "generated_at": "2026-09-24T00:01:03-07:00",
+  "generated_at": "2026-09-24T07:50:18-07:00",
   "manifest_version": 1,
-  "source_ref": "95cb874df27dfbefefc316fcdd965c5320d61fd3"
+  "source_ref": "62782e7bc36da40ad49c8183f42d841552309645"
 }

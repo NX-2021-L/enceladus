@@ -76,6 +76,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
+from elr_lib import identity as elr_identity  # noqa: E402
+from elr_lib.config import EXIT_CODE_NO_CREDENTIAL  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
 
 # --- Sentinel project segment ------------------------------------------------
@@ -543,6 +545,11 @@ def run_batch_get(ids: List[str], environment_profile_name: str, timeout: int) -
         anomalies.append("no_ids_supplied")
     elif overall_ok:
         overall_status = 200
+    elif fetched == 0 and outcomes and all(o.outcome == OUTCOME_FORBIDDEN for o in outcomes):
+        # ENC-TSK-Q35 (AC-4): every row was rejected for auth -- report the
+        # credential failure (401/403), not an upstream 502.
+        statuses = {o.http_status for o in outcomes}
+        overall_status = 403 if statuses == {403} else 401
     elif fetched == 0:
         overall_status = 502
     else:
@@ -614,6 +621,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # ENC-TSK-Q35 (AC-4): no credential -> refuse locally, no network call.
+    refusal = elr_identity.credential_refusal("elr_batch_get.batch", "tracker", args.profile)
+    if refusal is not None:
+        print(json.dumps(refusal, sort_keys=True))
+        return EXIT_CODE_NO_CREDENTIAL
 
     ids = collect_ids(args.ids, args.ids_file)
 

@@ -360,7 +360,9 @@ class OutcomeContractTests(unittest.TestCase):
         self.assertIn("ENC-TSK-1: tracker_get_failed_http_401 (unauthorized)", digest["anomalies"])
         self.assertEqual(digest["counts"]["failed"], 1)
         self.assertEqual(digest["counts"]["not_found"], 0)
-        self.assertEqual(digest["status"], 502)
+        # ENC-TSK-Q35 (AC-4): an all-auth-rejected batch reports the auth
+        # status, not an upstream 502.
+        self.assertEqual(digest["status"], 401)
         self.assertEqual(digest["identity_posture"], "unknown")
 
     def test_403_is_forbidden_with_auth_anomaly(self):

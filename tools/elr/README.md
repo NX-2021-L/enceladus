@@ -13,10 +13,42 @@ ELR only moves bytes and returns compact digests. Python 3.11, stdlib only
 - `mcp-http` -- JSON-RPC 2.0 against the streaming MCP-over-HTTP gateway
   (`initialize` -> `notifications/initialized` -> `tools/call`), optional bearer.
 
+## Credential (ENC-TSK-Q35 / ENC-ISS-831)
+
+ELR resolves its credential in Python (`elr_lib/config.py`), so the `elr`
+launcher, a direct `python3 elr_<sub>.py`, a subagent and a Workflow script
+all find the same key. Order: an FTR-074 agent credential
+(`ENCELADUS_AGENT_CREDENTIAL` / `~/.enceladus/credential.json`), then the
+internal-key env vars below, then ELR's own key file
+`~/.enceladus/internal_key` (override with `ENCELADUS_ELR_KEY_FILE`; mode
+0600 or 0400, anything wider is ignored with a warning). ELR never reads
+`~/.claude.json` or any other MCP launcher config.
+
+io provisions the key file once per host (agents never do):
+
+```
+python3 tools/elr/elr_provision_key.py          # prompts with no echo; or pipe the key on stdin
+```
+
+With no credential, every auth-required read (`list`, `batch_get`,
+`doc_get`, `doc_digest`, `doc_patch`) refuses locally with exit code 7 and
+anomaly `no_credential_configured`, before any network request.
+`elr_smoke` issues one authenticated probe besides the health GET and is ok
+only when the key is accepted.
+
+## Launcher
+
+`tools/elr/elr` is installed and hash-verified by `elr_sync pull`, which
+also pins the interpreter it ran under (`.elr-python`) and points
+`~/.enceladus/elr/elr` at it (replacing only a symlink or the legacy
+key-scraping wrapper). Usage: `~/.enceladus/elr/elr <subcommand> [args]`.
+
 ## Env vars (names only -- values are never printed or logged)
 
 - `ENCELADUS_COORDINATION_API_INTERNAL_API_KEY` / `ENCELADUS_COORDINATION_INTERNAL_API_KEY` /
-  `COORDINATION_INTERNAL_API_KEY` (+ per-API `ENCELADUS_<API>_API_INTERNAL_API_KEY` overrides)
+  `COORDINATION_INTERNAL_API_KEY` / `ENCELADUS_INTERNAL_API_KEY`
+  (+ per-API `ENCELADUS_<API>_API_INTERNAL_API_KEY` overrides)
+- `ENCELADUS_ELR_KEY_FILE`, `ELR_PYTHON`, `ELR_BIN`
 - `ENCELADUS_<API>_API_BASE` (tracker/document/deploy/governance/projects/...),
   `ENCELADUS_HEALTH_API_URL`, `ENCELADUS_GRAPH_QUERY_API_BASE`
 - `ENCELADUS_MCP_GATEWAY_URL`, `ENCELADUS_MCP_BEARER_TOKEN` / `ENCELADUS_MCP_API_KEY`

@@ -41,6 +41,8 @@ from elr_lib import tls as elr_tls  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
+from elr_lib import identity as elr_identity  # noqa: E402
+from elr_lib.config import EXIT_CODE_NO_CREDENTIAL  # noqa: E402
 
 # The reserved tracker-sentinel project segment (mirrors
 # elr_batch_get.PROJECT_SENTINEL). --project is always a real, single
@@ -508,6 +510,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not (args.census or args.page is not None or args.pages is not None):
         parser.error("choose one of --census, --page CURSOR, --pages N")
+
+    # ENC-TSK-Q35 (AC-4): no credential -> refuse locally, before even the
+    # health preflight, instead of a generic 401 from the census route.
+    refusal = elr_identity.credential_refusal("elr_list.preflight", "tracker", args.profile)
+    if refusal is not None:
+        print(json.dumps(refusal, sort_keys=True))
+        return EXIT_CODE_NO_CREDENTIAL
 
     config = get_profile("internal", environment_profile_name=args.profile)
     client = InternalClient(config, timeout=args.timeout)

@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as elr_config
+from . import digest as elr_digest
 from . import transport as elr_transport
 
 # --- Credential / session cache sources ---------------------------------
@@ -253,15 +254,49 @@ def load_agent_credential() -> Tuple[Optional[Dict[str, str]], List[str]]:
 
 
 def _internal_key_configured() -> bool:
-    """True iff any name in elr_lib.config.COMMON_INTERNAL_KEY_ENV_CHAIN is
-    set. That chain is the single source of truth for "which env var
-    names count as an internal key" -- it now includes both the existing
-    ENCELADUS_COORDINATION_INTERNAL_API_KEY (checked first) and this AC's
-    ENCELADUS_INTERNAL_API_KEY (see elr_lib/config.py), so this function
-    and the actual per-request key InternalProfileConfig attaches can
-    never disagree about what counts as "configured".
+    """True iff a common internal key resolves: any name in
+    elr_lib.config.COMMON_INTERNAL_KEY_ENV_CHAIN, or (ENC-TSK-Q35) the
+    ELR-owned key file. elr_lib.config.resolve_common_internal_key is the
+    single source of truth, so this posture check and the key
+    InternalProfileConfig actually attaches can never disagree.
     """
-    return any(os.environ.get(name, "").strip() for name in elr_config.COMMON_INTERNAL_KEY_ENV_CHAIN)
+    value, _source = elr_config.resolve_common_internal_key()
+    return bool(value)
+
+
+def internal_key_source() -> str:
+    """Where the common internal key resolved from: an env var NAME,
+    "key_file", or "none". Never the value (ENC-TSK-Q35 diagnostics)."""
+    return elr_config.resolve_common_internal_key()[1]
+
+
+def credential_refusal(
+    operation: str, api: str, environment_profile_name: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """ENC-TSK-Q35 (AC-4, ENC-ISS-831): local preflight for an
+    auth-required read. Returns None when a credential can be presented
+    for ``api`` (an internal key, or an FTR-074 agent credential).
+    Otherwise returns the refusal digest; the caller prints it and exits
+    with elr_config.EXIT_CODE_NO_CREDENTIAL WITHOUT issuing any request,
+    instead of reaching the server and reporting a generic 401.
+    """
+    config = elr_config.get_profile("internal", environment_profile_name=environment_profile_name)
+    if config.key_for(api):
+        return None
+    credential, warnings = load_agent_credential()
+    if credential is not None:
+        return None
+    anomalies = [elr_config.NO_CREDENTIAL_ANOMALY] + list(warnings) + elr_config.read_elr_key_file()[1]
+    return elr_digest.build_digest(
+        operation,
+        False,
+        elr_config.NO_CREDENTIAL_STATUS,
+        identity_posture=POSTURE_UNKNOWN,
+        anomalies=anomalies,
+        remediation=elr_config.NO_CREDENTIAL_REMEDIATION,
+        key_source="none",
+        profile=config.environment_profile.name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +490,9 @@ def resolve_identity(
             return identity
         anomalies.append("credential-bound resolution failed (register/claim) -- falling back")
 
+    # ENC-TSK-Q35: surface a present-but-unusable key file (wrong mode,
+    # empty) instead of silently falling through to "unknown".
+    anomalies.extend(elr_config.read_elr_key_file()[1])
     if _internal_key_configured():
         return IdentityContext(posture=POSTURE_INTERNAL_KEY, anomalies=anomalies)
 

@@ -31,10 +31,19 @@ and elr_lib/profiles.py module docstrings for the two-axis distinction).
 `--all-profiles` runs the health check under EVERY environment profile
 and prints one digest per profile (still one JSON object per line).
 
-Exit code (single-profile run): 0 when the health check succeeded (2xx),
-4 when the CA bundle could not be resolved (ENC-TSK-P76 AC-2), 1
-otherwise. With --all-profiles: 0 only if every profile's digest was ok,
-else the worst of (4 if any profile hit TLS-unresolved, else 1).
+ENC-TSK-Q35 (ENC-ISS-831): health never authenticates, so a smoke made of
+the health GET alone reported ok:true with no credential at all. The smoke
+now also issues ONE authenticated read (AUTH_PROBE_PATH on the tracker
+sentinel route; 2xx or 404 proves the key was accepted, 401/403 that it
+was not) and is ok only when both pass. With no credential it skips the
+probe and fails locally (anomaly no_credential_configured).
+
+Exit code (single-profile run): 0 when the health check and the
+authenticated probe both succeeded, 4 when the CA bundle could not be
+resolved (ENC-TSK-P76 AC-2), 7 when no credential resolves (ENC-TSK-Q35),
+1 otherwise. With --all-profiles: 0 only if every profile's digest was
+ok, else the worst of (4 if any profile hit TLS-unresolved, 7 if any had
+no credential, else 1).
 """
 
 from __future__ import annotations
@@ -43,7 +52,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Allow running this file directly (python3 tools/elr/elr_smoke.py) without
 # requiring tools/elr to already be on sys.path.
@@ -52,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from elr_lib import identity as elr_identity  # noqa: E402
 from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib import tls as elr_tls  # noqa: E402
+from elr_lib import config as elr_config  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
@@ -98,6 +108,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+# ENC-TSK-Q35: an authenticated, data-independent read. The sentinel route
+# resolves the project from the id; a nonexistent task id answers 404 once
+# the key is accepted and 401/403 when it is not.
+AUTH_PROBE_PATH = "_/task/ENC-TSK-0"
+
+
+def run_auth_probe(client: InternalClient, config: Any) -> Tuple[bool, Dict[str, Any], List[str]]:
+    """(ok, auth_probe digest field, anomalies). Never raises."""
+    if not config.key_for("tracker"):
+        return (
+            False,
+            {"status": elr_config.NO_CREDENTIAL_STATUS, "ok": False},
+            [elr_config.NO_CREDENTIAL_ANOMALY],
+        )
+    status, _body = client.request("GET", "tracker", AUTH_PROBE_PATH)
+    if isinstance(status, int) and (200 <= status < 300 or status == 404):
+        return True, {"status": status, "ok": True}, []
+    if status in (401, 403):
+        anomaly = f"auth_probe_rejected_http_{status}"
+    elif status == 0:
+        anomaly = "auth_probe_unreachable"
+    else:
+        anomaly = f"auth_probe_unexpected_http_{status}"
+    return False, {"status": status, "ok": False}, [anomaly]
 
 
 def run_health_smoke(
@@ -152,6 +188,15 @@ def run_health_smoke(
         anomalies = list(identity_ctx.anomalies) + list(anomalies)
         ok = 200 <= status < 300
 
+        auth_probe: Optional[Dict[str, Any]] = None
+        remediation: Optional[str] = None
+        if ok:
+            probe_ok, auth_probe, probe_anomalies = run_auth_probe(client, config)
+            anomalies = anomalies + probe_anomalies
+            ok = probe_ok
+            if elr_config.NO_CREDENTIAL_ANOMALY in probe_anomalies:
+                remediation = elr_config.NO_CREDENTIAL_REMEDIATION
+
         counts: Optional[Dict[str, Any]] = None
         governance_hash: Optional[str] = None
         if isinstance(body, dict):
@@ -184,6 +229,9 @@ def run_health_smoke(
             # holds no prefix map at all (see elr_batch_get.PROJECT_SENTINEL).
             profile=resolved_profile_name,
             governance_hash=governance_hash,
+            auth_probe=auth_probe,
+            key_source=elr_identity.internal_key_source(),
+            remediation=remediation,
             **extra,
         )
     finally:
@@ -198,6 +246,8 @@ def run_health_smoke(
 def _digest_exit_code(digest: Dict[str, Any]) -> int:
     if digest.get("status") == elr_tls.TLS_UNRESOLVED_STATUS:
         return elr_tls.EXIT_CODE_TLS_UNRESOLVED
+    if elr_config.NO_CREDENTIAL_ANOMALY in (digest.get("anomalies") or []):
+        return elr_config.EXIT_CODE_NO_CREDENTIAL
     return 0 if digest.get("ok") else 1
 
 
@@ -217,7 +267,10 @@ def main(argv: Optional[list] = None) -> int:
         exit_codes = [_digest_exit_code(d) for d in digests]
         if all(code == 0 for code in exit_codes):
             return 0
-        return elr_tls.EXIT_CODE_TLS_UNRESOLVED if elr_tls.EXIT_CODE_TLS_UNRESOLVED in exit_codes else 1
+        for worst in (elr_tls.EXIT_CODE_TLS_UNRESOLVED, elr_config.EXIT_CODE_NO_CREDENTIAL):
+            if worst in exit_codes:
+                return worst
+        return 1
 
     digest = run_health_smoke(args.profile, args.timeout, keep_session=args.keep_session)
     print(json.dumps(digest, sort_keys=True))

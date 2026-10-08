@@ -179,6 +179,11 @@ _OPTIONAL_FIELDS = (
     "next_cursor",
     "lower_bound",
     "page_truncated",
+    # ENC-TSK-Q35 (ENC-ISS-831): credential source NAME (never a value),
+    # the smoke's authenticated probe, and elr_sync's wrapper install.
+    "key_source",
+    "auth_probe",
+    "wrapper",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
