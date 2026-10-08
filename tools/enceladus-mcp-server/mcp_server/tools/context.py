@@ -407,6 +407,20 @@ async def get_compact_context_meta(args: dict) -> list[TextContent]:
     # Default anchor for record-oriented modes: use the primary record_id.
     if not anchor_id and mode in RECORD_CONTEXT_MODES:
         anchor_id = str(args.get("record_id") or "").strip()
+    # ENC-TSK-Q43 (ENC-ISS-837): in record-oriented modes with no caller query,
+    # derive the query from the fetched record so vector + keyword + graph all fire.
+    query_source = "caller" if query_text else "none"
+    if not query_text and mode in RECORD_CONTEXT_MODES:
+        _rc = context.get("record_context")
+        _rec = (_rc.get("record") if isinstance(_rc, dict) else None)
+        if not isinstance(_rec, dict):
+            _rec = _rc if isinstance(_rc, dict) else {}
+        _title = " ".join(str(_rec.get("title") or "").split())
+        _intent = " ".join(str(_rec.get("intent") or "").split())
+        _derived = " ".join(f"{_title} {_intent}".split())[:300].strip()
+        if _derived:
+            query_text = _derived
+            query_source = "derived_from_record"
     # Infer project_id from args first, then from the assembled context.
     hybrid_project_id = str(args.get("project_id") or "").strip()
     if not hybrid_project_id and isinstance(context.get("record_context"), dict):
@@ -434,6 +448,11 @@ async def get_compact_context_meta(args: dict) -> list[TextContent]:
                 top_n=args.get("top_n"),
                 include_below_threshold=bool(args.get("include_below_threshold", False)),
             )
+            # ENC-TSK-Q47: out-param for the context.compact route digest (private
+            # arg; never alters the returned payload).
+            _capture = args.get("_hybrid_capture")
+            if isinstance(_capture, dict) and isinstance(hybrid_resp, dict):
+                _capture.update(hybrid_resp)
             underlying_calls.append({
                 "tool": "graph_query_api.hybrid",
                 "status": "success" if hybrid_resp.get("success") else "error",
@@ -462,6 +481,8 @@ async def get_compact_context_meta(args: dict) -> list[TextContent]:
                     "fsrs_t3_threshold": hybrid_resp.get("fsrs_t3_threshold"),
                     "include_below_threshold": hybrid_resp.get("include_below_threshold"),
                     "duration_ms": hybrid_resp.get("duration_ms"),
+                    "query_source": query_source,
+                    "query_head": query_text[:80],
                 }
         except Exception as exc:
             warnings.append(f"hybrid retrieval failed: {exc}")

@@ -1,6 +1,6 @@
 PyJWT>=2.8.0,<3.0
 cryptography>=41.0,<44.0
-certifi
+certifi>=2024.2.2
 
 # ENC-TSK-O91 AC-1: pin the AWS SDK in the shared layer so a Lambda managed-runtime
 # update cannot silently change SDK behaviour underneath the fleet. The layer is

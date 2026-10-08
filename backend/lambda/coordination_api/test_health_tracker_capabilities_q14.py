@@ -35,7 +35,7 @@ class TestHealthTrackerCapabilities(unittest.TestCase):
         self.assertIn("tracker_capabilities", body)
         self.assertEqual(
             body["tracker_capabilities"],
-            {"census": True, "list_cursor_v2": True},
+            {"census": True, "list_cursor_v2": True, "compact_context": True},
         )
 
     def test_tracker_capabilities_present_even_when_dynamodb_unreachable(self):
@@ -52,6 +52,7 @@ class TestHealthTrackerCapabilities(unittest.TestCase):
         self.assertIn("tracker_capabilities", body)
         self.assertTrue(body["tracker_capabilities"]["census"])
         self.assertTrue(body["tracker_capabilities"]["list_cursor_v2"])
+        self.assertTrue(body["tracker_capabilities"]["compact_context"])  # ENC-TSK-Q47
 
 
 if __name__ == "__main__":

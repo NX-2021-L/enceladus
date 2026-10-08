@@ -277,6 +277,17 @@ Resources:
       RouteKey: GET /api/v1/coordination/capabilities
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-Q47 / ENC-TSK-Q48 (ENC-FTR-147): context.compact single assembler.
+  # Handler lives in coordination_api lambda_function.py
+  # (_handle_context_compact); it runs the SAME composer as MCP
+  # get_compact_context (tools/enceladus-mcp-server/mcp_server/tools/context.py).
+  RouteCoordinationContextCompact:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/context/compact
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteCoordinationMcpGet:
     Type: AWS::ApiGatewayV2::Route
     Properties:
@@ -1636,6 +1647,15 @@ Resources:
       RouteKey: OPTIONS /api/v1/coordination/capabilities
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  RouteOptCoordinationContextCompact:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/context/compact
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteOptCoordinationMcp:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsProduction
@@ -2395,6 +2415,15 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "OPTIONS /api/v1/coordination/capabilities"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptGammaCoordinationContextCompact:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/context/compact"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
   ImportedGammaRouteB0301:

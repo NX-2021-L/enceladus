@@ -21,6 +21,8 @@ def _run(coro):
 
 def _load_server(**env):
     module_name = f"enceladus_server_code_mode_{uuid.uuid4().hex}"
+    # ENC-TSK-Q47: keep these tests hermetic (no health probe / route call).
+    env = {"ENCELADUS_COMPACT_CONTEXT_ROUTE": "off", **env}
     with patch.dict(os.environ, env, clear=False):
         spec = importlib.util.spec_from_file_location(module_name, MODULE_PATH)
         module = importlib.util.module_from_spec(spec)
@@ -368,3 +370,62 @@ def test_canonical_governance_hash_ddb_reads_same_record_as_coordination_api():
     assert captured["ConsistentRead"] is True
     # Aligned to the coordination API's canonical record identity.
     assert server.GOVERNANCE_VERSION_RECORD_ID == "governance-version-current"
+
+
+def _run_record_mode_hybrid(args_extra):
+    """ENC-TSK-Q43: drive get_compact_context mode=task and capture hybrid kwargs."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    from mcp_server.runtime import RUNTIME
+
+    record_context = {
+        "success": True,
+        "project_id": "enceladus",
+        "record": {
+            "id": "ENC-TSK-Q33",
+            "type": "task",
+            "title": "Feed  sync\nfix",
+            "intent": "Purge stale   IDB leftovers",
+        },
+    }
+    captured = {}
+
+    async def _get_issue_context(_args):
+        return server._result_text(record_context)
+
+    def _hybrid(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "nodes": [], "signal_availability": {}}
+
+    server._TOOL_HANDLERS["get_issue_context"] = _get_issue_context
+    saved = RUNTIME.invoke_hybrid_retrieval
+    RUNTIME.invoke_hybrid_retrieval = _hybrid
+    try:
+        with patch.dict(os.environ, {"COORDINATION_ALLOWED_RAW_TOOLS": "get_issue_context"}, clear=False):
+            payload = json.loads(
+                _run(
+                    server.call_tool(
+                        "get_compact_context",
+                        {"mode": "task", "record_id": "ENC-TSK-Q33", "project_id": "enceladus", **args_extra},
+                    )
+                )[0].text
+            )
+    finally:
+        RUNTIME.invoke_hybrid_retrieval = saved
+    return payload, captured
+
+
+def test_record_mode_derives_hybrid_query_from_record_q43():
+    payload, captured = _run_record_mode_hybrid({})
+    assert captured["query_text"] == "Feed sync fix Purge stale IDB leftovers"
+    assert captured["anchor_record_id"] == "ENC-TSK-Q33"
+    hybrid = payload["result"]["hybrid_retrieval"]
+    assert hybrid["query_source"] == "derived_from_record"
+    assert hybrid["query_head"] == "Feed sync fix Purge stale IDB leftovers"
+
+
+def test_record_mode_caller_query_passes_through_q43():
+    payload, captured = _run_record_mode_hybrid({"query": "my explicit query"})
+    assert captured["query_text"] == "my explicit query"
+    hybrid = payload["result"]["hybrid_retrieval"]
+    assert hybrid["query_source"] == "caller"
+    assert hybrid["query_head"] == "my explicit query"
