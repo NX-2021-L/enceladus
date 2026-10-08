@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-08.02",
-  "updated_at": "2026-10-08T05:26:00Z",
-  "last_change_summary": "DVP-TSK-765 (observer-clock contract, Site B; DVP-TSK-736 defect 1): tracker_mutation POST /{project}/{type}/{id}/log accepts an opt-in boolean observation_only. When true it records an observation instead of content: SET last_observed_at, ADD observation_count, with no history append and no change to updated_at/sync_version/version_seq/content_hash. Absent or false, the default path is byte-identical. last_observed_at and observation_count are new server-written record fields on task, issue and feature, reserved against generic PATCH/create like closed_count, and carried on the feed_query full-record transforms. Site A (enceladus_shared.warehouse_registration, record_version 2) gates write_timestamp on a new generation and adds last_verified_at; it is not a tracker schema change.",
+  "version": "2026-10-08.01",
+  "updated_at": "2026-10-08T04:30:00Z",
+  "last_change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "owners": [
     "enceladus-platform"
   ],
@@ -61,28 +61,6 @@
     "tracker.task": {
       "description": "Task tracker records created via MCP and tracker mutation APIs.",
       "fields": {
-        "last_observed_at": {
-          "type": "string",
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "constraints": {
-            "format": "ISO 8601 datetime"
-          },
-          "definition": "DVP-TSK-765 (observer clock): UTC time of the most recent observation_only worklog call on this record. It is an OBSERVATION clock (a property of the observer, e.g. a detector re-asserting an unchanged condition) and is distinct from updated_at, the STATE clock, which an observation never moves.",
-          "usage_guidance": "Server-written only, by POST /{project}/{type}/{id}/log with observation_only=true. Generic PATCH/create reject it (RESERVED_FIELD). Absent on records never observed."
-        },
-        "observation_count": {
-          "type": "integer",
-          "default": 0,
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "definition": "DVP-TSK-765 (observer clock): number of observation_only worklog calls on this record. Atomic via UpdateExpression ADD observation_count :one. It replaces an unbounded worklog of identical re-assertions with a counter.",
-          "usage_guidance": "Server-written only. Generic PATCH/create reject it (RESERVED_FIELD). Treat absent as 0."
-        },
         "status": {
           "type": "enum",
           "enum": [
@@ -467,28 +445,6 @@
     "tracker.issue": {
       "description": "Issue tracker records for bug/risk/debt/security/performance.",
       "fields": {
-        "last_observed_at": {
-          "type": "string",
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "constraints": {
-            "format": "ISO 8601 datetime"
-          },
-          "definition": "DVP-TSK-765 (observer clock): UTC time of the most recent observation_only worklog call on this record. It is an OBSERVATION clock (a property of the observer, e.g. a detector re-asserting an unchanged condition) and is distinct from updated_at, the STATE clock, which an observation never moves.",
-          "usage_guidance": "Server-written only, by POST /{project}/{type}/{id}/log with observation_only=true. Generic PATCH/create reject it (RESERVED_FIELD). Absent on records never observed."
-        },
-        "observation_count": {
-          "type": "integer",
-          "default": 0,
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "definition": "DVP-TSK-765 (observer clock): number of observation_only worklog calls on this record. Atomic via UpdateExpression ADD observation_count :one. It replaces an unbounded worklog of identical re-assertions with a counter.",
-          "usage_guidance": "Server-written only. Generic PATCH/create reject it (RESERVED_FIELD). Treat absent as 0."
-        },
         "status": {
           "type": "enum",
           "enum": [
@@ -639,28 +595,6 @@
     "tracker.feature": {
       "description": "Feature tracker records with governed completion handshake.",
       "fields": {
-        "last_observed_at": {
-          "type": "string",
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "constraints": {
-            "format": "ISO 8601 datetime"
-          },
-          "definition": "DVP-TSK-765 (observer clock): UTC time of the most recent observation_only worklog call on this record. It is an OBSERVATION clock (a property of the observer, e.g. a detector re-asserting an unchanged condition) and is distinct from updated_at, the STATE clock, which an observation never moves.",
-          "usage_guidance": "Server-written only, by POST /{project}/{type}/{id}/log with observation_only=true. Generic PATCH/create reject it (RESERVED_FIELD). Absent on records never observed."
-        },
-        "observation_count": {
-          "type": "integer",
-          "default": 0,
-          "required": false,
-          "writable_by": [
-            "server"
-          ],
-          "definition": "DVP-TSK-765 (observer clock): number of observation_only worklog calls on this record. Atomic via UpdateExpression ADD observation_count :one. It replaces an unbounded worklog of identical re-assertions with a counter.",
-          "usage_guidance": "Server-written only. Generic PATCH/create reject it (RESERVED_FIELD). Treat absent as 0."
-        },
         "status": {
           "type": "enum",
           "enum": [
@@ -9521,13 +9455,8 @@
       }
     }
   },
-  "change_summary": "DVP-TSK-765 (observer-clock contract, Site B; DVP-TSK-736 defect 1): tracker_mutation POST /{project}/{type}/{id}/log accepts an opt-in boolean observation_only. When true it records an observation instead of content: SET last_observed_at, ADD observation_count, with no history append and no change to updated_at/sync_version/version_seq/content_hash. Absent or false, the default path is byte-identical. last_observed_at and observation_count are new server-written record fields on task, issue and feature, reserved against generic PATCH/create like closed_count, and carried on the feed_query full-record transforms. Site A (enceladus_shared.warehouse_registration, record_version 2) gates write_timestamp on a new generation and adds last_verified_at; it is not a tracker schema change.",
+  "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
-    {
-      "version": "2026-10-08.02",
-      "date": "2026-10-08",
-      "summary": "DVP-TSK-765 (observer-clock contract, Site B; DVP-TSK-736 defect 1): tracker_mutation POST /{project}/{type}/{id}/log accepts an opt-in boolean observation_only. When true it records an observation instead of content: SET last_observed_at, ADD observation_count, with no history append and no change to updated_at/sync_version/version_seq/content_hash. Absent or false, the default path is byte-identical. last_observed_at and observation_count are new server-written record fields on task, issue and feature, reserved against generic PATCH/create like closed_count, and carried on the feed_query full-record transforms. Site A (enceladus_shared.warehouse_registration, record_version 2) gates write_timestamp on a new generation and adds last_verified_at; it is not a tracker schema change."
-    },
     {
       "version": "2026-10-08.01",
       "date": "2026-10-08",
