@@ -90,7 +90,8 @@ Inputs
 
 Output
     A ``RegistrationRecord`` carrying table identity, row count, byte count,
-    file count, write timestamp, and content digest (BRD B2-R2 ``properties``).
+    file count, write timestamp, content digest (BRD B2-R2 ``properties``), and
+    the ``last_verified_at`` observation clock described below.
 
 Idempotency
     Deterministic in ``(rows, columns, write_timestamp)``. Two invocations with
@@ -106,6 +107,24 @@ Idempotency
     part of the data -- so a caller who wants observable idempotency must pass
     an explicit ``write_timestamp``. This is deliberate: a scheduled refresh
     SHOULD produce a new freshness stamp, and a replay SHOULD NOT.
+
+Two clocks (DVP-TSK-765, DVP-ISS-134)
+    The ``write_timestamp`` ARGUMENT is the invocation's clock. The record
+    carries it in two distinct fields, because "the table changed" and "the
+    table was checked" are different facts and a freshness reader must be able
+    to tell them apart:
+
+    * ``write_timestamp`` -- the STATE clock. It moves only with a new
+      generation (``storage_changed`` or ``catalog_changed``), exactly like
+      ``write_seq`` and the ``previous_*`` fields. An invocation that found the
+      table already current keeps the last generation's value.
+    * ``last_verified_at`` -- the OBSERVATION clock. Stamped on every
+      invocation, so "checked at T and found current" stays expressible
+      without masquerading as "changed at T".
+
+    Before this split the record stamped ``write_timestamp`` unconditionally,
+    so a no-op registration advanced the one field every freshness reader
+    consults while correctly holding every other generation field.
 
 Failure behaviour (transactional in intent)
     1. Validation and Parquet serialization happen entirely in memory. A bad
@@ -979,7 +998,12 @@ def register_or_update_glue_table(glue_client, contract: TableContract) -> Tuple
 REGISTRATION_PREFIX = "%s-%s" % (WAREHOUSE_PREFIX, REGISTRATION_SUFFIX)
 
 #: Schema version of the emitted record, so the B6-R2 monitor can evolve with it.
-REGISTRATION_RECORD_VERSION = 1
+#:
+#: 2 (DVP-TSK-765): ``write_timestamp`` is generation-gated and
+#: ``last_verified_at`` is present. A version-1 record's ``write_timestamp`` may
+#: be the clock of a no-op invocation rather than of the generation it
+#: describes (DVP-ISS-134), and it carries no ``last_verified_at``.
+REGISTRATION_RECORD_VERSION = 2
 
 LOGGER = logging.getLogger(__name__)
 
@@ -998,6 +1022,11 @@ class RegistrationRecord:
     the previous generation's counts and a monotonic ``write_seq``. That is what
     lets the monitor answer checks 1 and 5 from a single GetObject instead of
     re-listing S3 (DOC-1E1EC5B7CE02).
+
+    ``write_timestamp`` is the clock of the invocation that produced the
+    CURRENT generation; ``last_verified_at`` is the clock of THIS invocation
+    (see "Two clocks" in the module docstring). They are equal exactly when
+    this invocation wrote a new generation.
     """
 
     project: str
@@ -1023,12 +1052,18 @@ class RegistrationRecord:
     previous_byte_count: Optional[int] = None
     previous_file_count: Optional[int] = None
     previous_content_sha256: str = ""
+    last_verified_at: str = ""
     record_version: int = REGISTRATION_RECORD_VERSION
 
     #: Fields that describe the INVOCATION rather than the generation. They are
     #: returned to the caller and logged, but excluded from the persisted
     #: sidecar -- otherwise a no-op replay would still rewrite the record, and
     #: the record would become the one piece of state that idempotency misses.
+    #:
+    #: ``last_verified_at`` is per-invocation too, but it is persisted on
+    #: purpose: it is the observation the monitor reads. It is derived from the
+    #: caller's ``write_timestamp`` argument, never from a wall clock of its
+    #: own, so a verbatim replay still leaves the sidecar byte-identical.
     INVOCATION_FIELDS = ("storage_changed", "catalog_changed", "created", "pruned_objects")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1211,13 +1246,24 @@ def register_table(
     # previous-generation fields -- otherwise the record would be the one piece
     # of state that a no-op still mutates, and "repeated invocation leaves
     # storage state unchanged" would stop being literally true.
+    #
+    # write_timestamp is the generation's clock, so it is gated the same way
+    # (DVP-TSK-765). It used to be stamped unconditionally: the one field every
+    # freshness reader consults was the one generation field a no-op still
+    # advanced (DVP-ISS-134). This invocation's own clock goes to
+    # last_verified_at instead, which is stamped every time.
     previous = previous or {}
     new_generation = storage_changed or catalog_changed
     if new_generation:
         write_seq = int(previous.get("write_seq") or 0) + 1
+        written_at = stamp
         prior = previous
     else:
         write_seq = int(previous.get("write_seq") or 1)
+        # Falls back to this invocation's clock only when there is no prior
+        # record to hold (the data was written without one): nothing better is
+        # known, and an empty stamp would read as a failed write.
+        written_at = previous.get("write_timestamp") or stamp
         prior = {
             "write_timestamp": previous.get("previous_write_timestamp") or "",
             "row_count": previous.get("previous_row_count"),
@@ -1236,7 +1282,7 @@ def register_table(
         row_count=row_count,
         byte_count=len(payload),
         file_count=len(stored),
-        write_timestamp=stamp,
+        write_timestamp=written_at,
         content_sha256=digest,
         storage_changed=storage_changed,
         catalog_changed=catalog_changed,
@@ -1250,6 +1296,7 @@ def register_table(
         previous_byte_count=prior.get("byte_count"),
         previous_file_count=prior.get("file_count"),
         previous_content_sha256=prior.get("content_sha256") or "",
+        last_verified_at=stamp,
     )
 
     if emit_record:
