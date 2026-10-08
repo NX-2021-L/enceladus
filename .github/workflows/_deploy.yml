@@ -1225,6 +1225,24 @@ jobs:
             --region "${{ env.AWS_REGION }}" \
             --environment-suffix="${ENVIRONMENT_SUFFIX}"
 
+      # ENC-TSK-Q42 AC-3 (ENC-ISS-835): the Lambda smoke above probes per-function
+      # health endpoints; none exercised the coordination MCP gateway, which sat
+      # dead (JSON-RPC -32603 on every method) behind a green deploy. Probe it
+      # end to end against the TARGET environment with the internal key.
+      - name: Coordination MCP gateway probe (ENC-TSK-Q42 AC-3)
+        if: success()
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          TARGET_ENV: ${{ inputs.target_environment || 'v4-gamma' }}
+        run: |
+          set -euo pipefail
+          case "${TARGET_ENV}" in
+            v4-gamma) BASE="https://hi0dzmvqrc.execute-api.us-west-2.amazonaws.com" ;;
+            v3-prod)  BASE="https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com" ;;
+            *) echo "[INFO] no gateway probe base URL for ${TARGET_ENV}; skipping"; exit 0 ;;
+          esac
+          python3 tools/gateway_mcp_probe.py --base-url "${BASE}"
+
       - name: Set deployment status → success
         if: success()
         env:
