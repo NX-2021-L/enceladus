@@ -1,0 +1,19 @@
+{
+  "project_id": "enceladus",
+  "record_anchors": [
+    "ENC-TSK-Q33", "ENC-TSK-Q35", "ENC-TSK-Q10", "ENC-TSK-Q16", "ENC-FTR-134",
+    "ENC-FTR-147", "ENC-ISS-831", "ENC-ISS-830", "ENC-ISS-791", "ENC-PLN-093"
+  ],
+  "topic_queries": [
+    "ELR compact context token-efficient read surface hybrid retrieval",
+    "service worker stale-while-revalidate feed corpus",
+    "tracker sentinel route project resolution by record prefix",
+    "internal key credential resolution for local runner reads",
+    "collection census bounded list walk cursor",
+    "governance dictionary entity lookup",
+    "graph search reciprocal rank fusion corroboration",
+    "deploy checkout lifecycle commit complete identifier",
+    "documents store section patch optimistic concurrency",
+    "arm64 lambda architecture cutover"
+  ]
+}

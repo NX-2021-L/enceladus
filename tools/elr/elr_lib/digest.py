@@ -184,6 +184,21 @@ _OPTIONAL_FIELDS = (
     "key_source",
     "auth_probe",
     "wrapper",
+    # ENC-TSK-Q50 (elr_compact_context.py, schema elr.compact_context_digest,
+    # DOC-412AB7081565 section 7.3). Small, stable, allow-listed summaries only:
+    # header = run identity/timing scalars; retrieval = the server's signal and
+    # fusion posture (signals_present, signals_absent with reasons,
+    # graph_algorithm, candidate counts, embedding_coverage_sample);
+    # ranking = one ARRAY row per returned node (field names paid once in the
+    # schema, not top_n times); sections = {name: [bytes, sha256]} for the
+    # files landed on disk; ids_file = path of the batch_get --ids-file;
+    # warnings = per-section failures. Section BODIES are never digest fields.
+    "header",
+    "retrieval",
+    "ranking",
+    "sections",
+    "ids_file",
+    "warnings",
 )
 
 _STABLE_KEYS = ("operation", "ok", "status", "identity_posture", "anomalies")
