@@ -1,0 +1,53 @@
+#!/bin/sh
+# ELR launcher (ENC-TSK-Q35 / ENC-ISS-831). Versioned in tools/elr and
+# installed + hash-verified by elr_sync; elr_sync also points
+# ~/.enceladus/elr/elr at this file.
+#
+#   elr <subcommand> [args...]   ->  <python> elr_<subcommand>.py [args...]
+#
+# It handles NO credential. elr_lib resolves the key in Python (env chain,
+# then the 0600 ELR key file ~/.enceladus/internal_key), so this launcher
+# and a direct `python3 elr_<sub>.py` call behave identically.
+#
+# Interpreter: $ELR_PYTHON, else the absolute interpreter elr_sync pinned
+# at install time (.elr-python), else python3.11, else python3.
+set -e
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${ELR_BIN:-}" ]; then
+    bin_dir=$ELR_BIN
+elif [ -f "$script_dir/elr_smoke.py" ]; then
+    bin_dir=$script_dir
+elif [ -f "$script_dir/bin/elr_smoke.py" ]; then
+    # invoked through the ~/.enceladus/elr/elr symlink
+    bin_dir=$script_dir/bin
+else
+    echo "elr: cannot locate the ELR install next to $0 (set ELR_BIN)" >&2
+    exit 2
+fi
+
+python=${ELR_PYTHON:-}
+if [ -z "$python" ] && [ -f "$bin_dir/.elr-python" ]; then
+    python=$(head -n 1 "$bin_dir/.elr-python")
+fi
+if [ -z "$python" ] || [ ! -x "$python" ]; then
+    python=$(command -v python3.11 || command -v python3 || true)
+fi
+if [ -z "$python" ]; then
+    echo "elr: no Python interpreter found (set ELR_PYTHON)" >&2
+    exit 2
+fi
+
+sub=${1:-}
+if [ -z "$sub" ]; then
+    echo "usage: elr <subcommand> [args...]" >&2
+    exit 2
+fi
+shift
+
+target="$bin_dir/elr_${sub}.py"
+if [ ! -f "$target" ]; then
+    echo "elr: unknown subcommand '$sub' (no $target)" >&2
+    exit 2
+fi
+exec "$python" "$target" "$@"
