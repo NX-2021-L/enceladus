@@ -1110,6 +1110,12 @@ _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature
 # Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
 _F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
 
+# DVP-TSK-765: the observation clock, written only by POST .../log with
+# observation_only=true (see _record_observation). Reserved the same way as the
+# F41 counters: a client-set last_observed_at forges the clock, and a non-numeric
+# observation_count makes every later observation's ADD fail as a retryable 500.
+_DVP765_RESERVED_OBSERVATION_FIELDS = frozenset({"last_observed_at", "observation_count"})
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -3818,6 +3824,20 @@ def _handle_create_record(
                 reason="server_side_only",
                 rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
             )
+    for _obs_field in sorted(_DVP765_RESERVED_OBSERVATION_FIELDS):
+        if _obs_field in body:
+            return _error(
+                400,
+                (
+                    f"Field '{_obs_field}' is server-side only and must not be "
+                    f"supplied at create time. It is written only by "
+                    f"POST .../log with observation_only=true."
+                ),
+                code="RESERVED_FIELD",
+                field=_obs_field,
+                reason="server_side_only",
+                rule_citation="DVP-TSK-765",
+            )
 
     priority = body.get("priority")
     description = str(body.get("description") or "")
@@ -5350,6 +5370,19 @@ def _handle_update_field(
             field=field,
             reason="server_side_only",
             rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
+        )
+    if field in _DVP765_RESERVED_OBSERVATION_FIELDS:
+        return _error(
+            400,
+            (
+                f"Field '{field}' is server-side only. It is written only by "
+                f"POST .../log with observation_only=true and is not writable "
+                f"via tracker.set / tracker.create."
+            ),
+            code="RESERVED_FIELD",
+            field=field,
+            reason="server_side_only",
+            rule_citation="DVP-TSK-765",
         )
 
     # ENC-FTR-052: Lesson append-only mutation enforcement

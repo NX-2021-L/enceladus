@@ -21,6 +21,8 @@ Covers:
   * The gates in front of the write (existence, task checkout ownership)
     still apply; a non-boolean flag is refused; a null description is read as
     absent and a non-string one refused; GET exposes both fields.
+  * Both fields are server-side only: tracker.set and tracker.create refuse
+    them with 400 RESERVED_FIELD, as for the ENC-TSK-F41 counters.
 
 Run: python3 -m pytest test_worklog_observation_only_dvp765.py -q
 """
@@ -464,6 +466,63 @@ class ObservationOnlyTests(ObservationBase):
         self.assertEqual(record["last_observed_at"], NOW)
         self.assertEqual(record["observation_count"], 1)
         self.assertEqual(record["updated_at"], PRIOR_UPDATED_AT)
+
+
+# ---------------------------------------------------------------------------
+# The observation fields are server-side only (the ENC-TSK-F41 precedent)
+# ---------------------------------------------------------------------------
+
+
+class ReservedObservationFieldTests(ObservationBase):
+    OBSERVATION_FIELDS = ("last_observed_at", "observation_count")
+
+    def _assert_reserved(self, resp, field):
+        self.assertEqual(resp["statusCode"], 400, field)
+        envelope = _payload(resp)["error_envelope"]
+        self.assertEqual(envelope["code"], "RESERVED_FIELD")
+        self.assertEqual(envelope["details"]["field"], field)
+        self.assertEqual(envelope["details"]["reason"], "server_side_only")
+        self.assertEqual(envelope["details"]["rule_citation"], "DVP-TSK-765")
+
+    def test_patch_cannot_write_either_field(self):
+        """A forged last_observed_at, or a non-numeric observation_count that
+        would make every later observation's ADD a retryable 500, is refused
+        before any read or write."""
+        self.put_issue()
+        before = self.get_item()
+        for field, value in (("last_observed_at", "2099-01-01T00:00:00Z"),
+                             ("observation_count", "not-a-number")):
+            resp = tm._handle_update_field(
+                "enceladus", "issue", ISSUE, _body(field=field, value=value),
+            )
+            self._assert_reserved(resp, field)
+        self.assertEqual(self.get_item(), before)
+
+        # The observation path is unharmed: the ADD still lands on a number.
+        with mock.patch.object(tm, "_now_z", return_value=NOW):
+            observed = tm._handle_log(
+                "enceladus", "issue", ISSUE, _body(observation_only=True),
+            )
+        self.assertEqual(observed["statusCode"], 200)
+        self.assertEqual(_payload(observed)["observation_count"], 1)
+
+    def test_the_patch_guard_precedes_any_ddb_call(self):
+        fake = mock.MagicMock()
+        with mock.patch.object(tm, "_get_ddb", return_value=fake):
+            for field in self.OBSERVATION_FIELDS:
+                resp = tm._handle_update_field(
+                    "enceladus", "issue", ISSUE, _body(field=field, value="x"),
+                )
+                self._assert_reserved(resp, field)
+        fake.update_item.assert_not_called()
+        fake.get_item.assert_not_called()
+
+    def test_create_cannot_seed_either_field(self):
+        for field, value in (("last_observed_at", NOW), ("observation_count", 3)):
+            resp = tm._handle_create_record(
+                "enceladus", "issue", {"title": "seeded observation", field: value},
+            )
+            self._assert_reserved(resp, field)
 
 
 if __name__ == "__main__":
