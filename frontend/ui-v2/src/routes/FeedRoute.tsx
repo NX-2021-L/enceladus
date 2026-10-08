@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { Autosuggest, ButtonDropdown } from '../design-system'
+import { Alert, Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
 import { Badge } from '../components/Badge'
@@ -41,6 +41,7 @@ import { sortSearchHits } from '../search/sortSearchHits'
 import { useTieredSearch } from '../search/useTieredSearch'
 import { getCacheEngine } from '../sync/cacheEngine'
 import { useCacheEngineState } from '../sync/CacheEngineProvider'
+import { staleCorpusNotice } from '../sync/staleNotice'
 import {
   useKeystrokeSuggestionTelemetry,
   useRequestFirstPageTelemetry,
@@ -98,7 +99,8 @@ export function FeedRoute() {
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { isHydrating, refetchSnapshot } = useRealtimeFeed()
   const events = useRealtimeFeedEvents()
-  const { isWarm } = useCacheEngineState()
+  const { isWarm, indexRows, seedError, lastSeededAt } = useCacheEngineState()
+  const staleNotice = staleCorpusNotice(seedError, lastSeededAt)
   const corpus = (() => {
     const fromEvents = buildSearchCorpus(events, projects)
     if (!isWarm) return fromEvents
@@ -106,7 +108,8 @@ export function FeedRoute() {
     // row wholesale, stomping governed status/priority/updatedAt with the
     // thin event projection and reshuffling counts on every batch. The cache
     // row is the base; the event contributes only the fields it truly has.
-    const byId = new Map(getCacheEngine().searchIndex.all().map((row) => [row.recordId, row]))
+    // ENC-TSK-Q33: indexRows is provider state, so a completed seed repaints.
+    const byId = new Map(indexRows.map((row) => [row.recordId, row]))
     for (const row of fromEvents) {
       const existing = byId.get(row.recordId)
       byId.set(row.recordId, existing ? mergeEventRowOntoCache(existing, row) : row)
@@ -343,6 +346,14 @@ export function FeedRoute() {
           your way back.
         </p>
       </header>
+
+      {staleNotice && (
+        <div className="feed-route__stale">
+          <Alert type="warning" header="Results may be out of date">
+            {staleNotice}
+          </Alert>
+        </div>
+      )}
 
       <div className="feed-route__toolbar">
         <div className="feed-route__search">

@@ -9,6 +9,7 @@ type MemoryDb = {
   tier2: Map<string, Tier2Record>
   tombstones: Map<string, TombstoneRecord>
   queryCache: unknown | null
+  meta: Map<string, unknown>
 }
 
 let memoryDb: MemoryDb | null = null
@@ -20,6 +21,7 @@ function getMemoryDb(): MemoryDb {
       tier2: new Map(),
       tombstones: new Map(),
       queryCache: null,
+      meta: new Map(),
     }
   }
   return memoryDb
@@ -210,7 +212,7 @@ export async function getMeta(key: string): Promise<unknown | null> {
     const result = (await withStore('meta', 'readonly', (store) => store.get(key))) as unknown
     return result ?? null
   } catch {
-    return null
+    return getMemoryDb().meta.get(key) ?? null
   }
 }
 
@@ -218,7 +220,9 @@ export async function setMeta(key: string, value: unknown): Promise<void> {
   try {
     await withStore('meta', 'readwrite', (store) => store.put(value, key))
   } catch {
-    /* memory fallback not needed for version watermark in tests */
+    // ENC-TSK-Q33/Q34: delta cursors and the seeded-at stamp must survive in
+    // the memory fallback too (no IndexedDB, e.g. jsdom).
+    getMemoryDb().meta.set(key, value)
   }
 }
 

@@ -22,3 +22,16 @@ export function maxVersionSeqFromItems(items: Array<{ version_seq?: number }>, c
   }
   return latest
 }
+
+const CORPUS_SEEDED_AT_KEY = 'corpus_seeded_at'
+
+/** ENC-TSK-Q33: when the last corpus seed completed on this device, so a
+ *  failed refresh can say how old the cached list is. */
+export async function getCorpusSeededAt(): Promise<string | null> {
+  const raw = await getMeta(CORPUS_SEEDED_AT_KEY)
+  return typeof raw === 'string' && raw ? raw : null
+}
+
+export async function setCorpusSeededAt(iso: string): Promise<void> {
+  await setMeta(CORPUS_SEEDED_AT_KEY, iso)
+}
