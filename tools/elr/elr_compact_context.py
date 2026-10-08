@@ -20,6 +20,14 @@ small digest: the ranked top-N inline (a compact array row per node), the
 signal posture, and the on-disk section index. Digest bytes are bounded by
 ``1024 + 192 * top_n`` (M-3).
 
+TRANSPORT (ENC-TSK-Q54): ``--transport auto`` (default) reads
+tracker_capabilities.compact_context from /api/v1/health; when true ONE GET to
+coordination/context/compact (fields=full) replaces the composition above and
+is mapped into the same digest (retrieval.composer "route"; "elr-1" otherwise).
+A route failure (non-200 / shape drift) falls back to composition with a
+``route_fallback:*`` warning. In composition, hybrid requests fields=compact
+only when graphsearch/health advertises hybrid_fields_compact (ENC-TSK-Q49).
+
 HARD RULES
   * GET only. There is no code path that constructs another HTTP method
     (tests/test_compact_context.py proves it statically).
@@ -38,7 +46,8 @@ Exit codes
   0  digest emitted (a partial composition still exits 0 with partial=true)
   1  unusable ranking: hybrid call failed / record unreadable / unreachable
   4  TLS CA bundle unresolved                       (elr_lib.tls)
-  6  hybrid_unsupported_by_server: the plane answered 400/404 for hybrid
+  6  hybrid_unsupported_by_server: the plane answered 400/404 for hybrid;
+     or (--transport route) context_route_unavailable
   7  no_credential_configured                       (elr_lib.config)
   8  response_shape_drift: a contract key is missing from the hybrid response
 
@@ -99,6 +108,13 @@ import elr_batch_get  # noqa: E402  (id classification + sentinel path only)
 
 OPERATION = "elr_compact_context.run"
 COMPOSER_VERSION = "elr-1"
+COMPOSER_ROUTE = "route"  # ENC-TSK-Q54: server-side context.compact assembler
+TRANSPORT_AUTO = "auto"
+TRANSPORT_ROUTE = "route"
+TRANSPORT_COMPOSE = "compose"
+ROUTE_PATH = "/context/compact"
+ROUTE_SECTION_NAMES = {"record_context": "record", "hybrid_retrieval": "hybrid"}
+ROUTE_WARNING_MAX_CHARS = 96
 
 EXIT_UNUSABLE = 1
 EXIT_HYBRID_UNSUPPORTED = 6
@@ -154,7 +170,9 @@ OPTIONAL_HYBRID_KEYS: Tuple[str, ...] = (
     "keyword_source",
     "retrieval_records",
     "energy_lambda_weights",
-    "corroboration_weber_k",
+    "corroboration_weber_k",  # pre-ENC-TSK-Q46 planes
+    "corroboration_alpha",  # ENC-TSK-Q46
+    "s_top",  # ENC-TSK-Q46
 )
 REQUIRED_NODE_KEYS: Tuple[str, ...] = (
     "record_id",
@@ -435,6 +453,113 @@ def fetch_reference(client: Any, project_id: str, query: str) -> Section:
     return Section("reference", 200, grep_reference(content, query, doc_id), int((time.monotonic() - started) * 1000))
 
 
+def _hybrid_get(client: Any, hybrid_query: Dict[str, Any], warnings: List[str]) -> Tuple[int, Any]:
+    """The hybrid GET. When fields=compact was requested and the plane rejects
+    it (400) or answers a body that breaks the contract, retry once without it."""
+    status, body = _get(client, "graph_query", "", hybrid_query)
+    if hybrid_query.get("fields"):
+        drifted = False
+        if status == 200:
+            try:
+                validate_hybrid_shape(body)
+            except ShapeDrift:
+                drifted = True
+        if status in (400, 404) or drifted:
+            warnings.append("hybrid_fields_compact_retry_full")
+            plain = {k: v for k, v in hybrid_query.items() if k != "fields"}
+            return _get(client, "graph_query", "", plain)
+    return status, body
+
+
+def _route_query(args: Any, mode: str, top_n: int) -> Dict[str, Any]:
+    def off(flag: str) -> Optional[str]:
+        return "false" if getattr(args, flag, False) else None
+
+    query: Dict[str, Any] = {
+        "mode": mode,
+        "record_id": (args.record_id or None),
+        "project_id": (args.project_id or None),
+        "document_id": (args.document_id or None),
+        "query": (args.query or None),
+        "anchor_record_id": (args.anchor_record_id or None),
+        "record_type": (args.record_type or None),
+        "top_n": top_n,
+        "include_below_threshold": "true" if args.include_below_threshold else None,
+        "history_limit": args.history_limit,
+        "domain": (args.domain or None),
+        "domains": (args.domains or None),
+        "include_code_map": off("no_code_map"),
+        "include_governance": off("no_governance"),
+        "include_related_documents": off("no_related_documents"),
+        "include_hybrid_retrieval": off("no_hybrid"),
+        "include_components": off("no_components"),
+        "include_architecture": off("no_architecture"),
+        "include_recent_history": off("no_recent_history"),
+        "fields": "full",
+    }
+    return {k: v for k, v in query.items() if v is not None}
+
+
+def _try_route(client: Any, args: Any, mode: str, top_n: int) -> Tuple[Optional[Dict[str, Any]], str]:
+    """ONE GET to context.compact (fields=full). Returns (state, "") on success
+    or (None, reason) on any non-200 / shape drift so the caller can fall back."""
+    sec = _timed("route", lambda: _get(client, "coordination", ROUTE_PATH, _route_query(args, mode, top_n)))
+    if sec.status != 200:
+        return None, f"http_{sec.status}"
+    body = sec.body
+    if not isinstance(body, dict) or body.get("success") is not True:
+        return None, "shape_drift:success"
+    raw_sections, retrieval = body.get("sections"), body.get("retrieval")
+    if not isinstance(raw_sections, dict) or not raw_sections:
+        return None, "shape_drift:sections"
+    if not isinstance(retrieval, dict):
+        return None, "shape_drift:retrieval"
+    header = body.get("header") if isinstance(body.get("header"), dict) else {}
+    hybrid = raw_sections.get("hybrid_retrieval")
+    hybrid_body: Optional[Dict[str, Any]] = None
+    if isinstance(hybrid, dict):
+        try:
+            nodes = hybrid.get("nodes")
+            if not isinstance(nodes, list):
+                raise ShapeDrift("nodes")
+            for index, node in enumerate(nodes):
+                if not isinstance(node, dict):
+                    raise ShapeDrift(f"nodes[{index}]")
+                for key in REQUIRED_NODE_KEYS:
+                    if key not in node:
+                        raise ShapeDrift(f"nodes[{index}].{key}")
+        except ShapeDrift as drift:
+            return None, f"shape_drift:hybrid_retrieval.{drift.key}"
+        hybrid_body = dict(hybrid)
+        hybrid_body["pathway"] = {
+            "intent_signature": retrieval.get("intent_signature"),
+            "wave_id": retrieval.get("wave_id"),
+            "edge_count": retrieval.get("pathway_edge_count"),
+        }
+        for src, dst in (("alpha", "corroboration_alpha"), ("s_top", "s_top"), ("weber_k", "corroboration_weber_k")):
+            if retrieval.get(src) is not None and hybrid_body.get(dst) is None:
+                hybrid_body[dst] = retrieval[src]
+    elif not getattr(args, "no_hybrid", False) and mode in RECORD_MODES + ("topic",):
+        return None, "shape_drift:hybrid_retrieval"
+    landed: Dict[str, Section] = {}
+    for name, value in raw_sections.items():
+        landed[ROUTE_SECTION_NAMES.get(name, name)] = Section(ROUTE_SECTION_NAMES.get(name, name), 200, value, 0)
+    present = [s for s in SIGNALS if s in (retrieval.get("signals_present") or [])]
+    absent = {str(k): str(v) for k, v in (retrieval.get("signals_absent") or {}).items()}
+    warnings = [
+        f"server:{str(w)[:ROUTE_WARNING_MAX_CHARS]}" for w in (body.get("warnings") or []) if isinstance(w, (str, int, float))
+    ]
+    return {
+        "sections": landed,
+        "hybrid_body": hybrid_body,
+        "signals": (present, absent),
+        "query": str(header.get("query_head") or ""),
+        "anchor": str(header.get("anchor") or ""),
+        "partial": bool(header.get("partial")),
+        "warnings": warnings,
+    }, ""
+
+
 # --- the run ------------------------------------------------------------------
 
 
@@ -481,134 +606,174 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
     anchor = (args.anchor_record_id or "").strip()
     record_type = ""
 
-    # Step 1 -- the record (serial: project, type and the derived query come from it).
-    if mode in RECORD_MODES:
-        classified = elr_batch_get.classify_id(record_id)
-        if classified.kind != elr_batch_get.KIND_TRACKER:
-            return _fail_digest(EXIT_UNUSABLE, 400, ["unsupported_record_id"], args, profile, key_source)
-        record_type = classified.record_type or "task"
-        sec = _timed(
-            "record",
-            lambda: _get(client, "tracker", elr_batch_get.tracker_path(record_type, classified.normalized)),
-        )
-        if tls_failed(sec.status):
-            return _fail_digest(elr_tls.EXIT_CODE_TLS_UNRESOLVED, sec.status, ["tls_ca_bundle_missing"], args, profile, key_source, **ca_fields)
-        if not sec.ok:
-            posture, anomalies = classify_internal_posture(key_sent=True, status_code=sec.status if isinstance(sec.status, int) else 0)
-            return _fail_digest(
-                EXIT_UNUSABLE, sec.status, list(anomalies) + [f"record_fetch_failed_http_{sec.status}"], args, profile, key_source, posture=posture
-            )
-        sections["record"] = sec
-        record = sec.body.get("record") if isinstance(sec.body.get("record"), dict) else sec.body
-        project_id = project_id or str(record.get("project_id") or "")
-        if not query:
-            query = derive_query(record)  # FR-2
-        if not anchor:
-            anchor = classified.normalized  # FR-2: the record itself anchors the graph signal
-
-    # Step 2 -- independent reads, in parallel.
-    tasks: Dict[str, Callable[[], Section]] = {}
-    include = lambda flag: not getattr(args, flag, False)  # noqa: E731
-
-    def add(name: str, fn: Callable[[], Tuple[int, Any]]) -> None:
-        tasks[name] = lambda: _timed(name, fn)
-
-    if mode in RECORD_MODES:
-        if include("no_components") and project_id:
-            add("components", lambda: _get(client, "coordination", "/components", {"project_id": project_id, "status": "active"}))
-        if include("no_governance"):
-            entity = (args.governance_entity or "").strip() or f"tracker.{record_type}"
-            add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": entity}))
-        if include("no_related_documents"):
-            rel_query = {"project_id": project_id, "related": record_id} if project_id else {"related": record_id}
-            add("related_documents", lambda: _get(client, "document_direct", "/search", rel_query))
-        if project_id:
-            add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
-    elif mode == "project":
-        if not project_id:
-            return _fail_digest(EXIT_UNUSABLE, 400, ["project_id_required"], args, profile, key_source)
-        add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
-        if include("no_related_documents"):
-            tasks["documents"] = lambda: fetch_project_documents(client, project_id)
-        if (args.governance_entity or "").strip() and include("no_governance"):
-            add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": args.governance_entity.strip()}))
-    elif mode == "document":
-        document_id = (args.document_id or "").strip()
-        if not document_id:
-            return _fail_digest(EXIT_UNUSABLE, 400, ["document_id_required"], args, profile, key_source)
-        add("document", lambda: _get(client, "document_direct", f"/{_quote(document_id)}", {"include_content": "true"}))
-    elif mode == "topic":
-        if not query and not project_id:
-            return _fail_digest(EXIT_UNUSABLE, 400, ["topic_requires_query_or_project_id"], args, profile, key_source)
-        if project_id:
-            add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
-        if include("no_related_documents"):
-            doc_query: Dict[str, Any] = {"title": query} if query else {}
-            if project_id:
-                doc_query["project_id"] = project_id
-            add("documents", lambda: _get(client, "document_direct", "/search", doc_query))
-        if project_id and query:
-            tasks["reference"] = lambda: fetch_reference(client, project_id, query)
-        if (args.governance_entity or "").strip() and include("no_governance"):
-            add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": args.governance_entity.strip()}))
-    else:
-        return _fail_digest(EXIT_UNUSABLE, 400, [f"unknown_mode:{mode}"], args, profile, key_source)
-
-    anchor_sent = bool(anchor) and mode != "document"
-    query_sent = bool(query)
-    run_hybrid = include("no_hybrid") and (query_sent or anchor_sent) and bool(project_id)
-    if run_hybrid:
-        hybrid_query: Dict[str, Any] = {
-            "search_type": "hybrid",
-            "project_id": project_id,
-            "query": query or None,
-            "anchor_record_id": anchor or None,
-            "top_n": top_n,
-            "record_type": (args.record_type or None),
-            "include_below_threshold": "true" if args.include_below_threshold else None,
-            "wave_id": (args.wave_id or None),
-        }
-        add("hybrid", lambda: _get(client, "graph_query", "", hybrid_query))
-    add("health", lambda: _get(client, "health"))
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
-        futures = {name: pool.submit(fn) for name, fn in tasks.items()}
-        results = {name: fut.result() for name, fut in futures.items()}
-
-    health = results.pop("health", None)
+    # Step 0 -- health first (governance_hash + the transport capability switch).
+    health = _timed("health", lambda: _get(client, "health"))
     governance_hash = None
-    if health is not None and health.ok and isinstance(health.body, dict):
-        governance_hash = health.body.get("governance_hash") or None
-
-    # Step 3 -- the hybrid verdict decides the exit code before anything lands.
+    health_body = health.body if health.ok and isinstance(health.body, dict) else {}
+    if health_body:
+        governance_hash = health_body.get("governance_hash") or None
+    transport = (getattr(args, "transport", None) or TRANSPORT_AUTO).strip().lower()
+    route_state: Optional[Dict[str, Any]] = None
+    if transport != TRANSPORT_COMPOSE:
+        advertised = (health_body.get("tracker_capabilities") or {}).get("compact_context") is True if isinstance(health_body.get("tracker_capabilities"), dict) else False
+        if transport == TRANSPORT_ROUTE or advertised:
+            if (args.wave_id or "").strip():
+                route_reason = "route_does_not_support_wave_id"
+            else:
+                route_state, route_reason = _try_route(client, args, mode, top_n)
+            if route_state is None:
+                warnings.append(f"route_fallback:{route_reason}")
+                if transport == TRANSPORT_ROUTE:
+                    return _fail_digest(
+                        EXIT_HYBRID_UNSUPPORTED, 0, ["context_route_unavailable", f"context_route_unavailable:{route_reason}"], args, profile, key_source
+                    )
+        elif transport == TRANSPORT_AUTO:
+            pass  # plane does not advertise the route: Phase 1 composition (composer elr-1)
+    results: Dict[str, Section] = {}
     hybrid_body: Optional[Dict[str, Any]] = None
     posture = "internal-key"
-    if run_hybrid:
-        hyb = results.pop("hybrid")
-        if tls_failed(hyb.status):
-            return _fail_digest(elr_tls.EXIT_CODE_TLS_UNRESOLVED, hyb.status, ["tls_ca_bundle_missing"], args, profile, key_source, **ca_fields)
-        if hyb.status in (400, 404):
-            return _fail_digest(EXIT_HYBRID_UNSUPPORTED, hyb.status, [ANOMALY_HYBRID_UNSUPPORTED], args, profile, key_source)
-        if not hyb.ok:
-            posture, anomalies = classify_internal_posture(key_sent=True, status_code=hyb.status if isinstance(hyb.status, int) else 0)
-            return _fail_digest(
-                EXIT_UNUSABLE, hyb.status, list(anomalies) + [f"hybrid_call_failed_http_{hyb.status}"], args, profile, key_source, posture=posture
+    query_sent = False
+    anchor_sent = False
+    route_signals: Optional[Tuple[List[str], Dict[str, str]]] = None
+    composer = COMPOSER_VERSION
+    partial_from_route = False
+    if route_state is not None:
+        composer = COMPOSER_ROUTE
+        sections.update(route_state["sections"])
+        hybrid_body = route_state["hybrid_body"]
+        route_signals = route_state["signals"]
+        query = route_state["query"]
+        anchor = route_state["anchor"]
+        query_sent = bool(query)
+        anchor_sent = bool(anchor) and mode != "document"
+        partial_from_route = route_state["partial"]
+        warnings.extend(route_state["warnings"])
+        record_type = ""
+    else:
+        # Step 1 -- the record (serial: project, type and the derived query come from it).
+        if mode in RECORD_MODES:
+            classified = elr_batch_get.classify_id(record_id)
+            if classified.kind != elr_batch_get.KIND_TRACKER:
+                return _fail_digest(EXIT_UNUSABLE, 400, ["unsupported_record_id"], args, profile, key_source)
+            record_type = classified.record_type or "task"
+            sec = _timed(
+                "record",
+                lambda: _get(client, "tracker", elr_batch_get.tracker_path(record_type, classified.normalized)),
             )
-        try:
-            validate_hybrid_shape(hyb.body)
-        except ShapeDrift as drift:
-            return _fail_digest(
-                EXIT_RESPONSE_SHAPE_DRIFT, hyb.status, [ANOMALY_SHAPE_DRIFT, f"{ANOMALY_SHAPE_DRIFT}:{drift.key}"], args, profile, key_source
-            )
-        hybrid_body = hyb.body
-        sections["hybrid"] = hyb
-        for key in unexpected_hybrid_keys(hybrid_body):
-            warnings.append(f"unexpected_hybrid_key:{key}")
-        if hybrid_body.get("success") is False:
-            return _fail_digest(EXIT_UNUSABLE, hyb.status, ["hybrid_reported_failure"], args, profile, key_source)
+            if tls_failed(sec.status):
+                return _fail_digest(elr_tls.EXIT_CODE_TLS_UNRESOLVED, sec.status, ["tls_ca_bundle_missing"], args, profile, key_source, **ca_fields)
+            if not sec.ok:
+                posture, anomalies = classify_internal_posture(key_sent=True, status_code=sec.status if isinstance(sec.status, int) else 0)
+                return _fail_digest(
+                    EXIT_UNUSABLE, sec.status, list(anomalies) + [f"record_fetch_failed_http_{sec.status}"], args, profile, key_source, posture=posture
+                )
+            sections["record"] = sec
+            record = sec.body.get("record") if isinstance(sec.body.get("record"), dict) else sec.body
+            project_id = project_id or str(record.get("project_id") or "")
+            if not query:
+                query = derive_query(record)  # FR-2
+            if not anchor:
+                anchor = classified.normalized  # FR-2: the record itself anchors the graph signal
+
+        # Step 2 -- independent reads, in parallel.
+        tasks: Dict[str, Callable[[], Section]] = {}
+        include = lambda flag: not getattr(args, flag, False)  # noqa: E731
+
+        def add(name: str, fn: Callable[[], Tuple[int, Any]]) -> None:
+            tasks[name] = lambda: _timed(name, fn)
+
+        if mode in RECORD_MODES:
+            if include("no_components") and project_id:
+                add("components", lambda: _get(client, "coordination", "/components", {"project_id": project_id, "status": "active"}))
+            if include("no_governance"):
+                entity = (args.governance_entity or "").strip() or f"tracker.{record_type}"
+                add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": entity}))
+            if include("no_related_documents"):
+                rel_query = {"project_id": project_id, "related": record_id} if project_id else {"related": record_id}
+                add("related_documents", lambda: _get(client, "document_direct", "/search", rel_query))
+            if project_id:
+                add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
+        elif mode == "project":
+            if not project_id:
+                return _fail_digest(EXIT_UNUSABLE, 400, ["project_id_required"], args, profile, key_source)
+            add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
+            if include("no_related_documents"):
+                tasks["documents"] = lambda: fetch_project_documents(client, project_id)
+            if (args.governance_entity or "").strip() and include("no_governance"):
+                add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": args.governance_entity.strip()}))
+        elif mode == "document":
+            document_id = (args.document_id or "").strip()
+            if not document_id:
+                return _fail_digest(EXIT_UNUSABLE, 400, ["document_id_required"], args, profile, key_source)
+            add("document", lambda: _get(client, "document_direct", f"/{_quote(document_id)}", {"include_content": "true"}))
+        elif mode == "topic":
+            if not query and not project_id:
+                return _fail_digest(EXIT_UNUSABLE, 400, ["topic_requires_query_or_project_id"], args, profile, key_source)
+            if project_id:
+                add("project", lambda: _get(client, "coordination", f"/projects/{_quote(project_id)}"))
+            if include("no_related_documents"):
+                doc_query: Dict[str, Any] = {"title": query} if query else {}
+                if project_id:
+                    doc_query["project_id"] = project_id
+                add("documents", lambda: _get(client, "document_direct", "/search", doc_query))
+            if project_id and query:
+                tasks["reference"] = lambda: fetch_reference(client, project_id, query)
+            if (args.governance_entity or "").strip() and include("no_governance"):
+                add("governance", lambda: _get(client, "governance", "/dictionary", {"entity": args.governance_entity.strip()}))
+        else:
+            return _fail_digest(EXIT_UNUSABLE, 400, [f"unknown_mode:{mode}"], args, profile, key_source)
+
+        anchor_sent = bool(anchor) and mode != "document"
+        query_sent = bool(query)
+        run_hybrid = include("no_hybrid") and (query_sent or anchor_sent) and bool(project_id)
+        if run_hybrid:
+            hybrid_query: Dict[str, Any] = {
+                "search_type": "hybrid",
+                "project_id": project_id,
+                "query": query or None,
+                "anchor_record_id": anchor or None,
+                "top_n": top_n,
+                "record_type": (args.record_type or None),
+                "include_below_threshold": "true" if args.include_below_threshold else None,
+                "wave_id": (args.wave_id or None),
+            }
+            gs_health = _timed("graph_health", lambda: _get(client, "graph_query", "/health"))
+            hybrid_compact = bool(gs_health.ok and isinstance(gs_health.body, dict) and gs_health.body.get("hybrid_fields_compact") is True)
+            if hybrid_compact:
+                hybrid_query["fields"] = "compact"  # ENC-TSK-Q49 projection; hybrid.json keeps what the server returned
+            add("hybrid", lambda: _hybrid_get(client, hybrid_query, warnings))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
+            futures = {name: pool.submit(fn) for name, fn in tasks.items()}
+            results = {name: fut.result() for name, fut in futures.items()}
+
+        # Step 3 -- the hybrid verdict decides the exit code before anything lands.
+        if run_hybrid:
+            hyb = results.pop("hybrid")
+            if tls_failed(hyb.status):
+                return _fail_digest(elr_tls.EXIT_CODE_TLS_UNRESOLVED, hyb.status, ["tls_ca_bundle_missing"], args, profile, key_source, **ca_fields)
+            if hyb.status in (400, 404):
+                return _fail_digest(EXIT_HYBRID_UNSUPPORTED, hyb.status, [ANOMALY_HYBRID_UNSUPPORTED], args, profile, key_source)
+            if not hyb.ok:
+                posture, anomalies = classify_internal_posture(key_sent=True, status_code=hyb.status if isinstance(hyb.status, int) else 0)
+                return _fail_digest(
+                    EXIT_UNUSABLE, hyb.status, list(anomalies) + [f"hybrid_call_failed_http_{hyb.status}"], args, profile, key_source, posture=posture
+                )
+            try:
+                validate_hybrid_shape(hyb.body)
+            except ShapeDrift as drift:
+                return _fail_digest(
+                    EXIT_RESPONSE_SHAPE_DRIFT, hyb.status, [ANOMALY_SHAPE_DRIFT, f"{ANOMALY_SHAPE_DRIFT}:{drift.key}"], args, profile, key_source
+                )
+            hybrid_body = hyb.body
+            sections["hybrid"] = hyb
+            for key in unexpected_hybrid_keys(hybrid_body):
+                warnings.append(f"unexpected_hybrid_key:{key}")
+            if hybrid_body.get("success") is False:
+                return _fail_digest(EXIT_UNUSABLE, hyb.status, ["hybrid_reported_failure"], args, profile, key_source)
 
     # Step 4 -- land sections; failed reads become warnings, never an abort.
-    partial = False
+    partial = partial_from_route
     for name, sec in results.items():
         if not sec.ok:
             partial = True
@@ -640,10 +805,15 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
     if hybrid_body is not None:
         ids_file = context_store.write_ids_file(directory, run_id, ids).name  # relative to header.run_dir
 
-    present, absent = signal_posture(hybrid_body, query_sent, anchor_sent) if hybrid_body else ([], _no_hybrid_absent(query_sent, anchor_sent))
+    if route_signals is not None:
+        present, absent = route_signals
+    elif hybrid_body:
+        present, absent = signal_posture(hybrid_body, query_sent, anchor_sent)
+    else:
+        present, absent = [], _no_hybrid_absent(query_sent, anchor_sent)
     pathway = (hybrid_body or {}).get("pathway") or {}
     retrieval: Dict[str, Any] = {
-        "composer": COMPOSER_VERSION,
+        "composer": composer,
         "signals_present": present,
         "signals_absent": absent,
     }
@@ -653,7 +823,9 @@ def run_compact_context(args: Any, client: Any, *, profile: str, key_source: str
                 "graph_algorithm": hybrid_body.get("graph_algorithm"),
                 "rrf_k": hybrid_body.get("rrf_k") if hybrid_body.get("rrf_k") != DEFAULT_RRF_K else None,
                 "below_t3_included": True if hybrid_body.get("include_below_threshold") else None,
-                "weber_k": hybrid_body.get("corroboration_weber_k"),
+                "alpha": hybrid_body.get("corroboration_alpha"),
+                "s_top": hybrid_body.get("s_top"),
+                "weber_k": hybrid_body.get("corroboration_weber_k"),  # pre-ENC-TSK-Q46 planes only
                 "candidates": parse_summary_counts(hybrid_body.get("summary")),
                 "embedding_coverage_sample": _coverage_pair(hybrid_body.get("embedding_coverage_sample")),
                 "intent_signature": str(pathway.get("intent_signature") or "").replace("sha256:", "")[:INTENT_SIGNATURE_CHARS] or None,
@@ -907,6 +1079,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default=None, help="Context root (default ~/.enceladus/context; env ELR_CONTEXT_DIR).")
     parser.add_argument("--wave-id", default=None, help="Wave id forwarded to the intent signature.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-request timeout in seconds.")
+    parser.add_argument(
+        "--transport",
+        choices=[TRANSPORT_AUTO, TRANSPORT_ROUTE, TRANSPORT_COMPOSE],
+        default=TRANSPORT_AUTO,
+        help="auto: one GET to the context.compact route when /health advertises it, else client composition "
+        "(default); route: route only (exit 6 if unavailable); compose: always client composition.",
+    )
     parser.add_argument("--json", action="store_true", help="Accepted for CLI parity; output is always one compact JSON line.")
     return parser
 
