@@ -24,7 +24,9 @@ credential is *configured*, never its contents.
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional, Tuple
+import stat
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from . import profiles as elr_profiles
 
@@ -90,6 +92,72 @@ COMMON_INTERNAL_KEY_ENV_CHAIN = (
 # Auth header name, verbatim from server.py.
 INTERNAL_AUTH_HEADER = "X-Coordination-Internal-Key"
 
+# --- ELR-owned key file (ENC-TSK-Q35 / ENC-ISS-831) -----------------------
+# ELR's own durable credential source, resolved here in Python so every
+# entry point (the wrapper, a direct ``python3 elr_<sub>.py``, a subagent,
+# a Workflow script) finds the same key. It is consulted AFTER the env
+# chain above (an explicit env var still wins) and must be a regular file
+# readable by the owner only (mode 0600 or 0400): anything wider is
+# ignored with a warning, never used. ELR never reads ~/.claude.json or any
+# other MCP launcher config. io provisions the file with
+# tools/elr/elr_provision_key.py; agents never write it.
+ELR_KEY_FILE_ENV = "ENCELADUS_ELR_KEY_FILE"
+ELR_KEY_FILE_DEFAULT = "~/.enceladus/internal_key"
+
+# Exit code and anomaly for an auth-required read with no credential at all
+# (ENC-TSK-Q35 AC-4). Codes 1-6 are taken (see elr_lib/tls.py,
+# elr_list.py, elr_doc_patch.py).
+EXIT_CODE_NO_CREDENTIAL = 7
+NO_CREDENTIAL_STATUS = "no_credential"
+NO_CREDENTIAL_ANOMALY = "no_credential_configured"
+NO_CREDENTIAL_REMEDIATION = (
+    "no ELR credential: have io run `python3 tools/elr/elr_provision_key.py` "
+    "(writes ~/.enceladus/internal_key at 0600), or set ENCELADUS_INTERNAL_API_KEY; "
+    "ELR does not read ~/.claude.json (ENC-ISS-831)"
+)
+
+
+def elr_key_file_path() -> Path:
+    return Path(os.environ.get(ELR_KEY_FILE_ENV, "").strip() or ELR_KEY_FILE_DEFAULT).expanduser()
+
+
+def read_elr_key_file(path: Optional[Path] = None) -> Tuple[str, List[str]]:
+    """Return (key, warnings) from the ELR key file. The key is "" when the
+    file is absent, unreadable, empty, or not owner-only. Warnings name the
+    problem and never include the file's contents."""
+    target = path or elr_key_file_path()
+    try:
+        st = target.stat()
+    except FileNotFoundError:
+        return "", []
+    except OSError as exc:
+        return "", [f"elr_key_file_unreadable: {target} ({exc.__class__.__name__})"]
+    if not stat.S_ISREG(st.st_mode):
+        return "", [f"elr_key_file_not_regular: {target}"]
+    if st.st_mode & 0o077:
+        return "", [f"elr_key_file_mode_insecure: {target} is {oct(st.st_mode & 0o777)}, need 0600 -- ignored"]
+    try:
+        value = target.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return "", [f"elr_key_file_unreadable: {target} ({exc.__class__.__name__})"]
+    if not value:
+        return "", [f"elr_key_file_empty: {target}"]
+    return value, []
+
+
+def resolve_common_internal_key() -> Tuple[str, str]:
+    """(value, source) for the common internal key: the env chain first,
+    then the ELR key file. ``source`` is an env var NAME, "key_file", or
+    "none" -- never the value."""
+    for env_name in COMMON_INTERNAL_KEY_ENV_CHAIN:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value, env_name
+    value, _warnings = read_elr_key_file()
+    if value:
+        return value, "key_file"
+    return "", "none"
+
 DEFAULT_USER_AGENT_ENV = "ENCELADUS_HTTP_USER_AGENT"
 DEFAULT_USER_AGENT = "enceladus-elr-core/1.0"
 
@@ -147,11 +215,8 @@ class InternalProfileConfig:
             value = os.environ.get(dedicated_env, "").strip()
             if value:
                 return value
-        for env_name in COMMON_INTERNAL_KEY_ENV_CHAIN:
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                return value
-        return ""
+        value, _source = resolve_common_internal_key()
+        return value
 
     def base_url(self, api: str) -> str:
         try:

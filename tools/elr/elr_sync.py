@@ -190,6 +190,12 @@ def collect_runtime_files(elr_root: Path) -> List[Path]:
     if readme.is_file():
         candidates.append(readme)
 
+    # ENC-TSK-Q35 (ENC-ISS-831): the launcher is a versioned, hash-verified
+    # artifact, not a hand-installed script that scrapes a key.
+    launcher = elr_root / LAUNCHER_NAME
+    if launcher.is_file():
+        candidates.append(launcher)
+
     for path in candidates:
         if is_forbidden_path(path.name):
             raise AssertionError(
@@ -210,7 +216,7 @@ def _matches_runtime_pattern(repo_relative_path: str) -> bool:
         return False
     rel = repo_relative_path[len(prefix):]
     if "/" not in rel:
-        if rel in ("README.md", "elr_contracts.json"):
+        if rel in ("README.md", "elr_contracts.json", LAUNCHER_NAME):
             return True
         return rel.startswith("elr_") and rel.endswith(".py")
     parts = rel.split("/")
@@ -468,6 +474,55 @@ def _refusal_digest(operation: str, status: int, reason: str, violations: List[D
     )
 
 
+# ENC-TSK-Q35 (ENC-ISS-831): the managed launcher, the interpreter pin it
+# reads, and the marker that identifies the legacy hand-installed launcher
+# (which scraped the internal key out of ~/.claude.json) so it, and only it,
+# may be replaced by a link to the managed one.
+LAUNCHER_NAME = "elr"
+INTERPRETER_PIN_NAME = ".elr-python"
+LEGACY_LAUNCHER_MARKER = "ELR convenience wrapper"
+
+
+def _install_launcher(dest_path: Path) -> Dict[str, Any]:
+    """Pin this interpreter for the launcher and point <dest>/../elr at
+    <dest>/elr. An existing <dest>/../elr is replaced only when it is a
+    symlink or the legacy key-scraping launcher; any other file is left
+    alone and reported. Best-effort: never fails the pull."""
+    result: Dict[str, Any] = {"anomalies": []}
+    launcher = dest_path / LAUNCHER_NAME
+    if not launcher.is_file():
+        result["anomalies"].append("launcher_missing_from_install")
+        return result
+    try:
+        (dest_path / INTERPRETER_PIN_NAME).write_text(sys.executable + "\n", encoding="utf-8")
+        result["interpreter"] = sys.executable
+    except OSError as exc:
+        result["anomalies"].append(f"interpreter_pin_failed: {exc.__class__.__name__}")
+
+    link = dest_path.parent / LAUNCHER_NAME
+    result["path"] = str(link)
+    try:
+        replaced_legacy = False
+        if link.is_symlink():
+            link.unlink()
+        elif link.exists():
+            try:
+                legacy = LEGACY_LAUNCHER_MARKER in link.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                legacy = False
+            if not legacy:
+                result["anomalies"].append(f"launcher_link_skipped_unmanaged_file: {link}")
+                return result
+            link.unlink()
+            replaced_legacy = True
+        link.symlink_to(launcher)
+        result["target"] = str(launcher)
+        result["replaced_legacy"] = replaced_legacy
+    except OSError as exc:
+        result["anomalies"].append(f"launcher_link_failed: {exc.__class__.__name__}")
+    return result
+
+
 def _remove_stale_prefix_map() -> List[str]:
     """Best-effort unlink of the dead ENC-TSK-P90 prefix-map cache
     (ENC-TSK-Q10 AC-9). Resolves Path.home() at call time. Returns the
@@ -621,6 +676,8 @@ def pull_manifest_at_ref(ref: str, source_spec: str, dest: str, *, timeout: int 
             out_path = staging_dir / _elr_relative_path(rel_path)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(content)
+            if _elr_relative_path(rel_path) == LAUNCHER_NAME:
+                os.chmod(out_path, 0o755)
             files_verified += 1
 
         if mismatched:
@@ -658,18 +715,20 @@ def pull_manifest_at_ref(ref: str, source_spec: str, dest: str, *, timeout: int 
         # copy is removed on upgrade. Success path ONLY -- every refusal
         # above returns before this point and leaves local state alone.
         removed_paths = _remove_stale_prefix_map()
+        wrapper = _install_launcher(dest_path)
 
         return build_digest(
             operation,
             True,
             200,
-            anomalies=completeness_anomalies,
+            anomalies=completeness_anomalies + wrapper.pop("anomalies", []),
             files_verified=files_verified,
             files_failed=0,
             dest=str(dest_path),
             source_ref=ref,
             manifest_version=manifest.get("manifest_version"),
             removed_paths=removed_paths,
+            wrapper=wrapper,
         )
     finally:
         if staging_dir.exists():
