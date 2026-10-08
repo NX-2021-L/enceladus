@@ -8181,7 +8181,100 @@ register_execute_actions(_EXECUTE_ACTIONS)
 
 _search = search
 _coordination_meta = coordination_meta
-_get_compact_context_meta = get_compact_context_meta
+_get_compact_context_local = get_compact_context_meta
+
+# ENC-TSK-Q47 (ENC-FTR-147 / BRD FR-13): get_compact_context is a thin client of
+# the context.compact server route (coordination_api, GET
+# /api/v1/coordination/context/compact) when the plane advertises
+# /api/v1/health tracker_capabilities.compact_context. Any route failure falls
+# back to composing locally, so the legacy response shape is always served.
+#   ENCELADUS_COMPACT_CONTEXT_ROUTE = auto (default) | off
+COMPACT_CONTEXT_ROUTE_MODE = os.environ.get("ENCELADUS_COMPACT_CONTEXT_ROUTE", "auto").strip().lower()
+COMPACT_CONTEXT_ROUTE_DISABLED = False  # coordination_api sets True on the module it hosts
+_COMPACT_CONTEXT_PROBE: Dict[str, Any] = {"value": None, "at": 0.0}
+_COMPACT_CONTEXT_PROBE_NEG_TTL_S = 60.0
+
+
+def _compact_context_route_available() -> bool:
+    """Per-process cached probe of tracker_capabilities.compact_context."""
+    if COMPACT_CONTEXT_ROUTE_DISABLED or COMPACT_CONTEXT_ROUTE_MODE in ("off", "0", "false", "local"):
+        return False
+    cached = _COMPACT_CONTEXT_PROBE["value"]
+    if cached is True:
+        return True
+    if cached is False and (time.monotonic() - _COMPACT_CONTEXT_PROBE["at"]) < _COMPACT_CONTEXT_PROBE_NEG_TTL_S:
+        return False
+    try:
+        health = _health_api_request()
+        caps = health.get("tracker_capabilities") if isinstance(health, dict) else None
+        available = bool(isinstance(caps, dict) and caps.get("compact_context") is True)
+    except Exception:
+        available = False
+    _COMPACT_CONTEXT_PROBE["value"] = available
+    _COMPACT_CONTEXT_PROBE["at"] = time.monotonic()
+    return available
+
+
+_COMPACT_CONTEXT_ROUTE_PARAMS = (
+    "mode", "record_id", "project_id", "document_id", "query", "anchor_record_id",
+    "record_type", "governance_entity", "domain", "keyword", "title", "related", "section",
+    "top_n", "max_tokens", "history_limit", "page_size", "context_lines", "max_results",
+    "max_excerpt_tokens", "include_components", "include_architecture",
+    "include_recent_history", "include_code_map", "include_related_documents",
+    "include_governance", "include_below_threshold", "include_hybrid_retrieval",
+)
+
+
+def _compact_context_route_query(args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """get_compact_context args -> route query params; None if not expressible."""
+    allowed = set(_COMPACT_CONTEXT_ROUTE_PARAMS) | {"domains"}
+    if any(k not in allowed for k in args):
+        return None  # unknown/extra arg: compose locally to keep exact semantics
+    query: Dict[str, Any] = {"fields": "full"}
+    for key in _COMPACT_CONTEXT_ROUTE_PARAMS:
+        value = args.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        query[key] = value
+    domains = args.get("domains")
+    if domains:
+        if not isinstance(domains, (list, tuple)):
+            return None
+        query["domains"] = ",".join(str(d) for d in domains)
+    return query
+
+
+async def _get_compact_context_routed(args: dict) -> list:
+    query = _compact_context_route_query(args) if _compact_context_route_available() else None
+    if query is not None:
+        try:
+            resp = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _coordination_api_request("GET", "/context/compact", query=query)
+            )
+        except Exception:
+            resp = None
+        if (
+            isinstance(resp, dict)
+            and resp.get("success") is True
+            and isinstance(resp.get("sections"), dict)
+        ):
+            from mcp_server.meta_support import meta_tool_success
+
+            return meta_tool_success(
+                "get_compact_context",
+                mode=str(resp.get("header", {}).get("mode") or args.get("mode") or ""),
+                result=resp["sections"],
+                underlying_calls=resp.get("underlying_calls") or [],
+                warnings=resp.get("warnings") or [],
+                metadata=resp.get("metadata") or {},
+                partial=bool(resp.get("header", {}).get("partial")),
+            )
+    return await _get_compact_context_local(args)
+
+
+_get_compact_context_meta = _get_compact_context_routed
 _execute = execute
 
 
