@@ -448,6 +448,11 @@ async def get_compact_context_meta(args: dict) -> list[TextContent]:
                 top_n=args.get("top_n"),
                 include_below_threshold=bool(args.get("include_below_threshold", False)),
             )
+            # ENC-TSK-Q47: out-param for the context.compact route digest (private
+            # arg; never alters the returned payload).
+            _capture = args.get("_hybrid_capture")
+            if isinstance(_capture, dict) and isinstance(hybrid_resp, dict):
+                _capture.update(hybrid_resp)
             underlying_calls.append({
                 "tool": "graph_query_api.hybrid",
                 "status": "success" if hybrid_resp.get("success") else "error",

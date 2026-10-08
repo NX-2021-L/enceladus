@@ -21,6 +21,8 @@ def _run(coro):
 
 def _load_server(**env):
     module_name = f"enceladus_server_code_mode_{uuid.uuid4().hex}"
+    # ENC-TSK-Q47: keep these tests hermetic (no health probe / route call).
+    env = {"ENCELADUS_COMPACT_CONTEXT_ROUTE": "off", **env}
     with patch.dict(os.environ, env, clear=False):
         spec = importlib.util.spec_from_file_location(module_name, MODULE_PATH)
         module = importlib.util.module_from_spec(spec)

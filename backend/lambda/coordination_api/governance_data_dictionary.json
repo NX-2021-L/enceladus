@@ -2561,11 +2561,11 @@
       }
     },
     "mcp_server.context_assembly": {
-      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support.",
+      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support. Consumers (ENC-TSK-Q47): coordination_api context.compact route (GET /api/v1/coordination/context/compact), MCP get_compact_context (route client with local fallback), ELR compact_context.",
       "fields": {
         "get_compact_context": {
           "type": "tool",
-          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope. ENC-TSK-B92: extended with optional three-signal hybrid retrieval — when `query` and/or `anchor_record_id` is supplied, the response includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion (k=60) over vector (HNSW cosine via graph_query_api), graph (Personalized PageRank via GDS or Cypher fallback), and keyword (title/intent/description contains) signals. Backward-compat: callers not passing `query`/`anchor_record_id` receive the legacy context shape unchanged.",
+          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope. ENC-TSK-B92: extended with optional three-signal hybrid retrieval — when `query` and/or `anchor_record_id` is supplied, the response includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion (k=60) over vector (HNSW cosine via graph_query_api), graph (Personalized PageRank via GDS or Cypher fallback), and keyword (title/intent/description contains) signals. Backward-compat: callers not passing `query`/`anchor_record_id` receive the legacy context shape unchanged. ENC-TSK-Q47 (ENC-FTR-147, BRD DOC-412AB7081565 Phase 2): the composer is now served by ONE server route, GET /api/v1/coordination/context/compact (coordination_api _handle_context_compact), which loads this same composer via _load_mcp_server_module and returns the elr.compact_context_digest projection (ranking rows copied verbatim from hybrid_retrieval.nodes) plus a `sections` map when fields=full. Consumers: MCP get_compact_context (re-pointed at the route when /api/v1/health tracker_capabilities.compact_context is true, with automatic local-compose fallback and legacy response shape preserved), ELR compact_context, and the v5 Approval Cockpit.",
           "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged. Hybrid retrieval opt-in: pass `query` (text) or `anchor_record_id` (graph anchor) to enable. Auto-anchors to `record_id` for record modes when `anchor_record_id` is not supplied. Use `top_n` (default 20, max 50), `record_type` filter (task/issue/feature/plan/lesson/document), and `include_below_threshold` (default false) to tune results. Set `include_hybrid_retrieval=false` to force-disable even when query/anchor supplied. ENC-TSK-Q43 (ENC-ISS-837): in record-oriented modes (record|issue|task|feature|lesson) when the caller supplies no `query`, the server derives query := normalize(record title + intent)[:300] (whitespace collapsed; title alone if no intent; no query if neither) from the fetched record so vector, keyword and graph signals all fire, with anchor_record_id still the record_id. A caller-supplied `query` passes through unchanged. The hybrid_retrieval section reports `query_source` (derived_from_record|caller|none) and `query_head` (first 80 chars of the query used)."
         },
         "get_issue_context": {
@@ -6100,7 +6100,7 @@
       }
     },
     "retrieval.hybrid_pipeline": {
-      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context.",
+      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match — fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context. Consumers (ENC-TSK-Q47): MCP get_compact_context, coordination_api context.compact route (GET /api/v1/coordination/context/compact), ELR compact_context (reads the route digest ranking, which is nodes order verbatim).",
       "fields": {
         "rrf_k": {
           "type": "integer",
@@ -9164,6 +9164,43 @@
           "ENC-TSK-P82"
         ],
         "reference_doc": "DOC-8F6CF7700EAD"
+      }
+    },
+    "elr.compact_context_digest": {
+      "description": "ENC-TSK-Q47 (ENC-FTR-147, BRD DOC-412AB7081565 section 7.3): compact digest returned by GET /api/v1/coordination/context/compact (coordination_api _handle_context_compact). Produced by the same composer as MCP get_compact_context; the digest is a projection, never a recomputation: ranking rows are copied from hybrid_retrieval.nodes[*] (_final_rank, _fused_rank, _fused_score, _final_score, _per_signal_ranks, _corroboration_count, _b_corr, _below_t3) in the composer's order. Query params: the get_compact_context argument set (mode, record_id, project_id, document_id, query, anchor_record_id, record_type, top_n, max_tokens, include_* flags, domains as comma list, ...) plus fields=digest (default) | full. fields=full adds `sections` (composer context map verbatim), `underlying_calls` and `metadata` so thin clients can rebuild the legacy MCP response. Capability: /api/v1/health tracker_capabilities.compact_context=true. Errors: 400 VALIDATION_ERROR (bad mode/fields/integer/boolean), 403 on boundary_denied, 502 UPSTREAM_ERROR on composer failure.",
+      "fields": {
+        "header": {
+          "type": "object",
+          "definition": "run_id (12 hex), mode, anchor (anchor_record_id|record_id|document_id), query_head (<=120 chars), governance_hash, partial (composer warnings present), truncated (always false server-side), wall_ms (composer wall time in the route), server_duration_ms (graph_query_api hybrid duration_ms)."
+        },
+        "retrieval": {
+          "type": "object",
+          "definition": "rrf_k (60), fsrs_t3_threshold (0.7), include_below_threshold, weber_k (graph_query_api corroboration_weber_k), graph_algorithm, signals_present[], signals_absent{signal: reason}, candidates{vector, graph, keyword} (parsed from the hybrid summary), embedding_coverage_sample{covered, total_ranked}, intent_signature, wave_id, pathway_edge_count, query_source (caller | derived_from_record | none). Empty object when no hybrid retrieval ran."
+        },
+        "ranking": {
+          "type": "array",
+          "definition": "One array row per returned node in hybrid_retrieval.nodes order (final_rank order, NOT re-sorted): [record_id (<=16), record_type, final_rank, fused_rank, fused_score (6 dp), final_score (6 dp), {v: rank, g: rank, k: rank}, k_corr, b_corr (3 dp), below_t3, title (<=64 chars)]. Rows are arrays so field names are paid once in this schema, not top_n times per digest (BRD M-3: <=192 bytes per row)."
+        },
+        "sections_summary": {
+          "type": "object",
+          "definition": "Map of composer section name (record_context, project, code_map, related_documents, governance, documents, reference, architecture, hybrid_retrieval, ...) to {bytes, sha256} of the section's compact JSON. Names are the composer's own keys; clients alias them (record_context -> record, hybrid_retrieval -> hybrid)."
+        },
+        "sections": {
+          "type": "object",
+          "definition": "Present only when fields=full: the composer context map verbatim (section bodies)."
+        },
+        "warnings": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Composer warnings (best-effort section failures, hybrid retrieval unavailable)."
+        }
+      },
+      "governing_records": {
+        "tasks": [
+          "ENC-TSK-Q47",
+          "ENC-TSK-Q48"
+        ],
+        "reference_doc": "DOC-412AB7081565"
       }
     },
     "document.history": {
