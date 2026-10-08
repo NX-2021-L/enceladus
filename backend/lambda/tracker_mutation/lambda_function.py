@@ -6691,9 +6691,17 @@ def _handle_log(
     observation_only = body.get("observation_only")
     if observation_only is not None and not isinstance(observation_only, bool):
         return _error(400, "Field 'observation_only' must be a boolean.")
-    description = body.get("description", "").strip()
-    if not description and not observation_only:
-        return _error(400, "Field 'description' is required.")
+    if observation_only:
+        # Nothing is appended, so description is optional and a null one reads
+        # as absent (it must not reach .strip()). Any other non-string is
+        # refused, never coerced. The else branch is the pre-flag code verbatim.
+        description = body.get("description")
+        if description is not None and not isinstance(description, str):
+            return _error(400, "Field 'description' must be a string.")
+    else:
+        description = body.get("description", "").strip()
+        if not description:
+            return _error(400, "Field 'description' is required.")
     _normalize_write_source(body)
 
     # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate — agent-origin worklog

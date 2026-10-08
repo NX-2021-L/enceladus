@@ -10,14 +10,17 @@ observation_count, and nothing else.
 Covers:
   * The DEFAULT path (flag absent, or explicitly false) is pinned: the exact
     update_item kwargs and the exact response body are asserted against
-    literals, so any change to the default path fails here.
+    literals, so any change to the default path fails here. So is its
+    validation: false or null with no description is the same literal 400,
+    with no write.
   * The default path still bumps updated_at / sync_version / history /
     version_seq on the persisted record.
   * Two observation_only calls leave updated_at unchanged while
     observation_count goes 1 -> 2, and change nothing on the item except the
     two observation attributes -- so content_hash is unchanged too.
   * The gates in front of the write (existence, task checkout ownership)
-    still apply; a non-boolean flag is refused; GET exposes both fields.
+    still apply; a non-boolean flag is refused; a null description is read as
+    absent and a non-string one refused; GET exposes both fields.
 
 Run: python3 -m pytest test_worklog_observation_only_dvp765.py -q
 """
@@ -249,6 +252,37 @@ class DefaultPathPinTests(ObservationBase):
         self.assertEqual(resp["statusCode"], 400)
         self.assertIn("description", _payload(resp)["error"])
 
+    #: The literal 400 the default path returned BEFORE DVP-TSK-765 for a
+    #: missing or blank description.
+    EXPECTED_DESCRIPTION_REQUIRED = {
+        "success": False,
+        "error": "Field 'description' is required.",
+        "error_envelope": {
+            "code": "INVALID_INPUT",
+            "message": "Field 'description' is required.",
+            "retryable": False,
+            "details": {},
+        },
+    }
+
+    def test_false_and_null_keep_the_description_guard_and_write_nothing(self):
+        """The validation half of the pin. false and null are the default path,
+        so a missing or blank description is the same 400 as with the flag
+        absent, and nothing is written -- no history entry, no observation."""
+        self.put_issue()
+        before = self.get_item()
+        captured = self.capture_record_update()
+        for flag in ({}, {"observation_only": False}, {"observation_only": None}):
+            for description in ({}, {"description": ""}, {"description": "   "}):
+                with self.subTest(flag=flag, description=description):
+                    resp = tm._handle_log(
+                        "enceladus", "issue", ISSUE, _body(**flag, **description),
+                    )
+                    self.assertEqual(resp["statusCode"], 400)
+                    self.assertEqual(_payload(resp), self.EXPECTED_DESCRIPTION_REQUIRED)
+        self.assertEqual(captured, [])
+        self.assertEqual(self.get_item(), before)
+
 
 # ---------------------------------------------------------------------------
 # observation_only: true
@@ -345,6 +379,44 @@ class ObservationOnlyTests(ObservationBase):
         item = self.get_item()
         self.assertEqual(len(item["history"]["L"]), 1)
         self.assertEqual(item["last_update_note"]["S"], "the last real change")
+
+    def test_a_null_description_reads_as_absent(self):
+        """{observation_only: true, description: null} must not reach .strip()."""
+        self.put_issue()
+        resp = self._observe(NOW, description=None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertEqual(_payload(resp)["observation_count"], 1)
+        item = self.get_item()
+        self.assertEqual(len(item["history"]["L"]), 1)
+        self.assertEqual(item["updated_at"]["S"], PRIOR_UPDATED_AT)
+
+    def test_a_null_description_through_lambda_handler_is_a_recorded_observation(self):
+        """End to end: the request body is parsed and dispatched, and the null
+        description is an observation, not an unhandled Lambda error."""
+        self.put_issue()
+        path = f"/api/v1/tracker/enceladus/issue/{ISSUE}/log"
+        event = {
+            "requestContext": {"http": {"method": "POST", "path": path}},
+            "headers": {"host": "example.com"},
+            "rawPath": path,
+            "body": json.dumps(_body(observation_only=True, description=None)),
+        }
+        with mock.patch.object(tm, "_authenticate", return_value=({"internal_service": True}, None)), \
+                mock.patch.object(tm, "_validate_project_exists", return_value=None), \
+                mock.patch.object(tm, "_now_z", return_value=NOW):
+            resp = tm.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertEqual(_payload(resp)["last_observed_at"], NOW)
+        self.assertEqual(self.get_item()["observation_count"], {"N": "1"})
+
+    def test_a_non_string_description_is_refused_without_a_write(self):
+        self.put_issue()
+        before = self.get_item()
+        for value in (7, {}, ["seen"], True):
+            resp = self._observe(NOW, description=value)
+            self.assertEqual(resp["statusCode"], 400, value)
+            self.assertIn("description", _payload(resp)["error"])
+        self.assertEqual(self.get_item(), before)
 
     def test_a_non_boolean_flag_is_refused_without_a_write(self):
         self.put_issue()
