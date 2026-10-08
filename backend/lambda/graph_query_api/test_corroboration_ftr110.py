@@ -1,11 +1,11 @@
 """ENC-FTR-110 Phase 1 (ENC-TSK-I92) tests: dispersion/corroboration
-Weber-law bonus term.
+Weber-law bonus term (ENC-TSK-Q46: call-relative alpha * S_top form).
 
 Exercises:
   - corroboration.py pure math: cosine similarity/distance, the dispersion-
     constrained corroborator count (AC-2: near-duplicates must not count as
     corroborating each other), the Weber-Fechner B_corr formula (monotonic,
-    diminishing-returns, call-relative normalization), and the Weber_k
+    diminishing-returns, call-relative, bounded by alpha * S_top), and the alpha
     AppConfig -> env var -> default resolution order (mirrors
     test_energy_function_ftr104.TestLambdaWeightResolution).
   - Wiring into lambda_function._query_hybrid: per_node_fusion/nodes gain
@@ -159,102 +159,159 @@ class TestComputeCorroborationCounts(unittest.TestCase):
         self.assertEqual(cb.compute_corroboration_counts({}), {})
 
 
-class TestWeberBonusFormula(unittest.TestCase):
-    """B_corr(x) = Weber_k * ln(1 + k_corr) / ln(1 + k_max)."""
+class TestCorroborationBonusFormula(unittest.TestCase):
+    """B_corr(x) = alpha * S_top * ln(1 + k_corr) / ln(1 + k_max)
+    (ENC-TSK-Q46 / ENC-ISS-836 call-relative form)."""
 
-    def test_best_corroborated_candidate_gets_full_weber_k(self):
-        self.assertAlmostEqual(cb.weber_bonus(5, 5, weber_k=0.3), 0.3)
-        self.assertAlmostEqual(cb.weber_bonus(1, 1, weber_k=0.3), 0.3)
+    S_TOP = 0.0164
+    ALPHA = 0.02
+
+    def _b(self, k, k_max, s_top=None, alpha=None):
+        return cb.corroboration_bonus(
+            k, k_max, self.S_TOP if s_top is None else s_top,
+            self.ALPHA if alpha is None else alpha,
+        )
+
+    def test_best_corroborated_candidate_gets_full_alpha_s_top(self):
+        self.assertAlmostEqual(self._b(5, 5), self.ALPHA * self.S_TOP)
+        self.assertAlmostEqual(self._b(1, 1), self.ALPHA * self.S_TOP)
 
     def test_zero_corroboration_is_zero_bonus(self):
-        self.assertEqual(cb.weber_bonus(0, 5, weber_k=0.3), 0.0)
+        self.assertEqual(self._b(0, 5), 0.0)
 
-    def test_zero_k_max_never_divides_by_zero(self):
-        self.assertEqual(cb.weber_bonus(0, 0, weber_k=0.3), 0.0)
+    def test_zero_k_max_is_zero_bonus_for_everyone(self):
+        self.assertEqual(self._b(0, 0), 0.0)
+        self.assertEqual(self._b(3, 0), 0.0)
+        bonuses = cb.compute_bonuses({"A": 0, "B": 0}, s_top=self.S_TOP, alpha=self.ALPHA)
+        self.assertTrue(all(e["b_corr"] == 0.0 for e in bonuses.values()))
+
+    def test_non_positive_s_top_is_zero_bonus(self):
+        self.assertEqual(self._b(2, 2, s_top=0.0), 0.0)
+        self.assertEqual(self._b(2, 2, s_top=-1.0), 0.0)
 
     def test_monotonic_in_k_corr(self):
-        # Holding k_max fixed, more corroboration never produces a lower bonus.
         prev = -1.0
         for k in range(0, 11):
-            bonus = cb.weber_bonus(k, 10, weber_k=0.3)
+            bonus = self._b(k, 10)
             self.assertGreaterEqual(bonus, prev)
             prev = bonus
 
     def test_diminishing_returns_shape(self):
         """Weber-Fechner: 0->1 corroborator matters more than 5->6."""
         k_max = 20
-        delta_0_to_1 = cb.weber_bonus(1, k_max, 0.3) - cb.weber_bonus(0, k_max, 0.3)
-        delta_5_to_6 = cb.weber_bonus(6, k_max, 0.3) - cb.weber_bonus(5, k_max, 0.3)
-        self.assertGreater(delta_0_to_1, delta_5_to_6)
+        self.assertGreater(
+            self._b(1, k_max) - self._b(0, k_max),
+            self._b(6, k_max) - self._b(5, k_max),
+        )
 
     def test_worked_example(self):
-        # k_corr=2, k_max=2 (B is the best-corroborated candidate in its
-        # call) -> full Weber_k bonus, matching the AC-4 integration scenario.
-        self.assertAlmostEqual(cb.weber_bonus(2, 2, weber_k=0.3), 0.3)
-        # k_corr=1, k_max=2 -> partial, diminished bonus.
-        partial = cb.weber_bonus(1, 2, weber_k=0.3)
-        self.assertAlmostEqual(partial, 0.3 * math.log(2) / math.log(3))
-        self.assertLess(partial, 0.3)
+        self.assertAlmostEqual(self._b(2, 2), self.ALPHA * self.S_TOP)
+        partial = self._b(1, 2)
+        self.assertAlmostEqual(partial, self.ALPHA * self.S_TOP * math.log(2) / math.log(3))
+        self.assertLess(partial, self.ALPHA * self.S_TOP)
         self.assertGreater(partial, 0.0)
+
+    def test_scales_linearly_with_s_top(self):
+        """Dimensionless: doubling every RRF magnitude doubles the bonus."""
+        self.assertAlmostEqual(self._b(1, 3, s_top=0.2), 2 * self._b(1, 3, s_top=0.1))
+
+
+class TestBoundProperty(unittest.TestCase):
+    """ENC-TSK-Q46 AC-1/AC-3: for randomized fused-score vectors and k
+    distributions, max B_corr <= alpha * S_top, and no candidate with k >= 1
+    overtakes one whose fused_score exceeds its own by more than alpha * S_top."""
+
+    def test_randomized_bound_and_no_overtake(self):
+        import random
+        rng = random.Random(836)
+        for trial in range(500):
+            n = rng.randint(1, 30)
+            alpha = rng.choice([0.0, 0.005, 0.02, 0.05, 0.2])
+            scores = [rng.uniform(0.0005, 0.0656) for _ in range(n)]
+            counts = {f"R{i}": rng.choice([0, 0, 1, 2, 3, 7, 25]) for i in range(n)}
+            fused = {f"R{i}": scores[i] for i in range(n)}
+            s_top = max(fused.values())
+            bonuses = cb.compute_bonuses(counts, s_top=s_top, alpha=alpha)
+            bound = alpha * s_top
+            for rid, entry in bonuses.items():
+                self.assertGreaterEqual(entry["b_corr"], 0.0)
+                self.assertLessEqual(entry["b_corr"], bound + 1e-15)
+                self.assertEqual(entry["alpha"], alpha)
+                self.assertEqual(entry["s_top"], s_top)
+            final = {rid: fused[rid] + bonuses[rid]["b_corr"] for rid in fused}
+            for x in fused:
+                for y in fused:
+                    if counts[x] >= 1 and fused[y] - fused[x] > bound:
+                        self.assertLess(final[x], final[y])
+
+    def test_old_absolute_weber_constant_would_violate_bound(self):
+        """Regression guard for ENC-ISS-836: 0.3 >> 0.02 * 0.0656."""
+        self.assertLess(cb.DEFAULT_ALPHA * 0.0656, 0.3)
 
 
 class TestComputeBonuses(unittest.TestCase):
     def test_shape_and_k_max_resolution(self):
         counts = {"A": 0, "B": 2, "C1": 1, "C2": 1}
-        bonuses = cb.compute_bonuses(counts, weber_k=0.3)
+        bonuses = cb.compute_bonuses(counts, s_top=0.5, alpha=0.02)
         self.assertEqual(set(bonuses.keys()), set(counts.keys()))
         for rid, entry in bonuses.items():
             self.assertEqual(entry["schema"], cb.CORROBORATION_SCHEMA)
             self.assertEqual(entry["k_max"], 2)
             self.assertEqual(entry["k_corr"], counts[rid])
-            self.assertEqual(entry["weber_k"], 0.3)
+            self.assertEqual(entry["alpha"], 0.02)
+            self.assertEqual(entry["s_top"], 0.5)
         self.assertAlmostEqual(bonuses["A"]["b_corr"], 0.0)
-        self.assertAlmostEqual(bonuses["B"]["b_corr"], 0.3)
+        self.assertAlmostEqual(bonuses["B"]["b_corr"], 0.02 * 0.5)
 
     def test_empty_counts(self):
-        self.assertEqual(cb.compute_bonuses({}, weber_k=0.3), {})
+        self.assertEqual(cb.compute_bonuses({}, s_top=0.0, alpha=0.02), {})
 
-    def test_defaults_weber_k_when_omitted(self):
-        with mock.patch.object(cb, "load_weber_k", return_value=0.42):
-            bonuses = cb.compute_bonuses({"A": 1})
-        self.assertEqual(bonuses["A"]["weber_k"], 0.42)
+    def test_defaults_alpha_when_omitted(self):
+        with mock.patch.object(cb, "load_alpha", return_value=0.04):
+            bonuses = cb.compute_bonuses({"A": 1}, s_top=0.1)
+        self.assertEqual(bonuses["A"]["alpha"], 0.04)
 
 
-class TestWeberKResolution(unittest.TestCase):
-    """Mirrors test_energy_function_ftr104.TestLambdaWeightResolution for
-    Weber_k's AppConfig -> env var -> default resolution order."""
+class TestAlphaResolution(unittest.TestCase):
+    """AppConfig -> env var -> default resolution order for alpha, plus the
+    [0, MAX_ALPHA] clamp (mirrors test_energy_function_ftr104)."""
+
+    def test_default_is_point_zero_two(self):
+        self.assertEqual(cb.DEFAULT_ALPHA, 0.02)
 
     def test_defaults_when_unconfigured(self):
+        import os
         with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={}):
-            with mock.patch.dict("os.environ", {}, clear=False):
-                import os
-                os.environ.pop("CORROBORATION_WEBER_K", None)
-                weber_k = cb.load_weber_k()
-        self.assertEqual(weber_k, cb.DEFAULT_WEBER_K)
+            with mock.patch.dict("os.environ", {}):
+                os.environ.pop("CORROBORATION_ALPHA", None)
+                alpha = cb.load_alpha()
+        self.assertEqual(alpha, cb.DEFAULT_ALPHA)
 
     def test_env_var_overrides_default(self):
         with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={}):
-            with mock.patch.dict("os.environ", {"CORROBORATION_WEBER_K": "0.5"}):
-                weber_k = cb.load_weber_k()
-        self.assertEqual(weber_k, 0.5)
+            with mock.patch.dict("os.environ", {"CORROBORATION_ALPHA": "0.05"}):
+                alpha = cb.load_alpha()
+        self.assertEqual(alpha, 0.05)
 
     def test_appconfig_overrides_env_var(self):
-        with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={"weber_k": 0.77}):
-            with mock.patch.dict("os.environ", {"CORROBORATION_WEBER_K": "0.5"}):
-                weber_k = cb.load_weber_k()
-        self.assertEqual(weber_k, 0.77)
+        with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={"corroboration_alpha": 0.1}):
+            with mock.patch.dict("os.environ", {"CORROBORATION_ALPHA": "0.05"}):
+                alpha = cb.load_alpha()
+        self.assertEqual(alpha, 0.1)
 
-    def test_malformed_env_var_falls_back_to_default(self):
-        with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={}):
-            with mock.patch.dict("os.environ", {"CORROBORATION_WEBER_K": "not-a-number"}):
-                weber_k = cb.load_weber_k()
-        self.assertEqual(weber_k, cb.DEFAULT_WEBER_K)
+    def test_appconfig_value_above_max_is_clamped(self):
+        with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={"corroboration_alpha": 3.0}):
+            self.assertEqual(cb.load_alpha(), cb.MAX_ALPHA)
 
-    def test_negative_weight_falls_back_to_default(self):
+    def test_negative_value_is_clamped_to_zero(self):
+        with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={"corroboration_alpha": -0.5}):
+            self.assertEqual(cb.load_alpha(), 0.0)
+
+    def test_malformed_value_falls_back_to_default(self):
         with mock.patch.object(cb, "_appconfig_corroboration_config", return_value={}):
-            with mock.patch.dict("os.environ", {"CORROBORATION_WEBER_K": "-1.0"}):
-                weber_k = cb.load_weber_k()
-        self.assertEqual(weber_k, cb.DEFAULT_WEBER_K)
+            for bad in ("not-a-number", "nan", "inf"):
+                with mock.patch.dict("os.environ", {"CORROBORATION_ALPHA": bad}):
+                    self.assertEqual(cb.load_alpha(), cb.DEFAULT_ALPHA)
 
     def test_appconfig_extension_unreachable_degrades_to_empty(self):
         """No localhost:2772 extension in a unit test -- must never raise."""
@@ -295,7 +352,7 @@ class TestHybridCorroborationWiring(unittest.TestCase):
     """
 
     def setUp(self):
-        self.weber_k = 0.3
+        self.alpha = 0.02
         patchers = [
             mock.patch.object(lf, "_ensure_live_driver", side_effect=lambda d: d),
             mock.patch.object(lf, "_compute_query_embedding", return_value=[0.1, 0.2, 0.3]),
@@ -319,7 +376,7 @@ class TestHybridCorroborationWiring(unittest.TestCase):
                 },
             ),
             mock.patch.object(lf, "_reconstruct_pathway_edges", return_value=([], [], [])),
-            mock.patch.object(cb, "load_weber_k", return_value=self.weber_k),
+            mock.patch.object(cb, "load_alpha", return_value=self.alpha),
         ]
         self._emit_patch = mock.patch.object(lf, "_emit_pathway_telemetry")
         self.mock_emit = self._emit_patch.start()
@@ -355,7 +412,8 @@ class TestHybridCorroborationWiring(unittest.TestCase):
         BBB's two genuine corroborators flip the final_score ordering."""
         result = self._run()
         fusion = result["per_node_fusion"]
-        self.assertAlmostEqual(fusion["ENC-TSK-BBB"]["b_corr"], self.weber_k)
+        s_top = result["s_top"]
+        self.assertAlmostEqual(fusion["ENC-TSK-BBB"]["b_corr"], self.alpha * s_top)
         self.assertEqual(fusion["ENC-TSK-AAA"]["b_corr"], 0.0)
         self.assertLess(
             fusion["ENC-TSK-AAA"]["final_score"],
@@ -369,12 +427,25 @@ class TestHybridCorroborationWiring(unittest.TestCase):
         result = self._run()
         node_bbb = next(n for n in result["nodes"] if n["record_id"] == "ENC-TSK-BBB")
         self.assertEqual(node_bbb["_corroboration_count"], 2)
-        self.assertAlmostEqual(node_bbb["_b_corr"], self.weber_k)
-        self.assertAlmostEqual(node_bbb["_final_score"], node_bbb["_fused_score"] + self.weber_k)
+        self.assertAlmostEqual(node_bbb["_b_corr"], self.alpha * result["s_top"])
+        self.assertAlmostEqual(node_bbb["_final_score"], node_bbb["_fused_score"] + node_bbb["_b_corr"])
 
-    def test_corroboration_weber_k_echoed_in_response(self):
+    def test_alpha_and_s_top_echoed_in_response(self):
+        """ENC-TSK-Q46 AC-3: any client can verify the bound from the response."""
         result = self._run()
-        self.assertEqual(result["corroboration_weber_k"], self.weber_k)
+        self.assertEqual(result["corroboration_alpha"], self.alpha)
+        self.assertNotIn("corroboration_weber_k", result)
+        fusion = result["per_node_fusion"]
+        self.assertAlmostEqual(result["s_top"], max(f["fused_score"] for f in fusion.values()))
+        self.assertAlmostEqual(result["s_top"], fusion["ENC-TSK-AAA"]["fused_score"])
+        for f in fusion.values():
+            self.assertLessEqual(f["b_corr"], result["corroboration_alpha"] * result["s_top"] + 1e-15)
+        # No k>=1 candidate overtakes one that leads it by more than alpha * s_top.
+        bound = result["corroboration_alpha"] * result["s_top"]
+        for x in fusion.values():
+            for y in fusion.values():
+                if x["k_corr"] >= 1 and y["fused_score"] - x["fused_score"] > bound:
+                    self.assertLess(x["final_score"], y["final_score"])
 
     def test_embedding_blob_still_stripped_from_response_nodes(self):
         result = self._run()
