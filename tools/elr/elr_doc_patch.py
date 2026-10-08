@@ -70,6 +70,8 @@ from elr_lib import profiles as elr_profiles  # noqa: E402
 from elr_lib import sections as elr_sections  # noqa: E402
 from elr_lib.config import get_profile  # noqa: E402
 from elr_lib.digest import build_digest  # noqa: E402
+from elr_lib import identity as elr_identity  # noqa: E402
+from elr_lib.config import EXIT_CODE_NO_CREDENTIAL  # noqa: E402
 from elr_lib.transport import InternalClient, classify_internal_posture  # noqa: E402
 
 DEFAULT_PROJECT = "enceladus"
@@ -591,6 +593,12 @@ def _resolve_body(args: argparse.Namespace) -> Optional[str]:
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # ENC-TSK-Q35 (AC-4): no credential -> refuse locally, no network call.
+    refusal = elr_identity.credential_refusal("elr_doc_patch.patch_section", "document", args.profile)
+    if refusal is not None:
+        print(json.dumps(refusal, sort_keys=True))
+        return EXIT_CODE_NO_CREDENTIAL
 
     anchor = build_anchor(heading_path_raw=args.anchor_heading_path, block_id=args.block_id, ordinal=args.ordinal)
     body = _resolve_body(args)
