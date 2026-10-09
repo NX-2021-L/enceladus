@@ -120,6 +120,11 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # ENC-TSK-Q59: the compute-stack change-set replacement gate's own predicate,
+      # including the benign ARN-ripple and refused static-Conditional cases.
+      - name: Change-set replacement gate self-tests (ENC-TSK-Q59)
+        run: python3 tools/test_cfn_changeset_replacement_gate.py
+
       # ENC-ISS-663 / ENC-TSK-P03: the placeholder-Lambda guard's own predicate.
       # Its self-tests carry the false-positive cases explicitly -- a legitimately
       # small index-handler function and a Lambda Web Adapter run.sh entrypoint
