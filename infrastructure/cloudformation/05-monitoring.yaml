@@ -22,6 +22,7 @@ Parameters:
 
 Conditions:
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  IsProd: !Equals [!Ref EnvironmentSuffix, ""]
   HasSnsTopic: !Not [!Equals [!Ref SnsTopicArn, ""]]
 
 Resources:
@@ -305,6 +306,103 @@ Resources:
       Threshold: 100
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ENC-TSK-Q57 / ENC-ISS-543: per-queue loss detectors (sent vs received).
+  GraphSyncQueueLossAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub "enceladus-prod-graph-sync-queue-loss${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-Q57 / ENC-ISS-543: more than 10 percent of messages accepted
+        by devops-graph-sync-queue.fifo over the last hour were never received
+        by a consumer (FIFO dedup or consumer loss). Evaluated only when the
+        queue accepted more than 20 messages in the hour.
+        Prod only: gamma graph_sync reads the DynamoDB streams directly and
+        its FIFO event source mapping is disabled, so the gamma queue is
+        never received from by design.
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0.10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: sent
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: NumberOfMessagesSent
+              Dimensions:
+                - Name: QueueName
+                  Value: !Sub "devops-graph-sync-queue${EnvironmentSuffix}.fifo"
+            Period: 3600
+            Stat: Sum
+          ReturnData: false
+        - Id: received
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: NumberOfMessagesReceived
+              Dimensions:
+                - Name: QueueName
+                  Value: !Sub "devops-graph-sync-queue${EnvironmentSuffix}.fifo"
+            Period: 3600
+            Stat: Sum
+          ReturnData: false
+        - Id: lossRatio
+          Expression: "IF(sent > 20, (sent - received) / sent, 0)"
+          Label: LossRatio
+          ReturnData: true
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  FeedQueueLossAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-feed-queue-loss${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-Q57 / ENC-ISS-543: more than 10 percent of messages accepted
+        by devops-feed-publish-queue.fifo over the last hour were never received
+        by a consumer (FIFO dedup or consumer loss). Evaluated only when the
+        queue accepted more than 20 messages in the hour.
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0.10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: sent
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: NumberOfMessagesSent
+              Dimensions:
+                - Name: QueueName
+                  Value: !Sub "devops-feed-publish-queue${EnvironmentSuffix}.fifo"
+            Period: 3600
+            Stat: Sum
+          ReturnData: false
+        - Id: received
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: NumberOfMessagesReceived
+              Dimensions:
+                - Name: QueueName
+                  Value: !Sub "devops-feed-publish-queue${EnvironmentSuffix}.fifo"
+            Period: 3600
+            Stat: Sum
+          ReturnData: false
+        - Id: lossRatio
+          Expression: "IF(sent > 20, (sent - received) / sent, 0)"
+          Label: LossRatio
+          ReturnData: true
       AlarmActions: !If
         - HasSnsTopic
         - [!Ref SnsTopicArn]
