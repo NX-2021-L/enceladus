@@ -3999,6 +3999,14 @@ Resources:
   # ---------------------------------------------------------------------------
   # EventBridge Pipes (Tracker/Documents Streams -> Feed Queue)
   # ---------------------------------------------------------------------------
+  # ENC-TSK-Q57 / ENC-ISS-543: the four graph-sync/feed pipes dedup on $.eventID
+  # (unique per stream record). A record-key dedup id made SQS FIFO silently drop
+  # every later write to the same record inside its 5-minute window (~75% loss,
+  # DOC-A8D865DB190E). Tracker pipes group on Keys.project_id (same value as
+  # NewImage.project_id, but also present on REMOVE events). REMOVE propagation
+  # for TrackerToGraphPipe is deferred to ENC-ISS-841: any FilterCriteria edit
+  # changes SourceParameters (RequiresRecreation=Conditionally), which the
+  # ENC-TSK-Q22 replacement gate refuses without an io acknowledgement.
 
   TrackerToFeedPipe:
     Type: AWS::Pipes::Pipe
@@ -4019,8 +4027,8 @@ Resources:
         Fn::Sub: ${DataStackName}-FeedPublishQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: $.dynamodb.NewImage.project_id.S
-          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+          MessageGroupId: $.dynamodb.Keys.project_id.S
+          MessageDeduplicationId: $.eventID
 
   DocumentsToFeedPipe:
     Type: AWS::Pipes::Pipe
@@ -4042,7 +4050,7 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: $.dynamodb.NewImage.project_id.S
-          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+          MessageDeduplicationId: $.eventID
 
   TrackerToGraphPipe:
     Type: AWS::Pipes::Pipe
@@ -4063,8 +4071,8 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: $.dynamodb.NewImage.project_id.S
-          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+          MessageGroupId: $.dynamodb.Keys.project_id.S
+          MessageDeduplicationId: $.eventID
 
   # ENC-PLN-014 / ENC-FTR-065: Document node graph projection.
   # Second EventBridge Pipe modeled on TrackerToGraphPipe, sourcing from the
@@ -4093,7 +4101,7 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: document
-          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+          MessageDeduplicationId: $.eventID
 
   # ENC-TSK-L41 / B67 Search2.0: dedicated search-index FIFO (NOT GraphSyncQueue).
   # Deploy note: DocumentsToSearchIndexPipe is added in a follow-up changeset once this
