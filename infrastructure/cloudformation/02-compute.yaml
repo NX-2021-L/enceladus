@@ -4137,8 +4137,8 @@ Resources:
         Fn::Sub: ${DataStackName}-SearchIndexQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: $.dynamodb.NewImage.project_id.S
-          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+          MessageGroupId: $.dynamodb.Keys.project_id.S
+          MessageDeduplicationId: $.eventID
 
   DocumentsToSearchIndexPipe:
     Type: AWS::Pipes::Pipe
@@ -4161,14 +4161,15 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: document
-          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+          MessageDeduplicationId: $.eventID
 
   # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection pipes. Three more
   # EventBridge Pipes modeled on TrackerToGraphPipe/DocumentsToGraphPipe, each sourcing a
   # distinct agent-store DynamoDB Stream and targeting the SAME GraphSyncQueue. graph_sync
   # consumes all pipes transparently via its existing SQS event source. Each uses a literal
   # MessageGroupId (the store name) so agent mutations stay in a distinct FIFO group from
-  # the tracker/document groups; the store's own id field is the dedup id.
+  # the tracker/document groups. ENC-TSK-Q60: dedup on $.eventID, not the store id, so
+  # bursts on one session are not silently dropped (ENC-ISS-543 / ENC-ISS-841 class).
   AgentSessionsToGraphPipe:
     Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
@@ -4189,7 +4190,7 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: agent-session
-          MessageDeduplicationId: $.dynamodb.Keys.session_id.S
+          MessageDeduplicationId: $.eventID
 
   AgentTypesToGraphPipe:
     Type: AWS::Pipes::Pipe
@@ -4211,7 +4212,7 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: agent-identity
-          MessageDeduplicationId: $.dynamodb.Keys.agent_type_id.S
+          MessageDeduplicationId: $.eventID
 
   AgentCredentialsToGraphPipe:
     Type: AWS::Pipes::Pipe
@@ -4233,7 +4234,7 @@ Resources:
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: agent-credential
-          MessageDeduplicationId: $.dynamodb.Keys.credential_id.S
+          MessageDeduplicationId: $.eventID
 
   # ---------------------------------------------------------------------------
   # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
