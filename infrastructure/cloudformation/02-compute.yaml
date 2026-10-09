@@ -473,6 +473,15 @@ Resources:
             - IsGamma
             - "https://enceladus-gamma.jreese.net/api/v1/checkout"
             - "https://jreese.net/api/v1/checkout"
+          # ENC-TSK-Q58 / ENC-ISS-838: the embedded MCP server's hybrid retrieval
+          # defaults GRAPH_QUERY_API_BASE to the PROD graphsearch API Gateway, so
+          # the gamma gateway ranked the prod corpus. Gamma points at its own
+          # graphsearch (direct API Gateway host, like the prod default); prod
+          # keeps the default, so the prod function is unchanged.
+          ENCELADUS_GRAPH_QUERY_API_BASE: !If
+            - IsGamma
+            - "https://hi0dzmvqrc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch"
+            - !Ref "AWS::NoValue"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
