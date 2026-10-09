@@ -19,6 +19,17 @@
 #
 # Exit 0: no replacements/removals, OR acknowledge_replacements=true.
 # Exit 1: at least one replacement or removal and no acknowledgement.
+#
+# ENC-TSK-Q59 (ENC-PLN-097 ruling R8): a Replacement=Conditional change is a
+# benign ARN ripple -- and is not counted -- when every detail that could force
+# recreation (RequiresRecreation != Never) is Evaluation=Dynamic,
+# ChangeSource=ResourceAttribute, with CausingEntity "<LogicalId>.Arn" whose
+# resource is not itself replacing (Replacement=True, or a non-benign
+# Conditional, resolved transitively). An ARN changes only when its resource is
+# replaced, so the ripple cannot recreate anything. Example: an Environment edit
+# on a Lambda re-evaluates Events::Rule Targets (Replacement=False) and then the
+# Lambda::Permission SourceArn (create-only, Conditional). A Static/Direct
+# Conditional (e.g. a pipe SourceParameters edit) is still refused.
 set -euo pipefail
 
 stack_label="${1:?usage: cfn_changeset_replacement_gate.sh <stack_label> <changeset_arn> <acknowledge_replacements>}"
@@ -47,20 +58,45 @@ while :; do
   [ -z "${next_token}" ] && break
 done
 
+# Logical ids whose replacement is real: Replacement=True, plus Conditional
+# changes that are not benign ARN ripples (fixed point over CausingEntity).
+hard_ids=$(printf '%s' "${changes_json}" | jq -c '
+  def risky: [.ResourceChange.Details[]? | select((.Target.RequiresRecreation // "Never") != "Never")];
+  def ripple_src: if .Evaluation == "Dynamic" and .ChangeSource == "ResourceAttribute"
+                     and ((.CausingEntity // "") | test("^[A-Za-z0-9]+\\.Arn$"))
+                  then (.CausingEntity | split(".")[0]) else null end;
+  [.[] | .ResourceChange | select(.Replacement == "Conditional")
+       | {id: .LogicalResourceId, srcs: [(.Details // [])[] | select((.Target.RequiresRecreation // "Never") != "Never") | ripple_src]}] as $cond
+  | ([.[] | .ResourceChange | select(.Replacement == "True") | .LogicalResourceId]
+     + [$cond[] | select(any(.srcs[]; . == null)) | .id]) as $seed
+  | {hard: $seed, changed: true}
+  | until(.changed | not;
+      .hard as $h
+      | ([$cond[] | select((.id as $i | $h | index($i)) == null)
+                  | select(any(.srcs[]; . as $s | $h | index($s) != null)) | .id]) as $add
+      | {hard: ($h + $add), changed: (($add | length) > 0)})
+  | .hard')
+benign=$(printf '%s' "${changes_json}" | jq -r --argjson hard "${hard_ids}" '
+  [.[] | .ResourceChange | select(.Replacement == "Conditional") | .LogicalResourceId
+       | select(. as $i | $hard | index($i) == null)] | join(" ")')
+
 n=$(printf '%s' "${changes_json}" | jq 'length')
-r=$(printf '%s' "${changes_json}" | jq '[.[] | select(.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional")] | length')
+r=$(printf '%s' "${hard_ids}" | jq 'length')
 d=$(printf '%s' "${changes_json}" | jq '[.[] | select(.ResourceChange.Action == "Remove")] | length')
 
 summary_line="change-set gate (${stack_label}): ${n} changes, ${r} replacements, ${d} removals"
 echo "${summary_line}"
+if [ -n "${benign}" ]; then
+  echo "change-set gate (${stack_label}): Conditional ARN ripples from non-replaced resources (not counted): ${benign}"
+fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   echo "${summary_line}" >> "${GITHUB_STEP_SUMMARY}"
 fi
 
 if [ "${r}" -gt 0 ] || [ "${d}" -gt 0 ]; then
-  offenders=$(printf '%s' "${changes_json}" | jq -r '
+  offenders=$(printf '%s' "${changes_json}" | jq -r --argjson hard "${hard_ids}" '
     .[]
-    | select(.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional" or .ResourceChange.Action == "Remove")
+    | select((.ResourceChange.LogicalResourceId as $i | $hard | index($i) != null) or .ResourceChange.Action == "Remove")
     | "  \(.ResourceChange.Action) \(.ResourceChange.LogicalResourceId) (Replacement=\(.ResourceChange.Replacement // "N/A"))"
   ')
   if [ "${acknowledge}" = "true" ]; then
