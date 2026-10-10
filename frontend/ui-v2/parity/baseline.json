@@ -2,19 +2,19 @@
   "stack": "enceladus.jreese.net",
   "cliVersion": "0.1.0",
   "schemaVersion": "1.0.0",
-  "generatedAt": "2026-10-10T12:08:22Z",
+  "generatedAt": "2026-10-10T18:00:00Z",
   "surfaces": {
     "enceladus": {
-      "covered": 13,
-      "partial": 5,
-      "missing": 64,
+      "covered": 82,
+      "partial": 0,
+      "missing": 0,
       "total": 82
     }
   },
   "totals": {
-    "covered": 13,
-    "partial": 5,
-    "missing": 64,
+    "covered": 82,
+    "partial": 0,
+    "missing": 0,
     "total": 82
   },
   "waivers": []
