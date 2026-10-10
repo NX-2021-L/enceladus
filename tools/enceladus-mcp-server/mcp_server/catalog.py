@@ -144,6 +144,10 @@ def build_action_catalog(
         }
         if entry.get("flag"):
             item["flag"] = entry["flag"]
+        if via == "execute":
+            # DVP-TSK-892 / caps schema 1.1.0: execute(dry_run=true) and per-step dry_run
+            # resolve every execute-registry action server-side with zero writes.
+            item["dryRun"] = True
         catalog.append(item)
     return catalog
 

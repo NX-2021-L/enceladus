@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit caps.json (parity contract schema 1.0.0) for the Enceladus MCP surface.
+"""Emit caps.json (parity contract schema 1.1.0) for the Enceladus MCP surface.
 
 DVP-TSK-843.  The inventory is generated from the live action registry
 (``mcp_server.actions.build_action_registries``) and the raw Tool schemas in
@@ -36,7 +36,7 @@ REPO_ROOT = SERVER_DIR.parent.parent
 SCHEMA_PATH = PARITY_DIR / "schema" / "caps.schema.json"
 SNAPSHOT_PATH = PARITY_DIR / "caps.json"
 SURFACE = "enceladus"
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 
 
 def _bootstrap_paths() -> None:
