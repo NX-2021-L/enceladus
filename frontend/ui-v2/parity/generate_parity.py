@@ -223,8 +223,10 @@ def parse_routes() -> list[dict]:
     order = [t.strip() for t in tree.split(",") if t.strip()]
 
     # shellNavRoutes placeholders
-    nav = re.search(r"const shellNavRoutes = \[(.*?)\] as const", code, re.S).group(1)
-    placeholders = re.findall(r"path:\s*'([^']+)'", nav)
+    # DVP-TSK-860: the stubs are now planned nav entries (src/shell/navRegistry.ts);
+    # the array may be absent from router.tsx.
+    nav_m = re.search(r"const shellNavRoutes = \[(.*?)\] as const", code, re.S)
+    placeholders = re.findall(r"path:\s*'([^']+)'", nav_m.group(1)) if nav_m else []
 
     def const_path(sym: str) -> str:
         m = re.search(rf"export const {sym}\s*=\s*'([^']+)'", read(SRC / "routes" / "recordLink.ts"))
@@ -295,7 +297,7 @@ def build_routes() -> list[dict]:
 # `covered` maps to exactly one handler, `partial` to the nearest one; any
 # action not listed is written as `missing` with the generic note.
 MISSING_NOTE = "no route handler names the action or an equivalent HTTP handler"
-PLACEHOLDER_NOTE = "placeholder route /deployments (handlers [])"
+PLACEHOLDER_NOTE = "planned nav entry deployments (no route yet, DVP-TSK-860)"
 G = r"GET /api/v1/"
 ACTION_RULES: dict[str, tuple[str, str | None, str | None]] = {
     "projects.list": ("covered", G + r"projects$", None),

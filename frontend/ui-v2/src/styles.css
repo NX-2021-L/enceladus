@@ -10,6 +10,11 @@
 
 /* Design-system tokens: the canonical --enc-* palette, type scale, radii,
  * easing and the semantic element styles. Imported, never copied. */
+/* DVP-TSK-860: palette/semantic tokens come from the kit. design-system-2
+ * colors_and_type.css stays for fonts + semantic element styles (same :root
+ * vars, loaded after, identical values). */
+@import '@io-kit/tokens/tokens.css';
+@import '@io-kit/shell/io-kit.css';
 @import '../../design-system-2/colors_and_type.css';
 @import '../../design-system-2/v2/tokens.css';
 
