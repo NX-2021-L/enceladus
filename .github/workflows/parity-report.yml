@@ -71,7 +71,7 @@ jobs:
           E=https://io-356364570033.d.codeartifact.us-west-2.amazonaws.com/npm/io-kit/
           mkdir -p "$RUNNER_TEMP/iokit" && cd "$RUNNER_TEMP/iokit"
           printf '@io-kit:registry=%s\n//%s:_authToken=%s\n' "$E" "${E#https://}" "$T" > .npmrc
-          npm init -y >/dev/null && npm install --no-audit --no-fund @io-kit/parity@0.1.0
+          npm init -y >/dev/null && npm install --no-audit --no-fund @io-kit/parity@0.1.1
           echo "$RUNNER_TEMP/iokit/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Generate manifests
