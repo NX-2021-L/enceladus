@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import cursor_codec  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LIMIT = 50
@@ -50,15 +52,30 @@ def parse_corpus_query(qs: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def encode_cursor(sort_value: str, record_key: str) -> str:
+CURSOR_SCOPE = "feed_query:v1"
+_CURSOR_FILTER_KEYS = ("sort", "q", "record_type", "project_id", "status", "priority", "source")
+
+
+def cursor_filter(query: Optional[Mapping[str, Any]]) -> Optional[Dict[str, str]]:
+    """Filter binding for signed cursors: a cursor minted for one filter/sort is refused for another."""
+    if not query:
+        return None
+    return {k: str(query.get(k) or "") for k in _CURSOR_FILTER_KEYS if query.get(k)} or None
+
+
+def _legacy_cursor(sort_value: str, record_key: str) -> str:
     payload = {"sort_value": sort_value, "record_key": record_key}
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode_cursor(raw: str) -> Optional[Tuple[str, str]]:
-    if not raw:
-        return None
+def encode_cursor(sort_value: str, record_key: str, filter_value: Any = None) -> str:
+    """Mint a signed v1 cursor (DVP-TSK-919); falls back to the legacy unsigned form only when no key is configured."""
+    key = json.dumps([sort_value, record_key], separators=(",", ":"), ensure_ascii=False)
+    return cursor_codec.encode(key, CURSOR_SCOPE, filter_value) or _legacy_cursor(sort_value, record_key)
+
+
+def _decode_legacy(raw: str) -> Optional[Tuple[str, str]]:
     try:
         padded = raw + "=" * (-len(raw) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
@@ -67,7 +84,28 @@ def decode_cursor(raw: str) -> Optional[Tuple[str, str]]:
         if not sort_value or not record_key:
             return None
         return sort_value, record_key
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def decode_cursor(raw: str, filter_value: Any = None) -> Optional[Tuple[str, str]]:
+    """Verify and decode a cursor; None means invalid (callers answer 400 cursor_invalid).
+
+    Signed v1 cursors are verified (tag, expiry, scope, filter). The unsigned v0 form is accepted only
+    inside the migration window ending cursor_codec.V0_ACCEPTANCE_END_MS.
+    """
+    if not raw:
+        return None
+    try:
+        key, version = cursor_codec.decode(raw, CURSOR_SCOPE, filter_value)
+    except cursor_codec.CursorInvalid:
+        return None
+    if version == 0:
+        return _decode_legacy(key)
+    try:
+        sort_value, record_key = json.loads(key)
+        return (str(sort_value), str(record_key)) if sort_value and record_key else None
+    except (ValueError, TypeError):
         return None
 
 
@@ -169,7 +207,7 @@ def paginate_corpus(
     sorted_rows = sort_entries(filtered, sort)
     facets = compute_facets(sorted_rows)
 
-    cursor = decode_cursor(str(query.get("cursor") or ""))
+    cursor = decode_cursor(str(query.get("cursor") or ""), cursor_filter(query))
     start_index = 0
     if cursor is not None:
         cursor_sort, cursor_key = cursor
@@ -215,7 +253,9 @@ def paginate_corpus(
     next_cursor = None
     if start_index + limit < len(sorted_rows) and page:
         last = page[-1]
-        next_cursor = encode_cursor(str(last.get("sort_value") or ""), str(last.get("record_key") or ""))
+        next_cursor = encode_cursor(
+            str(last.get("sort_value") or ""), str(last.get("record_key") or ""), cursor_filter(query)
+        )
 
     public_items = []
     for row in page:

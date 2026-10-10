@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { resolveFeedEngine } from '../feed/feedEngine'
 import { Alert, Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
@@ -68,7 +69,22 @@ const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
   { value: 'status', label: 'Status' },
 ]
 
+// DVP-TSK-919: ?feed=kit mounts the @io-kit/feed panel; legacy stays the default this release.
+const KitFeedPanel = lazy(() => import('../feed/KitFeedPanel'))
+
 export function FeedRoute() {
+  const [engine] = useState(() => resolveFeedEngine())
+  if (engine === 'kit') {
+    return (
+      <Suspense fallback={null}>
+        <KitFeedPanel />
+      </Suspense>
+    )
+  }
+  return <LegacyFeedRoute />
+}
+
+function LegacyFeedRoute() {
   useDocumentTitle('Feed')
   const feedSearch = useSearch({ from: '/feed' })
   const navigate = useNavigate({ from: '/feed' })
