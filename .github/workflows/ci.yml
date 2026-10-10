@@ -341,6 +341,27 @@ jobs:
                 f\"overall={fn['overall']!r} (never a fabricated pass)\")
           "
 
+      # DVP-TSK-843 (DVP-PLN-008 E0 / S6): unwrapped action registry. Nothing in
+      # CI or _build.yml ran the enceladus-mcp-server tests before this step
+      # (git grep pytest .github/workflows -> only the tool installs above), so
+      # this is the first gate on that path. It proves (a) every registered
+      # search/coordination/execute action and first-party tool carries an
+      # inputSchema and annotations, (b) search(actions.schemas) returns exactly
+      # the registry, (c) the 55 declared input schemas still match what their
+      # handlers read, and (d) the committed parity/caps.json (schema 1.0.0,
+      # bundled from NX-2021-L/devops docs/contracts) is current and valid.
+      # Regenerate the snapshot with:
+      #   python3 tools/enceladus-mcp-server/parity/emit_caps.py
+      # _build.yml is deliberately not touched: it is also run for promoted
+      # (older) trees that do not carry tools/enceladus-mcp-server/parity/.
+      - name: MCP action registry parity and caps.json snapshot (DVP-TSK-843)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet mcp==1.26.0 jsonschema pytest
+          export PYTHONPATH="$PWD/backend/lambda/shared_layer/python"
+          python3 -m pytest tools/enceladus-mcp-server/test_action_registry_parity.py -q -p no:cacheprovider
+          python3 tools/enceladus-mcp-server/parity/emit_caps.py --check
+
   frontend-ui-tests:
     name: Frontend UI Tests
     runs-on: ubuntu-latest

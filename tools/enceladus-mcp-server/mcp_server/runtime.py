@@ -9,6 +9,7 @@ ResultText = Callable[[Any], list]
 ParseRecordId = Callable[[str], tuple]
 InvokeHybridRetrieval = Callable[..., Dict[str, Any]]
 ErrorPayload = Callable[..., Dict[str, Any]]
+ActionCatalog = Callable[[], List[Dict[str, Any]]]
 
 
 class McpRuntime:
@@ -20,6 +21,8 @@ class McpRuntime:
     invoke_hybrid_retrieval: Optional[InvokeHybridRetrieval] = None
     error_payload: Optional[ErrorPayload] = None
     enable_context_nodes: bool = False
+    # DVP-TSK-843: returns the unwrapped per-action contracts for search(actions.schemas).
+    action_catalog: Optional[ActionCatalog] = None
 
 
 RUNTIME = McpRuntime()

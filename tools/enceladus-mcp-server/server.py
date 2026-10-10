@@ -47,6 +47,7 @@ from mcp.types import (
     TextContent,
     TextResourceContents,
     Tool,
+    ToolAnnotations,
 )
 try:
     from enceladus_shared.appconfig_flags import flag as _appconfig_flag
@@ -3399,7 +3400,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
             description=(
                 "Compact read-only discovery surface over governed Enceladus resources. "
                 "Use action + arguments to access project, tracker, document, deploy, changelog, "
-                "governance, reference, and health lookups."
+                "governance, reference, and health lookups. "
+                "action=actions.schemas lists every action's schemas and annotations."
             ),
             inputSchema={
                 "type": "object",
@@ -3589,7 +3591,18 @@ def _code_mode_tool_catalog() -> list[Tool]:
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     if INTERFACE_MODE == INTERFACE_MODE_CODE:
-        return _code_mode_tool_catalog()
+        return _annotated_tools(_code_mode_tool_catalog())
+    tools = _raw_tool_definitions()
+    # Expose code-mode meta-tools in raw mode so remote raw-mode clients
+    # can discover them via tools/list (ENC-ISS-112).  Handlers already
+    # exist in _TOOL_HANDLERS; this just makes them visible.
+    tools.extend(_code_mode_tool_catalog())
+    return _annotated_tools(_filter_tool_list_for_session_context(tools))
+
+
+def _raw_tool_definitions() -> list[Tool]:
+    """The flat raw-mode tool list (DVP-TSK-843: split out of list_tools so the
+    action catalog can read these inputSchemas in code mode too)."""
     tools = [
         # --- Project Lifecycle Management (6.4) ---
         Tool(
@@ -5505,11 +5518,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
-    # Expose code-mode meta-tools in raw mode so remote raw-mode clients
-    # can discover them via tools/list (ENC-ISS-112).  Handlers already
-    # exist in _TOOL_HANDLERS; this just makes them visible.
-    tools.extend(_code_mode_tool_catalog())
-    return _filter_tool_list_for_session_context(tools)
+    return tools
 
 
 # -------------------------------------------------------------------
@@ -8187,6 +8196,7 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
 
 # --- Code Mode Meta-Tools (ENC-FTR-044 / ENC-TSK-L09 decomposition) ---
 from mcp_server.actions import ActionFeatureFlags, build_action_registries
+from mcp_server.catalog import build_action_catalog, tool_annotations as _catalog_tool_annotations
 from mcp_server.runtime import bind_runtime
 from mcp_server.tools.context import get_compact_context_meta
 from mcp_server.tools.coordination import coordination_meta, register_actions as register_coordination_actions
@@ -8204,6 +8214,38 @@ _SEARCH_ACTIONS, _COORDINATION_ACTIONS, _EXECUTE_ACTIONS = build_action_registri
 register_search_actions(_SEARCH_ACTIONS)
 register_coordination_actions(_COORDINATION_ACTIONS)
 register_execute_actions(_EXECUTE_ACTIONS)
+
+# DVP-TSK-843: unwrapped action registry.  Annotations are looked up against the
+# all-flags-on registry so a raw tool is annotated whether or not its action's
+# feature flag is enabled in this deployment.
+_ALL_FLAG_REGISTRIES = build_action_registries(
+    ActionFeatureFlags(True, True, True, True, True)
+)
+
+
+def _tool_input_schemas() -> Dict[str, Dict[str, Any]]:
+    """inputSchema of every first-party Tool definition (raw tools + meta-tools)."""
+    return {
+        tool.name: tool.inputSchema
+        for tool in (*_raw_tool_definitions(), *_code_mode_tool_catalog())
+    }
+
+
+def _action_catalog() -> List[Dict[str, Any]]:
+    """Per-action contracts for the live (flag-resolved) registry; see mcp_server/catalog.py."""
+    return build_action_catalog(
+        _SEARCH_ACTIONS, _COORDINATION_ACTIONS, _EXECUTE_ACTIONS, _tool_input_schemas(),
+    )
+
+
+def _annotated_tools(tools: List[Tool]) -> List[Tool]:
+    """Attach MCP ToolAnnotations (readOnly/destructive/idempotent) from the registry."""
+    for tool in tools:
+        hints = _catalog_tool_annotations(tool.name, *_ALL_FLAG_REGISTRIES)
+        if hints is not None:
+            tool.annotations = ToolAnnotations(**hints)
+    return tools
+
 
 _search = search
 _coordination_meta = coordination_meta
@@ -10445,6 +10487,7 @@ bind_runtime(
     invoke_hybrid_retrieval=_invoke_hybrid_retrieval,
     error_payload=_error_payload,
     enable_context_nodes=ENABLE_CONTEXT_NODES,
+    action_catalog=_action_catalog,
 )
 
 
