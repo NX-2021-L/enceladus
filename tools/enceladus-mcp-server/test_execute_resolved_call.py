@@ -1,10 +1,7 @@
 """DVP-TSK-892 (DVP-PLN-010 E2-W1.7, C-5): execute adopts ResolvedCall v1, RFC 9457
 problem details with errors[].pointer, and Idempotency-Key replay.
 
-The ResolvedCall v1 JSON Schema below is transcribed from DOC-3724FD572867 s1.3
-(Contract B).  The kit-published schema (DVP-TSK-891 / E2-W1.2) was not available when
-this was written; AC1 requires re-pointing ``RESOLVED_CALL_V1_SCHEMA`` at the kit schema
-once that task merges (additionalProperties is false so drift in either direction fails).
+AC1 validates against the committed ResolvedCall v1 schema copy (see RESOLVED_CALL_V1_SCHEMA).
 """
 import asyncio
 import importlib.util
@@ -19,55 +16,13 @@ import jsonschema
 
 MODULE_PATH = pathlib.Path(__file__).with_name("server.py")
 
-_ANNOTATIONS = {
-    "type": "object",
-    "required": ["readOnlyHint", "destructiveHint", "idempotentHint"],
-    "properties": {k: {"type": "boolean"} for k in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")},
-}
-RESOLVED_CALL_V1_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["v", "surface", "action", "arguments", "schemaHash", "underlying", "sideEffects",
-                 "placeholders", "annotations", "idempotencyKey", "source"],
-    "properties": {
-        "v": {"const": 1},
-        "surface": {"type": "string", "minLength": 1},
-        "action": {"type": "string", "minLength": 1},
-        "arguments": {},
-        "schemaHash": {"type": "string", "minLength": 1},
-        "governanceHash": {"type": "string"},
-        "principal": {"type": "string"},
-        "underlying": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["handler", "method", "path"],
-                "additionalProperties": False,
-                "properties": {"handler": {"type": "string"}, "method": {"type": "string"},
-                               "path": {"type": "string"}, "body": {}},
-            },
-        },
-        "sideEffects": {
-            "type": "object",
-            "required": ["writeCount", "kinds"],
-            "additionalProperties": False,
-            "properties": {"writeCount": {"type": "integer", "minimum": 0},
-                           "kinds": {"type": "array", "items": {"type": "string"}}},
-        },
-        "sentence": {"type": "string"},
-        "diff": {"type": "array", "items": {"type": "object", "required": ["pointer", "before", "after"]}},
-        "placeholders": {
-            "type": "array",
-            "items": {"type": "object", "required": ["pointer", "label"], "additionalProperties": False,
-                      "properties": {"pointer": {"type": "string"}, "label": {"type": "string"}}},
-        },
-        "annotations": _ANNOTATIONS,
-        "idempotencyKey": {"type": "string", "minLength": 1},
-        "warnings": {"type": "array", "items": {"type": "string"}},
-        "source": {"enum": ["server-dry-run", "client-preview"]},
-    },
-}
+# ResolvedCall v1 JSON Schema: committed copy at parity/schema/resolved_call.v1.schema.json,
+# transcribed from DOC-3724FD572867 s1.3 (Contract B) because the kit-published schema
+# (DVP-TSK-891 / E2-W1.2, @io-kit/schema_form) was not available.  When that lands, replace
+# the JSON file with the kit's copy (additionalProperties is false, so drift fails the test).
+RESOLVED_CALL_V1_SCHEMA = json.loads(
+    (MODULE_PATH.parent / "parity" / "schema" / "resolved_call.v1.schema.json").read_text(encoding="utf-8")
+)
 PROBLEM_SCHEMA = {
     "type": "object",
     "required": ["type", "title", "status"],

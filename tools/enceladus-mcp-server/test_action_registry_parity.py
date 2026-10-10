@@ -445,13 +445,13 @@ def test_bundled_schema_is_the_pinned_contract_copy():
     source = json.loads((SERVER_DIR / "parity" / "schema" / "SOURCE.json").read_text())
     digest = hashlib.sha256((SERVER_DIR / "parity" / "schema" / "caps.schema.json").read_bytes()).hexdigest()
     assert digest == source["sha256"]
-    assert source["schemaVersion"] == "1.0.0"
+    assert source["schemaVersion"] == "1.1.0"
     assert source["source"]["repo"] == "NX-2021-L/devops"
 
 
 def test_emitted_caps_validate_against_the_bundled_schema(server):
     caps = emit_caps.build_caps("all", server=server)
-    assert caps["schemaVersion"] == "1.0.0" and caps["surface"] == "enceladus"
+    assert caps["schemaVersion"] == "1.1.0" and caps["surface"] == "enceladus"
     emit_caps.validate_caps(caps)
     names = [a["name"] for a in caps["actions"]]
     assert len(names) == len(set(names)) == 106
@@ -469,6 +469,16 @@ def test_schema_rejects_an_action_missing_annotations(server):
     broken["schemaVersion"] = "2.0.0"
     with pytest.raises(jsonschema.ValidationError):
         emit_caps.validate_caps(broken)
+
+
+def test_dry_run_is_advertised_exactly_for_execute_actions(server):
+    caps = emit_caps.build_caps("all", server=server)
+    assert caps["actions"], "no actions emitted"
+    for action in caps["actions"]:
+        if action["via"] == "execute":
+            assert action.get("dryRun") is True, action["name"]
+        else:
+            assert "dryRun" not in action, action["name"]
 
 
 def test_committed_snapshot_is_current(server):

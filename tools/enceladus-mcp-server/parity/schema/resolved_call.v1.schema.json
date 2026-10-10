@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "surface",
+    "action",
+    "arguments",
+    "schemaHash",
+    "underlying",
+    "sideEffects",
+    "placeholders",
+    "annotations",
+    "idempotencyKey",
+    "source"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "surface": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arguments": {},
+    "schemaHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "governanceHash": {
+      "type": "string"
+    },
+    "principal": {
+      "type": "string"
+    },
+    "underlying": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "handler",
+          "method",
+          "path"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "handler": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "body": {}
+        }
+      }
+    },
+    "sideEffects": {
+      "type": "object",
+      "required": [
+        "writeCount",
+        "kinds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "writeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "sentence": {
+      "type": "string"
+    },
+    "diff": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pointer",
+          "before",
+          "after"
+        ]
+      }
+    },
+    "placeholders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pointer",
+          "label"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "pointer": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "annotations": {
+      "type": "object",
+      "required": [
+        "readOnlyHint",
+        "destructiveHint",
+        "idempotentHint"
+      ],
+      "properties": {
+        "readOnlyHint": {
+          "type": "boolean"
+        },
+        "destructiveHint": {
+          "type": "boolean"
+        },
+        "idempotentHint": {
+          "type": "boolean"
+        },
+        "openWorldHint": {
+          "type": "boolean"
+        }
+      }
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source": {
+      "enum": [
+        "server-dry-run",
+        "client-preview"
+      ]
+    }
+  },
+  "$id": "https://contracts.jreese.net/resolved-call/1",
+  "title": "ResolvedCall v1",
+  "description": "Transcribed from DOC-3724FD572867 s1.3 (Contract B) by DVP-TSK-892. Superseded by the @io-kit/schema_form schema (DVP-TSK-891) when it lands; swap this file for that copy."
+}

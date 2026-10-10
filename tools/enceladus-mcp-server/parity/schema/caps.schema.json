@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.jreese.net/parity/caps.schema.json/1.0.0",
+  "$id": "https://contracts.jreese.net/parity/caps.schema.json/1.1.0",
   "title": "MCP surface capabilities inventory",
-  "description": "Machine-readable action inventory for one MCP surface (version 1.0.0).",
+  "description": "Machine-readable action inventory for one MCP surface (version 1.1.0; additive over 1.0.0: optional action.dryRun and optional annotations.openWorldHint).",
   "type": "object",
   "required": ["schemaVersion", "surface", "generatedAt", "actions"],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": {"const": "1.0.0"},
+    "schemaVersion": {"enum": ["1.0.0", "1.1.0"]},
     "surface": {"type": "string", "minLength": 1},
     "generatedAt": {"type": "string", "format": "date-time"},
     "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}}
@@ -48,12 +48,14 @@
           "properties": {
             "readOnlyHint": {"type": "boolean"},
             "destructiveHint": {"type": "boolean"},
-            "idempotentHint": {"type": "boolean"}
+            "idempotentHint": {"type": "boolean"},
+            "openWorldHint": {"type": "boolean"}
           }
         },
         "requiresGovernanceHash": {"type": "boolean"},
         "via": {"enum": ["top-level", "execute", "search", "coordination"]},
-        "flag": {"type": "string", "minLength": 1}
+        "flag": {"type": "string", "minLength": 1},
+        "dryRun": {"type": "boolean", "description": "true when the surface implements server-side dry_run for this action (returns ResolvedCall v1, zero writes); absent or false means the kit runs degraded typed-confirm (F-12)"}
       }
     }
   }

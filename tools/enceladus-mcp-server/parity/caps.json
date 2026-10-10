@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-10T09:04:17Z",
+  "generatedAt": "2026-10-10T15:54:44Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -470,7 +470,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "checkout.append_worklog",
@@ -513,7 +514,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "checkout.release",
@@ -546,7 +548,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "checkout.task",
@@ -588,7 +591,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "component.add_edge",
@@ -628,7 +632,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.advance",
@@ -667,7 +672,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.deprecate",
@@ -701,7 +707,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.propose",
@@ -791,7 +798,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.remove_edge",
@@ -831,7 +839,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.restore",
@@ -861,7 +870,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "component.revert",
@@ -896,7 +906,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal"
+      "flag": "enable_component_proposal",
+      "dryRun": true
     },
     {
       "name": "deploy.history",
@@ -1048,7 +1059,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "deploy.status",
@@ -1240,7 +1252,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "deploy.trigger",
@@ -1264,7 +1277,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "dispatch_plan.dry_run",
@@ -1388,7 +1402,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.append_wave_entry",
@@ -1436,7 +1451,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.claim_handoff",
@@ -1466,7 +1482,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.complete_handoff",
@@ -1496,7 +1513,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.create_coe",
@@ -1579,7 +1597,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.create_handoff",
@@ -1668,7 +1687,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "document.create_note",
@@ -1752,7 +1772,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "document.create_wave",
@@ -1828,7 +1849,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_handoff_primitive"
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
     },
     {
       "name": "documents.check_policy",
@@ -1877,7 +1899,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": false,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "documents.diff",
@@ -2243,7 +2266,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "documents.patch_section",
@@ -2320,7 +2344,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "documents.put",
@@ -2508,7 +2533,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "documents.search",
@@ -2699,7 +2725,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_escalation_primitive"
+      "flag": "enable_escalation_primitive",
+      "dryRun": true
     },
     {
       "name": "escalation.watch",
@@ -2873,7 +2900,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "github.projects_list",
@@ -2946,7 +2974,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": false,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "governance.dictionary",
@@ -3053,7 +3082,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.advance",
@@ -3105,7 +3135,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.checkout",
@@ -3147,7 +3178,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.create",
@@ -3294,7 +3326,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.objectives_status",
@@ -3356,7 +3389,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.reorder_objectives",
@@ -3397,7 +3431,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "plan.replace_objectives",
@@ -3438,7 +3473,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "projects.get",
@@ -3791,7 +3827,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_typed_relationships"
+      "flag": "enable_typed_relationships",
+      "dryRun": true
     },
     {
       "name": "tracker.create",
@@ -3938,7 +3975,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "tracker.create_lesson",
@@ -4035,7 +4073,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_lesson_primitive"
+      "flag": "enable_lesson_primitive",
+      "dryRun": true
     },
     {
       "name": "tracker.create_relationship",
@@ -4096,7 +4135,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_typed_relationships"
+      "flag": "enable_typed_relationships",
+      "dryRun": true
     },
     {
       "name": "tracker.creation_rules",
@@ -4214,7 +4254,8 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_lesson_primitive"
+      "flag": "enable_lesson_primitive",
+      "dryRun": true
     },
     {
       "name": "tracker.get",
@@ -4651,7 +4692,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "tracker.manifest",
@@ -4787,7 +4829,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "tracker.set",
@@ -4853,7 +4896,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "tracker.set_acceptance_evidence",
@@ -4909,7 +4953,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": true,
-      "via": "execute"
+      "via": "execute",
+      "dryRun": true
     },
     {
       "name": "tracker.sheaf_cohomology",
