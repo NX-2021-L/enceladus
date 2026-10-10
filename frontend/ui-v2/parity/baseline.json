@@ -1,0 +1,21 @@
+{
+  "stack": "enceladus.jreese.net",
+  "cliVersion": "0.1.0",
+  "schemaVersion": "1.0.0",
+  "generatedAt": "2026-10-10T09:20:14Z",
+  "surfaces": {
+    "enceladus": {
+      "covered": 14,
+      "partial": 6,
+      "missing": 86,
+      "total": 106
+    }
+  },
+  "totals": {
+    "covered": 14,
+    "partial": 6,
+    "missing": 86,
+    "total": 106
+  },
+  "waivers": []
+}
