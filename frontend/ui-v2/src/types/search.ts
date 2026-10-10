@@ -93,4 +93,12 @@ export interface TieredSearchSnapshot {
   hybridError: Error | null
   signalAvailability?: HybridGraphsearchResponse['signal_availability']
   summary?: string
+  /** DVP-TSK-921: kit signal states (available | unavailable | disabled_by_user | timed_out) of the last hybrid run. */
+  availability?: import('@io-kit/search').SignalAvailability
+  /** Degraded signals of that run, each marked once with its reason (graph is unavailable on enceladus today). */
+  degraded: import('@io-kit/search').DegradedEntry[]
+  /** No server signal contributed: show the local-only banner. */
+  serverDown: boolean
+  /** Per-row evidence: signal -> rank (null = did not rank / degraded), keyed by record id. */
+  evidenceById: Map<string, import('@io-kit/search').SignalEvidence[]>
 }

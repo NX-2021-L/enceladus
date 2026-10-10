@@ -280,3 +280,8 @@
 .feed-route__stale {
   margin-block: var(--space-2);
 }
+
+/* DVP-TSK-921: per-signal evidence + pin under a result card */
+.feed-route__row-wrap { display: flex; flex-direction: column; }
+.feed-route__row-extras { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 12px 6px; font-size: 12px; }
+.feed-route__pin { cursor: pointer; font-size: 12px; }
