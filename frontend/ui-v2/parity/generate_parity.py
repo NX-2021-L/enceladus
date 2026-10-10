@@ -297,7 +297,7 @@ def parse_routes() -> list[dict]:
             entry = SRC / "routes" / "recordRoute.tsx"
             comp = FACTORY_COMPONENT[factory]
         else:
-            lm = re.search(r"import\('(\./\w+)'\)", blk)
+            lm = re.search(r"import\('(\.{1,2}/[\w/]+)'\)", blk)
             cm = re.search(r"component:\s*(\w+)\s*[,}\n]", blk)
             if lm:
                 entry = resolve(ROUTER, lm.group(1))
@@ -363,6 +363,13 @@ ACTION_RULES: dict[str, tuple[str, str | None, str | None]] = {
     "checkout.task": ("covered", r"POST /api/v1/tracker/\{project\}/\{type\}/\{id\}/checkout$", None),
     "checkout.advance": ("partial", r"PATCH /api/v1/tracker/\{project\}/\{type\}/\{id\}$", "status advance goes through the generic record PATCH"),
 }
+# DVP-TSK-895: generic coverage. Every registry action without a bespoke rule above is reachable through the
+# generated form (palette command -> /actions/$action -> dry run -> execute), so a NEW registry action is covered
+# by default and needs neither a route entry nor a waiver. ACTION_RULES is now only the list of bespoke overrides.
+GENERIC_HANDLER = r"POST /api/v1/actions/execute$"
+GENERIC_NOTE = "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+# bespoke screens that only partly cover an action: the generated form closes the gap (full inputSchema).
+GENERIC_OVER_PARTIAL = ("tracker.list", "reference.search", "governance.get", "escalation.get", "tracker.set", "checkout.advance")
 DEPLOY_ACTIONS = ("deploy.state_get", "deploy.history", "deploy.history_list", "deploy.status", "deploy.status_get", "deploy.pending_requests")
 
 
@@ -376,10 +383,8 @@ def build_map(routes: list[dict]) -> dict[str, dict]:
     entries: dict[str, dict] = {}
     for name in names:
         rule = ACTION_RULES.get(name)
-        if rule is None:
-            note = PLACEHOLDER_NOTE if name in DEPLOY_ACTIONS else MISSING_NOTE
-            entries[name] = {"verdict": "missing", "note": note}
-            continue
+        if rule is None or name in GENERIC_OVER_PARTIAL:
+            rule = ("covered", GENERIC_HANDLER, GENERIC_NOTE)
         verdict, rx, note = rule
         matches = [h for h in handlers if re.match(rx, h)]
         if len(matches) != 1:

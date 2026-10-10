@@ -1,4 +1,6 @@
 import { Search } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { matchActionCommands } from '../actions/commands'
 import { useUiStore } from '../store/uiStore'
 import { useCommandNavigation } from './useCommandNavigation'
 
@@ -24,6 +26,21 @@ export function CommandPalette() {
   const { nav, canGo, freeText, submit } = useCommandNavigation(query)
 
   if (!open) return null
+
+  // DVP-TSK-895: generated-form commands for registry actions without a bespoke route.
+  const actionMatches = nav === null ? matchActionCommands(query) : []
+  const actionList = actionMatches.length ? (
+    <ul className="palette-actions" aria-label="Actions">
+      {actionMatches.map((c) => (
+        <li key={c.name}>
+          <Link to="/actions/$action" params={{ action: c.name }} onClick={closeCommandPalette}>
+            {c.name}
+          </Link>{' '}
+          <span>{c.title}</span>
+        </li>
+      ))}
+    </ul>
+  ) : null
 
   const hint = freeText ? (
     // ENC-TSK-P59 (ENC-ISS-720): non-ID text is a keyword search.
@@ -77,6 +94,7 @@ export function CommandPalette() {
         }}
       >
         {hint}
+        {actionList}
       </div>
     )
   }
@@ -141,6 +159,7 @@ export function CommandPalette() {
           }}
         >
           {hint}
+          {actionList}
         </div>
       </div>
     </div>

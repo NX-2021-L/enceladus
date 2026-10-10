@@ -3,134 +3,133 @@ stack: "enceladus.jreese.net"
 surfaces:
   enceladus:
     "actions.schemas":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.checkout_release_backfill":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.claim":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.list":
       handler: "GET /api/v1/coordination/agents/sessions"
     "agent.register":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.retire":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.type.list":
       handler: "GET /api/v1/coordination/agents/types"
     "agent.type.register":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "auth.cognito_session":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "capabilities.get":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "changelog.history":
       handler: "GET /api/v1/changelog/history"
     "changelog.history_all":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "changelog.version":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.advance":
-      verdict: "partial"
-      handler: "PATCH /api/v1/tracker/{project}/{type}/{id}"
-      note: "status advance goes through the generic record PATCH"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.append_worklog":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.release":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.task":
       handler: "POST /api/v1/tracker/{project}/{type}/{id}/checkout"
     "component.add_edge":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.advance":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.deprecate":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.propose":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.remove_edge":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.restore":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.revert":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.history":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.history_list":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.pending_requests":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.state_get":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.state_set":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.status":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.status_get":
-      verdict: "missing"
-      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.submit":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.trigger":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "dispatch_plan.dry_run":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "dispatch_plan.generate":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.append_handoff_reply":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.append_wave_entry":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.claim_handoff":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.complete_handoff":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_coe":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_handoff":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_note":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_wave":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.check_policy":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.diff":
       handler: "GET /api/v1/documents/{id}/diff"
     "documents.get":
@@ -142,173 +141,168 @@ surfaces:
     "documents.manifest":
       handler: "GET /api/v1/documents/{id}/manifest"
     "documents.patch":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.patch_section":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.put":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.search":
       handler: "GET /api/v1/documents/search"
     "escalation.get":
-      verdict: "partial"
-      handler: "GET /api/v1/coordination/escalations"
-      note: "list-with-filter only; no per-escalation GET handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "escalation.list":
       handler: "GET /api/v1/coordination/escalations"
     "escalation.request":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "escalation.watch":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "get_compact_context":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.create_issue":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.projects_list":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.projects_sync":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.dictionary":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.get":
-      verdict: "partial"
-      handler: "GET /api/v1/documents/search"
-      note: "/governance route lists governance docs by search; no file_name fetch handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.hash":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.add_objective":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.advance":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.checkout":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.create":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.objectives_status":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.remove_objective":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.reorder_objectives":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.replace_objectives":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "projects.get":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "projects.list":
       handler: "GET /api/v1/projects"
     "projects.prefix_map":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "reference.search":
-      verdict: "partial"
-      handler: "GET /api/v1/documents/search"
-      note: "/docs calls generic document search; backend equivalence to reference.search not shown"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "request.get":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "session.classify_intent":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "session.intent_centroid_drift":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "system.connection_health":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "telemetry.rank":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.archive_relationship":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create_lesson":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create_relationship":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.creation_rules":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.embeddings_for":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.extend_lesson":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.get":
       handler: "GET /api/v1/tracker/{project}/{type}/{id}"
     "tracker.get_acs":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.graph_laplacian":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.graphsearch":
       handler: "GET /api/v1/tracker/graphsearch"
     "tracker.list":
-      verdict: "partial"
-      handler: "GET /api/v1/tracker/{project}?mode=census"
-      note: "route serves census mode only, no filtered list"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.list_lessons":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.list_relationships":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.log":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.manifest":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.manifest_bulk":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.pending_updates":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.relate":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.set":
-      verdict: "partial"
-      handler: "PATCH /api/v1/tracker/{project}/{type}/{id}"
-      note: "generic record PATCH; field coverage and governance_hash handling not shown in manifest"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.set_acceptance_evidence":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.sheaf_cohomology":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.validation_rules":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.worklog_timeline":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.worklogs":
-      verdict: "missing"
-      note: "no route handler names the action or an equivalent HTTP handler"
+      handler: "POST /api/v1/actions/execute"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
