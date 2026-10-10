@@ -1,6 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { DegradedBanner, SignalReadout } from '@io-kit/search/react'
+import { relateRecords } from '../api/actions'
+import { resolveFeedEngine } from '../feed/feedEngine'
 import { Alert, Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
@@ -68,7 +71,22 @@ const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
   { value: 'status', label: 'Status' },
 ]
 
+// DVP-TSK-919: ?feed=kit mounts the @io-kit/feed panel; legacy stays the default this release.
+const KitFeedPanel = lazy(() => import('../feed/KitFeedPanel'))
+
 export function FeedRoute() {
+  const [engine] = useState(() => resolveFeedEngine())
+  if (engine === 'kit') {
+    return (
+      <Suspense fallback={null}>
+        <KitFeedPanel />
+      </Suspense>
+    )
+  }
+  return <LegacyFeedRoute />
+}
+
+function LegacyFeedRoute() {
   useDocumentTitle('Feed')
   const feedSearch = useSearch({ from: '/feed' })
   const navigate = useNavigate({ from: '/feed' })
@@ -125,6 +143,15 @@ export function FeedRoute() {
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
   const tiered = useTieredSearch({ projectId, query: q }, feedCorpus)
+  // DVP-TSK-921: onPin -> tracker.relate. Pins the row to the record open in the reading pane.
+  const [pins, setPins] = useState<Record<string, 'pending' | 'done' | 'error'>>({})
+  function pinToSelected(sourceId: string, targetId: string) {
+    setPins((p) => ({ ...p, [targetId]: 'pending' }))
+    relateRecords(sourceId, targetId).then(
+      () => setPins((p) => ({ ...p, [targetId]: 'done' })),
+      () => setPins((p) => ({ ...p, [targetId]: 'error' })),
+    )
+  }
   // ENC-TSK-P60: one limit-1 corpus request — the backend computes
   // total_matches over the whole set before slicing.
   const serverCorpusQuery = useQuery(feedCorpusQueryOptions({ limit: 1 }))
@@ -285,7 +312,7 @@ export function FeedRoute() {
         : recordHrefForType(project, hit.recordType, hit.recordId)
     const cci = sessionStateBadge(hit.checkoutState)
 
-    return (
+    const card = (
       <RecordCard
         key={hit.recordId}
         recordId={hit.recordId}
@@ -307,6 +334,34 @@ export function FeedRoute() {
           ? { selected: selectedHit?.recordId === hit.recordId, onSelect: () => selectHit(hit) }
           : { href, onSelect: () => persistFeedReturnSearch(feedSearch) })}
       />
+    )
+    const evidence = tiered.evidenceById.get(hit.recordId)
+    const canPin =
+      isWide &&
+      selectedHit &&
+      selectedHit.recordId !== hit.recordId &&
+      (hit.recordType === 'task' || hit.recordType === 'issue' || hit.recordType === 'feature')
+    if (!evidence && !canPin) return card
+    return (
+      <div key={hit.recordId} className="feed-route__row-wrap">
+        {card}
+        <div className="feed-route__row-extras">
+          {evidence && tiered.availability ? (
+            <SignalReadout evidence={evidence} availability={tiered.availability} mode="chips" />
+          ) : null}
+          {canPin ? (
+            <button
+              type="button"
+              className="feed-route__pin"
+              disabled={pins[hit.recordId] === 'pending' || pins[hit.recordId] === 'done'}
+              onClick={() => pinToSelected(selectedHit.recordId, hit.recordId)}
+              aria-label={`Pin ${hit.recordId} as related to ${selectedHit.recordId}`}
+            >
+              {pins[hit.recordId] === 'done' ? 'Pinned' : pins[hit.recordId] === 'error' ? 'Pin failed - retry' : 'Pin as related'}
+            </button>
+          ) : null}
+        </div>
+      </div>
     )
   }
 
@@ -418,6 +473,10 @@ export function FeedRoute() {
         {tiered.hybridError && (
           <span className="feed-route__meta-error">{tiered.hybridError.message}</span>
         )}
+        {tiered.availability ? (
+          <DegradedBanner availability={tiered.availability} degraded={tiered.degraded} />
+        ) : null}
+        {tiered.serverDown ? <span role="status">Server search unavailable; showing local matches</span> : null}
         {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
           // ENC-ISS-513 / FND-01: this used to render inline, unconditionally
           // visible, AND duplicated verbatim in the always-open Feed rail.

@@ -1,0 +1,135 @@
+[
+ {
+  "heading_path": [],
+  "level": 1,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 2,
+  "line_end": 343,
+  "section_bytes": 23578
+ },
+ {
+  "heading_path": [
+   "0. Scope and inputs"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 11,
+  "line_end": 26,
+  "section_bytes": 969
+ },
+ {
+  "heading_path": [
+   "1. Area-by-stack matrix"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 28,
+  "line_end": 81,
+  "section_bytes": 4428
+ },
+ {
+  "heading_path": [
+   "2. Best-of-breed"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 83,
+  "line_end": 115,
+  "section_bytes": 2492
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 117,
+  "line_end": 229,
+  "section_bytes": 7794
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.1 FeedSource data contract"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 121,
+  "line_end": 177,
+  "section_bytes": 3525
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.2 Realtime transport decision"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 179,
+  "line_end": 202,
+  "section_bytes": 2007
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.3 Core, bindings and config surface"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 204,
+  "line_end": 229,
+  "section_bytes": 1903
+ },
+ {
+  "heading_path": [
+   "4. Migration order"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 231,
+  "line_end": 258,
+  "section_bytes": 1522
+ },
+ {
+  "heading_path": [
+   "5. Consumer contract tests"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 260,
+  "line_end": 304,
+  "section_bytes": 2788
+ },
+ {
+  "heading_path": [
+   "6. Open decisions for io"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 306,
+  "line_end": 329,
+  "section_bytes": 1576
+ },
+ {
+  "heading_path": [
+   "Inference register"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 331,
+  "line_end": 343,
+  "section_bytes": 1082
+ }
+]

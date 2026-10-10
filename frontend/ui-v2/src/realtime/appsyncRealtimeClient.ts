@@ -2,11 +2,23 @@ import type { AppSyncEventsConfig } from '../api/appsyncConfig'
 import type { FeedRealtimeEvent, GapTooLargeSignal } from '../types/feedEvents'
 
 export const GAP_CURSOR_THRESHOLD = 1_000_000_000 // ~1000 events at 1ms cursor spacing
-export const MAX_AUTO_RECONNECT_ATTEMPTS = 12
-export const LIVENESS_CHECK_INTERVAL_MS = 15_000
-export const DEFAULT_CONNECTION_TIMEOUT_MS = 300_000
-export const BACKOFF_BASE_MS = 500
-export const BACKOFF_CAP_MS = 30_000
+// DVP-TSK-919: reconnect backoff, the liveness sweep and the connection timeout are the @io-kit/feed /appsync
+// policy (pinned equal to the previous local values by the kit's parity test); re-exported for existing importers.
+import {
+  BACKOFF_BASE_MS,
+  BACKOFF_CAP_MS,
+  DEFAULT_CONNECTION_TIMEOUT_MS,
+  LIVENESS_CHECK_INTERVAL_MS,
+  MAX_AUTO_RECONNECT_ATTEMPTS,
+  backoffDelay,
+} from '@io-kit/feed/appsync'
+export {
+  BACKOFF_BASE_MS,
+  BACKOFF_CAP_MS,
+  DEFAULT_CONNECTION_TIMEOUT_MS,
+  LIVENESS_CHECK_INTERVAL_MS,
+  MAX_AUTO_RECONNECT_ATTEMPTS,
+}
 /**
  * ENC-TSK-N04 (B67 AC-4/W14-A): documented SERVER keepalive cadence. The B67
  * spec text said 30s, but AppSync Events delivers `ka` at ~60s in practice
@@ -404,9 +416,7 @@ export class AppSyncRealtimeClient {
       return
     }
 
-    const exp = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (this.reconnectAttempt - 1))
-    const jitter = 0.5 + Math.random() * 0.5
-    const delayMs = Math.round(exp * jitter)
+    const delayMs = backoffDelay(this.reconnectAttempt - 1)
 
     this.onEvent({ type: 'reconnecting', attempt: this.reconnectAttempt, delayMs })
     this.clearTimers()

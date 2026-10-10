@@ -1,0 +1,298 @@
+[
+ {
+  "heading_path": [],
+  "level": 1,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 2,
+  "line_end": 755,
+  "section_bytes": 81769
+ },
+ {
+  "heading_path": [
+   "0. Executive summary"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCQ2D99ZS5WK406TG66PE9",
+  "line_start": 14,
+  "line_end": 31,
+  "section_bytes": 3119
+ },
+ {
+  "heading_path": [
+   "1. North-star parity acceptance criterion"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 33,
+  "line_end": 68,
+  "section_bytes": 3186
+ },
+ {
+  "heading_path": [
+   "2. Current state"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 70,
+  "line_end": 127,
+  "section_bytes": 5281
+ },
+ {
+  "heading_path": [
+   "3. Vision: the next generation of io's software and cloud architecture ecosystem"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCRJ3S3Q0YDM6Y5E5CT6VJ",
+  "line_start": 130,
+  "line_end": 244,
+  "section_bytes": 14470
+ },
+ {
+  "heading_path": [
+   "3. Vision: the next generation of io's software and cloud architecture ecosystem",
+   "3.1 The ecosystem as a whole"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 132,
+  "line_end": 188,
+  "section_bytes": 5553
+ },
+ {
+  "heading_path": [
+   "3. Vision: the next generation of io's software and cloud architecture ecosystem",
+   "3.2 Locked decisions"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 190,
+  "line_end": 212,
+  "section_bytes": 4102
+ },
+ {
+  "heading_path": [
+   "3. Vision: the next generation of io's software and cloud architecture ecosystem",
+   "3.3 Deferred decisions"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 214,
+  "line_end": 231,
+  "section_bytes": 3182
+ },
+ {
+  "heading_path": [
+   "3. Vision: the next generation of io's software and cloud architecture ecosystem",
+   "3.4 Inference register for the vision"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 233,
+  "line_end": 244,
+  "section_bytes": 1502
+ },
+ {
+  "heading_path": [
+   "4. Kit package architecture"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 246,
+  "line_end": 289,
+  "section_bytes": 4138
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCRNN97A5H17B75SY9GENQ",
+  "line_start": 292,
+  "line_end": 488,
+  "section_bytes": 15263
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.1 auth"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 296,
+  "line_end": 326,
+  "section_bytes": 3050
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.2 shell"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 328,
+  "line_end": 348,
+  "section_bytes": 1655
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.3 md"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 350,
+  "line_end": 372,
+  "section_bytes": 1551
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.4 search"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 374,
+  "line_end": 393,
+  "section_bytes": 1544
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.5 feed"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 395,
+  "line_end": 416,
+  "section_bytes": 1485
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.6 schema_form"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 418,
+  "line_end": 441,
+  "section_bytes": 1996
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.7 recipes"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 443,
+  "line_end": 464,
+  "section_bytes": 1761
+ },
+ {
+  "heading_path": [
+   "5. Per-area canonical APIs",
+   "5.8 gates"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 466,
+  "line_end": 488,
+  "section_bytes": 1943
+ },
+ {
+  "heading_path": [
+   "6. Per-stack migration sequencing"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCQGHSN5TZAAEZE70XSKK2",
+  "line_start": 491,
+  "line_end": 556,
+  "section_bytes": 10085
+ },
+ {
+  "heading_path": [
+   "7. Parity-gap closure plan"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCQM477G7AJ404MEW8Y6CA",
+  "line_start": 559,
+  "line_end": 587,
+  "section_bytes": 3995
+ },
+ {
+  "heading_path": [
+   "8. Recommended feature and plan records"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 589,
+  "line_end": 638,
+  "section_bytes": 4516
+ },
+ {
+  "heading_path": [
+   "9. Risks and mitigations"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 640,
+  "line_end": 656,
+  "section_bytes": 2855
+ },
+ {
+  "heading_path": [
+   "10. Open decisions for io"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4JCQQFE094S0PQRZR5CR6Q4",
+  "line_start": 659,
+  "line_end": 695,
+  "section_bytes": 6926
+ },
+ {
+  "heading_path": [
+   "Inference register"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 697,
+  "line_end": 724,
+  "section_bytes": 3179
+ },
+ {
+  "heading_path": [
+   "Input index"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 726,
+  "line_end": 755,
+  "section_bytes": 3047
+ }
+]
