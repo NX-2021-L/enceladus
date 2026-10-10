@@ -3,13 +3,13 @@ import { DEFAULT_FEED_ENGINE, resolveFeedEngine } from './feedEngine'
 import { BACKOFF_BASE_MS, BACKOFF_CAP_MS, DEFAULT_CONNECTION_TIMEOUT_MS, LIVENESS_CHECK_INTERVAL_MS, MAX_AUTO_RECONNECT_ATTEMPTS } from '../realtime/appsyncRealtimeClient'
 import { backoffDelay } from '@io-kit/feed/appsync'
 
-describe('feed engine flag (default legacy this release)', () => {
-  it('defaults to legacy; ?feed=kit or the preference turns the kit panel on; the query wins', () => {
-    expect(DEFAULT_FEED_ENGINE).toBe('legacy')
-    expect(resolveFeedEngine('', null)).toBe('legacy')
-    expect(resolveFeedEngine('?feed=kit', null)).toBe('kit')
-    expect(resolveFeedEngine('', 'kit')).toBe('kit')
-    expect(resolveFeedEngine('?feed=legacy', 'kit')).toBe('legacy')
+describe('feed engine flag (default kit since DVP-TSK-924)', () => {
+  it('defaults to kit; ?feed=legacy or the preference forces the legacy engine; the query wins', () => {
+    expect(DEFAULT_FEED_ENGINE).toBe('kit')
+    expect(resolveFeedEngine('', null)).toBe('kit')
+    expect(resolveFeedEngine('?feed=legacy', null)).toBe('legacy')
+    expect(resolveFeedEngine('', 'legacy')).toBe('legacy')
+    expect(resolveFeedEngine('?feed=kit', 'legacy')).toBe('kit')
   })
 })
 

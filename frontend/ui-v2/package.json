@@ -18,7 +18,7 @@
   "dependencies": {
     "@io-kit/auth": "1.0.0",
     "@io-kit/feed": "1.0.0",
-    "@io-kit/md": "1.0.0",
+    "@io-kit/md": "1.1.0",
     "@io-kit/schema_form": "0.2.1",
     "@io-kit/search": "0.2.0",
     "@io-kit/shell": "0.1.0",
@@ -28,6 +28,7 @@
     "@tanstack/react-router": "^1.170.17",
     "@tanstack/react-virtual": "^3.14.5",
     "cytoscape": "^3.34.0",
+    "highlight.js": "11.11.1",
     "lucide-react": "^1.23.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
