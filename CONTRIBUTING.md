@@ -1,23 +1,23 @@
 # Contributing
 
-## UI parity: route or waiver (DVP-TSK-862)
+## UI parity: generic coverage by default (DVP-TSK-895, supersedes route-or-waiver)
 
-`enceladus.jreese.net` runs the io-kit parity job (`.github/workflows/parity-report.yml`) in
-blocking-with-ratchet mode on a flags-off basis (flag-gated actions are excluded, in the
-baseline, the gate and the report). The job fails a PR when `missing` rises above, or `covered`
-drops below, `frontend/ui-v2/parity/baseline.json`. It never requires coverage to rise.
+`enceladus.jreese.net` runs the io-kit parity job (`.github/workflows/parity-report.yml`) as a
+blocking ratchet against `frontend/ui-v2/parity/baseline.json` (flags-off basis: flag-gated actions
+are excluded). Since DVP-TSK-895 the baseline is 82 covered / 0 partial / 0 missing of 82.
 
-A PR that adds an action to the MCP registry (`tools/enceladus-mcp-server/parity/caps.json`)
-must, in the same PR, do one of:
+**A new registry action needs no route, no map entry and no waiver.** Every action in
+`tools/enceladus-mcp-server/parity/caps.json` is covered generically: the command palette lists it,
+`/actions/<name>` renders a form from its `inputSchema`, calls `execute` with `dry_run:true`, shows the
+server-verified ResolvedCall v1 preview, then executes with an `Idempotency-Key` and shows the receipt
+with the minted ids. When the action is added, also refresh the committed copy
+`frontend/ui-v2/src/actions/capsFull.json` and `src/shell/capsSnapshot.json`
+(`registry.test.ts` fails when `capsFull.json` drifts from `caps.json`).
 
-1. **Route**: add the ui-v2 route/handler and an `ACTION_RULES` entry in
-   `frontend/ui-v2/parity/generate_parity.py`, then run `python3 frontend/ui-v2/parity/generate_parity.py`
-   and commit `routes.yaml` and `map.yaml`.
-2. **Waiver**: add `{action, surface: enceladus, owner, reason, expires}` to
-   `frontend/ui-v2/parity/waivers.yaml`. `expires` must be at most 30 days out; an expired waiver fails the job.
-3. **Baseline bump**: rewrite the baseline deliberately (`io-kit parity baseline write --out
-   frontend/ui-v2/parity/baseline.json` with the same arguments the job uses, no `--flags`) and
-   say why in the PR body. Reviewers treat a baseline that gets worse as a decision, not a formality.
-
-Run the proof locally: `python3 -I -m unittest discover -s frontend/ui-v2/parity/tests`
-(the route-or-waiver tests need the `io-kit` CLI on PATH).
+The route-or-waiver convention now applies **only to bespoke overrides**: if you build a dedicated
+screen for an action, add an `ACTION_RULES` entry in `frontend/ui-v2/parity/generate_parity.py`, add the
+action to `BESPOKE_ACTIONS` in `src/actions/registry.ts`, and regenerate (`python3
+frontend/ui-v2/parity/generate_parity.py`, commit `routes.yaml` and `map.yaml`). A waiver
+(`parity/waivers.yaml`, `{action, surface: enceladus, owner, reason, expires}`, at most 30 days out) is
+only for an action the generic path cannot serve. The ratchet still fails when `covered` drops or
+`missing` rises; lowering the baseline is a deliberate edit.

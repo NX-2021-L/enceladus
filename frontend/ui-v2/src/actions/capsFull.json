@@ -1,0 +1,5091 @@
+{
+  "schemaVersion": "1.1.0",
+  "surface": "enceladus",
+  "generatedAt": "2026-10-10T15:54:44Z",
+  "actions": [
+    {
+      "name": "actions.schemas",
+      "title": "List action schemas",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "via": {
+            "type": "string",
+            "enum": [
+              "top-level",
+              "search",
+              "coordination",
+              "execute"
+            ],
+            "description": "Restrict the listing to one surface."
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Restrict the listing to these action names."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "agent.checkout_release_backfill",
+      "title": "Release checkouts of retired sessions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true, report the checkouts that would be released without releasing them."
+          },
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Restrict the backfill to these retired session ids."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.claim",
+      "title": "Claim agent session",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Pre-minted session id (ENC-SES-...) to claim."
+          },
+          "expected_agent_type_id": {
+            "type": "string",
+            "description": "Agent type id the claim must match."
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "sci": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Session Claim ID issued on claim (ENC-ISS-441); never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.list",
+      "title": "List agent sessions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Filter by session status."
+          },
+          "agent_type_id": {
+            "type": "string",
+            "description": "Filter by agent type id."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.register",
+      "title": "Register agent session",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_type_id": {
+            "type": "string",
+            "description": "Agent type id (ENC-AGT-...)."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "Runtime identifier for the session."
+          },
+          "parent_session_id": {
+            "type": "string",
+            "description": "Parent session id (ENC-SES-...)."
+          },
+          "status": {
+            "type": "string",
+            "description": "Initial session status."
+          },
+          "credential_id": {
+            "type": "string",
+            "description": "Optional ENC-CRED credential binding (ENC-TSK-J43)."
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.retire",
+      "title": "Retire agent session",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Session id (ENC-SES-...) to retire."
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.type.list",
+      "title": "List agent types",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Filter by agent-type status."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "agent.type.register",
+      "title": "Register agent type",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "surface": {
+            "type": "string",
+            "description": "Agent surface (for example claude-code)."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model identifier."
+          },
+          "cost_tier": {
+            "type": "string",
+            "description": "Cost tier."
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_type_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "auth.cognito_session",
+      "title": "Create Cognito session",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target_origin": {
+            "type": "string",
+            "description": "Optional https origin for browser cookie scoping (default: https://jreese.net)."
+          },
+          "include_set_cookie_headers": {
+            "type": "boolean",
+            "description": "Include serialized Set-Cookie header strings in the response. Default true.",
+            "default": true
+          },
+          "include_tokens": {
+            "type": "boolean",
+            "description": "Include raw Cognito tokens in response for advanced debugging. Default false.",
+            "default": false
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "capabilities.get",
+      "title": "Get coordination capabilities",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "changelog.history",
+      "title": "Get changelog history",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., 'enceladus', 'devops')."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max entries to return (default 20, max 100).",
+            "default": 20
+          },
+          "change_type": {
+            "type": "string",
+            "description": "Filter by change type: 'major', 'minor', or 'patch'.",
+            "enum": [
+              "major",
+              "minor",
+              "patch"
+            ]
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "changelog.history_all",
+      "title": "Get changelog history across projects",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "string",
+            "description": "Comma-separated project names (e.g., 'enceladus,devops,harrisonfamily')."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max entries per project to return (default 20, max 100).",
+            "default": 20
+          },
+          "change_type": {
+            "type": "string",
+            "description": "Filter by change type: 'major', 'minor', or 'patch'.",
+            "enum": [
+              "major",
+              "minor",
+              "patch"
+            ]
+          }
+        },
+        "required": [
+          "projects"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "changelog.version",
+      "title": "Get changelog version",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., 'enceladus', 'devops')."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "checkout.advance",
+      "title": "Advance task status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The task record ID to advance."
+          },
+          "target_status": {
+            "type": "string",
+            "description": "Target status. Lifecycle: open\u2192in-progress\u2192coding-complete\u2192committed\u2192pr\u2192merged-main\u2192deploy-init\u2192deploy-success\u2192closed."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider advancing the task (must match checkout owner)."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after the SCI enforcement epoch; strip-and-forwarded, never validated here."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "transition_evidence": {
+            "type": "object",
+            "description": "Evidence for gated transitions; required fields vary by target status."
+          },
+          "pr_id": {
+            "type": "integer",
+            "description": "GitHub PR number (shortcut for merged-main, same as transition_evidence.pr_id)."
+          },
+          "merged_at": {
+            "type": "string",
+            "description": "PR merged_at timestamp (shortcut for merged-main)."
+          }
+        },
+        "required": [
+          "record_id",
+          "target_status",
+          "provider",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "commit_approval_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "CAI/CCI token minted by the checkout service on the matching transition; never supply on input."
+          },
+          "commit_complete_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "CAI/CCI token minted by the checkout service on the matching transition; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "checkout.append_worklog",
+      "title": "Append task worklog",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The task record ID to log against."
+          },
+          "description": {
+            "type": "string",
+            "description": "Worklog text. Use [START], [INFO], [SUCCESS], [ERROR], [END] tags."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider appending the worklog (must match checkout owner)."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after the SCI enforcement epoch; strip-and-forwarded, never validated here."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          }
+        },
+        "required": [
+          "record_id",
+          "description",
+          "provider",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "checkout.release",
+      "title": "Release task checkout",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The task record ID to release."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider releasing the task."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          }
+        },
+        "required": [
+          "record_id",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "checkout.task",
+      "title": "Check out task",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The task record ID (e.g., ENC-TSK-730)."
+          },
+          "active_agent_session_id": {
+            "type": "string",
+            "description": "Agent identity checking out the task (e.g., 'claude_agent_sdk')."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after the SCI enforcement epoch; strip-and-forwarded, never validated here."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Optional coordination request ID for audit traceability."
+          }
+        },
+        "required": [
+          "record_id",
+          "active_agent_session_id",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "component.add_edge",
+      "title": "Add component edge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          },
+          "edge_type": {
+            "type": "string",
+            "description": "Edge type (DESIGNS, IMPLEMENTS or DEPLOYS).",
+            "x-io-required-by": "backend"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "Task id the edge points at.",
+            "x-io-required-by": "backend"
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.advance",
+      "title": "Advance component lifecycle",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          },
+          "target_status": {
+            "type": "string",
+            "description": "Target lifecycle_status.",
+            "x-io-required-by": "backend"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason for the transition."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.deprecate",
+      "title": "Deprecate component",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason for deprecation (io-only)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.propose",
+      "title": "Propose component",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Proposed component id.",
+            "x-io-required-by": "backend"
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable component name.",
+            "x-io-required-by": "backend"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Owning project id.",
+            "x-io-required-by": "backend"
+          },
+          "source_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Repository paths the component owns.",
+            "x-io-required-by": "backend"
+          },
+          "description": {
+            "type": "string",
+            "description": "Component description.",
+            "x-io-required-by": "backend"
+          },
+          "requested_minimum_transition_type": {
+            "type": "string",
+            "description": "Minimum transition type requested.",
+            "x-io-required-by": "backend"
+          },
+          "proposing_agent_session_id": {
+            "type": "string",
+            "description": "Proposing session id (ENC-SES-...)."
+          },
+          "category": {
+            "type": "string",
+            "description": "Component category."
+          },
+          "component_address": {
+            "type": "string",
+            "description": "v3 component address."
+          },
+          "component_repo_dir": {
+            "type": "string",
+            "description": "Repository directory for the component."
+          },
+          "component_address_class": {
+            "type": "string",
+            "description": "Component address class."
+          },
+          "component_class": {
+            "type": "string",
+            "description": "Component class."
+          },
+          "requested_required_transition_type": {
+            "type": "string",
+            "description": "Required transition type requested."
+          },
+          "required_transition_type_rationale": {
+            "type": "string",
+            "description": "Rationale for the required transition type."
+          }
+        },
+        "required": [
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.remove_edge",
+      "title": "Remove component edge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          },
+          "edge_type": {
+            "type": "string",
+            "description": "Edge type to remove.",
+            "x-io-required-by": "backend"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "Task id the edge points at.",
+            "x-io-required-by": "backend"
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.restore",
+      "title": "Restore component",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "component.revert",
+      "title": "Revert component",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component id."
+          },
+          "reverted_reason": {
+            "type": "string",
+            "description": "Why the component is reverted (minimum 10 characters; io-only).",
+            "x-io-required-by": "backend"
+          }
+        },
+        "required": [
+          "governance_hash",
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_component_proposal",
+      "dryRun": true
+    },
+    {
+      "name": "deploy.history",
+      "title": "Get deploy history",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results. Default 10.",
+            "default": 10
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.history_list",
+      "title": "List deploy history",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results. Default 10.",
+            "default": 10
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.pending_requests",
+      "title": "List pending deploy requests",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum pending requests to return (default 50, max 200)."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.state_get",
+      "title": "Get deploy state",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.state_set",
+      "title": "Set deploy state",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "PAUSED"
+            ],
+            "description": "The desired deployment state."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason for the state change."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          }
+        },
+        "required": [
+          "project_id",
+          "state",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "deploy.status",
+      "title": "Get deploy status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "spec_id": {
+            "type": "string",
+            "description": "The deployment spec ID (e.g., SPEC-20260219T143000)."
+          }
+        },
+        "required": [
+          "project_id",
+          "spec_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.status_get",
+      "title": "Get deploy status record",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "spec_id": {
+            "type": "string",
+            "description": "The deployment spec ID (e.g., SPEC-20260219T143000)."
+          }
+        },
+        "required": [
+          "project_id",
+          "spec_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "deploy.submit",
+      "title": "Submit deploy request",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., devops)."
+          },
+          "change_type": {
+            "type": "string",
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "description": "Semantic version bump type."
+          },
+          "deployment_type": {
+            "type": "string",
+            "enum": [
+              "github_public_static",
+              "github_private_sst",
+              "github_public_workers",
+              "github_private_workers",
+              "lambda_update",
+              "lambda_layer",
+              "container_template",
+              "glue_crawler_update",
+              "glue_job_update",
+              "eventbridge_rule",
+              "s3_asset_sync",
+              "cloudfront_config",
+              "step_function_update"
+            ],
+            "description": "Deployment type key from the v0.3 registry."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Human-readable summary of the deployment."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of change descriptions."
+          },
+          "related_record_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tracker record IDs related to this deploy (e.g., DVP-TSK-249)."
+          },
+          "files_changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of changed file paths."
+          },
+          "auto_trigger": {
+            "type": "boolean",
+            "description": "If true (default), send SQS trigger when state is ACTIVE.",
+            "default": true
+          },
+          "submitted_by": {
+            "type": "string",
+            "description": "Optional submitter identity for audit."
+          },
+          "pr_id": {
+            "type": "integer",
+            "description": "GitHub PR number that was merged for this deployment (required by deploy_intake). E.g. 75."
+          },
+          "merged_at": {
+            "type": "string",
+            "description": "ISO 8601 timestamp when the PR was merged (e.g. '2026-03-02T04:35:24Z'). Must match GitHub API value."
+          },
+          "pr_owner": {
+            "type": "string",
+            "description": "GitHub repo owner for PR merge validation. Defaults to 'NX-2021-L' if omitted."
+          },
+          "pr_repo": {
+            "type": "string",
+            "description": "GitHub repo name for PR merge validation. Defaults to 'enceladus' if omitted."
+          },
+          "github_config": {
+            "type": "object",
+            "description": "GitHub deployment config for github_* deployment types."
+          },
+          "non_ui_config": {
+            "type": "object",
+            "description": "Non-UI deployment config for infrastructure deployment types."
+          },
+          "source_artifact_s3_key": {
+            "type": "string",
+            "description": "Optional S3 key for a pre-built Lambda artifact zip. Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip where arch_tag is arm64-py312 (prod and gamma). When present, deploy_intake validates the arch tag matches the target environment."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          }
+        },
+        "required": [
+          "project_id",
+          "change_type",
+          "deployment_type",
+          "summary",
+          "changes",
+          "pr_id",
+          "merged_at",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "deploy.trigger",
+      "title": "Trigger deploy pipeline",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "dispatch_plan.dry_run",
+      "title": "Preview dispatch plan",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of outcome strings to plan for."
+          },
+          "preferred_provider": {
+            "type": "string",
+            "enum": [
+              "openai_codex",
+              "claude_agent_sdk",
+              "aws_native",
+              "aws_bedrock_agent"
+            ],
+            "description": "Optional preferred provider override."
+          }
+        },
+        "required": [
+          "project_id",
+          "outcomes"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "dispatch_plan.generate",
+      "title": "Generate dispatch plan",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "The coordination request ID to generate a dispatch-plan for."
+          },
+          "dispatch_plan_override": {
+            "type": "object",
+            "description": "Optional pre-built dispatch-plan JSON that bypasses auto-generation."
+          }
+        },
+        "required": [
+          "request_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "document.append_handoff_reply",
+      "title": "Append handoff reply",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Handoff document id."
+          },
+          "content": {
+            "type": "string",
+            "description": "Reply body (markdown)."
+          },
+          "agent_layer": {
+            "type": "string",
+            "description": "Layer of the replying agent.",
+            "enum": [
+              "supervisor",
+              "coord-lead",
+              "dispatched-agent",
+              "product-lead-terminal"
+            ]
+          },
+          "author": {
+            "type": "string",
+            "description": "Reply author; defaults to agent_layer."
+          },
+          "originating_handoff_ref": {
+            "type": "string",
+            "description": "Handoff the reply answers; defaults to document_id."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "document_id",
+          "content",
+          "agent_layer"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.append_wave_entry",
+      "title": "Append wave entry",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Wave document id."
+          },
+          "content": {
+            "type": "string",
+            "description": "Entry body (markdown)."
+          },
+          "agent_layer": {
+            "type": "string",
+            "description": "Layer of the appending agent."
+          },
+          "author": {
+            "type": "string",
+            "description": "Entry author; defaults to agent_layer."
+          },
+          "originating_handoff_ref": {
+            "type": "string",
+            "description": "Handoff the entry relates to."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "document_id",
+          "content",
+          "agent_layer"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.claim_handoff",
+      "title": "Claim handoff document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Handoff document id."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.complete_handoff",
+      "title": "Complete handoff document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Handoff document id."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.create_coe",
+      "title": "Create COE document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "title": {
+            "type": "string",
+            "description": "COE title."
+          },
+          "content": {
+            "type": "string",
+            "description": "COE body (markdown)."
+          },
+          "source_incident_id": {
+            "type": "string",
+            "description": "Incident the COE analyses."
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keywords."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related record or document ids."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "File name (markdown)."
+          },
+          "informed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Documents that informed this COE."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "title",
+          "content",
+          "source_incident_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.create_handoff",
+      "title": "Create handoff document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "title": {
+            "type": "string",
+            "description": "Handoff title."
+          },
+          "content": {
+            "type": "string",
+            "description": "Handoff body (markdown)."
+          },
+          "source_record_id": {
+            "type": "string",
+            "description": "Record the handoff originates from."
+          },
+          "prerequisite_state": {
+            "type": "string",
+            "description": "State required before the handoff can be claimed."
+          },
+          "verification_criteria": {
+            "type": "string",
+            "description": "How completion is verified."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "Expiry timestamp (ISO-8601)."
+          },
+          "action_checklist": {
+            "type": "array",
+            "items": {},
+            "description": "Checklist items."
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keywords."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related record or document ids."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "title",
+          "content",
+          "source_record_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "document.create_note",
+      "title": "Create note document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "title": {
+            "type": "string",
+            "description": "Note title."
+          },
+          "content": {
+            "type": "string",
+            "description": "Note body (markdown)."
+          },
+          "document_subtype": {
+            "type": "string",
+            "description": "Pinned to 'doc'; any other value is rejected.",
+            "enum": [
+              "doc"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keywords."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related record or document ids."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "File name (markdown)."
+          },
+          "informed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Documents that informed this note."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "title",
+          "content"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "document.create_wave",
+      "title": "Create wave document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "title": {
+            "type": "string",
+            "description": "Wave title."
+          },
+          "content": {
+            "type": "string",
+            "description": "Wave body (markdown)."
+          },
+          "plan_anchor_id": {
+            "type": "string",
+            "description": "Plan record the wave is anchored to."
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keywords."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related record or document ids."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "File name (markdown)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "title",
+          "content",
+          "plan_anchor_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_handoff_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "documents.check_policy",
+      "title": "Check document storage policy",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "description": "Operation name (e.g., documents_put, documents_patch)."
+          },
+          "storage_target": {
+            "type": "string",
+            "description": "Logical storage target (e.g., docstore_api, governance_s3)."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Optional proposed file name/path to validate."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Optional project ID for audit context."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Optional provider identity for audit context."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Optional coordination request ID for audit context."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Optional dispatch ID for audit context."
+          }
+        },
+        "required": [
+          "operation",
+          "storage_target"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "documents.diff",
+      "title": "Diff document versions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "description": "Document id (DOC-...)."
+          },
+          "from": {
+            "type": "string",
+            "description": "Version to diff from."
+          },
+          "to": {
+            "type": "string",
+            "description": "Version to diff to."
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "documents.get",
+      "title": "Get document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "description": "The document ID (e.g., DOC-ABC123DEF456)."
+          },
+          "include_content": {
+            "type": "boolean",
+            "description": "Whether to include the document body. Default true.",
+            "default": true
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "documents.history",
+      "title": "Get document history",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "description": "Document id (DOC-...)."
+          },
+          "since": {
+            "type": "string",
+            "description": "Lower bound (ISO-8601) on change timestamps."
+          },
+          "until": {
+            "type": "string",
+            "description": "Upper bound (ISO-8601) on change timestamps."
+          },
+          "actor": {
+            "type": "string",
+            "description": "Filter by the actor that made the change."
+          },
+          "op": {
+            "type": "string",
+            "description": "Filter by operation type."
+          },
+          "block_id": {
+            "type": "string",
+            "description": "Filter by document block id."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response's next_cursor."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Maximum records per page."
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "documents.list",
+      "title": "List documents",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Max documents per page (default 25, max 100)."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Pagination cursor from previous response's next_cursor."
+          },
+          "document_subtype": {
+            "type": "string",
+            "description": "Filter by document_subtype (e.g. skill, handoff)."
+          },
+          "include_content": {
+            "type": "boolean",
+            "description": "When false, list returns metadata-only projection (skill rows: id, title, description, version, updated_at, runtime_hint). Default true preserves full metadata."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "documents.manifest",
+      "title": "Get document manifest",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "description": "Document id (DOC-...)."
+          },
+          "digest_only": {
+            "type": "boolean",
+            "description": "If true, return only the digest portion of the manifest."
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "documents.patch",
+      "title": "Update document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "description": "Document ID to update."
+          },
+          "title": {
+            "type": "string",
+            "description": "Optional updated title."
+          },
+          "content": {
+            "type": "string",
+            "description": "Optional updated markdown content."
+          },
+          "append_content": {
+            "type": "string",
+            "description": "Optional content to append to existing document. Mutually exclusive with 'content'. For handoff docs, must include reply block frontmatter. For wave docs, must include agent-layer frontmatter."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional updated description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional replacement keywords list."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional replacement related_items list."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "description": "Optional document-level status change. Subtype-specific lifecycle fields (handoff_status/coe_status/wave_status) are separate."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Optional updated file name (.md/.markdown)."
+          },
+          "document_subtype": {
+            "type": "string",
+            "enum": [
+              "doc",
+              "handoff",
+              "coe",
+              "wave",
+              "idea",
+              "context-node",
+              "skill"
+            ],
+            "description": "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). Strict allow-list on patches. Agents may patch a legacy record (general/blueprint/narrative/session-log) to any allow-list subtype provided subtype-specific requirements are satisfied in the same PATCH."
+          },
+          "subtypepattern": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-16. Valid only when the post-patch document_subtype='doc'. Server canonicalizes (trim+lowercase) and validates ^[a-z-]+$. Empty string clears the field. (ref: document.doc)"
+          },
+          "full_description": {
+            "type": "string",
+            "description": "ENC-FTR-078 skill patch. Non-empty, len <= 4096. Valid only when final_subtype='skill'. (ref: document.skill)"
+          },
+          "claude_description": {
+            "type": "string",
+            "description": "ENC-FTR-078 skill patch. Non-empty, len <= 1024. Valid only when final_subtype='skill'. (ref: document.skill)"
+          },
+          "agentskills_manifest": {
+            "type": "object",
+            "description": "ENC-FTR-078 skill patch. JSON object re-validated against pinned agentskills_spec_version. (ref: document.skill)"
+          },
+          "agentskills_spec_version": {
+            "type": "string",
+            "description": "ENC-FTR-078 skill patch. Non-empty string; triggers manifest re-validation. (ref: document.skill)"
+          },
+          "runtime_variants": {
+            "type": "object",
+            "description": "ENC-FTR-078 skill patch. JSON object. Replaces existing runtime_variants. (ref: document.skill)"
+          },
+          "source_record_id": {
+            "type": "string",
+            "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). (ref: document.handoff)"
+          },
+          "handoff_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "claimed",
+              "completed",
+              "stale"
+            ],
+            "description": "Handoff lifecycle state. Canonical path to advance handoff docs. (ref: document.handoff)"
+          },
+          "prerequisite_state": {
+            "type": "string",
+            "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)"
+          },
+          "verification_criteria": {
+            "type": "string",
+            "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)"
+          },
+          "action_checklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)"
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)"
+          },
+          "source_incident_id": {
+            "type": "string",
+            "description": "Tracker record ID of the incident a COE investigates. (ref: document.coe)"
+          },
+          "coe_status": {
+            "type": "string",
+            "enum": [
+              "drafting",
+              "investigating",
+              "published",
+              "superseded"
+            ],
+            "description": "COE lifecycle status. (ref: document.coe)"
+          },
+          "plan_anchor_id": {
+            "type": "string",
+            "description": "Plan record ID this wave tracks (must contain '-PLN-'). (ref: document.wave)"
+          },
+          "wave_status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "complete",
+              "archived"
+            ],
+            "description": "Wave lifecycle status. (ref: document.wave)"
+          },
+          "informed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source documents that informed this one (GDMP provenance). (ref: document.graph_edges)"
+          },
+          "document_maturity_state": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "compliant",
+              "contextualized",
+              "mature"
+            ],
+            "description": "GDMP maturity lifecycle. Canonical path to advance maturity via patch. (ref: docstore.document)"
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          }
+        },
+        "required": [
+          "document_id",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "documents.patch_section",
+      "title": "Patch document section",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Document id (DOC-...)."
+          },
+          "op": {
+            "type": "string",
+            "description": "Section operation (for example replace, insert_after, delete).",
+            "x-io-required-by": "backend"
+          },
+          "anchor": {
+            "type": "object",
+            "description": "Section anchor: {block_id} or {heading_path}.",
+            "x-io-required-by": "backend"
+          },
+          "body": {
+            "type": "string",
+            "description": "Markdown body for the operation."
+          },
+          "if_match": {
+            "type": "string",
+            "description": "Content hash precondition; required by the backend (no unconditional mode).",
+            "x-io-required-by": "backend"
+          },
+          "include_heading": {
+            "type": "boolean",
+            "description": "Include the heading in the replaced body."
+          },
+          "rebase_headings": {
+            "type": "boolean",
+            "description": "Rebase heading levels to the anchor (default true)."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "Caller-supplied idempotency key."
+          },
+          "caused_by": {
+            "type": "string",
+            "description": "Record or document that caused this change."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate and report without writing."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID returned by agent.claim; forwarded as-is (ENC-ISS-441)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "document_id"
+        ],
+        "additionalProperties": true
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "documents.put",
+      "title": "Create document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID for the new document."
+          },
+          "title": {
+            "type": "string",
+            "description": "Document title."
+          },
+          "content": {
+            "type": "string",
+            "description": "Document body content (markdown)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional summary/description."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional keyword tags."
+          },
+          "related_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional related tracker IDs."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Optional output file name (.md/.markdown)."
+          },
+          "document_subtype": {
+            "type": "string",
+            "enum": [
+              "doc",
+              "handoff",
+              "coe",
+              "wave",
+              "idea",
+              "context-node",
+              "skill"
+            ],
+            "description": "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). Strict allow-list on writes. 'handoff' requires source_record_id; 'coe' requires source_incident_id; 'wave' requires plan_anchor_id; 'context-node' requires body <=2048 chars and >=5 related_items; 'skill' requires full_description (<=4096), claude_description (<=1024), agentskills_manifest + agentskills_spec_version, and >=2 related_items. Legacy values {general, blueprint, narrative, session-log} are read-only; for emergent patterns use document_subtype='doc' with subtypepattern='<value>'."
+          },
+          "confirm_subtype": {
+            "type": "boolean",
+            "description": "Override semantic guard when title/content match handoff patterns but subtype=doc is intentional."
+          },
+          "subtypepattern": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-16 self-learning field. Optional. Valid only when document_subtype='doc'. Server canonicalizes (trim+lowercase) and validates ^[a-z-]+$. Examples: 'blueprint', 'runbook', 'post-mortem'. (ref: document.doc)"
+          },
+          "full_description": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-8 required field for document_subtype='skill'. Non-empty, len <= 4096. Canonical source of truth. (ref: document.skill)"
+          },
+          "claude_description": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-9 required field for document_subtype='skill'. Non-empty, len <= 1024 (Claude SKILL.md hard ceiling). (ref: document.skill)"
+          },
+          "agentskills_manifest": {
+            "type": "object",
+            "description": "ENC-FTR-078 AC-12 required field for document_subtype='skill'. JSON object conformant with agentskills.io/home spec at pinned agentskills_spec_version. (ref: document.skill)"
+          },
+          "agentskills_spec_version": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-12 required field for document_subtype='skill'. Pinned agentskills.io/home spec version (default '0.1.0'). (ref: document.skill)"
+          },
+          "runtime_variants": {
+            "type": "object",
+            "description": "ENC-FTR-078 AC-13 optional field for document_subtype='skill'. Map of {runtime_id: variant_payload}. Unknown keys permitted. (ref: document.skill)"
+          },
+          "source_record_id": {
+            "type": "string",
+            "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). Required when document_subtype=handoff. (ref: document.handoff)"
+          },
+          "handoff_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "claimed",
+              "completed",
+              "stale"
+            ],
+            "description": "Handoff lifecycle state; defaults to 'pending' on creation. (ref: document.handoff)"
+          },
+          "prerequisite_state": {
+            "type": "string",
+            "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)"
+          },
+          "verification_criteria": {
+            "type": "string",
+            "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)"
+          },
+          "action_checklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)"
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)"
+          },
+          "source_incident_id": {
+            "type": "string",
+            "description": "Tracker record ID of the incident a COE investigates. Required when document_subtype=coe. (ref: document.coe)"
+          },
+          "coe_status": {
+            "type": "string",
+            "enum": [
+              "drafting",
+              "investigating",
+              "published",
+              "superseded"
+            ],
+            "description": "COE lifecycle status. (ref: document.coe)"
+          },
+          "plan_anchor_id": {
+            "type": "string",
+            "description": "Plan record ID this wave tracks (must contain '-PLN-', e.g. ENC-PLN-029). Required when document_subtype=wave. (ref: document.wave)"
+          },
+          "wave_status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "complete",
+              "archived"
+            ],
+            "description": "Wave lifecycle status. (ref: document.wave)"
+          },
+          "informed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source documents that informed this one (GDMP provenance). Array of document IDs. (ref: document.graph_edges)"
+          },
+          "document_maturity_state": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "compliant",
+              "contextualized",
+              "mature"
+            ],
+            "description": "GDMP maturity lifecycle; 'raw' on creation, advances via documents.patch. (ref: docstore.document)"
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          }
+        },
+        "required": [
+          "project_id",
+          "title",
+          "content",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "documents.search",
+      "title": "Search documents",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Filter by project."
+          },
+          "keyword": {
+            "type": "string",
+            "description": "Keyword to search in document keywords."
+          },
+          "related": {
+            "type": "string",
+            "description": "Related record ID to search for."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title substring to search for."
+          },
+          "document_subtype": {
+            "type": "string",
+            "description": "Filter by document_subtype (e.g. 'idea', 'context-node', 'skill', 'doc', 'handoff', 'coe', 'wave'). Legacy values still searchable as they remain readable."
+          },
+          "subtypepattern": {
+            "type": "string",
+            "description": "ENC-FTR-078 AC-17 self-learning filter. Matches document_subtype='doc' records whose canonical subtypepattern (lowercase, alpha+dash) exactly equals the filter value. Combine with document_subtype='doc' for clarity."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "escalation.get",
+      "title": "Get escalation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "escalation_id": {
+            "type": "string",
+            "description": "Escalation id (ENC-ESC-...)."
+          }
+        },
+        "required": [
+          "project_id",
+          "escalation_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_escalation_primitive"
+    },
+    {
+      "name": "escalation.list",
+      "title": "List escalations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by escalation status."
+          },
+          "target_record_id": {
+            "type": "string",
+            "description": "Filter by the record the escalation targets."
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Filter by originating session id (ENC-SES-...)."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Maximum records per page."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_escalation_primitive"
+    },
+    {
+      "name": "escalation.request",
+      "title": "Request escalation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "target_record_id": {
+            "type": "string",
+            "description": "Record the escalation targets.",
+            "x-io-required-by": "backend"
+          },
+          "mutation_type": {
+            "type": "string",
+            "description": "Lifecycle-forbidden mutation being proposed.",
+            "x-io-required-by": "backend"
+          },
+          "payload": {
+            "type": "object",
+            "description": "Mutation payload, validated by the backend mutation-handler registry.",
+            "x-io-required-by": "backend"
+          },
+          "justification": {
+            "type": "string",
+            "description": "Why io should approve.",
+            "x-io-required-by": "backend"
+          },
+          "expected_version": {
+            "type": "integer",
+            "description": "Record version the mutation was computed against."
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "Requesting identity."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request id (CRQ-* or DSP-*)."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch id (DSP-*)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "escalation_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_escalation_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "escalation.watch",
+      "title": "Poll escalation events",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Session id (ENC-SES-...) whose escalations to poll."
+          },
+          "since": {
+            "type": "string",
+            "description": "Cursor: pass the previous response's next_cursor."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination",
+      "flag": "enable_escalation_primitive"
+    },
+    {
+      "name": "get_compact_context",
+      "title": "Get compact context",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "Context mode: record, issue, task, feature, project, document, or topic."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Tracker record ID for record-oriented modes."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID for project/topic modes and codemap lookups."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Document ID for document mode."
+          },
+          "domain": {
+            "type": "string",
+            "description": "Optional codemap domain filter using the existing get_code_map payload semantics."
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional architecture or topic domains."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "description": "Token budget forwarded to existing composite helpers where supported."
+          },
+          "history_limit": {
+            "type": "integer",
+            "description": "History limit forwarded to record context helpers."
+          },
+          "query": {
+            "type": "string",
+            "description": "Topic or reference search query. When supplied, enables the hybrid retrieval vector + keyword signals (ENC-TSK-B92)."
+          },
+          "anchor_record_id": {
+            "type": "string",
+            "description": "Optional record_id used as the graph anchor for Personalized PageRank / fallback edge-walk scoring in hybrid retrieval. Defaults to `record_id` for record modes. (ENC-TSK-B92)"
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "Hybrid retrieval top-N result count (default 20, max 50). Applied after RRF fusion and FSRS-6 T3 Lesson filtering. (ENC-TSK-B92)"
+          },
+          "include_below_threshold": {
+            "type": "boolean",
+            "description": "If true, includes Lessons with FSRS-6 stability < T3 (0.7) in hybrid retrieval results. Default false suppresses below-threshold Lessons per B62 scope item #4. (ENC-TSK-B92)"
+          },
+          "record_type": {
+            "type": "string",
+            "description": "Optional record-type filter (task/issue/feature/plan/lesson/document) applied to hybrid retrieval. (ENC-TSK-B92)"
+          },
+          "include_code_map": {
+            "type": "boolean",
+            "description": "If true (default), include the existing get_code_map payload under code_map."
+          },
+          "include_governance": {
+            "type": "boolean",
+            "description": "If true, include governance dictionary slices when available."
+          },
+          "include_related_documents": {
+            "type": "boolean",
+            "description": "If true, include related document summaries when available."
+          },
+          "include_hybrid_retrieval": {
+            "type": "boolean",
+            "description": "If true (default when query/anchor_record_id is set), include three-signal hybrid retrieval results under hybrid_retrieval. Set false to disable. (ENC-TSK-B92)"
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "top-level"
+    },
+    {
+      "name": "github.create_issue",
+      "title": "Create GitHub issue",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "GitHub repository owner (organization or user)."
+          },
+          "repo": {
+            "type": "string",
+            "description": "GitHub repository name."
+          },
+          "title": {
+            "type": "string",
+            "description": "Issue title."
+          },
+          "body": {
+            "type": "string",
+            "description": "Issue body/description (markdown)."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional labels to assign to the issue."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Optional Enceladus tracker record ID to link (e.g., ENC-TSK-575)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Optional Enceladus project ID for traceability."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "title"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": false,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "github.projects_list",
+      "title": "List GitHub projects",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "org": {
+            "type": "string",
+            "description": "GitHub organization login. Default: NX-2021-L."
+          },
+          "include_closed": {
+            "type": "boolean",
+            "description": "Include closed projects. Default: false."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "github.projects_sync",
+      "title": "Sync issue to GitHub project",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "GitHub repository owner (organization or user)."
+          },
+          "repo": {
+            "type": "string",
+            "description": "GitHub repository name."
+          },
+          "issue_number": {
+            "type": "integer",
+            "description": "GitHub issue number."
+          },
+          "issue_url": {
+            "type": "string",
+            "description": "GitHub issue URL (alternative to owner/repo/issue_number)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "GitHub Projects v2 node ID (starts with PVT_). Get from github_projects_list."
+          },
+          "status": {
+            "type": "string",
+            "description": "Optional status to set (e.g., open, in_progress, closed)."
+          },
+          "priority": {
+            "type": "string",
+            "description": "Optional priority to set (e.g., P0, P1, P2)."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "governance.dictionary",
+      "title": "Get governance data dictionary",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity": {
+            "type": "string",
+            "description": "Entity to look up (e.g., 'tracker.task', 'deploy.request', 'document.create'). Omit for compact index of all entities."
+          },
+          "field": {
+            "type": "string",
+            "description": "Field within the entity to look up (e.g., 'status', 'priority'). Requires entity."
+          },
+          "value": {
+            "type": "string",
+            "description": "Value to validate against the field's enum. Requires entity and field."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "governance.get",
+      "title": "Get governance file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": {
+            "type": "string",
+            "description": "Governance file name (e.g., 'agents.md' or 'agents/dispatch-heuristics.md'). Defaults to 'agents.md' if not specified."
+          }
+        },
+        "required": [
+          "file_name"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "governance.hash",
+      "title": "Get governance hash",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "plan.add_objective",
+      "title": "Add plan objective",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "objective_task_id": {
+            "type": "string",
+            "description": "Task id to add as an objective."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id",
+          "objective_task_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.advance",
+      "title": "Advance plan status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "active_agent_session_id": {
+            "type": "string",
+            "description": "Owning session id; the checkout service enforces ownership.",
+            "x-io-required-by": "backend"
+          },
+          "target_status": {
+            "type": "string",
+            "description": "Target plan status.",
+            "x-io-required-by": "backend"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity.",
+            "x-io-required-by": "backend"
+          },
+          "transition_evidence": {
+            "type": "object",
+            "description": "Evidence required by the transition."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID returned by agent.claim; forwarded as-is (ENC-ISS-441)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.checkout",
+      "title": "Check out plan",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "active_agent_session_id": {
+            "type": "string",
+            "description": "Claiming session id (ENC-SES-...)."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request id (CRQ-* or DSP-*)."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID returned by agent.claim; forwarded as-is (ENC-ISS-441)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id",
+          "active_agent_session_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.create",
+      "title": "Create plan",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "record_type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "issue",
+              "feature"
+            ],
+            "description": "The type of record to create."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title for the new record."
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority (e.g., P0, P1, P2)."
+          },
+          "related": {
+            "type": "string",
+            "description": "Comma-separated related record IDs."
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Acceptance criteria. Required for tasks (min 1). Also accepted for features (governed field, min 1)."
+          },
+          "user_story": {
+            "type": "string",
+            "description": "User story for feature records (governed field). Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'. Required when record_type is 'feature'."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string"
+                },
+                "steps_to_duplicate": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "observed_by": {
+                  "type": "string"
+                },
+                "timestamp": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "description",
+                "steps_to_duplicate"
+              ]
+            },
+            "description": "Structured evidence for issue records (governed field, min 1). Each entry must include description and steps_to_duplicate."
+          },
+          "category": {
+            "type": "string",
+            "description": "Classification category. Features: epic|capability|enhancement|infrastructure. Tasks: implementation|investigation|documentation|maintenance|validation. Issues: bug|debt|risk|security|performance."
+          },
+          "transition_type": {
+            "type": "string",
+            "enum": [
+              "github_pr_deploy",
+              "lambda_deploy",
+              "web_deploy",
+              "code_only",
+              "no_code"
+            ],
+            "description": "Lifecycle arc for task records (ENC-ISS-092). Defaults to github_pr_deploy if omitted. no_code and code_only are sealed by ENC-FTR-060 and MUST be set at create time \u2014 they cannot be set or changed via tracker_set after creation. Only valid for record_type=task."
+          },
+          "intent": {
+            "type": "string",
+            "description": "Free-text WHY this record exists."
+          },
+          "primary_task": {
+            "type": "string",
+            "description": "Task ID of the execution entry-point task for features/issues (\u00a75.5). Must reference a valid task ID (contains -TSK- segment). Only valid for feature and issue record types."
+          },
+          "hypothesis": {
+            "type": "string",
+            "description": "Root cause hypothesis (issues). Required if technical_notes not provided."
+          },
+          "technical_notes": {
+            "type": "string",
+            "description": "Technical investigation context (issues). Required if hypothesis not provided."
+          },
+          "location_hint": {
+            "type": "string",
+            "description": "Suspected code paths for investigation (issues). Required at issue creation."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request ID for write audit traceability."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch identifier associated with this write."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider name associated with this write."
+          }
+        },
+        "required": [
+          "project_id",
+          "record_type",
+          "title",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.objectives_status",
+      "title": "Get plan objectives status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id (for example DVP-PLN-001)."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "plan.remove_objective",
+      "title": "Remove plan objective",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "objective_task_id": {
+            "type": "string",
+            "description": "Task id to remove; closed objectives cannot be removed."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id",
+          "objective_task_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.reorder_objectives",
+      "title": "Reorder plan objectives",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "ordered_objective_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The existing objectives in their new order (must be a permutation)."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id",
+          "ordered_objective_ids"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "plan.replace_objectives",
+      "title": "Replace plan objectives",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Plan record id."
+          },
+          "objective_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Complete replacement objectives_set; only allowed while the plan is drafted."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id",
+          "objective_ids"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "projects.get",
+      "title": "Get project",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_name": {
+            "type": "string",
+            "description": "The project name to retrieve."
+          }
+        },
+        "required": [
+          "project_name"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "projects.list",
+      "title": "List projects",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "planning",
+              "development",
+              "active_production"
+            ],
+            "description": "Filter by project status."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "If true, return only active projects."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "projects.prefix_map",
+      "title": "Get record-id prefix map",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "reference.search",
+      "title": "Search project reference",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., devops)."
+          },
+          "query": {
+            "type": "string",
+            "description": "Search text or regex pattern."
+          },
+          "regex": {
+            "type": "boolean",
+            "description": "If true, treat query as a regex pattern. Default false.",
+            "default": false
+          },
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "If true, search is case-sensitive. Default false.",
+            "default": false
+          },
+          "context_lines": {
+            "type": "integer",
+            "description": "Lines of context before/after each match. Default 2, max 10.",
+            "default": 2
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum number of snippets to return. Default 20, max 100.",
+            "default": 20
+          },
+          "section": {
+            "type": "string",
+            "description": "Only return matches within sections whose heading matches this pattern."
+          }
+        },
+        "required": [
+          "project_id",
+          "query"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "request.get",
+      "title": "Get coordination request",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "The coordination request ID."
+          }
+        },
+        "required": [
+          "request_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "session.classify_intent",
+      "title": "Classify session intent",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "first_turn_text": {
+            "type": "string",
+            "description": "The first-turn request text to classify."
+          },
+          "session_metadata": {
+            "type": "object",
+            "description": "Optional session metadata (surface, model, etc.)."
+          },
+          "applied_entelechy_override": {
+            "description": "Optional io override: list of node_ids, a single id, or {node_ids:[...]}. When present it overrides the prediction."
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "Nearest-neighbor breadth (default 5, max 25)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project scope for the corpus (default 'enceladus')."
+          }
+        },
+        "required": [
+          "first_turn_text"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "session.intent_centroid_drift",
+      "title": "Measure intent centroid drift",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "wave_id": {
+            "type": "string",
+            "description": "The coordination wave identifier."
+          },
+          "embeddings": {
+            "type": "array",
+            "description": "List of embedding vectors for the records dispatched in this wave.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "previous_centroid": {
+            "type": "array",
+            "description": "Optional previous wave centroid vector (drift is null without it).",
+            "items": {
+              "type": "number"
+            }
+          },
+          "persist": {
+            "type": "boolean",
+            "description": "Best-effort persist the new intent_centroid_drift column (default true)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project scope (default 'enceladus')."
+          }
+        },
+        "required": [
+          "wave_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "coordination"
+    },
+    {
+      "name": "system.connection_health",
+      "title": "Check connection health",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "telemetry.rank",
+      "title": "Rank attribute values",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "attribute_name": {
+            "type": "string",
+            "description": "Telemetry-eligible attribute to rank."
+          },
+          "attribute": {
+            "type": "string",
+            "description": "Alias of attribute_name."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id; defaults to 'enceladus'."
+          },
+          "record_type": {
+            "type": "string",
+            "description": "Record type; resolved from the attribute when omitted."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum rows (default 10, max 100)."
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "Alias of limit."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response's next_cursor."
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "attribute_name"
+            ]
+          },
+          {
+            "required": [
+              "attribute"
+            ]
+          }
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.archive_relationship",
+      "title": "Archive typed relationship",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Source record id.",
+            "x-io-required-by": "backend"
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Target record id.",
+            "x-io-required-by": "backend"
+          },
+          "relationship_type": {
+            "type": "string",
+            "description": "Typed relationship to archive.",
+            "x-io-required-by": "backend"
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_typed_relationships",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.create",
+      "title": "Create tracker record",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name."
+          },
+          "record_type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "issue",
+              "feature"
+            ],
+            "description": "The type of record to create."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title for the new record."
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority (e.g., P0, P1, P2)."
+          },
+          "related": {
+            "type": "string",
+            "description": "Comma-separated related record IDs."
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Acceptance criteria. Required for tasks (min 1). Also accepted for features (governed field, min 1)."
+          },
+          "user_story": {
+            "type": "string",
+            "description": "User story for feature records (governed field). Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'. Required when record_type is 'feature'."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string"
+                },
+                "steps_to_duplicate": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "observed_by": {
+                  "type": "string"
+                },
+                "timestamp": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "description",
+                "steps_to_duplicate"
+              ]
+            },
+            "description": "Structured evidence for issue records (governed field, min 1). Each entry must include description and steps_to_duplicate."
+          },
+          "category": {
+            "type": "string",
+            "description": "Classification category. Features: epic|capability|enhancement|infrastructure. Tasks: implementation|investigation|documentation|maintenance|validation. Issues: bug|debt|risk|security|performance."
+          },
+          "transition_type": {
+            "type": "string",
+            "enum": [
+              "github_pr_deploy",
+              "lambda_deploy",
+              "web_deploy",
+              "code_only",
+              "no_code"
+            ],
+            "description": "Lifecycle arc for task records (ENC-ISS-092). Defaults to github_pr_deploy if omitted. no_code and code_only are sealed by ENC-FTR-060 and MUST be set at create time \u2014 they cannot be set or changed via tracker_set after creation. Only valid for record_type=task."
+          },
+          "intent": {
+            "type": "string",
+            "description": "Free-text WHY this record exists."
+          },
+          "primary_task": {
+            "type": "string",
+            "description": "Task ID of the execution entry-point task for features/issues (\u00a75.5). Must reference a valid task ID (contains -TSK- segment). Only valid for feature and issue record types."
+          },
+          "hypothesis": {
+            "type": "string",
+            "description": "Root cause hypothesis (issues). Required if technical_notes not provided."
+          },
+          "technical_notes": {
+            "type": "string",
+            "description": "Technical investigation context (issues). Required if hypothesis not provided."
+          },
+          "location_hint": {
+            "type": "string",
+            "description": "Suspected code paths for investigation (issues). Required at issue creation."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request ID for write audit traceability."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch identifier associated with this write."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider name associated with this write."
+          }
+        },
+        "required": [
+          "project_id",
+          "record_type",
+          "title",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.create_lesson",
+      "title": "Create lesson",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "title": {
+            "type": "string",
+            "description": "Lesson title.",
+            "x-io-required-by": "backend"
+          },
+          "observation": {
+            "type": "string",
+            "description": "What was observed.",
+            "x-io-required-by": "backend"
+          },
+          "insight": {
+            "type": "string",
+            "description": "What it means.",
+            "x-io-required-by": "backend"
+          },
+          "evidence_chain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Evidence record ids supporting the lesson.",
+            "x-io-required-by": "backend"
+          },
+          "category": {
+            "type": "string",
+            "description": "Lesson category."
+          },
+          "provenance": {
+            "type": "string",
+            "description": "Lesson provenance."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Confidence in the lesson."
+          },
+          "analysis_reference": {
+            "type": "string",
+            "description": "Analysis document or record reference."
+          },
+          "pillar_scores": {
+            "type": "object",
+            "description": "Pillar score map."
+          },
+          "priority": {
+            "type": "string",
+            "description": "Lesson priority."
+          },
+          "description": {
+            "type": "string",
+            "description": "Longer description."
+          },
+          "related": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related record ids."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_lesson_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.create_relationship",
+      "title": "Create typed relationship",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Source record id.",
+            "x-io-required-by": "backend"
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Target record id.",
+            "x-io-required-by": "backend"
+          },
+          "relationship_type": {
+            "type": "string",
+            "description": "Typed relationship (ENC-FTR-049).",
+            "x-io-required-by": "backend"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the relationship exists."
+          },
+          "weight": {
+            "type": "number",
+            "description": "Edge weight."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Edge confidence."
+          },
+          "provenance": {
+            "type": "string",
+            "description": "Edge provenance."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_typed_relationships",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.creation_rules",
+      "title": "Get tracker creation rules",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_type": {
+            "type": "string",
+            "description": "Tracker record type, e.g. task, feature, plan, issue."
+          },
+          "parent_type": {
+            "type": "string",
+            "description": "Optional parent record type to also validate/describe the attachment contract for record_type as a child of parent_type (e.g. record_type=task, parent_type=plan)."
+          }
+        },
+        "required": [
+          "record_type"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.embeddings_for",
+      "title": "Get record embeddings",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "record_ids": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Record ids (array, or comma-separated string) whose stored embeddings to return. Admin-scoped."
+          }
+        },
+        "required": [
+          "project_id",
+          "record_ids"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.extend_lesson",
+      "title": "Extend lesson",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Lesson record id."
+          },
+          "content": {
+            "type": "string",
+            "description": "Extension text (append-only).",
+            "x-io-required-by": "backend"
+          },
+          "author": {
+            "type": "string",
+            "description": "Extension author.",
+            "x-io-required-by": "backend"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Evidence record ids."
+          },
+          "pillar_scores": {
+            "type": "object",
+            "description": "Pillar score map."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_lesson_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.get",
+      "title": "Get tracker record",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The record ID (e.g., DVP-TSK-074)."
+          },
+          "include_history": {
+            "type": "boolean",
+            "description": "If true, include full history[] and write_source fields. Default false (summary only)."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.get_acs",
+      "title": "Get acceptance criteria",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "Tracker record id (for example DVP-TSK-001)."
+          },
+          "indices": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Zero-based acceptance-criterion indices to fetch."
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Manifest content_hash for the freshness check; a stale hash returns a staleness envelope."
+          }
+        },
+        "required": [
+          "record_id",
+          "indices"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.graph_laplacian",
+      "title": "Compute graph Laplacian",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id; defaults to 'enceladus'."
+          },
+          "vertex_set_query": {
+            "type": "string",
+            "description": "Keyword query selecting the vertex set."
+          },
+          "record_ids": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Explicit vertex set (array, or comma-separated string)."
+          },
+          "edge_type_filter": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Restrict the induced subgraph to these edge types."
+          },
+          "k": {
+            "type": "integer",
+            "description": "Number of smallest Laplacian eigenvalues to return."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum vertices in the induced subgraph."
+          },
+          "normalization": {
+            "type": "string",
+            "description": "Laplacian normalization mode."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.graphsearch",
+      "title": "Search the tracker graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "search_type": {
+            "type": "string",
+            "description": "Graph search mode.",
+            "enum": [
+              "adjacency",
+              "dedup_convergence",
+              "hybrid",
+              "keyword",
+              "laplacian",
+              "neighbors",
+              "path",
+              "sheaf_cohomology",
+              "traversal"
+            ]
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "record_id": {
+            "type": "string",
+            "description": "Anchor record id for neighbor/traversal searches."
+          },
+          "depth": {
+            "type": "integer",
+            "description": "Traversal depth."
+          },
+          "direction": {
+            "type": "string",
+            "description": "Traversal direction.",
+            "enum": [
+              "up",
+              "down",
+              "both"
+            ]
+          },
+          "record_type": {
+            "type": "string",
+            "description": "Restrict results to one record type."
+          },
+          "keyword": {
+            "type": "string",
+            "description": "Keyword query (alias of query)."
+          },
+          "query": {
+            "type": "string",
+            "description": "Keyword or hybrid query text."
+          },
+          "from_record_id": {
+            "type": "string",
+            "description": "Path search start record id."
+          },
+          "to_record_id": {
+            "type": "string",
+            "description": "Path search end record id."
+          },
+          "edge_types": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Relationship edge types to follow (ENC-FTR-049)."
+          },
+          "edge_type": {
+            "type": "string",
+            "description": "Single relationship edge type to follow."
+          },
+          "min_weight": {
+            "type": "number",
+            "description": "Minimum edge weight."
+          },
+          "anchor_record_id": {
+            "type": "string",
+            "description": "Graph anchor for hybrid retrieval (ENC-TSK-B92)."
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "Hybrid retrieval result count."
+          },
+          "include_below_threshold": {
+            "type": "boolean",
+            "description": "Include lessons below the FSRS-6 T3 threshold in hybrid retrieval."
+          }
+        },
+        "required": [
+          "search_type",
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.list",
+      "title": "List tracker records",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., devops)."
+          },
+          "record_type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "issue",
+              "feature"
+            ],
+            "description": "Filter by record type."
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status (e.g., open, in-progress, closed)."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Max records per page (default 25, max 100)."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Pagination cursor from previous response's next_cursor."
+          },
+          "exhaust": {
+            "type": "boolean",
+            "description": "If true, get an exact/truncated total from a server-side census (ENC-TSK-Q15) before computing 'total', instead of reporting a lower bound. Costs one extra raw-API round trip -- leave false for hot-path / session-init reads and reserve for callers that need an exact count."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "census"
+            ],
+            "description": "Set to 'census' to bypass the normal records page entirely and return the raw route's census payload (count/pages/as_of/by_type/...) verbatim under 'result'. Mutually exclusive with the records/total list contract."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.list_lessons",
+      "title": "List lessons",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by lesson status."
+          },
+          "category": {
+            "type": "string",
+            "description": "Filter by lesson category."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Maximum records per page."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response's next_cursor."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_lesson_primitive"
+    },
+    {
+      "name": "tracker.list_relationships",
+      "title": "List typed relationships",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Filter by source record id."
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Filter by target record id."
+          },
+          "relationship_type": {
+            "type": "string",
+            "description": "Filter by relationship type."
+          },
+          "min_weight": {
+            "type": "number",
+            "description": "Minimum edge weight."
+          },
+          "provenance": {
+            "type": "string",
+            "description": "Filter by edge provenance."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Maximum records per page."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response's next_cursor."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_typed_relationships"
+    },
+    {
+      "name": "tracker.log",
+      "title": "Append worklog entry",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The record ID to log against."
+          },
+          "description": {
+            "type": "string",
+            "description": "The worklog description text."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request ID for write audit traceability."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch identifier associated with this write."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider name associated with this write."
+          }
+        },
+        "required": [
+          "record_id",
+          "description",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.manifest",
+      "title": "Get record manifest",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "Tracker record id (for example DVP-TSK-001)."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Restrict the manifest to these field names; identity and freshness fields are always kept."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.manifest_bulk",
+      "title": "Get record manifests in bulk",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Record ids to fetch manifests for (non-empty; capped per call by the server)."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Restrict each manifest to these field names."
+          }
+        },
+        "required": [
+          "record_ids"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.pending_updates",
+      "title": "List pending tracker updates",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project name (e.g., devops). Omit if all=true."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Scan all projects for pending updates. If true, project_id is ignored."
+          }
+        }
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.relate",
+      "title": "Relate two tracker records",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Record that gains the related_* pointer."
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Record to relate; must be a task, issue or feature."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider identity forwarded to the backend for checkout-ownership checks."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request id (CRQ-* or DSP-*)."
+          },
+          "sci": {
+            "type": "string",
+            "description": "Session Claim ID returned by agent.claim; forwarded as-is (ENC-ISS-441)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "source_id",
+          "target_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.set",
+      "title": "Set tracker record field",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The record ID to update."
+          },
+          "field": {
+            "type": "string",
+            "description": "The field to set (e.g., status, priority, assigned_to)."
+          },
+          "value": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "object",
+              "array",
+              "null"
+            ],
+            "description": "The new value for the field."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request ID for write audit traceability."
+          },
+          "coordination": {
+            "type": "boolean",
+            "description": "Whether this record is coordination-scoped. If true, coordination_request_id is required."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch identifier associated with this write."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider name associated with this write."
+          },
+          "transition_evidence": {
+            "type": "object",
+            "description": "Evidence for gated status transitions (ENC-FTR-022). Task status transitions are not performed through this tool. Any revert: {revert_reason}."
+          }
+        },
+        "required": [
+          "record_id",
+          "field",
+          "value",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.set_acceptance_evidence",
+      "title": "Set acceptance-criterion evidence",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The feature or task record ID."
+          },
+          "criterion_index": {
+            "type": "integer",
+            "description": "Zero-based index of the acceptance criterion to update."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Evidence that the criterion was met in production. Should reference deployment IDs, test results, monitoring data, etc."
+          },
+          "evidence_acceptance": {
+            "type": "boolean",
+            "description": "Whether the criterion has been validated and accepted."
+          },
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash for write authorization."
+          },
+          "coordination_request_id": {
+            "type": "string",
+            "description": "Coordination request ID for write audit traceability."
+          },
+          "dispatch_id": {
+            "type": "string",
+            "description": "Dispatch identifier associated with this write."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider name associated with this write."
+          }
+        },
+        "required": [
+          "record_id",
+          "criterion_index",
+          "evidence",
+          "evidence_acceptance",
+          "governance_hash"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "dryRun": true
+    },
+    {
+      "name": "tracker.sheaf_cohomology",
+      "title": "Detect graph inconsistencies",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "vertex_set_query": {
+            "type": "string",
+            "description": "Optional anchor restricting the computation to a connected subgraph."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.validation_rules",
+      "title": "Get tracker edit rules",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "The record ID to preflight (e.g., ENC-TSK-628)."
+          },
+          "target_status": {
+            "type": "string",
+            "description": "Optional status to preflight against current record state."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Optional provider identity to evaluate task checkout ownership requirements for status transitions."
+          },
+          "include_dictionary": {
+            "type": "boolean",
+            "description": "If true (default), include governance dictionary lookup for this record type."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.worklog_timeline",
+      "title": "Get worklog timeline",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "Tracker record id (for example DVP-TSK-001)."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    },
+    {
+      "name": "tracker.worklogs",
+      "title": "Get worklog entries",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "description": "Tracker record id (for example DVP-TSK-001)."
+          },
+          "since": {
+            "type": "string",
+            "description": "Lower bound (ISO-8601) on worklog timestamps."
+          },
+          "until": {
+            "type": "string",
+            "description": "Upper bound (ISO-8601) on worklog timestamps."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Worklog ids (wl-NNNN) to fetch."
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Manifest content_hash for the freshness check."
+          }
+        },
+        "required": [
+          "record_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
+    }
+  ]
+}

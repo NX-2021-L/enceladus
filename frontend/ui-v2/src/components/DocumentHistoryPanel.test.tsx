@@ -337,8 +337,12 @@ describe('DocumentRewindPane', () => {
     })
     await flush()
 
-    const pane = container.querySelector('[data-testid="document-rewind-pane"]')
-    expect(pane?.textContent).toContain('hash mismatch')
+    // Wait for the async hash comparison to land rather than assuming one flush suffices
+    // (flaked on CI under load, DVP-PLN-010 enceladus#1331/#1332).
+    await vi.waitFor(() => {
+      const pane = container.querySelector('[data-testid="document-rewind-pane"]')
+      expect(pane?.textContent ?? '').toContain('hash mismatch')
+    })
   })
 })
 

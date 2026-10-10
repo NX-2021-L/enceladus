@@ -1,0 +1,7 @@
+.actions-page { padding: var(--space-5); max-width: 880px; }
+.actions-note { color: var(--fg-muted); font-size: var(--text-xs); }
+.actions-preview, .actions-receipt { margin-top: var(--space-5); border: var(--border-divider); border-radius: var(--radius-lg); padding: var(--space-4); }
+.actions-page pre { overflow: auto; max-height: 320px; font-family: var(--font-mono); font-size: var(--text-xs); }
+.actions-page ul { list-style: none; padding: 0; }
+.palette-actions { list-style: none; margin: var(--space-2) 0 0; padding: 0; }
+.palette-actions a { color: var(--accent); font-family: var(--font-mono); }
