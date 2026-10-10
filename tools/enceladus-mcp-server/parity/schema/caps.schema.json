@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.jreese.net/parity/caps.schema.json/1.0.0",
+  "title": "MCP surface capabilities inventory",
+  "description": "Machine-readable action inventory for one MCP surface (version 1.0.0).",
+  "type": "object",
+  "required": ["schemaVersion", "surface", "generatedAt", "actions"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "surface": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}}
+  },
+  "$defs": {
+    "schemaOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/objectSchema"}
+      ]
+    },
+    "objectSchema": {
+      "type": "object",
+      "properties": {
+        "type": {"type": "string"},
+        "properties": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {"x-io-minted": {"type": "boolean"}}
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["name", "title", "inputSchema", "outputSchema", "annotations", "requiresGovernanceHash", "via"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"},
+        "title": {"type": "string", "minLength": 1},
+        "inputSchema": {"$ref": "#/$defs/schemaOrNull"},
+        "outputSchema": {"$ref": "#/$defs/schemaOrNull"},
+        "annotations": {
+          "type": "object",
+          "required": ["readOnlyHint", "destructiveHint", "idempotentHint"],
+          "additionalProperties": false,
+          "properties": {
+            "readOnlyHint": {"type": "boolean"},
+            "destructiveHint": {"type": "boolean"},
+            "idempotentHint": {"type": "boolean"}
+          }
+        },
+        "requiresGovernanceHash": {"type": "boolean"},
+        "via": {"enum": ["top-level", "execute", "search", "coordination"]},
+        "flag": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
