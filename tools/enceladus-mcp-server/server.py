@@ -3447,6 +3447,21 @@ def _code_mode_tool_catalog() -> list[Tool]:
                         "type": "object",
                         "description": "Arguments forwarded to the governed coordination helper.",
                     },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": (
+                            "If true on a write action, return a ResolvedCall v1 under resolved_call and "
+                            "dispatch nothing (DVP-TSK-892). Ignored for read-only actions."
+                        ),
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "description": "Idempotency-Key echoed in the ResolvedCall of a dry run.",
+                    },
+                    "schema_hash": {
+                        "type": "string",
+                        "description": "Optional schemaHash from a prior dry run; a mismatch returns an RFC 9457 409.",
+                    },
                 },
                 "required": ["action"],
             },
