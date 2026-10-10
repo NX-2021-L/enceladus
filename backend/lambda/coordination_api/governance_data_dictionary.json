@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-10.04",
-  "updated_at": "2026-10-10T16:00:00Z",
-  "last_change_summary": "DVP-TSK-892 follow-up (ruling E2-R16): the MCP coordination wrapper accepts dry_run:true (plus optional idempotency_key and schema_hash) on its WRITE actions (agent.register, agent.claim, agent.retire, agent.type.register, agent.checkout_release_backfill, auth.cognito_session, dispatch_plan.generate, escalation.watch) and returns a ResolvedCall v1 under resolved_call without dispatching; validation, schemaHash (409) and boundary failures add RFC 9457 problem details. A dry_run nested in arguments still reaches the underlying tool unchanged. parity/caps.json advertises dryRun:true on exactly those actions. Additive; no tracker/document schema change.",
+  "version": "2026-10-10.05",
+  "updated_at": "2026-10-10T19:35:00Z",
+  "last_change_summary": "DVP-TSK-919 (DVP-PLN-011 E3): feed_query issues signed v1 cursors (kid-selected HMAC bound to scope and filter/sort; keys from FEED_CURSOR_KEYS/FEED_CURSOR_ACTIVE_KID or derived from the internal key) with a v0 acceptance window ending 2027-01-10; an invalid cursor returns 400 cursor_invalid. Delta by since-seq and gap_too_large are unchanged. Response shapes are additive; no tracker/document schema change.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-10.05",
+      "date": "2026-10-10",
+      "summary": "DVP-TSK-919 (DVP-PLN-011 E3): feed_query issues signed v1 cursors (kid-selected HMAC bound to scope and filter/sort; keys from FEED_CURSOR_KEYS/FEED_CURSOR_ACTIVE_KID or derived from the internal key) with a v0 acceptance window ending 2027-01-10; an invalid cursor returns 400 cursor_invalid. Delta by since-seq and gap_too_large are unchanged. Response shapes are additive; no tracker/document schema change."
+    },
     {
       "version": "2026-10-10.04",
       "date": "2026-10-10",
