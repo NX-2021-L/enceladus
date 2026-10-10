@@ -1,0 +1,135 @@
+[
+ {
+  "heading_path": [],
+  "level": 1,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 2,
+  "line_end": 267,
+  "section_bytes": 19101
+ },
+ {
+  "heading_path": [
+   "0. Scope and inputs"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 9,
+  "line_end": 26,
+  "section_bytes": 1113
+ },
+ {
+  "heading_path": [
+   "1. Area-by-stack matrix"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 28,
+  "line_end": 62,
+  "section_bytes": 2015
+ },
+ {
+  "heading_path": [
+   "2. Best-of-breed"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 64,
+  "line_end": 94,
+  "section_bytes": 2123
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 96,
+  "line_end": 209,
+  "section_bytes": 7243
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.1 Docstore-convention plugin set (the docstore() preset)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 154,
+  "line_end": 176,
+  "section_bytes": 1487
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.2 Sanitization policy"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 178,
+  "line_end": 191,
+  "section_bytes": 1051
+ },
+ {
+  "heading_path": [
+   "3. Canonical kit API",
+   "3.3 Where this follows and departs from DOC-C97D5B581CB4"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 193,
+  "line_end": 209,
+  "section_bytes": 1124
+ },
+ {
+  "heading_path": [
+   "4. Migration order"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 211,
+  "line_end": 221,
+  "section_bytes": 1291
+ },
+ {
+  "heading_path": [
+   "5. Consumer contract tests"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 223,
+  "line_end": 242,
+  "section_bytes": 2836
+ },
+ {
+  "heading_path": [
+   "6. Open decisions for io"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 244,
+  "line_end": 254,
+  "section_bytes": 1228
+ },
+ {
+  "heading_path": [
+   "Inference register"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 256,
+  "line_end": 267,
+  "section_bytes": 780
+ }
+]

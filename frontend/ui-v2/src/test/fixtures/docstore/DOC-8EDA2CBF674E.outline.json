@@ -1,0 +1,299 @@
+[
+ {
+  "heading_path": [
+   "0. Executive summary"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 9,
+  "line_end": 15,
+  "section_bytes": 1597
+ },
+ {
+  "heading_path": [
+   "1. Objectives"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 17,
+  "line_end": 28,
+  "section_bytes": 1136
+ },
+ {
+  "heading_path": [
+   "2. Tenets"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 30,
+  "line_end": 39,
+  "section_bytes": 1197
+ },
+ {
+  "heading_path": [
+   "3. Scope"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 41,
+  "line_end": 47,
+  "section_bytes": 922
+ },
+ {
+  "heading_path": [
+   "4. Current state (as built)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 49,
+  "line_end": 60,
+  "section_bytes": 1054
+ },
+ {
+  "heading_path": [
+   "5. Design"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 62,
+  "line_end": 225,
+  "section_bytes": 12795
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.0 Foundation inherited from the convergence program"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 64,
+  "line_end": 81,
+  "section_bytes": 1882
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.1 The post model"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 83,
+  "line_end": 105,
+  "section_bytes": 1306
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.2 Coach logs a with-coach cum event"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 107,
+  "line_end": 123,
+  "section_bytes": 1291
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.3 Updates with media"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 125,
+  "line_end": 137,
+  "section_bytes": 951
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.4 The coach app: one installable surface"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 139,
+  "line_end": 149,
+  "section_bytes": 1010
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.5 Notifications and badges"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 151,
+  "line_end": 168,
+  "section_bytes": 1537
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.6 The scheduler"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 170,
+  "line_end": 181,
+  "section_bytes": 1256
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.7 Media seams for the future"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 183,
+  "line_end": 195,
+  "section_bytes": 883
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.8 Articles: the agent author"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 197,
+  "line_end": 208,
+  "section_bytes": 1469
+ },
+ {
+  "heading_path": [
+   "5. Design",
+   "5.9 Authorization table (delta)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 210,
+  "line_end": 225,
+  "section_bytes": 842
+ },
+ {
+  "heading_path": [
+   "6. Requirements"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 227,
+  "line_end": 245,
+  "section_bytes": 1535
+ },
+ {
+  "heading_path": [
+   "7. Constraints and dependencies"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 247,
+  "line_end": 261,
+  "section_bytes": 1107
+ },
+ {
+  "heading_path": [
+   "8. Recommended feature records"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 263,
+  "line_end": 297,
+  "section_bytes": 1999
+ },
+ {
+  "heading_path": [
+   "9. Plan outline (phases in dependency order)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 299,
+  "line_end": 344,
+  "section_bytes": 2395
+ },
+ {
+  "heading_path": [
+   "10. Risks"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 346,
+  "line_end": 353,
+  "section_bytes": 1094
+ },
+ {
+  "heading_path": [
+   "11. Inference register"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 355,
+  "line_end": 375,
+  "section_bytes": 1051
+ },
+ {
+  "heading_path": [
+   "12. Amendment 1 (2026-10-10) -- DOC-4B28ED908326 accepted at v16 with rulings L-15 and L-16"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 377,
+  "line_end": 412,
+  "section_bytes": 3129
+ },
+ {
+  "heading_path": [
+   "13. Amendment 2 (2026-10-10) -- per-post notification squash"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 414,
+  "line_end": 434,
+  "section_bytes": 1701
+ },
+ {
+  "heading_path": [
+   "14. Amendment 3 (2026-10-10) -- scheduler groomed: availability windows, partial bookings, booking records, invitation toggle"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4K82BSNZP3D6V5W1C0TAN1B",
+  "line_start": 437,
+  "line_end": 489,
+  "section_bytes": 5379
+ },
+ {
+  "heading_path": [
+   "14. Amendment 3 (2026-10-10) -- scheduler groomed: availability windows, partial bookings, booking records, invitation toggle",
+   "15. Amendment 4 (2026-10-10) -- coach-proposed booking times (INT-FTR-082)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 472,
+  "line_end": 489,
+  "section_bytes": 1487
+ }
+]

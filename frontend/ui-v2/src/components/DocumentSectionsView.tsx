@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { Document } from '../types/records'
 import { recordKeys } from '../api/queryOptions'
@@ -8,7 +8,11 @@ import { DocumentSection } from './DocumentSection'
 import { SectionEditor } from './SectionEditor'
 import { MarkdownContent } from './MarkdownContent'
 import type { DocumentSection as DocumentSectionModel } from '../utils/documentSections'
+import { resolveMarkdownEngine } from '../utils/markdownEngine'
 import './documentSections.css'
+
+// DVP-TSK-916: lazy so the kit (and its unified/remark stack) stays out of the main chunk while the flag is off.
+const KitDocumentView = lazy(() => import('./KitDocumentView'))
 
 /**
  * ENC-TSK-P92 (AC-1..AC-4, ports ENC-TSK-P80) — the document detail
@@ -22,6 +26,21 @@ import './documentSections.css'
  * utils/documentSections.ts documents this as the intended degrade.
  */
 export function DocumentSectionsView({ record }: { record: Document }) {
+  // DVP-TSK-916 (DVP-PLN-011 E3-W2.3): ?md=kit (or the ev2.md.engine preference)
+  // swaps in the @io-kit/md docstore renderer. Default stays 'legacy' this
+  // release; the flip-and-remove step is DVP-TSK-924 (E3-W3.4).
+  const [engine] = useState(() => resolveMarkdownEngine())
+  if (engine === 'kit') {
+    return (
+      <Suspense fallback={<p className="ev2-docsec__manifest-loading">Loading document&hellip;</p>}>
+        <KitDocumentView record={record} />
+      </Suspense>
+    )
+  }
+  return <LegacyDocumentSectionsView record={record} />
+}
+
+function LegacyDocumentSectionsView({ record }: { record: Document }) {
   const queryClient = useQueryClient()
   const documentId = record.document_id
   const projectId = record.project_id
