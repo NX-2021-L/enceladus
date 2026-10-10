@@ -149,7 +149,7 @@ def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie",
+        "Access-Control-Allow-Headers": "Content-Type, Cookie, Authorization, X-Requested-With, X-Io-Mode",
         "Access-Control-Allow-Credentials": "true",
     }
 
@@ -205,6 +205,14 @@ def _extract_id_token(event: Dict) -> Optional[str]:
 # Token refresh
 # ---------------------------------------------------------------------------
 
+class RefreshRejected(ValueError):
+    """Cognito rejected the refresh token (revoked/expired): sign in again."""
+
+
+class RefreshNetwork(ValueError):
+    """Cognito unreachable / transient error: the session is kept (AUTH_NETWORK)."""
+
+
 def _refresh_tokens(refresh_token: str) -> Dict[str, str]:
     """Call Cognito InitiateAuth with REFRESH_TOKEN_AUTH.
 
@@ -221,9 +229,9 @@ def _refresh_tokens(refresh_token: str) -> Dict[str, str]:
             ClientId=COGNITO_CLIENT_ID,
         )
     except cognito.exceptions.NotAuthorizedException as exc:
-        raise ValueError(f"Refresh token rejected: {exc}") from exc
+        raise RefreshRejected(f"Refresh token rejected: {exc}") from exc
     except (BotoCoreError, ClientError) as exc:
-        raise ValueError(f"Cognito API error: {exc}") from exc
+        raise RefreshNetwork(f"Cognito API error: {exc}") from exc
 
     result = resp.get("AuthenticationResult") or {}
     id_token = result.get("IdToken")
@@ -373,6 +381,146 @@ def _handle_oauth_callback(event: Dict) -> Dict:
 # Handler
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-861: @io-kit/auth edge contract (refresh + manifest)
+# ---------------------------------------------------------------------------
+# auth_refresh is the auth edge for ui-v2 (cookie mode). The kit client's
+# cognitoAdapter calls POST {authEdgeBase}/refresh with X-Requested-With:
+# io-kit + a matching Origin and expects 200 {accessToken,idToken,expiresIn,
+# exp}, 401 AUTH_REFRESH_FAILED (cookies cleared) or 503 AUTH_NETWORK (cookie
+# kept). Requests without that header keep the legacy response unchanged.
+
+KIT_HEADER_VALUE = "io-kit"
+ALLOWED_ORIGINS = tuple(
+    o.strip()
+    for o in os.environ.get(
+        "AUTH_ALLOWED_ORIGINS",
+        "https://enceladus.jreese.net,https://enceladus-gamma.jreese.net",
+    ).split(",")
+    if o.strip()
+)
+MANIFEST_TTL_SECONDS = 300
+_POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy_table.json")
+
+
+def _header(event: Dict, name: str) -> str:
+    for k, v in (event.get("headers") or {}).items():
+        if k.lower() == name.lower():
+            return v or ""
+    return ""
+
+
+def _is_kit_request(event: Dict) -> bool:
+    return _header(event, "x-requested-with").lower() == KIT_HEADER_VALUE
+
+
+def _kit_error(status: int, code: str, message: str, extra_headers: Optional[Dict] = None,
+               cookies: Optional[list] = None) -> Dict:
+    out = _response(status, {"code": code, "error": message}, {"Cache-Control": "no-store", **(extra_headers or {})})
+    if cookies:
+        out["cookies"] = cookies
+    return out
+
+
+def _clear_cookies() -> list:
+    return [
+        "enceladus_id_token=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0",
+        "enceladus_refresh_token=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0",
+        "enceladus_session_at=; Path=/enceladus; Secure; SameSite=None; Max-Age=0",
+    ]
+
+
+def _jwt_claims(token: str) -> Dict[str, Any]:
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:  # noqa: BLE001 - any malformed token is "no claims"
+        return {}
+
+
+def _handle_kit_refresh(event: Dict) -> Dict:
+    origin = _header(event, "origin")
+    if origin not in ALLOWED_ORIGINS:
+        return _kit_error(403, "AUTH_FORBIDDEN", "origin not allowed")
+    refresh_token = _extract_refresh_token(event)
+    if not refresh_token:
+        return _kit_error(401, "AUTH_REFRESH_FAILED", "no refresh token", cookies=_clear_cookies())
+    try:
+        tokens = _refresh_tokens(refresh_token)
+    except RefreshNetwork as exc:
+        logger.warning("kit refresh network failure: %s", exc)
+        return _kit_error(503, "AUTH_NETWORK", "identity provider unreachable")
+    except ValueError as exc:
+        logger.warning("kit refresh rejected: %s", exc)
+        return _kit_error(401, "AUTH_REFRESH_FAILED", "refresh rejected", cookies=_clear_cookies())
+    id_token = tokens["id_token"]
+    exp = int(_jwt_claims(id_token).get("exp") or (time.time() + ID_TOKEN_MAX_AGE))
+    now_ms = str(int(time.time() * 1000))
+    out = _response(
+        200,
+        {"accessToken": tokens.get("access_token") or id_token, "idToken": id_token,
+         "expiresIn": ID_TOKEN_MAX_AGE, "exp": exp},
+        {"Cache-Control": "no-store", "Access-Control-Allow-Origin": origin},
+    )
+    out["cookies"] = [
+        f"enceladus_id_token={id_token}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age={ID_TOKEN_MAX_AGE}",
+        f"enceladus_session_at={now_ms}; Path=/enceladus; Secure; SameSite=None; Max-Age={SESSION_COOKIE_MAX_AGE}",
+    ]
+    return out
+
+
+def _load_policy() -> Dict[str, Any]:
+    with open(_POLICY_PATH, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def issue_manifest(claims: Dict[str, Any], table: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    """PermissionManifest (kit shape) from the policy table for the caller's groups.
+
+    Display-only: every API handler stays authoritative, and the escalation
+    decide path keeps its own three server gates.
+    """
+    now_s = int(now if now is not None else time.time())
+    raw_groups = claims.get("cognito:groups") or []
+    groups = [raw_groups] if isinstance(raw_groups, str) else list(raw_groups)
+    grants = []
+    for action, row in sorted(table["actions"].items()):
+        modes = []
+        if set(groups) & set(row.get("dry_run", [])) or set(groups) & set(row.get("execute", [])):
+            modes.append("dry_run")
+        if set(groups) & set(row.get("execute", [])):
+            modes.append("execute")
+        grant = {"action": action, "modes": modes,
+                 "visibilityWhenDenied": row.get("visibilityWhenDenied", "hide")}
+        if row.get("requiresStepUp"):
+            grant["requiresStepUp"] = True
+        grants.append(grant)
+    return {
+        "principal": {
+            "type": "human", "sub": claims.get("sub", ""), "issuer": claims.get("iss", ""),
+            "groups": groups, "authTime": int(claims.get("auth_time") or claims.get("iat") or now_s),
+            **({"displayName": claims["email"]} if claims.get("email") else {}),
+        },
+        "policyVersion": table["version"], "issuedAt": now_s, "expiresAt": now_s + MANIFEST_TTL_SECONDS,
+        "grants": grants,
+    }
+
+
+def _handle_manifest(event: Dict) -> Dict:
+    token = _extract_id_token(event)
+    if not token:
+        auth = _header(event, "authorization")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+    claims = _jwt_claims(token) if token else {}
+    if not claims or int(claims.get("exp") or 0) <= time.time() or claims.get("token_use") not in (None, "id", "access"):
+        return _kit_error(401, "AUTH_EXPIRED", "not authenticated")
+    if claims.get("iss") and not str(claims["iss"]).endswith(COGNITO_USER_POOL_ID):
+        return _kit_error(401, "AUTH_EXPIRED", "wrong issuer")
+    return _response(200, issue_manifest(claims, _load_policy()), {"Cache-Control": "no-store"})
+
+
+
 def lambda_handler(event: Dict, context: Any) -> Dict:
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
@@ -400,8 +548,14 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if method == "GET" and path.rstrip("/").endswith("/auth/callback"):
         return _handle_oauth_callback(event)
 
+    if method == "GET" and path.rstrip("/").endswith("/auth/manifest"):
+        return _handle_manifest(event)
+
     if method != "POST":
         return _error(405, "Method not allowed.")
+
+    if _is_kit_request(event):
+        return _handle_kit_refresh(event)
 
     logger.info("auth refresh request")
 
