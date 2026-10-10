@@ -14,7 +14,7 @@ import type {
 import { TypedRelationshipSection } from './TypedRelationshipSection'
 import { RecordLink } from './RecordLink'
 import { getCacheEngine } from '../sync/cacheEngine'
-import { MarkdownText } from './MarkdownText'
+import { MarkdownContent } from './MarkdownContent'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { computePrimaryActions, type TransitionAction } from '../utils/transitionArcs'
 import './recordDetailHub.css'
@@ -643,7 +643,7 @@ export function NeighborsTab({
 }
 
 /** Worklog tab body: the record's history[], most recent first. Entries
- *  render through MarkdownText (ENC-TSK-M32) -- worklog descriptions
+ *  render through MarkdownContent (ENC-TSK-M32) -- worklog descriptions
  *  routinely carry inline record IDs (PR merges, backport notes) that
  *  should link like anywhere else. */
 export function WorklogTab({
@@ -662,7 +662,7 @@ export function WorklogTab({
             <span className="ev2-rdh__worklog-ts">{h.timestamp}</span>
             <StatusChip status={h.status} />
           </div>
-          <MarkdownText text={h.description} projectId={projectId} className="ev2-rdh__worklog-desc" />
+          <MarkdownContent text={h.description} projectId={projectId} className="ev2-rdh__worklog-desc" />
         </li>
       ))}
     </ul>
@@ -673,7 +673,7 @@ export function WorklogTab({
  *  B6B52E3BB9BB §7) -- a ●/○ accept-state circle per AC (● = accepted, ○ =
  *  evidence not yet accepted, matching the v3 direct visual capture verbatim
  *  rather than a text "Accepted"/"Pending" badge), rendered through
- *  MarkdownText (ENC-TSK-M32) so evidence text -- which often embeds
+ *  MarkdownContent (ENC-TSK-M32) so evidence text -- which often embeds
  *  record IDs, hashes, or run URLs -- wraps instead of overflowing and links
  *  inline IDs like everywhere else. */
 export function EvidenceTab({
@@ -697,9 +697,9 @@ export function EvidenceTab({
             {c.evidence_acceptance ? '●' : '○'}
           </span>
           <div className="ev2-rdh__evidence-body">
-            <MarkdownText text={c.description} projectId={projectId} className="ev2-rdh__evidence-desc" />
+            <MarkdownContent text={c.description} projectId={projectId} className="ev2-rdh__evidence-desc" />
             {c.evidence ? (
-              <MarkdownText text={c.evidence} projectId={projectId} className="ev2-rdh__evidence-proof" />
+              <MarkdownContent text={c.evidence} projectId={projectId} className="ev2-rdh__evidence-proof" />
             ) : null}
           </div>
         </li>
@@ -725,7 +725,7 @@ export function IssueEvidenceTab({
       {entries.map((e, i) => (
         <li className="ev2-rdh__evidence-item" key={i}>
           <div className="ev2-rdh__evidence-body">
-            <MarkdownText text={e.description} projectId={projectId} className="ev2-rdh__evidence-desc" />
+            <MarkdownContent text={e.description} projectId={projectId} className="ev2-rdh__evidence-desc" />
             {e.steps_to_duplicate?.length ? (
               <ol className="ev2-rdh__evidence-steps">
                 {e.steps_to_duplicate.map((step, j) => (

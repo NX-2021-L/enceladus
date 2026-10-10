@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
-import { MarkdownText } from './MarkdownText'
+import { MarkdownContent } from './MarkdownContent'
 
 /**
  * Shared card chrome for every primitive renderer. Void-emergent surface,
@@ -130,13 +130,13 @@ export function SectionHeading({ children }: { children: ReactNode }) {
 }
 
 /** Body prose -- record description/observation text, rendered through the
- *  shared MarkdownText component (ENC-TSK-M32) rather than a raw <p>, so
+ *  shared MarkdownContent component (ENC-TSK-M32) rather than a raw <p>, so
  *  descriptions get real markdown, inline ENC-*\/DOC-* ID auto-linking, and
  *  long-token wrapping. `projectId` resolves bare tracker-ID mentions found
  *  inline to a same-project detail route. */
 export function Prose({ children, projectId }: { children: ReactNode; projectId?: string }) {
   const text = typeof children === 'string' ? children : ''
-  return <MarkdownText text={text} projectId={projectId} />
+  return <MarkdownContent text={text} projectId={projectId} />
 }
 
 /** Mono metric value — tabular numerics, teal (Law 2 — fracture as detail). */

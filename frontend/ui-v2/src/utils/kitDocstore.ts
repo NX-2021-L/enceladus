@@ -9,15 +9,7 @@
  *    parse (block ids + heading paths + ordinals). These are exactly the
  *    fields `elr doc_patch --anchor` and the patchSection API address by.
  */
-import { docstore, parse, highlighter, type IdResolver, type MdDocument, type OutlineNode, type MdPlugin } from '@io-kit/md/lean'
-import json from 'highlight.js/lib/languages/json'
-import yaml from 'highlight.js/lib/languages/yaml'
-import typescript from 'highlight.js/lib/languages/typescript'
-import python from 'highlight.js/lib/languages/python'
-import bash from 'highlight.js/lib/languages/bash'
-import sql from 'highlight.js/lib/languages/sql'
-import xml from 'highlight.js/lib/languages/xml'
-import markdown from 'highlight.js/lib/languages/markdown'
+import { docstore, parse, type IdResolver, type MdDocument, type OutlineNode, type MdPlugin } from '@io-kit/md'
 import type { ProjectSummary } from '../api/projects'
 import type { DocumentOutlineEntry } from '../api/documentManifest'
 import { resolveRecordTarget } from '../routes/recordLink'
@@ -35,12 +27,7 @@ export function makeKitIdResolver(projects: ProjectSummary[]): IdResolver {
 }
 
 export function kitDocstorePlugins(projects: ProjectSummary[]): MdPlugin[] {
-  // lean entry + 8 grammars (DVP-TSK-924): lives in the lazy KitDocumentView chunk, never the initial route.
-  const code = highlighter({
-    languages: { json, yaml, typescript, python, bash, sql, xml, markdown },
-    aliases: { typescript: ['ts', 'tsx'], python: ['py'], bash: ['sh', 'shell'], yaml: ['yml'], xml: ['html'] },
-  })
-  return docstore({ resolver: makeKitIdResolver(projects), code })
+  return docstore({ resolver: makeKitIdResolver(projects) })
 }
 
 export interface KitSectionItem {
