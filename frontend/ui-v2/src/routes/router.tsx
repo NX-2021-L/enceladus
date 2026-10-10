@@ -153,8 +153,22 @@ const placeholderRoutes = shellNavRoutes.map(({ path, title }) =>
   }),
 )
 
+const actionsIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/actions',
+  component: lazyRouteComponent(() => import('../actions/ActionsRoute'), 'ActionsIndexRoute'),
+})
+// DVP-TSK-895: generic coverage. Bespoke routes keep precedence; every other registry action lands here.
+const actionFormRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/actions/$action',
+  component: lazyRouteComponent(() => import('../actions/ActionsRoute'), 'ActionFormRoute'),
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  actionsIndexRoute,
+  actionFormRoute,
   feedRoute,
   projectsRoute,
   docsRoute,

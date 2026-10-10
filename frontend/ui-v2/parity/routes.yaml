@@ -16,6 +16,18 @@ routes:
       - "GET /api/v1/tracker/{project}?mode=census"
     auth: "session"
     surface: "enceladus"
+  - path: "/actions"
+    component: "frontend/ui-v2/src/actions/ActionsRoute.tsx"
+    handlers:
+      - "POST /api/v1/coordination/mcp"
+    auth: "session"
+    surface: "enceladus"
+  - path: "/actions/$action"
+    component: "frontend/ui-v2/src/actions/ActionsRoute.tsx"
+    handlers:
+      - "POST /api/v1/coordination/mcp"
+    auth: "session"
+    surface: "enceladus"
   - path: "/feed"
     component: "frontend/ui-v2/src/routes/FeedRoute.tsx"
     handlers:

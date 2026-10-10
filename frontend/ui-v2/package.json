@@ -17,8 +17,10 @@
   },
   "dependencies": {
     "@io-kit/auth": "1.0.0",
+    "@io-kit/schema_form": "0.2.1",
     "@io-kit/shell": "0.1.0",
     "@io-kit/tokens": "0.1.0",
+    "@tanstack/react-form": "1.33.5",
     "@tanstack/react-query": "^5.101.2",
     "@tanstack/react-router": "^1.170.17",
     "@tanstack/react-virtual": "^3.14.5",

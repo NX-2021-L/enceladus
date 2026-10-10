@@ -1,12 +1,12 @@
 {
   "artifact": "caps.schema.json",
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "source": {
     "repo": "NX-2021-L/devops",
     "path": "docs/contracts/caps.schema.json",
-    "commit": "e7bdf4ad",
+    "commit": "bdc61390216fb0cedd12822ed8f6f484c31305f7",
     "spec": "docs/contracts/parity-spec.md"
   },
-  "sha256": "6540305231eed0883d6e27937307ceee7c71b4975a40fa4a1c573155f6a37b96",
-  "note": "Verbatim copy. Do not edit here: change the contract in NX-2021-L/devops and re-copy; a major bump requires regenerating parity/caps.json."
+  "sha256": "038422a834ff87507e1a146368a79e8bd12cfc51d4703469452d7a44b53bf2dc",
+  "note": "Verbatim copy. Do not edit here: change the contract in NX-2021-L/devops and re-copy; a major bump requires regenerating parity/caps.json. 1.1.0 (ruling E2-R11) is additive over 1.0.0: optional action.dryRun and annotations.openWorldHint."
 }
