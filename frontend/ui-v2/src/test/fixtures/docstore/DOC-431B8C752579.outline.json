@@ -1,0 +1,325 @@
+[
+ {
+  "heading_path": [],
+  "level": 1,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 2,
+  "line_end": 451,
+  "section_bytes": 30342
+ },
+ {
+  "heading_path": [
+   "io decisions in force"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 9,
+  "line_end": 23,
+  "section_bytes": 893
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-792 - retire dead crawlers, rules and Lambdas in code"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4D03PZAP9T7TRADXRHT48AT",
+  "line_start": 26,
+  "line_end": 66,
+  "section_bytes": 3027
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-793 / 794 - finance-mcp read/write split (stage 1 and stage 2)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 68,
+  "line_end": 100,
+  "section_bytes": 2729
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-784 / 785 (+ 783 AC-5, 786 AC-4) - host probes, dataset reconciler, Trino readability; DVP-ISS-137/138/139"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 102,
+  "line_end": 123,
+  "section_bytes": 2228
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 125,
+  "line_end": 199,
+  "section_bytes": 5098
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "Merged"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 127,
+  "line_end": 136,
+  "section_bytes": 864
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "Published / bootstrapped"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 138,
+  "line_end": 146,
+  "section_bytes": 728
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "Deployed (out-of-band, DVP-TSK-700 route; workflow 245543976 untouched)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 148,
+  "line_end": 156,
+  "section_bytes": 768
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "Controlled runs (io D9)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 158,
+  "line_end": 171,
+  "section_bytes": 886
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "DVP-ISS-134 fixed live (765 AC-1/AC-2, registration site)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 173,
+  "line_end": 181,
+  "section_bytes": 748
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "DVP-TSK-758 gate: PASSED at 13:36:55Z"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 183,
+  "line_end": 187,
+  "section_bytes": 240
+ },
+ {
+  "heading_path": [
+   "platform_health bundle + DVP-TSK-765 shipped; DVP-TSK-758 gate passed (2026-10-08, session ENC-SES-0IA)",
+   "Still open, and why"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 189,
+  "line_end": 199,
+  "section_bytes": 585
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-796 / DVP-ISS-138 - finance-mcp public invoke closed; DVP-ISS-140 filed (2026-10-08, ENC-SES-0IA)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 201,
+  "line_end": 235,
+  "section_bytes": 1891
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-796 / DVP-ISS-138 - finance-mcp public invoke closed; DVP-ISS-140 filed (2026-10-08, ENC-SES-0IA)",
+   "Before the fix"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 203,
+  "line_end": 210,
+  "section_bytes": 418
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-796 / DVP-ISS-138 - finance-mcp public invoke closed; DVP-ISS-140 filed (2026-10-08, ENC-SES-0IA)",
+   "Fix ([NX-2021-L/finance#103](https://github.com/NX-2021-L/finance/pull/103))"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 212,
+  "line_end": 218,
+  "section_bytes": 634
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-796 / DVP-ISS-138 - finance-mcp public invoke closed; DVP-ISS-140 filed (2026-10-08, ENC-SES-0IA)",
+   "After the fix"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 220,
+  "line_end": 223,
+  "section_bytes": 342
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-796 / DVP-ISS-138 - finance-mcp public invoke closed; DVP-ISS-140 filed (2026-10-08, ENC-SES-0IA)",
+   "DVP-ISS-140"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 225,
+  "line_end": 235,
+  "section_bytes": 359
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-795 shipped; devops-platform-health-daily RE-ENABLED (DVP-TSK-759 window open), 2026-10-08"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 237,
+  "line_end": 265,
+  "section_bytes": 1908
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-795 shipped; devops-platform-health-daily RE-ENABLED (DVP-TSK-759 window open), 2026-10-08",
+   "Merged"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 239,
+  "line_end": 246,
+  "section_bytes": 778
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-795 shipped; devops-platform-health-daily RE-ENABLED (DVP-TSK-759 window open), 2026-10-08",
+   "Deployed (out-of-band)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 248,
+  "line_end": 250,
+  "section_bytes": 142
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-795 shipped; devops-platform-health-daily RE-ENABLED (DVP-TSK-759 window open), 2026-10-08",
+   "Controlled dry run R2 (e0a0680c, 14:00:36Z)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 252,
+  "line_end": 255,
+  "section_bytes": 127
+ },
+ {
+  "heading_path": [
+   "DVP-TSK-795 shipped; devops-platform-health-daily RE-ENABLED (DVP-TSK-759 window open), 2026-10-08",
+   "DVP-TSK-759"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 257,
+  "line_end": 265,
+  "section_bytes": 755
+ },
+ {
+  "heading_path": [
+   "2026-10-08 16:20-16:30Z: DVP-TSK-797 shipped; 747, 791 and 753 complete (ENC-SES-0IA)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 267,
+  "line_end": 324,
+  "section_bytes": 2915
+ },
+ {
+  "heading_path": [
+   "2026-10-08 16:30-16:40Z: DVP-ISS-135 re-evaluated, 786 and 732 closed, 798 filed, plan objectives stamped (ENC-SES-0IA)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 326,
+  "line_end": 367,
+  "section_bytes": 2639
+ },
+ {
+  "heading_path": [
+   "2026-10-08 21:38-22:15Z: DVP-ISS-137/139/140 remediation (ENC-SES-0IG; ENC-SES-0IA was retired by the idle sweep)"
+  ],
+  "level": 2,
+  "ordinal": 1,
+  "block_id": "01M4EXJ5MP4HJBYFNKMWHVG0EC",
+  "line_start": 370,
+  "line_end": 451,
+  "section_bytes": 5518
+ },
+ {
+  "heading_path": [
+   "2026-10-08 21:38-22:15Z: DVP-ISS-137/139/140 remediation (ENC-SES-0IG; ENC-SES-0IA was retired by the idle sweep)",
+   "2026-10-08 21:38-22:15Z: DVP-ISS-137/139/140 remediation (ENC-SES-0IG; ENC-SES-0IA was retired by the idle sweep)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 372,
+  "line_end": 425,
+  "section_bytes": 3743
+ },
+ {
+  "heading_path": [
+   "2026-10-08 21:38-22:15Z: DVP-ISS-137/139/140 remediation (ENC-SES-0IG; ENC-SES-0IA was retired by the idle sweep)",
+   "2026-10-08 22:15-23:30Z: DVP-TSK-799 and DVP-TSK-801 closed early on io's waiver (ENC-SES-0IG)"
+  ],
+  "level": 3,
+  "ordinal": 1,
+  "block_id": null,
+  "line_start": 427,
+  "line_end": 451,
+  "section_bytes": 1556
+ }
+]
