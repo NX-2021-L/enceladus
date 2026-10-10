@@ -7,7 +7,7 @@
  * pieces: a same-origin cookie fetch, a side map of the raw node fields the contract does not carry (status,
  * priority, project, updated_at) for the result cards, and `relate` wired to tracker.relate (pin).
  */
-import { createEnceladusSource, type RelateRequest, type SearchSource } from '@io-kit/search'
+import { createEnceladusSource, type RelateRequest, type SearchRequest, type SearchSource } from '@io-kit/search'
 import { browserSearchFetch } from '../api/searchFetch'
 import { relateRecords } from '../api/actions'
 
@@ -47,9 +47,25 @@ export function withNodeCapture(inner: Fetcher): Fetcher {
   }
 }
 
-export function createHostSearchSource(opts: { fetch?: Fetcher; relate?: (from: string, to: string) => Promise<void> } = {}): SearchSource {
-  const base = createEnceladusSource({ baseUrl: '', fetch: withNodeCapture(opts.fetch ?? browserSearchFetch) })
+export function createHostSearchSource(opts: { fetch?: Fetcher; relate?: (from: string, to: string) => Promise<void>; defaultProject?: string } = {}): SearchSource {
+  const kit = createEnceladusSource({ baseUrl: '', fetch: withNodeCapture(opts.fetch ?? browserSearchFetch) })
   const relate = opts.relate ?? ((from: string, to: string) => relateRecords(from, to))
+  // graphsearch rejects a request without project_id (HTTP 400). The kit's derived suggest() and any caller
+  // that omits filters would hit that, so default the project here (DVP-TSK-921 live conformance fix).
+  const withProject = (req: SearchRequest): SearchRequest => ({
+    ...req,
+    filters: { project_id: opts.defaultProject ?? 'enceladus', ...(req.filters ?? {}) },
+  })
+  const query: SearchSource['query'] = (req, call) => kit.query(withProject(req), call)
+  const base: SearchSource = {
+    ...kit,
+    query,
+    async suggest(req, call) {
+      const r = await query({ q: req.q, limit: Math.min(req.limit ?? 8, 50) }, call)
+      const suggestions = r.results.slice(0, req.limit ?? 8).map((h) => ({ id: h.id, type: h.type, title: h.title }))
+      return { suggestions, signal_availability: r.signal_availability, degraded: r.degraded }
+    },
+  }
   return {
     ...base,
     async relate(req: RelateRequest) {
