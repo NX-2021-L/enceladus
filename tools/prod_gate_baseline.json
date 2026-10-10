@@ -313,6 +313,10 @@
       "class": "gamma-only",
       "notes": "ENC-TSK-M13 (L46 AC-2 carrier): workflow_dispatch OpenSearch failover drill. guard-gamma-only refuses non-v4/** refs; SSM systemctl stop/start of the gamma-only opensearch-node instance via BackendDeployRole (no v3-prod resources exist; node is gamma-only, DOC-499FA089EC30)"
     },
+    "parity-report.yml": {
+      "class": "inert",
+      "notes": "DVP-TSK-840 report-only UI parity; read-only AWS (CodeArtifact read token), no mutation"
+    },
     "pr-commit-gate.yml": {
       "class": "inert",
       "notes": "gate validation, read-only"
