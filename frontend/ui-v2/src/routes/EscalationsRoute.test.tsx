@@ -15,7 +15,7 @@ import type { ProjectSummary } from '../api/projects'
  * `Link` whenever an id resolves to a route (every session id does, via the
  * SES prefix, regardless of the project registry), and no test in this
  * package builds a live RouterProvider tree — see
- * src/components/MarkdownContent.test.tsx's note on the same constraint.
+ * src/components/MarkdownText.tsx's note on the same constraint.
  */
 
 // DVP-TSK-861: the decide controls are gated on the PermissionManifest; grant it here.

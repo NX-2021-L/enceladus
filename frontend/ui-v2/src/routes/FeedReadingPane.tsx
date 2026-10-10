@@ -15,7 +15,7 @@ import type { SearchResultHit } from '../types/search'
  * duplicate summary. No separate renderer is forked here.
  *
  * Description/body text renders through each Primitive's existing <Prose>
- * component (plaintext today). Lane L1 is landing a shared MarkdownContent
+ * component (plaintext today). Lane L1 is landing a shared MarkdownText (kit core profile)
  * component for description rendering elsewhere in the primitive stack --
  * because this pane reuses the primitives verbatim rather than re-rendering
  * the description itself, it inherits that upgrade automatically on the next
