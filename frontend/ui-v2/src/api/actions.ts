@@ -147,3 +147,45 @@ export function createActionsTransport(viaOf: (action: string) => string | undef
     return adaptResponse(req, un.status, un.body)
   }
 }
+
+async function callTool(name: string, args: Json, signal?: AbortSignal): Promise<unknown> {
+  const res = await fetch(`${API_BASE}/coordination/mcp`, {
+    method: 'POST',
+    credentials: 'include',
+    cache: 'no-store',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }),
+  })
+  if (res.status === 401) throw new SessionExpiredError()
+  const text = await res.text()
+  let rpc: unknown = text
+  try {
+    rpc = text === '' ? undefined : JSON.parse(text)
+  } catch {
+    /* non-JSON stays a string */
+  }
+  const un = unwrapRpc(res.status, rpc)
+  if (un.status >= 400) throw new Error(`${name} failed (${un.status})`)
+  return un.body
+}
+
+/**
+ * DVP-TSK-921: pin-as-related. The same governed path the generic action form uses (POST /coordination/mcp,
+ * `execute` -> tracker.relate, Cognito cookie auth); tracker.relate requires the current governance hash, read
+ * through `search` -> governance.hash first. dry_run:false with an idempotency key per (source, target).
+ */
+export async function relateRecords(sourceId: string, targetId: string, signal?: AbortSignal): Promise<void> {
+  const gh = await callTool('search', { action: 'governance.hash', arguments: {} }, signal)
+  const hash = isRecord(gh) ? String(gh.governance_hash ?? gh.hash ?? '') : ''
+  if (!hash) throw new Error('governance hash unavailable')
+  await callTool(
+    'execute',
+    {
+      steps: [{ action: 'tracker.relate', arguments: { governance_hash: hash, source_id: sourceId, target_id: targetId } }],
+      dry_run: false,
+      idempotency_key: `ui-v2-pin:${sourceId}:${targetId}`,
+    },
+    signal,
+  )
+}
