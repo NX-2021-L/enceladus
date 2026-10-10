@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
+from mcp_server.catalog import CATALOG_SCHEMA_VERSION, VIA_ORDER, filter_catalog
 from mcp_server.meta_support import (
     merge_meta_tool_arguments,
     meta_tool_error,
@@ -24,6 +25,54 @@ SEARCH_ACTIONS: Dict[str, Dict[str, Any]] | None = None
 def register_actions(actions: Dict[str, Dict[str, Any]]) -> None:
     global SEARCH_ACTIONS
     SEARCH_ACTIONS = actions
+
+
+def _builtin_action(action: str, raw_args: Dict[str, Any]) -> list[TextContent]:
+    """Actions answered by the dispatcher itself (no underlying raw tool)."""
+    if action != "actions.schemas":
+        return meta_tool_error(
+            "search",
+            code="unknown_action",
+            message=f"Unknown search action '{action}'",
+            action=action,
+        )
+    provider = RUNTIME.action_catalog
+    if provider is None:
+        return meta_tool_error(
+            "search",
+            code="tool_resolution_failed",
+            message="action catalog is not bound",
+            action=action,
+        )
+    via = str(raw_args.get("via") or "").strip()
+    if via and via not in VIA_ORDER:
+        return meta_tool_error(
+            "search",
+            code="invalid_input",
+            message=f"via must be one of: {', '.join(VIA_ORDER)}",
+            action=action,
+        )
+    names = raw_args.get("names")
+    if names is not None and not isinstance(names, list):
+        return meta_tool_error(
+            "search",
+            code="invalid_input",
+            message="names must be an array of action names",
+            action=action,
+        )
+    catalog = provider()
+    actions = filter_catalog(catalog, via=via or None, names=names)
+    return meta_tool_success(
+        "search",
+        action=action,
+        result={
+            "schemaVersion": CATALOG_SCHEMA_VERSION,
+            "count": len(actions),
+            "registry_size": len(catalog),
+            "actions": actions,
+        },
+        metadata={"action_count": len(actions)},
+    )
 
 
 async def search(args: dict) -> list[TextContent]:
@@ -45,6 +94,9 @@ async def search(args: dict) -> list[TextContent]:
         )
 
     raw_args = merge_meta_tool_arguments(args, {"action", "arguments"})
+    if entry.get("builtin"):
+        return _builtin_action(action, raw_args)
+
     try:
         raw_call = await RUNTIME.invoke_raw_tool(entry["tool"], raw_args)
     except PermissionError as exc:
