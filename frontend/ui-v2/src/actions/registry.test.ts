@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ExecuteMachine, createDegradedCounter, createExecuteClient, mintedFields } from '@io-kit/schema_form/execute'
 import { resolveCall } from '@io-kit/schema_form/execute'
-import { adaptResponse, buildEnvelope, createActionsTransport } from '../api/actions'
+import { adaptResponse, buildEnvelope, createActionsTransport, unwrapRpc } from '../api/actions'
 import { ACTION_COMMANDS, matchActionCommands } from './commands'
 import { BESPOKE_ACTIONS, FLAGGED_ACTIONS, loadActionRegistry } from './registry'
 import capsFull from './capsFull.json'
@@ -30,13 +30,19 @@ describe('generic coverage registry', () => {
 describe('transport adapter', () => {
   const req = (phase: 'dry_run' | 'execute') => ({ phase, surface: 'enceladus', action: 'a.b', headers: {}, body: { arguments: { x: 1 }, schemaHash: 'h' } })
   it('builds an execute envelope and unwraps the per-step resolved_call', () => {
-    expect(buildEnvelope(req('dry_run'), 'execute')).toMatchObject({ via: 'execute', dry_run: true, steps: [{ action: 'a.b', arguments: { x: 1 } }] })
+    expect(buildEnvelope(req('dry_run'), 'execute')).toMatchObject({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'execute', arguments: { dry_run: true, schema_hash: 'h', steps: [{ action: 'a.b', arguments: { x: 1 } }] } } })
+    expect(buildEnvelope(req('execute'), 'search')).toMatchObject({ params: { name: 'search', arguments: { action: 'a.b', arguments: { x: 1 } } } })
+    const text = JSON.stringify({ step_results: [] })
+    expect(unwrapRpc(200, { result: { content: [{ type: 'text', text }] } })).toEqual({ status: 200, body: { step_results: [] } })
+    expect(unwrapRpc(200, { error: { code: -32602, message: 'bad' } }).status).toBe(422)
     const rc = { v: 1 }
     expect(adaptResponse(req('dry_run'), 200, { step_results: [{ resolved_call: rc }] }).body).toBe(rc)
     expect(adaptResponse(req('dry_run'), 409, { title: 'p' })).toEqual({ status: 409, body: { title: 'p' } })
     expect(adaptResponse(req('execute'), 200, { step_results: [{ ok: true, minted: { '/id': 'DVP-TSK-1' } }] }).body).toMatchObject({ ok: true, minted: { '/id': 'DVP-TSK-1' } })
   })
 })
+
+const rpcOk = (payload: unknown) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } }), { status: 200 })
 
 // AC2: one read and one governed write, preview then execute with an Idempotency-Key; fake server only.
 describe('dry-run preview then execute', () => {
@@ -45,17 +51,20 @@ describe('dry-run preview then execute', () => {
     const contract = reg.get(action)!
     const seen: Array<{ dry: boolean; key: string | null }> = []
     vi.stubGlobal('fetch', vi.fn(async (_u: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body))
-      const key = new Headers(init.headers).get('Idempotency-Key')
+      const rpc = JSON.parse(String(init.body))
+      expect(rpc.method).toBe('tools/call')
+      const body = rpc.params.arguments
+      const key = body.idempotency_key as string
+      expect(new Headers(init.headers).get('Idempotency-Key')).toBe(key)
       seen.push({ dry: body.dry_run, key })
       const step = body.steps[0]
       if (body.dry_run) {
         const rc = { ...resolveCall(contract, step.arguments), source: 'server-dry-run', schemaHash: body.schema_hash, idempotencyKey: key }
-        return new Response(JSON.stringify({ step_results: [{ resolved_call: rc }] }), { status: 200 })
+        return rpcOk({ step_results: [{ resolved_call: rc }] })
       }
       const minted: Record<string, string> = {}
       for (const f of mintedFields(contract.outputSchema)) minted[f.pointer] = 'DVP-TSK-900'
-      return new Response(JSON.stringify({ step_results: [{ ok: true, structuredContent: { ok: true }, minted }] }), { status: 200 })
+      return rpcOk({ step_results: [{ ok: true, structuredContent: { ok: true }, minted }] })
     }))
     const degraded = createDegradedCounter()
     const client = createExecuteClient({ transport: createActionsTransport(reg.via), onDegraded: degraded.record, liveSchemaHash: () => contract.schemaHash })

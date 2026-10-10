@@ -3,132 +3,132 @@ stack: "enceladus.jreese.net"
 surfaces:
   enceladus:
     "actions.schemas":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.checkout_release_backfill":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.claim":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.list":
       handler: "GET /api/v1/coordination/agents/sessions"
     "agent.register":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.retire":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "agent.type.list":
       handler: "GET /api/v1/coordination/agents/types"
     "agent.type.register":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "auth.cognito_session":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "capabilities.get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "changelog.history":
       handler: "GET /api/v1/changelog/history"
     "changelog.history_all":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "changelog.version":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.advance":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.append_worklog":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.release":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "checkout.task":
       handler: "POST /api/v1/tracker/{project}/{type}/{id}/checkout"
     "component.add_edge":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.advance":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.deprecate":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.propose":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.remove_edge":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.restore":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.revert":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.history":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.history_list":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.pending_requests":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.state_get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.state_set":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.status":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.status_get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.submit":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "deploy.trigger":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "dispatch_plan.dry_run":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "dispatch_plan.generate":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.append_handoff_reply":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.append_wave_entry":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.claim_handoff":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.complete_handoff":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_coe":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_handoff":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_note":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "document.create_wave":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.check_policy":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.diff":
       handler: "GET /api/v1/documents/{id}/diff"
@@ -141,168 +141,168 @@ surfaces:
     "documents.manifest":
       handler: "GET /api/v1/documents/{id}/manifest"
     "documents.patch":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.patch_section":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.put":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "documents.search":
       handler: "GET /api/v1/documents/search"
     "escalation.get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "escalation.list":
       handler: "GET /api/v1/coordination/escalations"
     "escalation.request":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "escalation.watch":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "get_compact_context":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.create_issue":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.projects_list":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "github.projects_sync":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.dictionary":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "governance.hash":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.add_objective":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.advance":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.checkout":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.create":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.objectives_status":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.remove_objective":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.reorder_objectives":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "plan.replace_objectives":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "projects.get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "projects.list":
       handler: "GET /api/v1/projects"
     "projects.prefix_map":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "reference.search":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "request.get":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "session.classify_intent":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "session.intent_centroid_drift":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "system.connection_health":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "telemetry.rank":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.archive_relationship":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create_lesson":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.create_relationship":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.creation_rules":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.embeddings_for":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.extend_lesson":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.get":
       handler: "GET /api/v1/tracker/{project}/{type}/{id}"
     "tracker.get_acs":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.graph_laplacian":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.graphsearch":
       handler: "GET /api/v1/tracker/graphsearch"
     "tracker.list":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.list_lessons":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.list_relationships":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.log":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.manifest":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.manifest_bulk":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.pending_updates":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.relate":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.set":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.set_acceptance_evidence":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.sheaf_cohomology":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.validation_rules":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.worklog_timeline":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "tracker.worklogs":
-      handler: "POST /api/v1/actions/execute"
+      handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"

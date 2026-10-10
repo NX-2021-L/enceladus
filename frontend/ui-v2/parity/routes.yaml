@@ -19,13 +19,13 @@ routes:
   - path: "/actions"
     component: "frontend/ui-v2/src/actions/ActionsRoute.tsx"
     handlers:
-      - "POST /api/v1/actions/execute"
+      - "POST /api/v1/coordination/mcp"
     auth: "session"
     surface: "enceladus"
   - path: "/actions/$action"
     component: "frontend/ui-v2/src/actions/ActionsRoute.tsx"
     handlers:
-      - "POST /api/v1/actions/execute"
+      - "POST /api/v1/coordination/mcp"
     auth: "session"
     surface: "enceladus"
   - path: "/feed"

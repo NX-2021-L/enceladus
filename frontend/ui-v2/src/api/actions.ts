@@ -4,9 +4,11 @@
  *
  * The kit (`@io-kit/schema_form/execute`) never holds credentials; this closure
  * carries the PWA session (cookie, credentials: 'include'). Every action goes
- * through one governed endpoint, which relays to the MCP `execute` tool
- * (dry_run:true for the preview, dry_run:false with an Idempotency-Key for the
- * execute). Server validation and the io-dev-admin gate stay authoritative.
+ * through the coordination API's MCP JSON-RPC route (POST /coordination/mcp,
+ * Cognito cookie auth, same as every other coordination call): `tools/call`
+ * `execute` (dry_run:true for the preview, dry_run:false with an idempotency
+ * key for the execute), or `search`/`coordination` for the wrapper actions.
+ * Server validation and the io-dev-admin gate stay authoritative (E2-R14).
  */
 import type { Transport, TransportRequest, TransportResponse } from '@io-kit/schema_form/execute'
 import { API_BASE, SessionExpiredError } from './client'
@@ -50,21 +52,61 @@ export function adaptResponse(req: TransportRequest, status: number, body: unkno
   }
 }
 
-export function buildEnvelope(req: TransportRequest, via: string | undefined): Json {
+/** tools/call params for the action: `execute` for via=execute, `search`/`coordination` for the wrappers. */
+export function buildToolCall(req: TransportRequest, via: string | undefined): { name: string; arguments: Json } {
   const b = req.body as Json
-  const args = req.phase === 'dry_run' ? b.arguments : (b.arguments as unknown)
-  return {
-    via: via ?? 'execute',
-    steps: [{ action: req.action, arguments: args }],
-    dry_run: req.phase === 'dry_run',
-    schema_hash: b.schemaHash,
+  if (via === 'search' || via === 'coordination') {
+    return { name: via, arguments: { action: req.action, arguments: b.arguments } }
   }
+  return {
+    name: 'execute',
+    arguments: {
+      steps: [{ action: req.action, arguments: b.arguments }],
+      dry_run: req.phase === 'dry_run',
+      idempotency_key: b.idempotencyKey,
+      schema_hash: b.schemaHash,
+    },
+  }
+}
+
+let rpcId = 0
+
+export function buildEnvelope(req: TransportRequest, via: string | undefined): Json {
+  return { jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: buildToolCall(req, via) }
+}
+
+/**
+ * JSON-RPC response -> the tool payload (result.content[0].text parsed) or a problem.
+ * A JSON-RPC error and an isError result both become an RFC 9457 problem so the kit maps them.
+ */
+export function unwrapRpc(status: number, rpc: unknown): { status: number; body: unknown } {
+  if (!isRecord(rpc)) return { status, body: rpc }
+  if (isRecord(rpc.error)) {
+    const code = typeof rpc.error.code === 'number' ? rpc.error.code : 0
+    const http = code === -32602 ? 422 : code === -32601 ? 404 : 500
+    return { status: http, body: { type: 'about:blank', title: String(rpc.error.message ?? 'MCP error'), status: http } }
+  }
+  const result = isRecord(rpc.result) ? rpc.result : undefined
+  const first = result && Array.isArray(result.content) && isRecord(result.content[0]) ? result.content[0] : undefined
+  let payload: unknown = result?.structuredContent ?? result
+  if (first && typeof first.text === 'string') {
+    try {
+      payload = JSON.parse(first.text)
+    } catch {
+      payload = first.text
+    }
+  }
+  if (result?.isError === true) {
+    const p = isRecord(payload) && typeof payload.status === 'number' ? payload : { type: 'about:blank', title: 'Action failed', status: 422, detail: typeof payload === 'string' ? payload : undefined }
+    return { status: (p as Json).status as number, body: p }
+  }
+  return { status, body: payload }
 }
 
 /** `viaOf(action)` names the MCP wrapper (execute | search | coordination) for the action. */
 export function createActionsTransport(viaOf: (action: string) => string | undefined): Transport {
   return async (req) => {
-    const res = await fetch(`${API_BASE}/actions/execute`, {
+    const res = await fetch(`${API_BASE}/coordination/mcp`, {
       method: 'POST',
       credentials: 'include',
       cache: 'no-store',
@@ -79,12 +121,13 @@ export function createActionsTransport(viaOf: (action: string) => string | undef
     })
     if (res.status === 401) throw new SessionExpiredError()
     const text = await res.text()
-    let body: unknown = text
+    let rpc: unknown = text
     try {
-      body = text === '' ? undefined : JSON.parse(text)
+      rpc = text === '' ? undefined : JSON.parse(text)
     } catch {
       /* non-JSON stays a string */
     }
-    return adaptResponse(req, res.status, body)
+    const un = unwrapRpc(res.status, rpc)
+    return adaptResponse(req, un.status, un.body)
   }
 }

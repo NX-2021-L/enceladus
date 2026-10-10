@@ -366,7 +366,7 @@ ACTION_RULES: dict[str, tuple[str, str | None, str | None]] = {
 # DVP-TSK-895: generic coverage. Every registry action without a bespoke rule above is reachable through the
 # generated form (palette command -> /actions/$action -> dry run -> execute), so a NEW registry action is covered
 # by default and needs neither a route entry nor a waiver. ACTION_RULES is now only the list of bespoke overrides.
-GENERIC_HANDLER = r"POST /api/v1/actions/execute$"
+GENERIC_HANDLER = r"POST /api/v1/coordination/mcp$"
 GENERIC_NOTE = "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
 # bespoke screens that only partly cover an action: the generated form closes the gap (full inputSchema).
 GENERIC_OVER_PARTIAL = ("tracker.list", "reference.search", "governance.get", "escalation.get", "tracker.set", "checkout.advance")
