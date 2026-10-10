@@ -42,6 +42,14 @@ SRC = HERE.parent / "src"
 ROUTER = SRC / "routes" / "router.tsx"
 CAPS = REPO / "tools" / "enceladus-mcp-server" / "parity" / "caps.json"
 
+
+def configure(src: Path) -> None:
+    """Point the generator at another src tree (the committed test fixture)."""
+    global SRC, ROUTER
+    SRC = Path(src).resolve()
+    ROUTER = SRC / "routes" / "router.tsx"
+    _symbols.clear()
+
 STACK = "enceladus.jreese.net"
 SCHEMA_VERSION = "1.0.0"
 GENERATED_AT = "2026-10-10T00:00:00Z"  # fixed on purpose: output must be reproducible
@@ -110,18 +118,33 @@ def split_symbols(path: Path) -> dict[str, str]:
 
 
 _symbols: dict[Path, dict[str, str]] = {}
+NAMED_IMPORT = re.compile(r"""import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"](\.[^'"]+)['"]""")
+Key = tuple  # (api module Path, symbol name)
 
 
-def api_symbols() -> dict[str, tuple[Path, str]]:
+def api_symbols() -> dict[Key, str]:
     if not _symbols:
         for p in sorted((SRC / "api").glob("*.ts")):
             if not is_test(p):
                 _symbols[p] = split_symbols(p)
-    table: dict[str, tuple[Path, str]] = {}
-    for p, syms in _symbols.items():
-        for name, body in syms.items():
-            table.setdefault(name, (p, body))
-    return table
+    return {(p, name): body for p, syms in _symbols.items() for name, body in syms.items()}
+
+
+def bound_api_names(path: Path) -> set[Key]:
+    """Api symbols a file imports BY NAME from an api module. DVP-TSK-862: a bare
+    token that merely spells an api symbol (a local variable, a prop) no longer
+    reaches it; only an import binding does."""
+    out: set[Key] = set()
+    text = read(path)
+    for names, spec in NAMED_IMPORT.findall(text):
+        r = resolve(path, spec)
+        if r is None or not in_api(r):
+            continue
+        for part in names.split(","):
+            n = part.strip().removeprefix("type ").split(" as ")[0].strip()
+            if n:
+                out.add((r, n))
+    return out
 
 
 def reach_files(entry: Path) -> set[Path]:
@@ -141,25 +164,32 @@ def reach_files(entry: Path) -> set[Path]:
     return seen
 
 
-def reached_api_symbols(files: set[Path], extra_tokens: set[str]) -> set[str]:
-    """Api symbols a route reaches, following symbol -> symbol references and the
-    non-api modules an api module imports (e.g. sync/readThrough.ts, which owns
-    the record GET behind queryOptions)."""
+def reached_api_symbols(files: set[Path], extra_tokens: set[str]) -> set[Key]:
+    """Api symbols a route reaches: names imported from api modules by a reached
+    non-api file AND used in it, then symbol -> symbol references inside an api
+    module (its own symbols, or names it imports from another api module), plus
+    the non-api modules an api module imports (e.g. sync/readThrough.ts)."""
     table = api_symbols()
     seen_files = set(files)
-    used = set(extra_tokens)
+    hit: set[Key] = set()
+    todo: list[Key] = []
     for f in files:
-        if not in_api(f):
-            used |= set(TOKEN.findall(read(f)))
-    hit: set[str] = set()
-    todo = [t for t in used if t in table]
-    while todo:
-        name = todo.pop()
-        if name in hit:
+        if in_api(f):
             continue
-        hit.add(name)
-        path, body = table[name]
-        new_tokens = set(TOKEN.findall(body))
+        toks = set(TOKEN.findall(strip_imports(read(f))))
+        todo += [k for k in bound_api_names(f) if k in table and k[1] in toks]
+    todo += [k for k in bound_api_names(ROUTER) if k in table and k[1] in extra_tokens]
+    while todo:
+        key = todo.pop()
+        if key in hit:
+            continue
+        hit.add(key)
+        path, name = key
+        body = table[key]
+        toks = set(TOKEN.findall(body))
+        imported = bound_api_names(path)
+        todo += [(path, t) for t in toks if (path, t) in table and (path, t) not in hit]
+        todo += [k for k in imported if k[1] in toks and k in table and k not in hit]
         for spec in IMPORT.findall(read(path)):
             r = resolve(path, spec)
             if r is not None and not in_api(r) and r not in seen_files:
@@ -167,9 +197,13 @@ def reached_api_symbols(files: set[Path], extra_tokens: set[str]) -> set[str]:
                 seen_files |= extra
                 for f in extra:
                     if not in_api(f):
-                        new_tokens |= set(TOKEN.findall(read(f)))
-        todo += [t for t in new_tokens if t in table and t not in hit]
+                        ftoks = set(TOKEN.findall(strip_imports(read(f))))
+                        todo += [k for k in bound_api_names(f) if k in table and k[1] in ftoks and k not in hit]
     return hit
+
+
+def strip_imports(text: str) -> str:
+    return re.sub(r"import\s[^;]*?from\s*['\"][^'\"]+['\"];?", "", text, flags=re.S)
 
 
 # ------------------------------------------------------------------ endpoints
@@ -185,6 +219,7 @@ def normalise(raw: str, base: str) -> str:
         s = "/api/v1/feed" + s[len("${FEED_BASE}"):]
     elif s.startswith("${API_BASE}"):
         s = base + s[len("${API_BASE}"):]
+    s = re.sub(r"(?<=[A-Za-z0-9_-])\$\{\w+\}$", "", s)  # `types${qs}`: a query suffix glued to the path
     s = re.sub(r"\$\{encodeURIComponent\((\w+)\)\}", lambda m: "{%s}" % PARAM_NAMES.get(m.group(1), m.group(1)), s)
     s = re.sub(r"\$\{(\w+)\}", lambda m: "{%s}" % PARAM_NAMES.get(m.group(1), m.group(1)), s)
     s = re.sub(r"\$\{.*$", "", s)  # a nested expression is always a query suffix
@@ -194,21 +229,28 @@ def normalise(raw: str, base: str) -> str:
 
 
 def endpoints_of(body: str, base: str) -> list[str]:
-    meths = sorted(set(METHOD.findall(body))) or ["GET"]
-    # `decision: 'approve' | 'deny'` style unions expand a {decision} path segment
+    """Endpoints a symbol calls. DVP-TSK-862: each URL takes the HTTP methods quoted
+    in its own segment (from the URL to the next URL), not the cross product of every
+    method and every URL in the symbol; a segment with no method is a GET unless the
+    symbol has a single URL, which then keeps the symbol-wide methods."""
     unions = {m.group(1): re.findall(r"'([\w-]+)'", m.group(2))
               for m in re.finditer(r"(\w+):\s*('[\w-]+'(?:\s*\|\s*'[\w-]+')+)", body)}
-    found: set[str] = set()
-    for m in re.finditer(r"""[`'"]((?:\$\{(?:API_BASE|FEED_BASE)\}|/api/v1)(?:[^`'"\\]|\\.)*)[`'"]""", body):
+    urls = list(re.finditer(r"""[`'"]((?:\$\{(?:API_BASE|FEED_BASE)\}|/api/v1)(?:[^`'"\\]|\\.)*)[`'"]""", body))
+    symbol_meths = sorted(set(METHOD.findall(body))) or ["GET"]
+    found: dict[str, set[str]] = {}
+    for i, m in enumerate(urls):
         norm = normalise(m.group(1), base)
         if norm in ("/api/v1", "/api/v1/feed"):
             continue  # a bare base constant, not a call
-        slots = [k for k in unions if "{%s}" % k in norm]
+        end = urls[i + 1].start() if i + 1 < len(urls) else len(body)
+        seg = sorted(set(METHOD.findall(body[m.end():end])))
+        meths = seg or (symbol_meths if len(urls) == 1 else ["GET"])
         variants = [norm]
-        for k in slots:
+        for k in [k for k in unions if "{%s}" % k in norm]:
             variants = [v.replace("{%s}" % k, val) for v in variants for val in unions[k]]
-        found.update(variants)
-    return [f"{mm} {e}" for e in sorted(found) for mm in meths]
+        for v in variants:
+            found.setdefault(v, set()).update(meths)
+    return [f"{mm} {e}" for e in sorted(found) for mm in sorted(found[e])]
 
 
 # ---------------------------------------------------------------------- routes
@@ -276,8 +318,8 @@ def build_routes() -> list[dict]:
         files = reach_files(r["entry"])
         syms = reached_api_symbols(files, r["tokens"])
         handlers: list[str] = []
-        for s in sorted(syms):
-            for h in endpoints_of(table[s][1], local_base(table[s][0])):
+        for (spath, sname) in sorted(syms, key=lambda k: (str(k[0]), k[1])):
+            for h in endpoints_of(table[(spath, sname)], local_base(spath)):
                 if h not in handlers:
                     handlers.append(h)
         out.append({
