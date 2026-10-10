@@ -34,7 +34,10 @@ export function adaptResponse(req: TransportRequest, status: number, body: unkno
   if (req.phase === 'dry_run') {
     // ResolvedCall v1 is the step's resolved_call (DVP-TSK-892); anything else passes through
     // and the kit rejects it as invalid-dry-run rather than the UI inventing a preview.
-    return { status, body: step && isRecord(step.resolved_call) ? step.resolved_call : body }
+    // execute puts it on the step; the coordination wrapper (DVP-TSK-892 follow-up) returns it top-level.
+    if (step && isRecord(step.resolved_call)) return { status, body: step.resolved_call }
+    if (isRecord(body) && isRecord(body.resolved_call)) return { status, body: body.resolved_call }
+    return { status, body }
   }
   const failed = step && step.ok === false
   if (failed) return { status: typeof step.status === 'number' ? step.status : 422, body: step.problem ?? step }
@@ -55,8 +58,21 @@ export function adaptResponse(req: TransportRequest, status: number, body: unkno
 /** tools/call params for the action: `execute` for via=execute, `search`/`coordination` for the wrappers. */
 export function buildToolCall(req: TransportRequest, via: string | undefined): { name: string; arguments: Json } {
   const b = req.body as Json
-  if (via === 'search' || via === 'coordination') {
+  if (via === 'search') {
     return { name: via, arguments: { action: req.action, arguments: b.arguments } }
+  }
+  if (via === 'coordination') {
+    // Coordination writes take top-level dry_run (DVP-TSK-892 follow-up, E2-R16).
+    return {
+      name: via,
+      arguments: {
+        action: req.action,
+        arguments: b.arguments,
+        ...(req.phase === 'dry_run' ? { dry_run: true } : {}),
+        ...(b.idempotencyKey ? { idempotency_key: b.idempotencyKey } : {}),
+        ...(b.schemaHash ? { schema_hash: b.schemaHash } : {}),
+      },
+    }
   }
   return {
     name: 'execute',

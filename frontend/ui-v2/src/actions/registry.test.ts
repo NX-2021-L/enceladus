@@ -37,6 +37,8 @@ describe('transport adapter', () => {
     expect(unwrapRpc(200, { error: { code: -32602, message: 'bad' } }).status).toBe(422)
     const rc = { v: 1 }
     expect(adaptResponse(req('dry_run'), 200, { step_results: [{ resolved_call: rc }] }).body).toBe(rc)
+    // coordination wrapper writes return resolved_call top-level (DVP-TSK-892 follow-up)
+    expect(adaptResponse(req('dry_run'), 200, { dry_run: true, resolved_call: rc }).body).toBe(rc)
     expect(adaptResponse(req('dry_run'), 409, { title: 'p' })).toEqual({ status: 409, body: { title: 'p' } })
     expect(adaptResponse(req('execute'), 200, { step_results: [{ ok: true, minted: { '/id': 'DVP-TSK-1' } }] }).body).toMatchObject({ ok: true, minted: { '/id': 'DVP-TSK-1' } })
   })
@@ -88,7 +90,7 @@ describe('dry-run preview then execute', () => {
 
   it('governed write action: Idempotency-Key sent, minted ids come only from the server', async () => {
     const reg = await loadActionRegistry()
-    const write = reg.contracts.find((c) => c.dryRun && !c.annotations.readOnlyHint && mintedFields(c.outputSchema).length > 0)
+    const write = reg.contracts.find((c) => reg.via(c.action) === 'execute' && c.dryRun && !c.annotations.readOnlyHint && mintedFields(c.outputSchema).length > 0)
     expect(write).toBeDefined()
     const { receipt, seen } = await run(write!.action, {})
     expect(seen.every((s) => !!s.key)).toBe(true)

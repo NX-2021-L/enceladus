@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-10T15:54:44Z",
+  "generatedAt": "2026-10-10T16:59:57Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -63,7 +63,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "agent.claim",
@@ -100,7 +101,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "agent.list",
@@ -171,7 +173,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "agent.retire",
@@ -195,7 +198,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "agent.type.list",
@@ -254,7 +258,8 @@
         "idempotentHint": true
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "auth.cognito_session",
@@ -285,7 +290,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "capabilities.get",
@@ -1348,7 +1354,8 @@
         "idempotentHint": false
       },
       "requiresGovernanceHash": false,
-      "via": "coordination"
+      "via": "coordination",
+      "dryRun": true
     },
     {
       "name": "document.append_handoff_reply",
@@ -2759,7 +2766,8 @@
       },
       "requiresGovernanceHash": false,
       "via": "coordination",
-      "flag": "enable_escalation_primitive"
+      "flag": "enable_escalation_primitive",
+      "dryRun": true
     },
     {
       "name": "get_compact_context",

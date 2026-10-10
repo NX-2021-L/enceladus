@@ -223,3 +223,92 @@ def test_failed_execution_is_not_stored_and_stays_retryable():
     _call(server, request)
     _call(server, request)
     assert calls["n"] == 2
+
+
+# --- DVP-TSK-892 follow-up (ruling E2-R16): coordination wrapper dry_run -----------------
+
+def _coord(server, arguments, allowed="agent_register,agent_checkout_release_backfill,agent_list"):
+    with patch.dict(os.environ, {"COORDINATION_ALLOWED_RAW_TOOLS": allowed}, clear=False):
+        return json.loads(_run(server.call_tool("coordination", arguments))[0].text)
+
+
+def _coord_write_action(server):
+    return next(
+        (name, entry) for name, entry in server._COORDINATION_ACTIONS.items()
+        if not entry["annotations"]["readOnlyHint"]
+    )
+
+
+def test_coordination_write_dry_run_returns_resolved_call_and_dispatches_nothing():
+    server = _load_server()
+    calls = {"n": 0}
+
+    async def _handler(_args):
+        calls["n"] += 1
+        return server._result_text({"success": True})
+
+    validator = jsonschema.Draft202012Validator(RESOLVED_CALL_V1_SCHEMA)
+    seen = 0
+    for name, entry in server._COORDINATION_ACTIONS.items():
+        if entry["annotations"]["readOnlyHint"]:
+            continue
+        server._TOOL_HANDLERS[entry["tool"]] = _handler
+        payload = _coord(server, {"action": name, "dry_run": True, "idempotency_key": "ck-1"}, allowed=entry["tool"])
+        if payload.get("success") is not True:
+            # required arguments missing -> RFC 9457 with pointers, still no dispatch
+            assert payload["problem"]["status"] == 422 and payload["problem"]["errors"], name
+            continue
+        rc = payload["resolved_call"]
+        validator.validate(rc)
+        assert payload["dry_run"] is True and rc["action"] == name and rc["idempotencyKey"] == "ck-1"
+        assert rc["sideEffects"]["writeCount"] == 1 and rc["underlying"][0]["handler"] == entry["tool"]
+        seen += 1
+    assert calls["n"] == 0
+    assert seen >= 1
+
+
+def test_coordination_dry_run_with_valid_arguments_is_schema_valid():
+    server = _load_server()
+    results = {}
+    for name, entry in server._COORDINATION_ACTIONS.items():
+        if entry["annotations"]["readOnlyHint"]:
+            continue
+        contract = server._action_catalog()
+        schema = next(c for c in contract if c["name"] == name and c["via"] == "coordination")["inputSchema"] or {}
+        sample = {}
+        for field in schema.get("required", []):
+            kind = schema["properties"].get(field, {}).get("type")
+            sample[field] = {"string": "x", "boolean": True, "integer": 1, "number": 1, "array": [], "object": {}}.get(kind, "x")
+        payload = _coord(server, {"action": name, "dry_run": True, "arguments": {}, **sample}, allowed=entry["tool"])
+        results[name] = payload
+        assert payload["success"] is True, (name, payload.get("problem"))
+        jsonschema.Draft202012Validator(RESOLVED_CALL_V1_SCHEMA).validate(payload["resolved_call"])
+    assert len(results) == 8
+
+
+def test_coordination_dry_run_ignored_for_reads_and_nested_dry_run_passes_through():
+    server = _load_server()
+    seen = []
+
+    async def _list(args):
+        seen.append(("list", args))
+        return server._result_text({"success": True})
+
+    async def _backfill(args):
+        seen.append(("backfill", args))
+        return server._result_text({"success": True, "would_release": []})
+
+    server._TOOL_HANDLERS["agent_list"] = _list
+    server._TOOL_HANDLERS["agent_checkout_release_backfill"] = _backfill
+    read = _coord(server, {"action": "agent.list", "dry_run": True})
+    assert read["success"] is True and "resolved_call" not in read
+    native = _coord(server, {"action": "agent.checkout_release_backfill", "arguments": {"dry_run": True}})
+    assert "resolved_call" not in native
+    assert seen[1] == ("backfill", {"dry_run": True})
+
+
+def test_coordination_dry_run_schema_hash_mismatch_is_409():
+    server = _load_server()
+    name, entry = _coord_write_action(server)
+    bad = _coord(server, {"action": name, "dry_run": True, "schema_hash": "0" * 64}, allowed=entry["tool"])
+    assert bad["success"] is False and bad["problem"]["status"] == 409

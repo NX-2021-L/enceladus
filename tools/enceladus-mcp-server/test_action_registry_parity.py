@@ -471,14 +471,23 @@ def test_schema_rejects_an_action_missing_annotations(server):
         emit_caps.validate_caps(broken)
 
 
-def test_dry_run_is_advertised_exactly_for_execute_actions(server):
+def test_dry_run_is_advertised_for_execute_actions_and_every_write_action(server):
+    """Ruling E2-R16: every WRITE action is dry-run capable (execute registry + coordination
+    wrapper); read-only search/coordination/top-level actions carry no dryRun."""
     caps = emit_caps.build_caps("all", server=server)
     assert caps["actions"], "no actions emitted"
+    writes_without_dry_run = []
     for action in caps["actions"]:
+        read_only = action["annotations"]["readOnlyHint"]
         if action["via"] == "execute":
             assert action.get("dryRun") is True, action["name"]
+        elif action["via"] == "coordination":
+            assert bool(action.get("dryRun")) is (not read_only), action["name"]
         else:
             assert "dryRun" not in action, action["name"]
+        if not read_only and not action.get("dryRun"):
+            writes_without_dry_run.append(action["name"])
+    assert writes_without_dry_run == []
 
 
 def test_committed_snapshot_is_current(server):

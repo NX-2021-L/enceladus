@@ -36,7 +36,7 @@ SCHEMA_HASH_ARGS = ("schema_hash", "schemaHash")
 IDEMPOTENCY_TTL_S = 24 * 3600
 IDEMPOTENCY_MAX_ENTRIES = 512
 
-_CONTRACTS: Optional[Dict[str, Dict[str, Any]]] = None
+_CONTRACTS: Optional[Dict[tuple, Dict[str, Any]]] = None
 _IDEM_LOCK = threading.Lock()
 # key -> {"fingerprint": str, "payload": dict, "expires": float}
 # In-memory (per warm Lambda container / server process): a replay on a cold or
@@ -79,13 +79,13 @@ def _pointer(path: Any) -> str:
     return "/" + "/".join(parts) if parts else ""
 
 
-def _action_contract(action: str) -> Optional[Dict[str, Any]]:
+def _action_contract(action: str, via: str = "execute") -> Optional[Dict[str, Any]]:
     """Per-action contract (inputSchema/outputSchema/annotations) from the unwrapped registry."""
     global _CONTRACTS
     if _CONTRACTS is None:
         catalog = RUNTIME.action_catalog() if RUNTIME.action_catalog is not None else []
-        _CONTRACTS = {item["name"]: item for item in catalog if item.get("via") == "execute"}
-    return _CONTRACTS.get(action)
+        _CONTRACTS = {(item.get("via"), item["name"]): item for item in catalog}
+    return _CONTRACTS.get((via, action))
 
 
 def schema_hash_for(contract: Optional[Dict[str, Any]], entry: Dict[str, Any]) -> str:
