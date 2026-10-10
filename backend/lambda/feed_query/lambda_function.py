@@ -2152,8 +2152,8 @@ def _handle_corpus(qs: Dict[str, Any]) -> Dict[str, Any]:
     if query["sort"] not in feed_corpus.VALID_SORTS:
         return _error(400, f"Invalid sort '{query['sort']}'")
 
-    if query["cursor"] and feed_corpus.decode_cursor(query["cursor"]) is None:
-        return _error(400, "Invalid cursor")
+    if query["cursor"] and feed_corpus.decode_cursor(query["cursor"], feed_corpus.cursor_filter(query)) is None:
+        return _error(400, "Invalid cursor", code="cursor_invalid")
 
     try:
         entries = _get_corpus_entries()
@@ -2320,7 +2320,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # /feed/corpus contract (opaque base64; same encode/decode as corpus.py).
     feed_cursor = str(qs.get("cursor") or "").strip()
     if feed_cursor and feed_corpus.decode_cursor(feed_cursor) is None:
-        return _error(400, "Invalid cursor")
+        return _error(400, "Invalid cursor", code="cursor_invalid")
 
     try:
         try:

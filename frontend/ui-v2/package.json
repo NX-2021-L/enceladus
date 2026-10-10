@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@io-kit/auth": "1.0.0",
+    "@io-kit/feed": "1.0.0",
     "@io-kit/md": "1.0.0",
     "@io-kit/schema_form": "0.2.1",
     "@io-kit/shell": "0.1.0",
