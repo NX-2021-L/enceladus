@@ -15,7 +15,6 @@ delete adherence['x-omelette']
 const adherenceTargets = [
   'src/shell/AppShell.tsx',
   'src/design-system/**/*.{ts,tsx,js}',
-  'src/routes/PlaceholderRoute.tsx',
 ]
 
 export default tseslint.config(

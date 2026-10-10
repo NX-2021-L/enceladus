@@ -932,6 +932,16 @@ Resources:
       RouteKey: POST /api/v1/auth/refresh
       Target: !Sub integrations/${AuthRefreshIntegration}
 
+  # DVP-TSK-861: auth_refresh serves the @io-kit/auth PermissionManifest at
+  # GET /api/v1/auth/manifest (ui-v2 createAuthClient manifestUrl, resolved
+  # against apiBase /api/v1). Same-origin, so no OPTIONS route is needed.
+  RouteAuthManifest:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/manifest
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
   # ENC-TSK-K95: Cognito Hosted-UI OAuth2 authorization-code callback for the
   # v4 cockpit (frontend/ui-v2). Same-origin login exchange handled by
   # auth_refresh — no Lambda@Edge. Public (no authorizer): it receives an

@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-10.01",
-  "updated_at": "2026-10-10T09:15:00Z",
-  "last_change_summary": "DVP-TSK-843 (DVP-PLN-008 W2.3): new read-only search action actions.schemas returns per-action contracts {name, title, inputSchema, outputSchema, annotations{readOnlyHint,destructiveHint,idempotentHint}, requiresGovernanceHash, via, flag?} for every action reachable via search, execute and coordination (106 with all flags on); raw tools/list gains annotations (additive); 55 previously unspecified actions get declared schemas (mcp_server/action_schemas.py) enforced by AST-introspection tests; build emits parity/caps.json (caps schema 1.0.0, NX-2021-L/devops docs/contracts). No change to existing call behaviour.",
+  "version": "2026-10-10.02",
+  "updated_at": "2026-10-10T12:10:00Z",
+  "last_change_summary": "DVP-TSK-861 (DVP-PLN-009 E1-W3): auth_refresh becomes the @io-kit/auth edge for ui-v2. POST /api/v1/auth/refresh keeps its contract (200; 401 AUTH_REFRESH_FAILED; 503 AUTH_NETWORK; 403 on bad Origin/CSRF) and new GET /api/v1/auth/manifest returns an @io-kit/auth PermissionManifest {principal, policyVersion, issuedAt, expiresAt, grants[]} from policy_table.json over the Enceladus caps (execute requires io-dev-admin; escalation decide server gates unchanged). No tracker/document schema change.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-10.02",
+      "date": "2026-10-10",
+      "summary": "DVP-TSK-861 (DVP-PLN-009 E1-W3): auth_refresh becomes the @io-kit/auth edge for ui-v2. POST /api/v1/auth/refresh keeps its contract (200; 401 AUTH_REFRESH_FAILED; 503 AUTH_NETWORK; 403 on bad Origin/CSRF) and new GET /api/v1/auth/manifest returns an @io-kit/auth PermissionManifest {principal, policyVersion, issuedAt, expiresAt, grants[]} from policy_table.json over the Enceladus caps (execute requires io-dev-admin; escalation decide server gates unchanged). No tracker/document schema change."
+    },
     {
       "version": "2026-10-10.01",
       "date": "2026-10-10",

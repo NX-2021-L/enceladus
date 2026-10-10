@@ -1,13 +1,15 @@
 name: Parity Report
 
-# DVP-TSK-840 (DVP-PLN-008 E0): report-only UI parity for enceladus.jreese.net.
+# DVP-TSK-840 / DVP-TSK-862 (DVP-PLN-008 E1): UI parity for enceladus.jreese.net.
 # Checks that every default-visible action in the enceladus MCP caps manifest
-# is reachable from a ui-v2 route (io-kit parity). Report-only: the job fails
-# on invalid input or tool errors, never on counts. Counts are ratcheted
-# against frontend/ui-v2/parity/baseline.json (written with all flags on, so
-# turning a feature flag on later cannot look like a regression); the report
-# itself uses the default flags (all OFF), so flag-gated actions are excluded
-# from the effective counts.
+# is reachable from a ui-v2 route (io-kit parity). Blocking-with-ratchet: the
+# job fails when `missing` rises above (or `covered` drops below)
+# frontend/ui-v2/parity/baseline.json, and on invalid input. It never demands
+# that coverage rise. Basis is flags-off (product truth: flag-gated actions are
+# excluded) in the baseline, the gate and the report alike, so all three agree.
+# Route-or-waiver: a PR that adds a registry action ships a route/map entry, a
+# waiver in frontend/ui-v2/parity/waivers.yaml, or an explicit baseline bump
+# (see CONTRIBUTING.md).
 #
 # Reads AWS only: assumes io-kit-github-read and fetches a 15 minute
 # CodeArtifact read token. No deploy, no write. Classified inert in
@@ -34,7 +36,7 @@ concurrency:
 
 jobs:
   parity:
-    name: Parity (report-only)
+    name: Parity (blocking-with-ratchet)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -78,22 +80,31 @@ jobs:
           set -euo pipefail
           python3 -I "$PARITY_DIR/generate_parity.py"
           if ! git diff --quiet -- "$PARITY_DIR"; then
-            echo "::warning::committed routes.yaml/map.yaml were stale; run python3 $PARITY_DIR/generate_parity.py and commit the result"
+            echo "::error::committed routes.yaml/map.yaml were stale; run python3 $PARITY_DIR/generate_parity.py and commit the result"
             git diff --stat -- "$PARITY_DIR"
+            exit 1
           fi
 
-      - name: Parity (report-only)
+      - name: Generator and route-or-waiver tests
+        shell: bash
+        run: python3 -I -m unittest discover -s "$PARITY_DIR/tests"
+
+      - name: Parity (blocking-with-ratchet, flags off)
         shell: bash
         run: |
           set -euo pipefail
-          io-kit parity validate "$CAPS" "$PARITY_DIR/routes.yaml"
-          # ratchet: baseline and check both with all flags on, like for like
-          io-kit parity baseline check --baseline "$PARITY_DIR/baseline.json" \
-            --caps "$CAPS" --routes "$PARITY_DIR/routes.yaml" --stack "$STACK" \
-            --mapping "$PARITY_DIR/map.yaml" --flags '*' \
-            --mode report-only --json parity-result.json
-          # report: default flags (all off), flag-gated actions excluded
-          io-kit parity report --caps "$CAPS" --routes "$PARITY_DIR/routes.yaml" \
-            --stack "$STACK" --mapping "$PARITY_DIR/map.yaml" \
-            --format md --out parity-report
-          cat parity-report/*.md >> "$GITHUB_STEP_SUMMARY"
+          io-kit parity validate "$CAPS" "$PARITY_DIR/routes.yaml" "$PARITY_DIR/baseline.json"
+          A=(--caps "$CAPS" --routes "$PARITY_DIR/routes.yaml" --stack "$STACK"
+             --mapping "$PARITY_DIR/map.yaml" --waivers "$PARITY_DIR/waivers.yaml")
+          # no --flags: flag-gated actions excluded, same basis as baseline.json
+          io-kit parity report "${A[@]}" --format md --out parity-report || true
+          cat parity-report/*.md >> "$GITHUB_STEP_SUMMARY" || true
+          io-kit parity baseline check --baseline "$PARITY_DIR/baseline.json" "${A[@]}" \
+            --mode blocking --json parity-result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-enceladus
+          path: |
+            parity-result.json
+            parity-report

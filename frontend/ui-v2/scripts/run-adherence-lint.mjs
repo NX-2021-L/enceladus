@@ -16,7 +16,6 @@ execFileSync(
     'eslint.adherence.config.js',
     'src/shell/AppShell.tsx',
     'src/design-system',
-    'src/routes/PlaceholderRoute.tsx',
   ],
   { cwd: pkgRoot, stdio: 'inherit' },
 )

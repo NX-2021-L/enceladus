@@ -73,25 +73,25 @@ surfaces:
       note: "no route handler names the action or an equivalent HTTP handler"
     "deploy.history":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.history_list":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.pending_requests":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.state_get":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.state_set":
       verdict: "missing"
       note: "no route handler names the action or an equivalent HTTP handler"
     "deploy.status":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.status_get":
       verdict: "missing"
-      note: "placeholder route /deployments (handlers [])"
+      note: "planned nav entry deployments (no route yet, DVP-TSK-860)"
     "deploy.submit":
       verdict: "missing"
       note: "no route handler names the action or an equivalent HTTP handler"

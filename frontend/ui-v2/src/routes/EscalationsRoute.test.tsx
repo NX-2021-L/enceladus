@@ -18,6 +18,8 @@ import type { ProjectSummary } from '../api/projects'
  * src/components/MarkdownContent.test.tsx's note on the same constraint.
  */
 
+// DVP-TSK-861: the decide controls are gated on the PermissionManifest; grant it here.
+vi.mock('../auth/useCan', () => ({ useCanExecute: () => true, useAuthSession: () => ({}) }))
 vi.mock('../api/projects', async () => {
   const actual = await vi.importActual<typeof import('../api/projects')>('../api/projects')
   return { ...actual, fetchProjectsList: vi.fn() }

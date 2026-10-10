@@ -392,6 +392,9 @@ jobs:
   frontend-ui-v2:
     name: Frontend UI v2 (ui-v2)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     timeout-minutes: 10
     defaults:
       run:
@@ -407,6 +410,21 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: frontend/ui-v2/package-lock.json
+
+      # DVP-TSK-860: @io-kit/shell + tokens come from CodeArtifact (R13 inline pattern).
+      # The 900s read token feeds `npm ci` via frontend/ui-v2/.npmrc.
+      - name: Configure AWS credentials (OIDC io-kit read role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/io-kit-github-read
+          aws-region: us-west-2
+
+      - name: CodeArtifact token for @io-kit
+        run: |
+          set -euo pipefail
+          T=$(aws codeartifact get-authorization-token --domain io --domain-owner 356364570033 --duration-seconds 900 --query authorizationToken --output text)
+          echo "::add-mask::$T"
+          echo "CODEARTIFACT_AUTH_TOKEN=$T" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci

@@ -78,6 +78,7 @@ import {
   type EscalationRow,
   type ProjectEscalationsFeed,
 } from './escalationRows'
+import { useCanExecute } from '../auth/useCan'
 import './escalations.css'
 
 /** Project filter's "everything" option — never a real project_id, so it can
@@ -176,6 +177,8 @@ export function EscalationsRoute() {
   // The open row is READ FROM QUERY DATA every render, never copied into state:
   // a decision elsewhere (or the 30s poll) updates the modal in place, and an
   // escalation that leaves the feed closes it rather than showing a ghost.
+  // DVP-TSK-861: display gate from the PermissionManifest; the server's three decide gates are untouched.
+  const canDecide = useCanExecute('escalation.request')
   const openRow = openId ? (rows.find((row) => row.id === openId) ?? null) : null
 
   function closeModal() {
@@ -366,7 +369,7 @@ export function EscalationsRoute() {
         size="large"
         onDismiss={closeModal}
         footer={
-          openRow?.decidable ? (
+          openRow?.decidable && canDecide ? (
             <div className="ev2-esc__actions">
               <Button
                 variant="normal"
