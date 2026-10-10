@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-08.02",
-  "updated_at": "2026-10-08T18:00:00Z",
-  "last_change_summary": "ENC-TSK-Q46 (ENC-ISS-836): retrieval.hybrid_pipeline corroboration bonus is now call-relative, B_corr = alpha * S_top * ln(1 + k_corr) / ln(1 + k_max), alpha 0.02 (AppConfig corroboration_alpha, clamped [0, 0.2]); the absolute Weber_k (0.3) is retired. Activation k >= 1, dispersion cosine distance 0.3. Hybrid response carries corroboration_alpha and s_top.",
+  "version": "2026-10-10.01",
+  "updated_at": "2026-10-10T09:15:00Z",
+  "last_change_summary": "DVP-TSK-843 (DVP-PLN-008 W2.3): new read-only search action actions.schemas returns per-action contracts {name, title, inputSchema, outputSchema, annotations{readOnlyHint,destructiveHint,idempotentHint}, requiresGovernanceHash, via, flag?} for every action reachable via search, execute and coordination (106 with all flags on); raw tools/list gains annotations (additive); 55 previously unspecified actions get declared schemas (mcp_server/action_schemas.py) enforced by AST-introspection tests; build emits parity/caps.json (caps schema 1.0.0, NX-2021-L/devops docs/contracts). No change to existing call behaviour.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2380,6 +2380,14 @@
           "type": "behavior",
           "definition": "If tools/list_changed is unsupported or transport is stateless, tool_filter_active remains false and full tool list is returned (no regression)."
         }
+      }
+    },
+    "mcp_server.action_registry": {
+      "description": "Unwrapped action registry and discovery surface (DVP-TSK-843, BRD DOC-4B28ED908326 L-04). search(action=\"actions.schemas\", arguments={via?, names?}) is read-only and returns {count, actions[]} where each action carries name, title, inputSchema, outputSchema, annotations, requiresGovernanceHash, via and (for feature-flag-gated actions) flag. Creation actions mark minted ids with x-io-minted in outputSchema. tools/enceladus-mcp-server/parity/emit_caps.py writes caps.json conforming to NX-2021-L/devops docs/contracts/caps.schema.json v1.0.0.",
+      "fields": {
+        "via": {"type": "enum", "enum": ["top-level", "search", "execute", "coordination"], "definition": "Which MCP entry point dispatches the action."},
+        "annotations": {"type": "object", "definition": "MCP tool annotations readOnlyHint, destructiveHint, idempotentHint; declared for every action and every raw/meta tool."},
+        "flag": {"type": "string", "definition": "Feature flag that gates the action; absent for always-on actions."}
       }
     },
     "mcp_server.code_mode": {
@@ -9509,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-10.01",
+      "date": "2026-10-10",
+      "summary": "DVP-TSK-843 (DVP-PLN-008 W2.3): new read-only search action actions.schemas returns per-action contracts {name, title, inputSchema, outputSchema, annotations{readOnlyHint,destructiveHint,idempotentHint}, requiresGovernanceHash, via, flag?} for every action reachable via search, execute and coordination (106 with all flags on); raw tools/list gains annotations (additive); 55 previously unspecified actions get declared schemas (mcp_server/action_schemas.py) enforced by AST-introspection tests; build emits parity/caps.json (caps schema 1.0.0, NX-2021-L/devops docs/contracts). No change to existing call behaviour."
+    },
     {
       "version": "2026-10-08.01",
       "date": "2026-10-08",
