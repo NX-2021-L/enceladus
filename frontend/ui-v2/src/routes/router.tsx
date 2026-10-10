@@ -7,6 +7,7 @@ import {
 } from '@tanstack/react-router'
 import { AppShell } from '../shell/AppShell'
 import { HomeRoute } from './HomeRoute'
+import { PlaceholderRoute } from './PlaceholderRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
 import { parseFeedSearch } from '../search/feedSearchParams'
@@ -135,6 +136,23 @@ const escalationsRoute = createRoute({
 const sessionRoute = createSessionDetailRoute(() => rootRoute)
 const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
 
+// Remaining shell nav placeholders not yet built out (component registry,
+// deployment manager, access tokens, terminal sessions).
+const shellNavRoutes = [
+  { path: '/component-registry', title: 'Component registry' },
+  { path: '/deployments', title: 'Deployment manager' },
+  { path: '/access-tokens', title: 'Access tokens' },
+  { path: '/terminal-sessions', title: 'Terminal sessions' },
+] as const
+
+const placeholderRoutes = shellNavRoutes.map(({ path, title }) =>
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path,
+    component: () => <PlaceholderRoute title={title} />,
+  }),
+)
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   feedRoute,
@@ -147,6 +165,7 @@ const routeTree = rootRoute.addChildren([
   escalationsRoute,
   sessionRoute,
   agentDetailRoute,
+  ...placeholderRoutes,
   taskRoute,
   issueRoute,
   featureRoute,

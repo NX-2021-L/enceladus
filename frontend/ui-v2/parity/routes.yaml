@@ -105,6 +105,26 @@ routes:
       - "GET /api/v1/coordination/agents/types"
     auth: "session"
     surface: "enceladus"
+  - path: "/component-registry"
+    component: "frontend/ui-v2/src/routes/PlaceholderRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
+  - path: "/deployments"
+    component: "frontend/ui-v2/src/routes/PlaceholderRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
+  - path: "/access-tokens"
+    component: "frontend/ui-v2/src/routes/PlaceholderRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
+  - path: "/terminal-sessions"
+    component: "frontend/ui-v2/src/routes/PlaceholderRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
   - path: "/$project/task/$id"
     component: "frontend/ui-v2/src/routes/recordRoute.tsx (createRecordRoute)"
     handlers:

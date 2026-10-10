@@ -63,31 +63,101 @@ function extractBlock(css: string, headerPattern: RegExp): string {
   return css.slice(start, i - 1)
 }
 
-// DVP-TSK-860: the drawer/scrim/bottom-nav behaviour (ENC-ISS-515, Band-B,
-// ENC-TSK-M75) moved into @io-kit/shell KitShell (48rem breakpoint, bottom
-// bar, More drawer, Escape, safe-area). These assertions pin the adoption.
-describe('shell frame on @io-kit/shell (DVP-TSK-860)', () => {
+describe('mobile nav drawer (ENC-ISS-515 / defect A)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  const mobileBlock = extractBlock(shellCss, /@media \(max-width: 48rem\) \{/)
+
+  it('has a mobile breakpoint block for the shell nav', () => {
+    expect(mobileBlock.length).toBeGreaterThan(0)
+  })
+
+  it('hides .ev2-al__nav by default at mobile width, independent of the --collapsed class', () => {
+    // Must NOT depend on the fragile double-negative :not(.ev2-al__nav--collapsed)
+    // selector that shipped in the regressed version.
+    expect(mobileBlock).not.toMatch(/\.ev2-al__nav:not\(/)
+    expect(mobileBlock).toMatch(/\.ev2-shell\s+\.ev2-al__nav\s*\{[^}]*display:\s*none/)
+  })
+
+  it('shows the nav as an explicit full-screen drawer only when .ev2-shell--nav-open is present', () => {
+    expect(mobileBlock).toMatch(/\.ev2-shell--nav-open\s+\.ev2-al__nav\s*\{/)
+    const openRuleMatch = mobileBlock.match(/\.ev2-shell--nav-open\s+\.ev2-al__nav\s*\{([^}]*)\}/)
+    const openRule = openRuleMatch?.[1] ?? ''
+    expect(openRule).toMatch(/display:\s*flex/)
+    expect(openRule).toMatch(/position:\s*fixed/)
+  })
+
+  it('AppShell wires the open state to both the drawer class and the scrim', () => {
+    const appShell = readSrc('shell/AppShell.tsx')
+    expect(appShell).toMatch(/ev2-shell--nav-open/)
+    expect(appShell).toMatch(/ev2-shell__nav-scrim/)
+    expect(appShell).toMatch(/toggleSidebar/)
+  })
+})
+
+/**
+ * Band-B polish (ENC-ISS-51x, io live-probe 2026-07-08 @ ~500px): the drawer
+ * opened (ENC-TSK-M26 above), but dismiss was dead. `.ev2-shell__nav-scrim`
+ * existed in the DOM with a real onClick handler, yet rendered at 0x0 --
+ * untappable -- because an unconditional `.ev2-shell__nav-scrim{display:
+ * none}` rule shipped *after* the mobile-scoped override in shell.css. Equal
+ * specificity + later source position means that rule always won the
+ * cascade, at any viewport. Escape wasn't wired at all. Fixed by moving the
+ * default-hidden rule before the media query, and adding a document-level
+ * Escape listener scoped to the open state.
+ */
+describe('drawer dismiss (ENC-ISS-51x / Band-B defect 1: scrim tap + Escape)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  const mobileBlock = extractBlock(shellCss, /@media \(max-width: 48rem\) \{/)
   const appShell = readSrc('shell/AppShell.tsx')
-  const styles = readSrc('styles.css')
 
-  it('renders inside KitShell with the registry-derived nav (no hand-rolled drawer)', () => {
-    expect(appShell).toMatch(/<KitShell/)
-    expect(appShell).toMatch(/NAV_REGISTRY/)
-    expect(appShell).not.toMatch(/SideNavigation|ev2-shell__nav-scrim|MOBILE_NAV/)
+  it('the mobile override gives the scrim real fixed-position geometry, not display:none', () => {
+    const scrimRuleMatch = mobileBlock.match(/\.ev2-shell__nav-scrim\s*\{([^}]*)\}/)
+    expect(scrimRuleMatch, 'expected a .ev2-shell__nav-scrim rule inside the mobile block').not.toBeNull()
+    const scrimRule = scrimRuleMatch?.[1] ?? ''
+    expect(scrimRule).toMatch(/display:\s*block/)
+    expect(scrimRule).toMatch(/position:\s*fixed/)
+    expect(scrimRule).toMatch(/inset:/)
   })
 
-  it('loads the kit tokens and shell styles', () => {
-    expect(styles).toMatch(/@io-kit\/tokens\/tokens\.css/)
-    expect(styles).toMatch(/@io-kit\/shell\/io-kit\.css/)
+  it('the default-hidden scrim rule sits BEFORE the mobile media query, not after', () => {
+    // A same-specificity `.ev2-shell__nav-scrim` rule declared AFTER the
+    // mobile block would win the cascade at every viewport and re-zero the
+    // scrim (the exact regression this suite guards against). The only safe
+    // place for the unconditional `display: none` default is before it.
+    const mediaIdx = shellCss.indexOf('@media (max-width: 48rem)')
+    expect(mediaIdx).toBeGreaterThan(-1)
+    const before = shellCss.slice(0, mediaIdx)
+    const after = shellCss.slice(mediaIdx + '@media (max-width: 48rem) {'.length + mobileBlock.length)
+
+    expect(before).toMatch(/\.ev2-shell__nav-scrim\s*\{\s*display:\s*none;?\s*\}/)
+
+    // Strip out any subsequent @media blocks (nested selectors reusing the
+    // same class name inside a *different* scoped context are fine) before
+    // checking for a stray bare redeclaration.
+    let rest = after
+    let mediaMatch: RegExpMatchArray | null
+    while ((mediaMatch = rest.match(/@media[^{]*\{/))) {
+      const idx = mediaMatch.index ?? 0
+      const blockBody = extractBlock(rest, /@media[^{]*\{/)
+      rest = rest.slice(0, idx) + rest.slice(idx + mediaMatch[0].length + blockBody.length + 1)
+    }
+    expect(rest).not.toMatch(/\.ev2-shell__nav-scrim/)
   })
 
-  it('keeps the viewport-fit=cover meta the kit safe-area insets need', () => {
-    expect(readFileSync(resolve(srcRoot, '../index.html'), 'utf8')).toMatch(/viewport-fit=cover/)
+  it('the scrim button keeps a real click-to-close handler', () => {
+    const scrimBlockMatch = appShell.match(/className="ev2-shell__nav-scrim"[\s\S]{0,200}/)
+    expect(scrimBlockMatch).not.toBeNull()
+    expect(scrimBlockMatch?.[0] ?? '').toMatch(/onClick=\{[^}]*setSidebarOpen\(false\)[^}]*\}/)
   })
 
-  it('the kit shell css keeps the 48rem breakpoint and safe-area insets', () => {
-    const kitCss = readFileSync(resolve(srcRoot, '../node_modules/@io-kit/shell/dist/io-kit.css'), 'utf8')
-    expect(kitCss).toMatch(/safe-area-inset-bottom/)
+  it('Escape closes the drawer via a document-level keydown listener scoped to the open state', () => {
+    expect(appShell).toMatch(/addEventListener\(\s*['"]keydown['"]/)
+    const effectMatch = appShell.match(/useEffect\(\(\) => \{[\s\S]*?Escape[\s\S]*?\}, \[[^\]]*\]\)/)
+    expect(effectMatch, 'expected a useEffect wiring an Escape keydown handler').not.toBeNull()
+    const effectBody = effectMatch?.[0] ?? ''
+    expect(effectBody).toMatch(/navigationOpen/)
+    expect(effectBody).toMatch(/setSidebarOpen\(false\)/)
+    expect(effectBody).toMatch(/removeEventListener\(\s*['"]keydown['"]/)
   })
 })
 
@@ -333,8 +403,22 @@ describe('search input + toolbar overflow floor (ENC-TSK-M38)', () => {
  * source and fail loudly if any fix is reverted.
  */
 describe('PWA UI polish (ENC-TSK-M75)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  const appShell = readSrc('shell/AppShell.tsx')
   const hubCss = stripCssComments(readSrc('components/recordDetailHub.css'))
   const topNav = readSrc('../../design-system-2/v2/components/TopNavigation/TopNavigation.jsx')
+
+  it('AC-1: the mobile bottom nav bar (Home/Projects/Feed/Docs) is fully removed', () => {
+    // No component, no MOBILE_NAV array, no render in AppShell...
+    expect(appShell).not.toMatch(/MobileBottomNav/)
+    expect(appShell).not.toMatch(/MOBILE_NAV/)
+    // ...and its stylesheet rules are gone too (the drawer is the sole nav).
+    expect(shellCss).not.toMatch(/\.ev2-shell__bottom-nav\s*\{/)
+    expect(shellCss).not.toMatch(/\.ev2-shell__bottom-link/)
+    // The drawer + Menu toggle remain the single nav surface.
+    expect(appShell).toMatch(/SideNavigation/)
+    expect(appShell).toMatch(/toggleSidebar/)
+  })
 
   it('AC-2: the sticky action bar has an OPAQUE enc surface background (not the undefined --bg-elevated, no transparency)', () => {
     const stickyMatch = hubCss.match(/\.ev2-rdh__actionbar--sticky\s*\{([^}]*)\}/)
