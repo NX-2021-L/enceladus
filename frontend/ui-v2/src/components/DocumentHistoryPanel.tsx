@@ -7,7 +7,7 @@ import {
   sha256Hex,
   type DocumentHistoryEvent,
 } from '../api/documentHistory'
-import { MarkdownText } from './MarkdownText'
+import { MarkdownContent } from './MarkdownContent'
 import './documentHistory.css'
 
 /**
@@ -147,7 +147,7 @@ export function DocumentRewindPane({
         </span>
         <span className="ev2-history__rewind-version">v{state.version}</span>
       </div>
-      <MarkdownText text={state.content} projectId={projectId} />
+      <MarkdownContent text={state.content} projectId={projectId} />
     </div>
   )
 }

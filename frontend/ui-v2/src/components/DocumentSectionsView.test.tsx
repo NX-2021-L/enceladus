@@ -72,8 +72,8 @@ function outlineEntry(overrides: Partial<DocumentOutlineEntry>): DocumentOutline
   }
 }
 
-const FIRST_ENTRY = outlineEntry({ heading_path: ['First'], ordinal: 1 })
-const SECOND_ENTRY = outlineEntry({ heading_path: ['Second'], ordinal: 2 })
+const FIRST_ENTRY = outlineEntry({ heading_path: ['First'], ordinal: 0 })
+const SECOND_ENTRY = outlineEntry({ heading_path: ['Second'], ordinal: 1 })
 
 function makeManifest(overrides: Partial<DocumentManifest> = {}): DocumentManifest {
   return {
@@ -168,12 +168,6 @@ describe('DocumentSectionsView', () => {
         </QueryClientProvider>,
       )
     })
-    // the kit view is a lazy chunk: wait for it to mount
-    for (let i = 0; i < 200 && !container.querySelector('[data-md-engine="kit"]'); i++) {
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-    }
     await flush()
   }
 
@@ -183,7 +177,7 @@ describe('DocumentSectionsView', () => {
 
     expect(container.querySelector('nav[aria-label="Document outline"]')).toBeTruthy()
     expect(container.textContent).toContain('First')
-    expect(container.querySelector('h2[id$="first"]')).toBeTruthy()
+    expect(document.getElementById('first-0')).toBeTruthy()
     expect(container.textContent).toContain('First body.')
   })
 
@@ -244,7 +238,7 @@ describe('DocumentSectionsView', () => {
       expect.objectContaining({
         document_id: DOC_ID,
         project_id: PROJECT_ID,
-        anchor: { heading_path: ['First'], ordinal: 1 },
+        anchor: { heading_path: ['First'], ordinal: 0 },
         op: 'replace',
         body: 'Updated first body.',
         if_match: 'hash-v1',
@@ -338,7 +332,7 @@ describe('DocumentSectionsView', () => {
     // its own — its raw text is present (swallowed into First's unbounded
     // tail slice, since there's no next entry to stop at), so the assertion
     // targets the section CARD, not substring text.
-    expect(container.querySelector('[aria-label="Section updated"]')).toBeFalsy()
+    expect(container.querySelector('[data-testid="document-section-second-1"]')).toBeFalsy()
 
     // Open the editor on First BEFORE the live event lands.
     act(() => {
@@ -352,8 +346,12 @@ describe('DocumentSectionsView', () => {
     })
     await flush()
 
-    // Outline refreshed: Second is newly surfaced and marked changed in the outline.
-    expect(container.querySelectorAll('[aria-label="Section updated"]').length).toBeGreaterThan(0)
+    // Outline refreshed: Second now has its own section card and is marked changed.
+    expect(container.querySelector('[data-testid="document-section-second-1"]')).toBeTruthy()
+    const updatedBadges = Array.from(container.querySelectorAll('button')).filter(
+      (b) => b.textContent === 'Updated',
+    )
+    expect(updatedBadges.length).toBeGreaterThan(0)
 
     // The open editor surfaces a banner rather than silently swapping if_match.
     expect(container.textContent).toContain('changed elsewhere while you were editing')
