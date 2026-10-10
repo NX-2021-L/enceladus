@@ -4,11 +4,12 @@ import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { KitShell } from '@io-kit/shell/react'
 import type { RouterAdapter } from '@io-kit/shell/react'
 import { performLogout } from '../auth/logout'
+import { useAuthSession } from '../auth/useCan'
 import { useUiStore } from '../store/uiStore'
 import { refreshApp } from '../offline/swUpdate'
 import { CommandPalette } from './CommandPalette'
 import { useCommandNavigation } from './useCommandNavigation'
-import { NAV_REGISTRY, EXECUTE_GROUP } from './navRegistry'
+import { NAV_REGISTRY } from './navRegistry'
 import { ConflictMergeModal, MutationErrorFlashbar, OfflinePendingFlashbar } from '../components/OfflineLayer'
 import './shell.css'
 
@@ -37,9 +38,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       navigate: (to: string) => void navigate({ to }),
   }
 
-  // Until @io-kit/auth lands (DVP-TSK-861) the single-operator cockpit holds
-  // the execute group client-side; the server remains the authority.
-  const user = { groups: [EXECUTE_GROUP] }
+  // Groups come from the @io-kit/auth principal (DVP-TSK-861); display only.
+  const session = useAuthSession()
+  const user = { sub: session.principal?.sub, groups: session.principal?.groups ?? [] }
 
   return (
     <>

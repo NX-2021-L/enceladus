@@ -1,0 +1,965 @@
+{
+ "actions": {
+  "actions.schemas": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "agent.checkout_release_backfill": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "agent.claim": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "agent.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "agent.register": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "agent.retire": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "agent.type.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "agent.type.register": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "auth.cognito_session": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "capabilities.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "changelog.history": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "changelog.history_all": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "changelog.version": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "checkout.advance": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "checkout.append_worklog": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "checkout.release": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "checkout.task": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.add_edge": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.advance": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.deprecate": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.propose": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.remove_edge": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.restore": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "component.revert": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "deploy.history": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.history_list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.pending_requests": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.state_get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.state_set": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "deploy.status": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.status_get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "deploy.submit": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "deploy.trigger": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "dispatch_plan.dry_run": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "dispatch_plan.generate": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.append_handoff_reply": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.append_wave_entry": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.claim_handoff": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.complete_handoff": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.create_coe": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.create_handoff": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.create_note": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "document.create_wave": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "documents.check_policy": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.diff": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.history": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.manifest": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "documents.patch": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "documents.patch_section": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "documents.put": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "documents.search": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "escalation.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "escalation.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "escalation.request": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "escalation.watch": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "get_compact_context": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "github.create_issue": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "github.projects_list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "github.projects_sync": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "governance.dictionary": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "governance.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "governance.hash": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "plan.add_objective": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.advance": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.checkout": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.create": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.objectives_status": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "plan.remove_objective": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.reorder_objectives": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "plan.replace_objectives": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "projects.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "projects.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "projects.prefix_map": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "reference.search": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "request.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "session.classify_intent": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "session.intent_centroid_drift": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "system.connection_health": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "telemetry.rank": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.archive_relationship": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.create": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.create_lesson": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.create_relationship": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.creation_rules": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.embeddings_for": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.extend_lesson": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.get": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.get_acs": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.graph_laplacian": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.graphsearch": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.list": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.list_lessons": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.list_relationships": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.log": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.manifest": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.manifest_bulk": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.pending_updates": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.relate": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.set": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.set_acceptance_evidence": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "disable"
+  },
+  "tracker.sheaf_cohomology": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.validation_rules": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.worklog_timeline": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  },
+  "tracker.worklogs": {
+   "dry_run": [
+    "io-dev-admin"
+   ],
+   "execute": [
+    "io-dev-admin"
+   ],
+   "visibilityWhenDenied": "hide"
+  }
+ },
+ "defaults": {
+  "mode": {
+   "agent": "dry_run",
+   "human": "dry_run"
+  }
+ },
+ "version": "2026.10.1"
+}
