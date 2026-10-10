@@ -1,7 +1,6 @@
-import { useState, type AnchorHTMLAttributes } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRouter } from '@tanstack/react-router'
-import { KitMarkdown } from '@io-kit/md/react'
+import { KitMarkdown } from '@io-kit/md/lean/react'
 import '@io-kit/md/docstore.css'
 import type { Document } from '../types/records'
 import { recordKeys } from '../api/queryOptions'
@@ -10,37 +9,14 @@ import { useDocumentOutline } from '../hooks/useDocumentOutline'
 import { kitDocstorePlugins, kitSections } from '../utils/kitDocstore'
 import type { DocumentSection } from '../utils/documentSections'
 import { SectionEditor } from './SectionEditor'
+import { HostLink } from './MarkdownTextKit'
 import './documentSections.css'
-
-/** Internal (host-route) links navigate in-app; everything else keeps the browser default. */
-function HostLink({ href, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
-  const router = useRouter()
-  const internal = !!href && href.startsWith('/') && !href.startsWith('//')
-  return (
-    <a
-      href={href}
-      {...rest}
-      onClick={
-        internal
-          ? (e) => {
-              if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
-              e.preventDefault()
-              router.history.push(href)
-            }
-          : rest.onClick
-      }
-    >
-      {children}
-    </a>
-  )
-}
 
 /**
  * DVP-TSK-916 (DVP-PLN-011 E3-W2.3): the document Content tab rendered through
  * @io-kit/md's docstore preset (header card, YAML tree, id links to ui-v2
- * routes, claim badges, section anchors). Only mounted behind the markdown
- * engine flag (utils/markdownEngine.ts); the legacy DocumentSectionsView stays
- * the default this release.
+ * routes, claim badges, section anchors). Since DVP-TSK-924 this is the only
+ * document renderer (the legacy parser and the md flag are gone).
  *
  * The outline and the section editor are driven by the kit's parse: block ids
  * and heading paths (+ ordinals) are what SectionEditor sends to patchSection,
