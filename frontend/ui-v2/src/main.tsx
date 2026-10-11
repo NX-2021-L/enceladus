@@ -11,6 +11,10 @@ import { CacheEngineProvider } from './sync/CacheEngineProvider'
 import { AuthGate } from './auth/AuthGate'
 import { useOfflineStore } from './store/offlineStore'
 import { setUpdateSW } from './offline/swUpdate'
+// DVP-TSK-956: kit 0.4.0 standalone primitives (the safe-area insets, top-inset
+// class and no-focus-zoom class). Everything in it sits in cascade layers, so the
+// unlayered design-system-2 styles always win and the desktop look is unchanged.
+import '@io-kit/shell/io-kit.css'
 import './styles.css'
 
 const rootEl = document.getElementById('root')

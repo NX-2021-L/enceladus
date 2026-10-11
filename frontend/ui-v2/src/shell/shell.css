@@ -2,9 +2,32 @@
 
 .ev2-shell {
   height: 100%;
-  min-height: 100vh;
+  /* DVP-TSK-956: dvh so the frame tracks the iOS dynamic toolbar. */
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* DVP-TSK-956: the ds2 app bar wrapper (ScrollTopZone, .io-safe-top). It is the
+ * ONLY consumer of the top inset; the strip it adds is void-coloured so the
+ * status bar area blends with the bar. */
+.ev2-shell__bar {
+  background: var(--enc-void);
+}
+
+/* DVP-TSK-956: useVisualViewportFrame sets --io-vv-height/--io-vv-top and
+ * data-io-keyboard="open" on the frame while the on-screen keyboard is up.
+ * Same recipe as the kit's .io-shell; the fixed bottom action bar is hidden
+ * (it would sit mid-screen above the keyboard) and the scroller reveals the
+ * focused field instead. */
+.ev2-shell[data-io-keyboard='open'] {
+  min-height: 0;
+  height: var(--io-vv-height, 100dvh);
+  transform: translateY(var(--io-vv-top, 0px));
+}
+
+.ev2-shell[data-io-keyboard='open'] .ev2-rdh__actionbar--sticky {
+  display: none;
 }
 
 .ev2-shell .ev2-al {
@@ -62,11 +85,15 @@
     display: flex;
     flex-direction: column;
     position: fixed;
-    inset: var(--space-0) var(--space-0) var(--space-0) var(--space-0);
-    top: calc(var(--v2-control-height) + var(--space-6));
+    inset: var(--space-0) var(--io-safe-right) var(--space-0) var(--io-safe-left);
+    /* DVP-TSK-956: the app bar wrapper owns the top inset (.io-safe-top), so
+     * the drawer starts below bar + inset; it touches left and bottom, so
+     * those take their insets too. */
+    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
+    padding-bottom: var(--io-safe-bottom);
     z-index: 4;
-    width: min(100%, calc(var(--space-16) * 14));
-    max-width: min(100%, calc(var(--space-16) * 14));
+    width: min(calc(100% - var(--io-safe-left) - var(--io-safe-right)), calc(var(--space-16) * 14));
+    max-width: min(calc(100% - var(--io-safe-left) - var(--io-safe-right)), calc(var(--space-16) * 14));
     box-shadow: var(--shadow-lg);
     background: var(--enc-surface-alt);
   }
@@ -80,14 +107,16 @@
    * detail pages reserve their own extra clearance for the sticky action bar
    * via .ev2-rdh padding-bottom). */
   .ev2-shell .ev2-al__content {
-    padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, var(--space-0)));
+    padding-bottom: calc(var(--space-4) + var(--io-safe-bottom));
   }
 
   .ev2-shell__nav-scrim {
     display: block;
     position: fixed;
     inset: var(--space-0);
-    top: calc(var(--v2-control-height) + var(--space-6));
+    /* io-inset-exempt left right bottom: a full-bleed backdrop paints under
+     * the notch and home indicator; only its top edge follows the app bar. */
+    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
     z-index: 3;
     background: rgba(10, 10, 15, 0.6);
     border: none;

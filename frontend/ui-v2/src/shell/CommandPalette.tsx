@@ -79,8 +79,8 @@ export function CommandPalette() {
         aria-label="Search results"
         style={{
           position: 'fixed',
-          top: '60px',
-          right: '20px',
+          top: 'calc(60px + var(--io-safe-top))',
+          right: 'calc(20px + var(--io-safe-right))',
           width: 'min(360px, calc(100vw - 40px))',
           background: 'var(--bg-surface)',
           border: 'var(--border-hover)',
@@ -112,7 +112,10 @@ export function CommandPalette() {
         display: 'flex',
         alignItems: 'flex-start',
         justifyContent: 'center',
-        paddingTop: '14vh',
+        paddingTop: 'calc(14vh + var(--io-safe-top))',
+        paddingRight: 'var(--io-safe-right)',
+        paddingBottom: 'var(--io-safe-bottom)',
+        paddingLeft: 'var(--io-safe-left)',
         zIndex: 50,
       }}
     >
