@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { registerSW } from 'virtual:pwa-register'
-import { installIosFocusZoomGuard } from '@io-kit/shell'
+import { installIosFocusZoomGuard, watchForUpdates } from '@io-kit/shell'
 import { queryClient } from './api/queryClient'
 import { projectRegistryQueryOptions } from './api/projectRegistry'
 import { router } from './routes/router'
@@ -39,6 +39,12 @@ if ('serviceWorker' in navigator) {
     },
     onOfflineReady() {
       /* precache warm — no auto reload (registerType: prompt) */
+    },
+    // DVP-TSK-A14: re-check for a new worker when the app returns to the foreground (and every 30 min while visible),
+    // so the "App update available" banner appears after a deploy without a manual reload. Installed PWAs stay in
+    // memory and the browser otherwise only checks sw.js on a full navigation.
+    onRegisteredSW(_url, registration) {
+      if (registration) watchForUpdates(registration)
     },
   })
   setUpdateSW(updateSW)

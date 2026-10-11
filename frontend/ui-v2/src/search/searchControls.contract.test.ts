@@ -61,9 +61,16 @@ describe('typography: the kit theme supplies the design-system tokens', () => {
   })
   it('the iOS focus-zoom guard runs once at boot, before the first render', () => {
     const main = read('main.tsx')
-    expect(main).toMatch(/import \{ installIosFocusZoomGuard \} from '@io-kit\/shell'/)
+    expect(main).toMatch(/import \{ installIosFocusZoomGuard(, watchForUpdates)? \} from '@io-kit\/shell'/)
     expect(main.match(/^installIosFocusZoomGuard\(\)/gm)).toHaveLength(1)
     expect(main.indexOf('installIosFocusZoomGuard()')).toBeLessThan(main.indexOf('createRoot(rootEl)'))
+  })
+})
+
+describe('service-worker update freshness (DVP-TSK-A14)', () => {
+  it('re-checks for a new worker on foreground via the kit watcher', () => {
+    const main = read('main.tsx')
+    expect(main).toMatch(/onRegisteredSW\(_url, registration\) \{\s*if \(registration\) watchForUpdates\(registration\)/)
   })
 })
 
@@ -86,7 +93,9 @@ describe('hide / show toggles', () => {
 describe('frozen controls: sticky to the page scroller below 960px', () => {
   it('the sticky edge is 0 (the app bar is outside the scroller) and the bg is the page background token', () => {
     const split = css('search/searchSplit.css')
-    expect(split).toMatch(/\.ev2-fill\s*\{[^}]*--io-search-sticky-top:\s*0;[^}]*--io-search-sticky-bg:\s*var\(--enc-void\)/)
+    // DVP-TSK-A14: the stuck edge is pulled up by the page scroller's 16px top padding, with an equal opaque band.
+    expect(split).toMatch(/\.ev2-fill\s*\{[^}]*--io-search-sticky-top:\s*calc\(-1 \* var\(--space-4\)\);[^}]*--io-search-sticky-bg:\s*var\(--enc-void\)/)
+    expect(split).toMatch(/@media \(max-width: 959\.98px\)\s*\{[\s\S]*\.ev2-fill \.io-search__controls\s*\{[^}]*padding-block-start:\s*var\(--space-4\);[^}]*margin-block-start:\s*calc\(-1 \* var\(--space-4\)\)/)
     const tokens = readFileSync(resolve(uiRoot, '..', 'design-system-2', 'colors_and_type.css'), 'utf8')
     expect(tokens).toMatch(/--enc-void:\s*#0A0A0F/i)
   })
