@@ -330,6 +330,12 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     )
 
     record_type = _first_nonempty(primary.get("record_type"), "record")
+    # DVP-TSK-968 part D: recipe-family rows. Runs written before the record_type stamp are
+    # recognised by key; the recipe-name uniqueness index rows are bookkeeping, not feed events.
+    if record_type == "record" and record_id.startswith("recipe_run#"):
+        record_type = "recipe_run"
+    if record_type == "recipe" and _first_nonempty(primary.get("record_kind")) == "name":
+        return None
     project_id = _first_nonempty(primary.get("project_id"), keys.get("project_id")) or DEFAULT_PROJECT_ID
     title = _first_nonempty(primary.get("title"), primary.get("name"))
 

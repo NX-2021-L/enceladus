@@ -415,8 +415,8 @@ def _publish_lesson_scoring_request(project_id: str, record_id: str, item_id: st
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
 _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
 _DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted", "generation": "drafted"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN", "escalation": "ESC"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN", "escalation": "ESC", "recipe": "REC", "recipe_run": "RUN"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation", "ESC": "escalation", "REC": "recipe", "RUN": "recipe_run"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
@@ -7083,6 +7083,12 @@ _RELATIONSHIP_TYPES = frozenset({
     "affects", "affected-by",
     "tests", "tested-by",
     "consumes-from", "produces-for",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun relationship types
+    "recipe-uses-tool", "tool-used-by-recipe",
+    "recipe-serves-project", "project-served-by-recipe",
+    "recipe-implements-feature", "implemented-by-recipe",
+    "run-instance-of-recipe", "recipe-has-run",
+    "run-opened-escalation", "escalation-opened-by-run",
     # ENC-FTR-058: Plan primitive relationship types
     "plan-contains", "contained-by-plan",
     "plan-attached-doc", "doc-attached-to-plan",
@@ -7120,6 +7126,12 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "affects": "affected-by", "affected-by": "affects",
     "tests": "tested-by", "tested-by": "tests",
     "consumes-from": "produces-for", "produces-for": "consumes-from",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": "tool-used-by-recipe", "tool-used-by-recipe": "recipe-uses-tool",
+    "recipe-serves-project": "project-served-by-recipe", "project-served-by-recipe": "recipe-serves-project",
+    "recipe-implements-feature": "implemented-by-recipe", "implemented-by-recipe": "recipe-implements-feature",
+    "run-instance-of-recipe": "recipe-has-run", "recipe-has-run": "run-instance-of-recipe",
+    "run-opened-escalation": "escalation-opened-by-run", "escalation-opened-by-run": "run-opened-escalation",
     # ENC-FTR-058: Plan primitive
     "plan-contains": "contained-by-plan", "contained-by-plan": "plan-contains",
     "plan-attached-doc": "doc-attached-to-plan", "doc-attached-to-plan": "plan-attached-doc",
@@ -7166,6 +7178,17 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     "tested-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
     "consumes-from": {"asymmetric": True, "irreflexive": True, "transitive": False},
     "produces-for":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "tool-used-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-serves-project": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "project-served-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-implements-feature": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "implemented-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-instance-of-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-has-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-opened-escalation": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "escalation-opened-by-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"asymmetric": True, "irreflexive": True, "transitive": False},
     "contained-by-plan":  {"asymmetric": True, "irreflexive": True, "transitive": False},
@@ -7214,6 +7237,17 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     "tested-by":     {"source": frozenset({"feature", "issue"}), "target": frozenset({"task"})},
     "consumes-from": {"source": None, "target": None},
     "produces-for":  {"source": None, "target": None},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun (endpoints are non-tracker ids; unconstrained)
+    "recipe-uses-tool": {"source": None, "target": None},
+    "tool-used-by-recipe": {"source": None, "target": None},
+    "recipe-serves-project": {"source": None, "target": None},
+    "project-served-by-recipe": {"source": None, "target": None},
+    "recipe-implements-feature": {"source": None, "target": None},
+    "implemented-by-recipe": {"source": None, "target": None},
+    "run-instance-of-recipe": {"source": None, "target": None},
+    "recipe-has-run": {"source": None, "target": None},
+    "run-opened-escalation": {"source": None, "target": None},
+    "escalation-opened-by-run": {"source": None, "target": None},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"source": frozenset({"plan"}), "target": frozenset({"task", "issue", "feature"})},
     "contained-by-plan":  {"source": frozenset({"task", "issue", "feature"}), "target": frozenset({"plan"})},
@@ -8713,8 +8747,19 @@ def _gate_producer_principals() -> Dict[str, set]:
     }
 
 
+import contextvars as _contextvars
+
+# DVP-TSK-968: the recipe service files its publish/retire gates through the producer path
+# under the internal principal "recipe-runner". It is honoured ONLY while the in-process
+# context flag is set by _recipe_escalate; an HTTP caller claiming it is refused (403).
+_INTERNAL_PRODUCER = _contextvars.ContextVar("internal_producer", default=None)
+_INTERNAL_PRODUCER_PRINCIPALS = {"recipe-runner": "recipe"}
+
+
 def _gate_resolve_producer(principal: str, source: Any):
     """Resolve (source, error) for a producer principal; error is a 403 message."""
+    if principal in _INTERNAL_PRODUCER_PRINCIPALS and _INTERNAL_PRODUCER.get() == principal:
+        return _INTERNAL_PRODUCER_PRINCIPALS[principal], None
     allow = _gate_producer_principals()
     matches = sorted(src for src, principals in allow.items() if principal in principals)
     if not matches:
@@ -9844,6 +9889,10 @@ _RE_ESCALATION = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_*-]+)/escalation"
     r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>apply))?)?$"
 )
+_RE_RECIPE = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/recipe"
+    r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>validate|publish-request|deprecate|apply))?)?$"
+)
 _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
 )
@@ -9867,7 +9916,367 @@ _RE_PROJECT = re.compile(
 )
 
 
+# --- DVP-TSK-968 part A (DVP-FTR-106): recipe primitive wiring --------------------------
+try:
+    import recipe_service as _recipe_service
+except ImportError:  # pragma: no cover - packaging guard
+    _recipe_service = None
+
+_RECIPE_JSON_FIELDS = frozenset({"definition", "history", "validation", "deprecation", "tags",
+                                 "project_ids", "related_feature_ids", "recipe_ref", "inputs", "steps", "gate",
+                                 "gate_history", "outputs", "error", "telemetry", "consumed_tokens", "compensations", "blocked"})
+_RECIPE_REGISTRY_CACHE: Dict[str, Any] = {}
+
+
+def _recipe_to_ddb(item: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if item.get("record_kind") == "run" and not item.get("record_type"):
+        # DVP-TSK-968 part D: stamp the stream-visible type so graph_sync / the AppSync feed classify runs.
+        ref = item.get("recipe_ref") if isinstance(item.get("recipe_ref"), dict) else {}
+        item = dict(item, record_type="recipe_run", item_id=item.get("run_id"),
+                    title=f"{ref.get('recipe_id') or 'recipe'} run {item.get('run_id')}")
+    for key, val in item.items():
+        if val is None:
+            continue
+        if key in _RECIPE_JSON_FIELDS:
+            out[key] = _ser_s(json.dumps(val, default=str, sort_keys=True))
+        elif isinstance(val, bool):
+            out[key] = {"BOOL": val}
+        elif isinstance(val, (int, float)):
+            out[key] = {"N": str(val)}
+        else:
+            out[key] = _ser_s(str(val))
+    return out
+
+
+def _recipe_from_ddb(raw: Dict[str, Any]) -> Dict[str, Any]:
+    item = _deser_item(raw)
+    for key in _RECIPE_JSON_FIELDS:
+        if isinstance(item.get(key), str):
+            try:
+                item[key] = json.loads(item[key])
+            except ValueError:
+                pass
+    return item
+
+
+def _recipe_escalate(project_id: str, body: Dict[str, Any]):
+    """File a hub gate as the internal producer principal recipe-runner (never reachable over HTTP)."""
+    token = _INTERNAL_PRODUCER.set("recipe-runner")
+    try:
+        resp = _handle_escalation_produce(project_id, dict(body, source_principal="recipe-runner"))
+    finally:
+        _INTERNAL_PRODUCER.reset(token)
+    try:
+        parsed = json.loads(resp.get("body") or "{}")
+    except (ValueError, TypeError):
+        parsed = {}
+    return int(resp.get("statusCode", 500)), parsed if isinstance(parsed, dict) else {}
+
+
+def _recipe_context():
+    ddb = _get_ddb()
+
+    def get(project, sk):
+        raw = ddb.get_item(TableName=DYNAMODB_TABLE, ConsistentRead=True,
+                           Key={"project_id": _ser_s(project), "record_id": _ser_s(sk)}).get("Item")
+        return _recipe_from_ddb(raw) if raw else None
+
+    def put(project, item, if_absent=False, expect=None):
+        kwargs: Dict[str, Any] = {}
+        if if_absent:
+            kwargs["ConditionExpression"] = "attribute_not_exists(record_id)"
+        elif expect:
+            attr, value = expect
+            kwargs["ConditionExpression"] = "#rv = :rv"
+            kwargs["ExpressionAttributeNames"] = {"#rv": attr}
+            kwargs["ExpressionAttributeValues"] = {":rv": {"N": str(value)} if isinstance(value, (int, float)) else _ser_s(str(value))}
+        try:
+            ddb.put_item(TableName=DYNAMODB_TABLE, Item=_recipe_to_ddb(dict(item, project_id=project)), **kwargs)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if "ConditionalCheckFailed" in str(exc):
+                return False
+            logger.error("recipe put_item failed: %s", exc)
+            raise
+
+    def query(project, prefix):
+        kwargs: Dict[str, Any] = {
+            "TableName": DYNAMODB_TABLE, "ConsistentRead": True,
+            "KeyConditionExpression": "project_id = :p AND begins_with(record_id, :s)",
+            "ExpressionAttributeValues": {":p": _ser_s(project), ":s": _ser_s(prefix)}}
+        items: List[Dict[str, Any]] = []
+        while True:
+            resp = ddb.query(**kwargs)
+            items.extend(_recipe_from_ddb(i) for i in resp.get("Items", []))
+            if not resp.get("LastEvaluatedKey"):
+                return items
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    def mint(project):
+        prefix = _get_project_prefix(project)
+        if not prefix:
+            raise RuntimeError(f"Project '{project}' has no prefix.")
+        return _next_record_id(project, prefix, "recipe")
+
+    def registry():
+        if "v" not in _RECIPE_REGISTRY_CACHE:
+            _RECIPE_REGISTRY_CACHE["v"] = _recipe_service.load_registry()
+        return _RECIPE_REGISTRY_CACHE["v"]
+
+    def escalation(project, esc_id):
+        raw = ddb.get_item(TableName=DYNAMODB_TABLE, ConsistentRead=True,
+                           Key={"project_id": _ser_s(project), "record_id": _ser_s(f"escalation#{esc_id}")}).get("Item")
+        if not raw:
+            return None
+        item = _deser_item(raw)
+        if isinstance(item.get("subject"), str):
+            try:
+                item["subject"] = json.loads(item["subject"])
+            except ValueError:
+                item["subject"] = {}
+        return item
+
+    def active_runs(project, rec, version):
+        live = 0
+        for run in query(project, "recipe_run#"):
+            ref = run.get("recipe_ref") or {}
+            if (run.get("record_kind", "run") == "run" and ref.get("recipe_id") == rec and ref.get("version") == version
+                    and run.get("status") not in ("completed", "failed", "cancelled", "expired")):
+                live += 1
+        return live
+
+    return _recipe_service.RecipeContext(get=get, put=put, query=query, mint=mint, now=_now_z, registry=registry,
+                                         escalate=_recipe_escalate, escalation=escalation,
+                                         active_runs=active_runs)
+
+
+# --- DVP-TSK-968 part B (DVP-FTR-106): recipe runs and the runner -------------------------
+try:
+    import recipe_run_service as _recipe_run_service
+except ImportError:  # pragma: no cover - packaging guard
+    _recipe_run_service = None
+
+_RE_RECIPE_RUN = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/recipe-run"
+    r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>resume|cancel|apply))?)?$"
+)
+
+
+def _recipe_surface_env(surface: str) -> str:
+    return "RECIPE_SURFACE_CREDENTIALS_" + re.sub(r"[^A-Z0-9]", "_", str(surface).upper()) + "_ARN"
+
+
+def _recipe_surface_ready(surface: str) -> bool:
+    return surface == "enceladus" or bool(os.environ.get(_recipe_surface_env(surface), "").strip())
+
+
+def _recipe_surface_post(surface: str, call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """External surface executor (io-finance, io-travel). No credentials ARN -> sanctioned fixture result."""
+    arn = os.environ.get(_recipe_surface_env(surface), "").strip()
+    if not arn:
+        return {"ok": True, "result": {"fixture": True, "surface": surface, "action": call.get("action"),
+                                       "arguments": call.get("arguments"), "dry_run": True}}
+    try:
+        import boto3 as _boto3
+        import urllib.request as _urlreq
+        secret = json.loads(_boto3.client("secretsmanager").get_secret_value(SecretId=arn)["SecretString"])
+        req = _urlreq.Request(
+            str(secret["url"]), method="POST",
+            data=json.dumps({"action": call.get("action"), "arguments": call.get("arguments"), "dry_run": bool(dry_run),
+                             "idempotency_key": call.get("idempotency_key")}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + str(secret.get("token", ""))})
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            return {"ok": True, "result": json.loads(resp.read().decode("utf-8") or "{}")}
+    except Exception as exc:  # noqa: BLE001 - never echo credentials
+        return {"ok": False, "error": {"code": "SURFACE_ERROR", "message": type(exc).__name__ + ": " + str(exc)[:200]}}
+
+
+def _recipe_enceladus_call(batch: Dict[str, Any], call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """In-process Enceladus executor under the recipe-runner principal. Stage 1 routes the recipe.* family;
+    other registry actions answer ACTION_NOT_ROUTABLE until the governed execute path is exposed in-process."""
+    svc, action = _recipe_service, str(call.get("action") or "")
+    args = dict(call.get("arguments") or {})
+    project = str(args.pop("project_id", None) or batch.get("project_id") or "")
+    if svc is None or not action.startswith("recipe."):
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action or '?'} is not routable in-process by the recipe runner yet."}}
+    ctx, actor = _recipe_context(), SOURCE_PRINCIPAL_RECIPE
+    fns = {"recipe.create": svc.create, "recipe.validate": svc.validate,
+           "recipe.publish_request": svc.publish_request, "recipe.deprecate": svc.deprecate}
+    if action == "recipe.get":
+        code, out = svc.get(ctx, project, str(args.get("recipe_id") or ""), args.get("version"))
+    elif action == "recipe.list":
+        code, out = svc.list_recipes(ctx, project, args)
+    elif action in fns:
+        code, out = fns[action](ctx, project, args, actor, dry_run)
+    else:
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action} is not routable in-process."}}
+    if code >= 300:
+        return {"ok": False, "error": {"code": str(out.get("error_code") or "STEP_ERROR"), "message": str(out.get("error") or "step failed")[:300]}}
+    return {"ok": True, "result": out, "receipt": _recipe_run_service.receipt_of(out)}
+
+
+SOURCE_PRINCIPAL_RECIPE = "recipe-runner"
+
+
+def _recipe_run_execute(batch: Dict[str, Any]) -> Dict[str, Any]:
+    """ONE execute call per segment: dispatch each call by surface."""
+    def call_one(call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+        surface = str(call.get("surface") or "enceladus")
+        if surface == "enceladus":
+            return _recipe_enceladus_call(batch, call, dry_run)
+        return _recipe_surface_post(surface, call, dry_run)
+    exe = _recipe_mcp_executor()
+    if exe is None:   # RECIPE_MCP_API_KEY_SECRET_ARN unset: recipe.* in-process, other enceladus steps ACTION_NOT_ROUTABLE
+        return _recipe_run_service.run_batch_locally(batch, call_one)
+    return _recipe_mcp_executor_module.execute_batch(batch, exe, _recipe_runner_session(batch), call_one)
+
+
+try:
+    import recipe_mcp_executor as _recipe_mcp_executor_module
+except Exception:  # noqa: BLE001 - packaging gap: the in-process path keeps working
+    _recipe_mcp_executor_module = None
+_RECIPE_MCP: Dict[str, Any] = {"executor": None}
+
+
+def _recipe_mcp_executor():
+    """DVP-TSK-968 E4-R16: the governed-MCP executor when RECIPE_MCP_API_KEY_SECRET_ARN is configured, else None."""
+    if _recipe_mcp_executor_module is None or not os.environ.get("RECIPE_MCP_API_KEY_SECRET_ARN", "").strip():
+        return None
+    if _RECIPE_MCP["executor"] is None:
+        _RECIPE_MCP["executor"] = _recipe_mcp_executor_module.EnceladusMcpExecutor.from_env()
+    return _RECIPE_MCP["executor"]
+
+
+def _recipe_runner_session(batch: Dict[str, Any]):
+    """The run's agent session (stored on the run item by the claim write that precedes every segment)."""
+    try:
+        item = _recipe_context().get(str(batch.get("project_id") or ""), _recipe_run_service.run_key(str(batch.get("run_id") or "")))
+    except Exception:  # noqa: BLE001
+        item = None
+    if isinstance(item, dict) and item.get("runner_session_id"):
+        return {"session_id": item["runner_session_id"], "sci": item.get("runner_sci")}
+    return None
+
+
+def _recipe_mcp_ctx_kwargs() -> Dict[str, Any]:
+    exe = _recipe_mcp_executor()
+    if exe is None:
+        return {"governance_hash": (lambda: None)}
+    return {"governance_hash": exe.governance_hash, "server_hash": True,
+            "session_start": lambda project, run: exe.register_session(project, str(run.get("run_id") or ""), run.get("governance_hash_last")),
+            "session_heartbeat": lambda project, run: exe.heartbeat(project, run.get("runner_session_id")),
+            "session_end": lambda project, run: exe.retire(project, run.get("runner_session_id"))}
+
+
+def _recipe_run_scheduled_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """EventBridge rate(15 minutes): POST /recipe-run/sweep equivalent per project (expiry + runner heartbeats)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return {"statusCode": 503, "swept": []}
+    projects = [p.strip() for p in str(os.environ.get("RECIPE_SWEEP_PROJECT_IDS") or "enceladus,devops").split(",") if p.strip()]
+    swept = []
+    for project in projects:
+        try:
+            code, _body = svc.sweep(_recipe_run_context(), project, {}, "recipe-sweeper")
+            swept.append({"project_id": project, "status": code})
+        except Exception as exc:  # noqa: BLE001
+            swept.append({"project_id": project, "error": type(exc).__name__})
+    return {"statusCode": 200, "swept": swept}
+
+
+def _recipe_run_context():
+    base = _recipe_context()
+
+    def mint(project):
+        prefix = _get_project_prefix(project)
+        if not prefix:
+            raise RuntimeError(f"Project '{project}' has no prefix.")
+        return _next_record_id(project, prefix, "recipe_run")
+
+    # The Lambda cannot compute the governance hash: the caller's hash (MCP injects its current one on
+    # every resume) is compared with governance_hash_last, so drift is detected per segment.
+    return _recipe_run_service.RunContext(
+        get=base.get, put=base.put, query=base.query, mint=mint, now=base.now, escalate=base.escalate,
+        escalation=base.escalation, execute=_recipe_run_execute, **_recipe_mcp_ctx_kwargs(),
+        surface_ready=_recipe_surface_ready, withdraw=lambda project, esc_id, reason: False)
+
+
+def _handle_recipe_run_route(method: str, project_id: str, run_id: Optional[str], sub: Optional[str],
+                             body: Dict[str, Any], query: Dict[str, Any]) -> Dict:
+    """Routes: POST /recipe-run (start; mode dry_run|to_next_gate), GET /recipe-run/list, GET /recipe-run/{RUN},
+    POST /recipe-run/{RUN}/resume|cancel, POST /recipe-run/{RUN}/apply (hub recipe_run_step applier),
+    POST /recipe-run/sweep (runner sweeper)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return _error(503, "Recipe run service is not packaged with this deployment.")
+    body = body if isinstance(body, dict) else {}
+    actor = str((body.get("write_source") or {}).get("provider") or "unknown")
+    dry_run = body.get("dry_run") is True or str(body.get("dry_run") or "").lower() == "true"
+    ctx = _recipe_run_context()
+    if method == "GET":
+        res = svc.list_runs(ctx, project_id, query or {}) if run_id in (None, "list") else svc.get(ctx, project_id, run_id)
+    elif method == "POST":
+        if run_id in (None, "create") and not sub:
+            res = svc.start(ctx, project_id, body, actor, dry_run)
+        elif run_id == "sweep" and not sub:
+            res = svc.sweep(ctx, project_id, body, actor)
+        elif sub == "resume":
+            res = svc.resume(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "cancel":
+            res = svc.cancel(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "apply":
+            res = svc.apply_gate(ctx, project_id, run_id or "", body, actor)
+            res = (res[0], {"success": True, "status": "applied", "result": res[1]} if res[0] < 300
+                   else dict(res[1], status="failed"))
+        else:
+            return _error(405, f"Unknown recipe-run action '{sub or run_id}'.")
+    else:
+        return _error(405, f"Method {method} not allowed on /recipe-run.")
+    return _response(res[0], res[1])
+
+
+def _handle_recipe_route(method: str, project_id: str, rec_id: Optional[str], sub: Optional[str],
+                         body: Dict[str, Any], query: Dict[str, Any]) -> Dict:
+    """Routes: GET /recipe/list, GET /recipe/{REC}[?version=], POST /recipe (create), POST /recipe/{REC}
+    (new version), POST /recipe/{REC}/validate|publish-request|deprecate, POST /recipe/{REC}/apply (hub hook)."""
+    svc = _recipe_service
+    if svc is None:
+        return _error(503, "Recipe service is not packaged with this deployment.")
+    body = body if isinstance(body, dict) else {}
+    actor = str((body.get("write_source") or {}).get("provider") or "unknown")
+    dry_run = body.get("dry_run") is True or str(body.get("dry_run") or "").lower() == "true"
+    if rec_id and rec_id not in ("list", "create"):
+        body["recipe_id"] = rec_id
+    ctx = _recipe_context()
+    if method == "GET":
+        if rec_id in (None, "list"):
+            res = svc.list_recipes(ctx, project_id, query or {})
+        else:
+            res = svc.get(ctx, project_id, rec_id, (query or {}).get("version"))
+    elif method == "POST":
+        if sub == "apply":
+            res = svc.apply_decision(ctx, project_id, rec_id or "", body, actor)
+            res = (res[0], {"success": True, "status": "applied", "result": res[1]} if res[0] < 300
+                   else dict(res[1], status="failed"))
+        elif sub == "validate":
+            res = svc.validate(ctx, project_id, body, actor, dry_run)
+        elif sub == "publish-request":
+            res = svc.publish_request(ctx, project_id, body, actor, dry_run)
+        elif sub == "deprecate":
+            res = svc.deprecate(ctx, project_id, body, actor, dry_run)
+        elif rec_id in (None, "create") or not sub:
+            res = svc.create(ctx, project_id, body, actor, dry_run)
+        else:
+            return _error(405, f"Unknown recipe action '{sub}'.")
+    else:
+        return _error(405, f"Method {method} not allowed on /recipe.")
+    return _response(res[0], res[1])
+
+
 def lambda_handler(event: Dict, context: Any) -> Dict:
+    if isinstance(event, dict) and event.get("recipe_run_sweep") and "requestContext" not in event:
+        return _recipe_run_scheduled_sweep(event)
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
@@ -9976,6 +10385,50 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         elif method == "GET":
             return _handle_escalation_list(project_id, query_params)
         return _error(405, f"Method {method} not allowed on /escalation.")
+
+    # --- Route: recipes (DVP-TSK-968 part A / DVP-FTR-106) ---
+    m_recipe = _RE_RECIPE.match(path)
+    if m_recipe:
+        project_id = m_recipe.group("project")
+        claims, auth_err = _authenticate(event, ["tracker:read"] if method == "GET" else ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        recipe_body: Dict[str, Any] = {}
+        if method == "POST":
+            try:
+                recipe_body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            if not isinstance(recipe_body, dict):
+                return _error(400, "Body must be a JSON object.")
+            _normalize_write_source(recipe_body, claims)
+        return _handle_recipe_route(method, project_id, m_recipe.group("id"), m_recipe.group("sub"),
+                                    recipe_body, query_params)
+
+    # --- Route: recipe runs (DVP-TSK-968 part B / DVP-FTR-106) ---
+    m_run = _RE_RECIPE_RUN.match(path)
+    if m_run:
+        project_id = m_run.group("project")
+        claims, auth_err = _authenticate(event, ["tracker:read"] if method == "GET" else ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        run_body: Dict[str, Any] = {}
+        if method == "POST":
+            try:
+                run_body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            if not isinstance(run_body, dict):
+                return _error(400, "Body must be a JSON object.")
+            _normalize_write_source(run_body, claims)
+        return _handle_recipe_run_route(method, project_id, m_run.group("id"), m_run.group("sub"),
+                                        run_body, query_params)
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)

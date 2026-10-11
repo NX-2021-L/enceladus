@@ -9,6 +9,18 @@ Description: >
   The EarlyValidation hook requires Code to be present for import operations.
 
 Parameters:
+  RecipeMcpApiKeySecretArn:
+    Type: String
+    Default: "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/recipe-runner/mcp-api-key-nvFY2Z"
+    Description: DVP-TSK-968 - ARN of the SAME Secrets Manager secret the MCP lambda's ENCELADUS_MCP_API_KEY comes from (never a new copy). Empty keeps the recipe runner on the in-process path and disables the sweep rule.
+  RecipeMcpUrl:
+    Type: String
+    Default: https://mcp.jreese.net/mcp
+    Description: DVP-TSK-968 - streamable-HTTP endpoint of the governed MCP server used by the recipe runner (E4-R16).
+  RecipeRunnerAgentTypeId:
+    Type: String
+    Default: "ENC-AGT-00N"
+    Description: DVP-TSK-968 - registered agent type (ENC-AGT-00N) the recipe runner claims one session per run under.
   Environment:
     Type: String
     Default: production
@@ -315,6 +327,7 @@ Parameters:
       before the HCE runs a full cycle on a scheduled fire.
 
 Conditions:
+  HasRecipeMcpSecret: !Not [!Equals [!Ref RecipeMcpApiKeySecretArn, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
@@ -564,6 +577,10 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          RECIPE_MCP_URL: !Ref RecipeMcpUrl
+          RECIPE_MCP_API_KEY_SECRET_ARN: !Ref RecipeMcpApiKeySecretArn
+          RECIPE_RUNNER_AGENT_TYPE_ID: !Ref RecipeRunnerAgentTypeId
+          RECIPE_SWEEP_PROJECT_IDS: "enceladus,devops"
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -4601,6 +4618,26 @@ Resources:
         - Key: Project
           Value: enceladus
 
+  # DVP-TSK-968 E4-R16: run sweeper (POST /recipe-run/sweep equivalent): expires stale gates, heartbeats awaiting_gate runner sessions.
+  RecipeRunSweepRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Recipe-run sweeper for TrackerMutationFunction (DVP-TSK-968)
+      ScheduleExpression: rate(15 minutes)
+      State: !If [HasRecipeMcpSecret, ENABLED, DISABLED]
+      Targets:
+        - Id: recipe-run-sweep
+          Arn: !GetAtt TrackerMutationFunction.Arn
+          Input: '{"recipe_run_sweep": true}'
+
+  RecipeRunSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TrackerMutationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RecipeRunSweepRule.Arn
+
   TrackerMutationRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
@@ -4636,6 +4673,10 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              - Sid: RecipeRunnerMcpApiKeyRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !If [HasRecipeMcpSecret, !Ref RecipeMcpApiKeySecretArn, !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus-recipe-mcp-key-unset"]
               - Sid: TrackerTableAccess
                 Effect: Allow
                 Action:

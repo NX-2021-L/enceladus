@@ -181,7 +181,8 @@
       "function_name": "devops-tracker-mutation-api",
       "lambda_dir": "backend/lambda/tracker_mutation",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
+      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh",
+      "package_extra_files": ["recipe_service.py", "recipe_run_service.py", "recipe_mcp_executor.py", "recipe_caps"]
     },
     {
       "function_name": "enceladus-arc-walk-metrics",
