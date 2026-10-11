@@ -94,6 +94,9 @@ export default function KitFeedPanel() {
 
   useEffect(() => {
     void feed.start()
+    // DVP-TSK-947: FeedList reports the reader's position only on scroll and the engine starts not-at-top,
+    // so seed it here; otherwise auto-when-at-top keeps the pill until the first scroll.
+    feed.setAtTop((window.scrollY ?? 0) < 8)
     const onVisible = () => {
       if (document.visibilityState === 'visible') void feed.resume()
     }
