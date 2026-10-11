@@ -25,7 +25,7 @@ ISSUERS = [
      "audiences": ["x"]},
 ]
 ENV = {
-    "HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "HUB_EXCHANGE_SECRET_ARN": "arn:test:secret",
+    "HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "COORDINATION_INTERNAL_API_KEY": "k" * 64,
     "HUB_SHELL_ORIGINS": "https://coach.thepup.io,https://think.example.io,https://vagamod.com",
     "ESCALATION_MACHINE_EMAIL_DOMAINS": "enceladus.internal",
     "GATE_PRODUCER_PRINCIPALS": json.dumps({"vagamod": ["vagamod"], "think": ["think"], "coach": ["coach"]}),
@@ -50,11 +50,6 @@ class _HubBase(gate._Base):
         env = mock.patch.dict(os.environ, ENV)
         env.start()
         self.addCleanup(env.stop)
-        sec = mock.patch.object(hx, "_fetch_secret", return_value="s" * 64)
-        sec.start()
-        self.addCleanup(sec.stop)
-        hx._secret_cache.update({"value": None, "fetched_at": 0.0})
-        self.addCleanup(hx._secret_cache.update, {"value": None, "fetched_at": 0.0})
 
     def token(self, issuer=0, email="io@jreese.net", now=None, acr="2"):
         return hx.mint_hub_token(sub="u1", email=email, src_iss=ISSUERS[issuer]["iss"],

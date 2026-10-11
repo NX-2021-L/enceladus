@@ -39,7 +39,7 @@ ISSUERS = [
      "jwks_uri": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_THINK/.well-known/jwks.json",
      "audiences": ["think-client"]},
 ]
-ENV = {"HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "HUB_EXCHANGE_SECRET_ARN": "arn:test:secret",
+ENV = {"HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "COORDINATION_INTERNAL_API_KEY": "k" * 64,
        "HUB_SHELL_ORIGINS": "https://coach.thepup.io,https://think.example.io,https://vagamod.com",
        "ESCALATION_MACHINE_EMAIL_DOMAINS": "enceladus.internal"}
 ALLOW = {"io@jreese.net"}
@@ -66,7 +66,6 @@ class HubBase(unittest.TestCase):
     def setUp(self):
         patches = [
             mock.patch.dict(os.environ, ENV),
-            mock.patch.object(hx, "_fetch_secret", return_value="s" * 64),
             mock.patch.object(hx, "_fetch_jwks", return_value={"keys": [_JWK]}),
             mock.patch.object(coord, "_load_escalation_approver_allowlist", return_value=set(ALLOW)),
         ]
@@ -227,10 +226,8 @@ class TestHubPrincipal(HubBase):
         head, payload, sig = good.split(".")
         self.assertEqual(401, call(f"{head}.{payload}.{sig[:-2]}AA"))  # tampered signature
         self.assertEqual(401, call(""))                                # empty HubExchange token
-        with mock.patch.object(hx, "_fetch_secret", return_value="r" * 64):
-            hx._secret_cache.update({"value": None, "fetched_at": 0.0})
-            self.assertEqual(401, call(good))                          # signing key rotated
-        hx._secret_cache.update({"value": None, "fetched_at": 0.0})
+        with mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "r" * 64}):
+            self.assertEqual(401, call(good))                          # signing key rotated, no PREVIOUS
         with mock.patch.dict(os.environ, {"HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS[1:])}):
             self.assertEqual(401, call(good))                          # issuer removed from allow-list
 
@@ -261,6 +258,65 @@ class TestCors(HubBase):
         self.assertEqual("https://coach.thepup.io",
                          self.exchange(src_token(email="no@example.com"), origin="https://coach.thepup.io")
                          ["headers"]["Access-Control-Allow-Origin"])
+
+
+class TestHubKeyDerivation(unittest.TestCase):
+    """E4-R20: the HMAC key is derived from COORDINATION_INTERNAL_API_KEY (no Secrets Manager)."""
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, ENV)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("COORDINATION_INTERNAL_API_KEY_PREVIOUS", None)
+        os.environ.pop("HUB_EXCHANGE_SECRET_ARN", None)
+
+    def mint(self, **kw):
+        return hx.mint_hub_token(sub="u", email="io@jreese.net", src_iss=ISSUERS[0]["iss"],
+                                 src_name="vagamod-keycloak", auth_time=int(time.time()) - 60,
+                                 acr="1", **kw)["hub_token"]
+
+    def test_signature_is_hmac_of_the_derived_key(self):
+        import base64
+        import hashlib
+        import hmac as _hmac
+        token = self.mint()
+        head, payload, sig = token.split(".")
+        derived = _hmac.new(b"k" * 64, b"enceladus-hub-exchange-v1", hashlib.sha256).digest()
+        want = base64.urlsafe_b64encode(
+            _hmac.new(derived, f"{head}.{payload}".encode("ascii"), hashlib.sha256).digest()).rstrip(b"=").decode()
+        self.assertEqual(want, sig)
+
+    def test_token_minted_with_previous_key_still_verifies_during_rotation(self):
+        old = self.mint()
+        with mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "n" * 64}):
+            with self.assertRaises(hx.HubExchangeError) as ctx:  # no PREVIOUS: rotated away
+                hx.verify_hub_token(old)
+            self.assertEqual(401, ctx.exception.status)
+            with mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY_PREVIOUS": "k" * 64}):
+                self.assertEqual("io@jreese.net", hx.verify_hub_token(old)["email"])  # rotation window
+                fresh = self.mint()  # minted with the CURRENT key
+                self.assertEqual("io@jreese.net", hx.verify_hub_token(fresh)["email"])
+            with self.assertRaises(hx.HubExchangeError):  # fresh token is not valid under the old key alone
+                with mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "k" * 64}):
+                    hx.verify_hub_token(fresh)
+
+    def test_missing_key_fails_closed_on_mint_and_verify(self):
+        token = self.mint()
+        with mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": ""}):
+            for call in (self.mint, lambda: hx.verify_hub_token(token)):
+                with self.assertRaises(hx.HubExchangeError) as ctx:
+                    call()
+                self.assertEqual(503, ctx.exception.status)
+
+    def test_secret_arn_is_only_an_optional_override(self):
+        with mock.patch.dict(os.environ, {"HUB_EXCHANGE_SECRET_ARN": "arn:test:secret"}), \
+             mock.patch.object(hx, "_fetch_secret", return_value="s" * 64):
+            hx._secret_cache.update({"value": None, "fetched_at": 0.0})
+            token = self.mint()
+            self.assertEqual("io@jreese.net", hx.verify_hub_token(token)["email"])
+        hx._secret_cache.update({"value": None, "fetched_at": 0.0})
+        with self.assertRaises(hx.HubExchangeError):  # override key != derived key
+            hx.verify_hub_token(token)
 
 
 if __name__ == "__main__":
