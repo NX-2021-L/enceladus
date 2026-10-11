@@ -10,7 +10,7 @@ import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
-import { parseFeedSearch } from '../search/feedSearchParams'
+import { parseFeedSearch } from '../search/feedUrl'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,

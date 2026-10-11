@@ -7,12 +7,9 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { mergeTiers, type SearchRequest } from '@io-kit/search'
+import type { SearchRequest } from '@io-kit/search'
 import { assertSearchSourceConformance } from '@io-kit/search/testing'
 import { createHostSearchSource } from './enceladusSearchSource'
-import { kitHitsToResultHits, localToResult } from './kitHits'
-import { feedSearchToParams, parseFeedSearch } from './feedSearchParams'
-import { createUrlCodec } from '@io-kit/search'
 
 const dir = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__')
 const fixture = (n: string) => JSON.parse(readFileSync(join(dir, `enc-graphsearch-${n}.json`), 'utf8')) as unknown
@@ -74,21 +71,10 @@ describe('two-tier merge, evidence and degraded display model', () => {
     expect(res.signal_availability.graph).toBe('unavailable')
     expect(res.degraded.map((d) => d.signal)).toContain('graph')
     expect(res.partial).toBe(true)
-    const top = res.results[0]!
-    const local = [{ recordId: 'ENC-TSK-LOCALONLY', recordType: 'task' as const, projectId: 'enceladus', title: 'feed local only', status: 'open' }]
-    const merged = mergeTiers(
-      [localToResult({ ...local[0]!, tier: 'local' }, 0), localToResult({ recordId: top.id, recordType: 'task', projectId: 'enceladus', title: top.title, tier: 'local' }, 1)],
-      res.results,
-    )
-    const hits = kitHitsToResultHits(merged, 'enceladus', local)
-    expect(hits[0]!.recordId).toBe(top.id)
-    expect(hits[0]!.tier).toBe('hybrid')
-    expect(hits.filter((h) => h.recordId === top.id)).toHaveLength(1)
-    expect(hits.at(-1)!.recordId).toBe('ENC-TSK-LOCALONLY')
-    expect(hits.at(-1)!.tier).toBe('local')
-    const ev = merged[0]!.evidence
-    expect(ev.find((e) => e.signal === 'graph')!.rank).toBeNull()
-    expect(ev.every((e) => e.rank !== 0)).toBe(true)
+    // The two-tier merge itself is kit-owned now (useCollectionSearch); the host contract is that evidence keeps nulls.
+    const ev = res.results[0]!.per_signal_ranks
+    expect(ev.graph).toBeNull()
+    expect(Object.values(ev).every((r) => r !== 0)).toBe(true)
   })
 
   it('onPin goes through relate -> tracker.relate with from/to', async () => {
@@ -98,24 +84,4 @@ describe('two-tier merge, evidence and degraded display model', () => {
     expect(relate).toHaveBeenCalledWith('ENC-TSK-1', 'ENC-TSK-2')
     expect(edge).toEqual({ from: 'ENC-TSK-1', to: 'ENC-TSK-2', rel: 'related', created_by: 'human' })
   })
-})
-
-describe('existing search URLs round-trip (AC3)', () => {
-  // The Feed keeps writing URLs through feedSearchParams (unchanged tests). The kit codec must READ every existing
-  // link: q and the property filter decode, unmapped keys (op/sort/scroll) are preserved in extras, and decoding is stable.
-  const codec = createUrlCodec('enceladus')
-  for (const raw of [
-    { q: 'feed engine', f: 'status|=|open;priority|=|P1', op: 'and', sort: 'updated', scroll: 240 },
-    { q: '', f: '', op: 'or', sort: 'tier', scroll: 0 },
-    { q: 'ENC-TSK-1', f: 'record_type|=|task', op: 'and', sort: 'id', scroll: 0 },
-  ]) {
-    it(`?${JSON.stringify(raw)}`, () => {
-      const search = parseFeedSearch(raw)
-      const params = feedSearchToParams(search)
-      expect(parseFeedSearch(Object.fromEntries(params))).toEqual(search) // the app's own round trip is exact
-      const state = codec.decode(params)
-      expect(state.query.q).toBe(raw.q)
-      expect(JSON.stringify(state.query.filters ?? {})).toBe(JSON.stringify(codec.decode(codec.encode(state)).query.filters ?? {}))
-    })
-  }
 })

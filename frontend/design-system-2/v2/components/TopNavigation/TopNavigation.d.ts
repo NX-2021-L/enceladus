@@ -8,7 +8,9 @@ export interface TopNavIdentity {
 }
 
 export interface TopNavUtility {
-  type?: 'button' | 'badge' | 'avatar';
+  type?: 'button' | 'badge' | 'avatar' | 'node';
+  /** type 'node': an arbitrary element rendered in the utilities row (DVP-TSK-995: the kit SearchLauncher) */
+  node?: React.ReactNode;
   text?: React.ReactNode;
   /** Mono badge on a button */
   badge?: React.ReactNode;

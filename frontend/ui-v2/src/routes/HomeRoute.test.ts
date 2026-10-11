@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { OPEN_TASKS_SEARCH } from './HomeRoute'
-import { parseFilterQuery } from '../search/feedSearchParams'
+import { parseFilterQuery } from '../search/feedUrl'
 
 /**
  * ENC-TSK-P59 (ENC-ISS-725, supersedes the ENC-TSK-M36 single-project

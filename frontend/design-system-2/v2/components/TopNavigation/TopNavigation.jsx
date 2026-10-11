@@ -88,6 +88,7 @@ export function TopNavigation({ identity = {}, utilities = [], search = null }) 
       )}
       <div className="ev2-tn__util">
         {utilities.map((u, i) => {
+          if (u.type === 'node') return <span className="ev2-tn__node" key={i}>{u.node}</span>;
           if (u.type === 'badge') return <span className="ev2-tn__badge" key={i}>{u.text}</span>;
           if (u.type === 'avatar') return <span className="ev2-tn__avatar" key={i} title={u.text}>{u.initials}</span>;
           return (

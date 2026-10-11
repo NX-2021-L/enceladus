@@ -1,6 +1,6 @@
 import { useNavigate } from '@tanstack/react-router'
 import { BreadcrumbGroup } from '../design-system'
-import { loadFeedReturnSearch } from '../search/feedSearchParams'
+import { loadFeedReturnSearch } from '../search/feedUrl'
 
 export function RecordDetailBreadcrumbs({ recordId }: { recordId: string }) {
   const navigate = useNavigate()

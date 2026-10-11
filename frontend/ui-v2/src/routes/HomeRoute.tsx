@@ -17,7 +17,7 @@ import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { pausedApprovalRows, pendingEscalationRows, staleLockRows, type QueueRow } from './homeQueue'
-import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedSearchParams'
+import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedUrl'
 import {
   DASHBOARD_RECORD_TYPES,
   DASHBOARD_TYPE_LABEL,

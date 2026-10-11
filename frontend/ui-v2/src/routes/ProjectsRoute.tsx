@@ -38,7 +38,7 @@ import {
   FEED_SEARCH_DEFAULTS,
   serializeFilterQuery,
   type FeedRouteSearch,
-} from '../search/feedSearchParams'
+} from '../search/feedUrl'
 import { StatusChip } from '../components/StatusChip'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import './projects.css'

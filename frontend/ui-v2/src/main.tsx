@@ -7,7 +7,7 @@ import { queryClient } from './api/queryClient'
 import { projectRegistryQueryOptions } from './api/projectRegistry'
 import { router } from './routes/router'
 import { RealtimeFeedProvider } from './realtime/RealtimeFeedProvider'
-import { CacheEngineProvider } from './sync/CacheEngineProvider'
+import { CorpusProvider } from './search/CorpusProvider'
 import { AuthGate } from './auth/AuthGate'
 import { useOfflineStore } from './store/offlineStore'
 import { setUpdateSW } from './offline/swUpdate'
@@ -42,11 +42,11 @@ createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <AuthGate>
-        <CacheEngineProvider>
+        <CorpusProvider>
           <RealtimeFeedProvider>
             <RouterProvider router={router} />
           </RealtimeFeedProvider>
-        </CacheEngineProvider>
+        </CorpusProvider>
       </AuthGate>
     </QueryClientProvider>
   </StrictMode>,
