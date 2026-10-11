@@ -63,6 +63,10 @@ class RunContext:
     governance_hash: Callable[[], Optional[str]] = lambda: None
     surface_ready: Callable[[str], bool] = lambda surface: surface == "enceladus"
     withdraw: Callable[[str, str, str], bool] = lambda project, esc_id, reason: False
+    server_hash: bool = False       # E4-R16: governance_hash is read server-side; a caller-sent hash is never trusted
+    session_start: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None    # (project, run) -> {"session_id", "sci"}
+    session_heartbeat: Optional[Callable[[str, Dict[str, Any]], Any]] = None           # (project, run): escalation.watch
+    session_end: Optional[Callable[[str, Dict[str, Any]], Any]] = None                 # (project, run): agent.retire
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -261,7 +265,17 @@ def _has_unresolved(value: Any) -> bool:
     return False
 
 
+HIDDEN_FIELDS = ("runner_session_id", "runner_sci", "runner_retired", "runner_session_error")
+
+
 def view(run: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
+    out = _view_raw(run, token)
+    for key in HIDDEN_FIELDS:
+        out.pop(key, None)
+    return out
+
+
+def _view_raw(run: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
     """The one-read answer to 'was it completed'."""
     steps = run.get("steps") or []
     done = sum(1 for s in steps if s.get("status") in ("ok", "skipped"))
@@ -289,6 +303,13 @@ def view(run: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _save(ctx: RunContext, project_id: str, run: Dict[str, Any]) -> bool:
+    ok = _save_raw(ctx, project_id, run)
+    if ok:
+        _session_hooks(ctx, project_id, run)
+    return ok
+
+
+def _save_raw(ctx: RunContext, project_id: str, run: Dict[str, Any]) -> bool:
     """Conditional write on rev (idempotent advance): False when another writer got there first."""
     expect = int(run.get("rev") or 0)
     new = dict(run, rev=expect + 1, updated_at=ctx.now())
@@ -484,10 +505,66 @@ def _complete(ctx: RunContext, project_id: str, run: Dict[str, Any], definition:
     return None if _save(ctx, project_id, run) else _conflict(run["run_id"])
 
 
+def _current_hash(ctx: RunContext, ctl: Dict[str, Any]) -> Optional[str]:
+    """E4-R16: with a server-side hash source the caller-sent governance_hash is never trusted."""
+    if ctx.server_hash:
+        return ctx.governance_hash()
+    return ctl.get("governance_hash") or ctx.governance_hash()
+
+
+def _ensure_session(ctx: RunContext, project_id: str, run: Dict[str, Any]) -> Optional[str]:
+    """One agent session per run (register + claim), stored on the run item; never returned by get/list."""
+    if ctx.session_start is None or run.get("runner_session_id") or run.get("dry_run"):
+        return None
+    try:
+        sess = ctx.session_start(project_id, run) or {}
+    except Exception as exc:  # noqa: BLE001
+        return "runner session could not be registered: " + str(exc)[:200]
+    if not sess.get("session_id"):
+        return "runner session could not be registered: no session_id returned."
+    run["runner_session_id"], run["runner_sci"] = sess["session_id"], sess.get("sci")
+    return None
+
+
+def _session_hooks(ctx: RunContext, project_id: str, run: Dict[str, Any]) -> None:
+    """After every successful run write: heartbeat while a gate is open, retire once at a terminal state."""
+    if not run.get("runner_session_id"):
+        return
+    try:
+        if run.get("status") == "awaiting_gate" and ctx.session_heartbeat:
+            ctx.session_heartbeat(project_id, run)
+        elif run.get("status") in TERMINAL and ctx.session_end and not run.get("runner_retired"):
+            run["runner_retired"] = True
+            ctx.session_end(project_id, run)
+    except Exception as exc:  # noqa: BLE001 - session upkeep never fails a run write
+        run["runner_session_error"] = (type(exc).__name__ + ": " + str(exc))[:160]
+
+
+def _heartbeat_awaiting(ctx: RunContext, project_id: str) -> int:
+    """Sweeper heartbeat: sessions die 2h after claim unless escalation.watch is polled."""
+    if ctx.session_heartbeat is None:
+        return 0
+    try:
+        items = ctx.query(project_id, RUN_PREFIX) or []
+    except Exception:  # noqa: BLE001
+        return 0
+    beats = 0
+    for item in items:
+        if isinstance(item, dict) and item.get("status") == "awaiting_gate" and item.get("runner_session_id"):
+            try:
+                ctx.session_heartbeat(project_id, item)
+                beats += 1
+            except Exception:  # noqa: BLE001
+                pass
+    return beats
+
+
 def _segment(ctx: RunContext, project_id: str, run: Dict[str, Any], definition: Dict[str, Any],
              start: int, end: int, ctl: Dict[str, Any]) -> Optional[Result]:
     steps = definition["steps"]
-    gh = ctl.get("governance_hash") or ctx.governance_hash()       # re-fetched at every segment start
+    gh = _current_hash(ctx, ctl)       # re-fetched at every segment start
+    if ctx.server_hash and not gh:
+        return _err(503, "GOVERNANCE_UNAVAILABLE", "governance_hash could not be read from the governed MCP surface; the segment was not started.")
     last = run.get("governance_hash_last")
     if gh and last and gh != last and not ctl.get("accept_drift"):
         return _block_drift(ctx, project_id, run, last, gh)
@@ -498,6 +575,9 @@ def _segment(ctx: RunContext, project_id: str, run: Dict[str, Any], definition: 
         return _terminate(ctx, project_id, run, definition, "failed", "STEP_ERROR",
                           f"the segment at step {start} was already claimed and at_most_once step(s) {at_most} are never auto-retried.", at_most[0])
     run.update(segment_started=start, status="running", blocked=None)
+    sess_err = _ensure_session(ctx, project_id, run)
+    if sess_err:
+        return _terminate(ctx, project_id, run, definition, "failed", "STEP_ERROR", sess_err, None)
     if not _save(ctx, project_id, run):                              # claim (queued -> running)
         return _conflict(run["run_id"])
     scope, pending, calls = _scope(run), [], []
@@ -589,7 +669,7 @@ def start(ctx: RunContext, project_id: str, body: Dict[str, Any], actor: str, dr
     if not isinstance(inputs, dict):
         return _err(400, "VALIDATION_FAILED", "inputs must be an object.")
     key = str(body.get("idempotency_key") or "").strip()
-    gh = str(body.get("governance_hash") or "").strip() or (ctx.governance_hash() or "")
+    gh = (ctx.governance_hash() or "") if ctx.server_hash else (str(body.get("governance_hash") or "").strip() or (ctx.governance_hash() or ""))
     if not plan_only:
         if not key:
             return _err(400, "VALIDATION_FAILED", "idempotency_key is required to start a run.")
@@ -717,7 +797,7 @@ def _decide(ctx: RunContext, project_id: str, run: Dict[str, Any], definition: D
         problems = validate_schema(inputs, g.get("inputs") or {})            # validated BEFORE any state change
         if problems:
             return _err(422, "INPUTS_INVALID", "gate inputs do not match the gate inputs schema.", errors=problems[:20])
-        gh = ctl.get("governance_hash") or ctx.governance_hash()
+        gh = _current_hash(ctx, ctl)
         last = run.get("governance_hash_last")
         if gh and last and gh != last and not ctl.get("accept_drift"):
             if dry_run:
@@ -864,6 +944,12 @@ def cancel(ctx: RunContext, project_id: str, run_id: str, body: Dict[str, Any], 
 
 
 def sweep(ctx: RunContext, project_id: str, body: Dict[str, Any], actor: str) -> Result:
+    res = _sweep_raw(ctx, project_id, body, actor)
+    _heartbeat_awaiting(ctx, project_id)
+    return res
+
+
+def _sweep_raw(ctx: RunContext, project_id: str, body: Dict[str, Any], actor: str) -> Result:
     """Runner sweeper: expire stale non-terminal runs and observe decided/expired gates (the fallback to the
     hub event and the recipe_run.resume kick)."""
     now = ctx.now()

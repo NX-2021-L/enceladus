@@ -10087,7 +10087,63 @@ def _recipe_run_execute(batch: Dict[str, Any]) -> Dict[str, Any]:
         if surface == "enceladus":
             return _recipe_enceladus_call(batch, call, dry_run)
         return _recipe_surface_post(surface, call, dry_run)
-    return _recipe_run_service.run_batch_locally(batch, call_one)
+    exe = _recipe_mcp_executor()
+    if exe is None:   # RECIPE_MCP_API_KEY_SECRET_ARN unset: recipe.* in-process, other enceladus steps ACTION_NOT_ROUTABLE
+        return _recipe_run_service.run_batch_locally(batch, call_one)
+    return _recipe_mcp_executor_module.execute_batch(batch, exe, _recipe_runner_session(batch), call_one)
+
+
+try:
+    import recipe_mcp_executor as _recipe_mcp_executor_module
+except Exception:  # noqa: BLE001 - packaging gap: the in-process path keeps working
+    _recipe_mcp_executor_module = None
+_RECIPE_MCP: Dict[str, Any] = {"executor": None}
+
+
+def _recipe_mcp_executor():
+    """DVP-TSK-968 E4-R16: the governed-MCP executor when RECIPE_MCP_API_KEY_SECRET_ARN is configured, else None."""
+    if _recipe_mcp_executor_module is None or not os.environ.get("RECIPE_MCP_API_KEY_SECRET_ARN", "").strip():
+        return None
+    if _RECIPE_MCP["executor"] is None:
+        _RECIPE_MCP["executor"] = _recipe_mcp_executor_module.EnceladusMcpExecutor.from_env()
+    return _RECIPE_MCP["executor"]
+
+
+def _recipe_runner_session(batch: Dict[str, Any]):
+    """The run's agent session (stored on the run item by the claim write that precedes every segment)."""
+    try:
+        item = _recipe_context().get(str(batch.get("project_id") or ""), _recipe_run_service.run_key(str(batch.get("run_id") or "")))
+    except Exception:  # noqa: BLE001
+        item = None
+    if isinstance(item, dict) and item.get("runner_session_id"):
+        return {"session_id": item["runner_session_id"], "sci": item.get("runner_sci")}
+    return None
+
+
+def _recipe_mcp_ctx_kwargs() -> Dict[str, Any]:
+    exe = _recipe_mcp_executor()
+    if exe is None:
+        return {"governance_hash": (lambda: None)}
+    return {"governance_hash": exe.governance_hash, "server_hash": True,
+            "session_start": lambda project, run: exe.register_session(project, str(run.get("run_id") or "")),
+            "session_heartbeat": lambda project, run: exe.heartbeat(project, run.get("runner_session_id")),
+            "session_end": lambda project, run: exe.retire(project, run.get("runner_session_id"))}
+
+
+def _recipe_run_scheduled_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """EventBridge rate(15 minutes): POST /recipe-run/sweep equivalent per project (expiry + runner heartbeats)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return {"statusCode": 503, "swept": []}
+    projects = [p.strip() for p in str(os.environ.get("RECIPE_SWEEP_PROJECT_IDS") or "enceladus,devops").split(",") if p.strip()]
+    swept = []
+    for project in projects:
+        try:
+            code, _body = svc.sweep(_recipe_run_context(), project, {}, "recipe-sweeper")
+            swept.append({"project_id": project, "status": code})
+        except Exception as exc:  # noqa: BLE001
+            swept.append({"project_id": project, "error": type(exc).__name__})
+    return {"statusCode": 200, "swept": swept}
 
 
 def _recipe_run_context():
@@ -10103,7 +10159,7 @@ def _recipe_run_context():
     # every resume) is compared with governance_hash_last, so drift is detected per segment.
     return _recipe_run_service.RunContext(
         get=base.get, put=base.put, query=base.query, mint=mint, now=base.now, escalate=base.escalate,
-        escalation=base.escalation, execute=_recipe_run_execute, governance_hash=lambda: None,
+        escalation=base.escalation, execute=_recipe_run_execute, **_recipe_mcp_ctx_kwargs(),
         surface_ready=_recipe_surface_ready, withdraw=lambda project, esc_id, reason: False)
 
 
@@ -10180,6 +10236,8 @@ def _handle_recipe_route(method: str, project_id: str, rec_id: Optional[str], su
 
 
 def lambda_handler(event: Dict, context: Any) -> Dict:
+    if isinstance(event, dict) and event.get("recipe_run_sweep") and "requestContext" not in event:
+        return _recipe_run_scheduled_sweep(event)
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
