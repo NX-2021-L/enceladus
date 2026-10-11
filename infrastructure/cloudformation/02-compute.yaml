@@ -24,14 +24,14 @@ Parameters:
   # an empty issuer list means nothing can be exchanged or accepted.
   HubExchangeIssuers:
     Type: String
-    Default: "[]"
+    Default: '[{"name":"vagamod-keycloak","iss":"https://auth.vagamod.io/realms/mod-one-line-library","jwks_uri":"https://auth.vagamod.io/realms/mod-one-line-library/protocol/openid-connect/certs","audiences":["mod-web-app"]},{"name":"coach-cognito","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["7eo7qrnnsrumsook1v2vttm7gu"]},{"name":"think-iograph","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["6eh4u69l1mqk1m4hfjspeibla8","2mvnpft2mhqa2rjer8179bca8c"]}]'
     Description: >
       JSON allow-list of OIDC issuers whose ID tokens may be exchanged for a hub
       principal: [{"name","iss","jwks_uri","audiences":[...]}] for vagamod-keycloak,
       coach-cognito, think-iograph. Set per environment at deploy time.
   HubShellOrigins:
     Type: String
-    Default: "https://coach.thepup.io,https://vagamod.com"
+    Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
     Description: >
       Comma list of shell origins allowed (CORS) on the hub exchange / list / decide
       routes. Append the think origin at deploy time.
