@@ -10781,6 +10781,77 @@ def _handle_queue_stale_locks(event: Dict[str, Any], claims: Dict[str, Any]) -> 
     })
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-967 phase 2b: DERIVED gate cards. Paused approvals and stale locks of
+# the home requires-io queue read back through the escalations feed as kinds
+# tool_call and stale_lock. This is a READ-TIME PROJECTION: no new writer, no new
+# table; every card is marked derived=true and gets the F-10 expiry backfilled.
+# Opt-in (include_derived=true or an explicit tool_call/stale_lock kind filter)
+# so the default feed shape and cost (GitHub calls) are unchanged (D9).
+# ---------------------------------------------------------------------------
+_DERIVED_GATE_KINDS = ("tool_call", "stale_lock")
+
+
+def _derived_queue_body(resp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if resp.get("statusCode") != 200:
+        return None
+    try:
+        body = json.loads(resp.get("body") or "{}")
+    except (ValueError, TypeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _derived_gate_cards(event: Dict[str, Any], claims: Dict[str, Any],
+                        kind_filter: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    wanted = [k for k in _DERIVED_GATE_KINDS if not kind_filter or k in kind_filter]
+    cards: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    detected = _gate_fmt(_gate_now())
+    if "tool_call" in wanted:
+        body = _derived_queue_body(_handle_queue_paused_approvals(event, claims))
+        if body is None:
+            errors.append("paused_approvals_unavailable")
+        for run in (body or {}).get("runs", []):
+            ref = str(run.get("run_url") or f"run:{run.get('id')}")
+            cards.append({
+                "id": f"DRV-PA-{run.get('id')}", "item_id": f"DRV-PA-{run.get('id')}",
+                "project_id": "enceladus", "kind": "tool_call", "status": "requested",
+                "derived": True, "source": "github_actions",
+                "created_at": run.get("created_at") or "",
+                "title": f"Paused approval: {run.get('requesting_workflow') or 'workflow run'}",
+                "requestedBy": str(run.get("requesting_workflow") or ""),
+                "subject": {"record_id": ref, "project": "enceladus",
+                            "version": str(run.get("head_sha") or "")},
+                "evidence": [{"label": "workflow run", "ref": ref}],
+                "environments": run.get("environments") or [],
+            })
+    if "stale_lock" in wanted:
+        body = _derived_queue_body(_handle_queue_stale_locks(event, claims))
+        if body is None:
+            errors.append("stale_locks_unavailable")
+        for lock in (body or {}).get("locks", []):
+            rid = str(lock.get("record_id") or "")
+            if not rid:
+                continue
+            cards.append({
+                "id": f"DRV-SL-{rid}", "item_id": f"DRV-SL-{rid}", "project_id": "",
+                "kind": "stale_lock", "status": "requested", "derived": True,
+                "source": "stale_checkout_monitor",
+                # Regenerated per read: createdAt is the detection time, so the
+                # 7d regenerate window never hides a lock that is still stale.
+                "created_at": detected, "detectedAt": detected,
+                "title": f"Stale lock on {rid}",
+                "requestedBy": str(lock.get("holder_session") or ""),
+                "heldSince": lock.get("held_since"), "ageMinutes": lock.get("age_minutes"),
+                "subject": {"record_id": rid, "project": "", "version": ""},
+                "evidence": [{"label": "locked record", "ref": rid}],
+            })
+    for card in cards:
+        _escalation_gate_view(card)
+    return cards, errors
+
+
 def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/coordination/escalations — io's approval queue (§5.7).
 
@@ -10844,6 +10915,11 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
     for escalation in escalations:
         escalation["payload"] = _escalation_payload_dict(escalation)
         _escalation_gate_view(escalation)
+    derived_errors: List[str] = []
+    if (str(params.get("include_derived") or "").strip().lower() in ("1", "true", "yes")
+            or set(kind_filter) & set(_DERIVED_GATE_KINDS)):
+        derived_cards, derived_errors = _derived_gate_cards(event, claims, kind_filter)
+        escalations.extend(derived_cards)
     if kind_filter:
         escalations = [e for e in escalations if e.get("kind") in kind_filter]
     if state_filter:
@@ -10851,7 +10927,8 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
     for escalation in escalations:
         # An expired-but-unswept 'requested' record is not actionable: no diff,
         # not in the pending list (decide would 410 it anyway).
-        if escalation.get("status") == "requested" and escalation.get("state") in ("pending", "snoozed"):
+        if (escalation.get("status") == "requested" and not escalation.get("derived")
+                and escalation.get("state") in ("pending", "snoozed")):
             target = _read_escalation_target(
                 str(escalation.get("project_id") or project_id),
                 str(escalation.get("target_record_id") or ""))
@@ -10869,6 +10946,8 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
         "terminal": terminal,
         "count": len(escalations),
     }
+    if derived_errors:
+        feed_payload["derived_errors"] = derived_errors
     if cross_project:
         feed_payload["scope"] = "all_projects"
         feed_payload["projects_scanned"] = len(scan_projects)

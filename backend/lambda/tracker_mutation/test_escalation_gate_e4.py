@@ -7,6 +7,7 @@ fail-closed expiry on apply, and the expiry sweeper.
 """
 import datetime as dt
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -38,6 +39,7 @@ class _Base(unittest.TestCase):
         self.lf = lf
         self._patches = [
             mock.patch.object(lf, "ENABLE_ESCALATION_PRIMITIVE", True),
+            mock.patch.dict(os.environ, {"GATE_PRODUCER_PRINCIPALS": json.dumps({"think": ["think"]})}),
             mock.patch.object(lf, "_gate_now", return_value=NOW),
             mock.patch.object(lf, "_get_events", return_value=mock.MagicMock()),
         ]
