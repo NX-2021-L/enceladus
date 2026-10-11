@@ -4634,6 +4634,10 @@ Resources:
   RecipeRunSweepRule:
     Type: AWS::Events::Rule
     Properties:
+      # Explicit suffixed name (like every other rule here): an auto-generated
+      # 'enceladus-compute-gamma-RecipeRunSweepRule-*' name matched the prod stack
+      # prefix and failed the prod pre-deploy drift gate (ENC-ISS-455 / ENC-TSK-J12).
+      Name: !Sub "enceladus-recipe-run-sweep${EnvironmentSuffix}"
       Description: Recipe-run sweeper for TrackerMutationFunction (DVP-TSK-968)
       ScheduleExpression: rate(15 minutes)
       State: !If [HasRecipeMcpSecret, ENABLED, DISABLED]
