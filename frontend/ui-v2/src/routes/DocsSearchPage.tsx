@@ -28,7 +28,7 @@ const DATE_PRESETS = [
  */
 export default function DocsSearchPage() {
   useDocumentTitle('Docs')
-  const { project } = useSearch({ from: '/docs' }) as { project: string }
+  const { project, focus } = useSearch({ from: '/docs' }) as { project: string; focus?: 1 }
   const [query, setQuery] = useState<Query>(() => ({
     operation: 'and',
     tokens: project ? [{ propertyKey: 'project_id', operator: '=', value: project }] : [],
@@ -68,6 +68,8 @@ export default function DocsSearchPage() {
         error={corpus.status === 'error' ? corpus.error : null}
         placeholder="Search documents"
         pageSize={50}
+        restoreKey="docs"
+        autoFocus={focus === 1}
         renderRow={(row, ctx) =>
           renderFeedRow(rowToHit(row, ctx.hybrid), {
             projects,

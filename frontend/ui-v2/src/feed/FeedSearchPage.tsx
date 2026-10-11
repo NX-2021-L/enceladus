@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { IndexRow, Query } from '@io-kit/search'
@@ -11,7 +11,7 @@ import { FeedReadingPane } from '../routes/FeedReadingPane'
 import { RecentlyViewedNav } from '../routes/RecentlyViewedNav'
 import { useUiStore } from '../store/uiStore'
 import { useEnceladusCorpus } from '../search/CorpusProvider'
-import { decodeFeedSearch, encodeFeedSearch, persistFeedReturnSearch } from '../search/feedUrl'
+import { decodeFeedSearch, encodeFeedSearch, persistFeedReturnSearch, type FeedRouteSearch } from '../search/feedUrl'
 import { hostSearchSource } from '../search/enceladusSearchSource'
 import { ENCELADUS_PROPERTIES } from '../search/propertyDefs'
 import { getRecentlyViewed, hitFromRecent, trackRecentlyViewed } from '../search/recentlyViewed'
@@ -47,6 +47,12 @@ export default function FeedSearchPage() {
   const corpus = useEnceladusCorpus()
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { query, sortId } = decodeFeedSearch(feedSearch)
+  // focus=1 (header SearchLauncher) is a one-shot mount hint; it never enters the persisted return search.
+  const autoFocus = feedSearch.focus === 1
+  const persistable = useMemo<FeedRouteSearch>(
+    () => ({ q: feedSearch.q, f: feedSearch.f, op: feedSearch.op, sort: feedSearch.sort, scroll: feedSearch.scroll }),
+    [feedSearch.q, feedSearch.f, feedSearch.op, feedSearch.sort, feedSearch.scroll],
+  )
   // The legacy saved searches move into the kit store once, before the component reads it.
   const [store] = useState(() => {
     migrateLegacySavedSearches(localSavedFilterStore)
@@ -68,8 +74,8 @@ export default function FeedSearchPage() {
     return () => mq.removeEventListener('change', sync)
   }, [])
   useEffect(() => {
-    persistFeedReturnSearch(feedSearch)
-  }, [feedSearch])
+    persistFeedReturnSearch(persistable)
+  }, [persistable])
 
   const [chosen, setChosen] = useState<SearchResultHit | null>(null)
   const [firstHit, setFirstHit] = useState<SearchResultHit | null>(null)
@@ -110,7 +116,7 @@ export default function FeedSearchPage() {
       isWide,
       selectedHit,
       onSelect: setChosen,
-      onLeave: () => persistFeedReturnSearch(feedSearch),
+      onLeave: () => persistFeedReturnSearch(persistable),
       evidenceFor: (id) => (id === hit.recordId ? ctx.evidence : undefined),
       availability: ENCELADUS_SIGNAL_AVAILABILITY,
       pins,
@@ -137,6 +143,8 @@ export default function FeedSearchPage() {
       error={corpus.status === 'error' ? corpus.error : null}
       placeholder="Search records"
       pageSize={50}
+      restoreKey="feed"
+      autoFocus={autoFocus}
       renderRow={renderRow}
     />
   )
