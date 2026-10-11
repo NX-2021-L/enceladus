@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-11.01",
-  "updated_at": "2026-10-11T13:00:00Z",
-  "last_change_summary": "DVP-TSK-967 (DVP-PLN-013 E4-W1.2 phase 2b): escalation.request gains the producer API (kind, exactly one of proposedCalls or candidates, source_principal verified against the per-source GATE_PRODUCER_PRINCIPALS allow-list, telemetry kinds drift/notice accepted) and escalation.list gains kind/state/all_projects filters; paused approvals and stale locks read back as derived tool_call/stale_lock cards in the coordination escalations feed (opt-in include_derived, read-time projection, no new writer). No MCP decide action exists or is added (FTR-121). Response shapes are additive; no tracker/document schema change.",
+  "version": "2026-10-11.02",
+  "updated_at": "2026-10-11T22:36:59Z",
+  "last_change_summary": "DVP-TSK-A17 (DVP-PLN-013 E4-W2.8, ruling E4-R14): hub token exchange POST /api/v1/coordination/hub/exchange (allow-listed OIDC issuers -> short-lived HMAC hub principal with src_iss/auth_time/acr); decide/list/authorizer accept Authorization: HubExchange; shell-origin CORS; enceladus_shared.hub_exchange module.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-11.02",
+      "date": "2026-10-11",
+      "summary": "DVP-TSK-A17 (DVP-PLN-013 E4-W2.8, ruling E4-R14): hub token exchange POST /api/v1/coordination/hub/exchange (allow-listed OIDC issuers -> short-lived HMAC hub principal with src_iss/auth_time/acr); decide/list/authorizer accept Authorization: HubExchange; shell-origin CORS; enceladus_shared.hub_exchange module."
+    },
     {
       "version": "2026-10-11.01",
       "date": "2026-10-11",
