@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { Container, Header, Table } from '../design-system'
+import { Table } from '../components/StackedTable'
+import { PageHeader } from '../components/PageHeader'
 import type { TableColumnDefinition } from '../../../design-system-2/v2/components/Table/Table'
 import { skillLibraryQueryOptions, type SkillListItem } from '../api/skillLibrary'
 import { documentHref } from './recordLink'
@@ -112,16 +113,7 @@ export function SkillLibraryRoute() {
 
   return (
     <div className="ev2-skill-library">
-      <Container
-        header={
-          <Header
-            variant="h1"
-            description="Every governed skill record — resolved fresh from the body-excluded metadata projection on each page load. No client-side catalog or cache of the list."
-          >
-            Skill Library
-          </Header>
-        }
-      >
+      <PageHeader title="Skill Library" description="Every governed skill record — resolved fresh from the body-excluded metadata projection on each page load. No client-side catalog or cache of the list." />
         {isError ? (
           <div className="ev2-skill-library__error">
             <p>Failed to load skill library{error instanceof Error ? `: ${error.message}` : ''}.</p>
@@ -145,7 +137,7 @@ export function SkillLibraryRoute() {
             empty={isPending ? 'Loading skill library…' : 'No skills found.'}
           />
         )}
-      </Container>
+      
     </div>
   )
 }

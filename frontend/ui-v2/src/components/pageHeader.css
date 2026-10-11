@@ -1,0 +1,15 @@
+/* DVP-TSK-A09 (R16): single page header. The type comes from ds2 `.ev2-header--h1 .ev2-header__title` (28px). */
+.ev2-page-header {
+  margin: var(--space-0);
+  min-width: var(--space-0);
+}
+.ev2-page-header .ev2-header__counter {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+.ev2-page-header .ev2-header__actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}

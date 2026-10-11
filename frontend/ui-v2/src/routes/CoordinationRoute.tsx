@@ -19,7 +19,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { useSearch } from '@tanstack/react-router'
-import { Cards, PropertyFilter, Tabs } from '../design-system'
+import { Cards, PropertyFilter } from '../design-system'
+import { Tabs } from '../components/StripTabs'
+import { PageHeader } from '../components/PageHeader'
 import { Link } from '@tanstack/react-router'
 import { RecordLink } from '../components/RecordLink'
 import { StatusChip } from '../components/StatusChip'
@@ -245,13 +247,7 @@ export function CoordinationRoute() {
 
   return (
     <div className="coordination-route">
-      <header className="coordination-route__header">
-        <p className="coordination-route__eyebrow">COORDINATION · LIVE</p>
-        <h1 className="coordination-route__title">Coordination monitor</h1>
-        <p className="coordination-route__subtitle">
-          Sessions, agent types, lessons, and escalations across active coordination requests.
-        </p>
-      </header>
+      <PageHeader title="Coordination monitor" description="Sessions, agent types, lessons, and escalations across active coordination requests." />
 
       <PropertyFilter
         query={filterQuery}

@@ -1,0 +1,28 @@
+/* DVP-TSK-A09 (R16): fill-the-height split pages (/feed, /docs). Unlayered, so it wins over the kit's layered rules. */
+.ev2-fill {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: var(--space-0);
+}
+.ev2-fill > .io-split {
+  flex: 1 1 auto;
+  min-block-size: 0;
+}
+/* The primary column holds one CollectionSearch (pinned rows + its own results scroller): it fills the column. */
+.io-split__own > .io-search--split {
+  flex: 1 1 auto;
+  block-size: auto;
+  min-block-size: 0;
+}
+@media (min-width: 960px) {
+  .ev2-fill > .io-split {
+    block-size: auto;
+  }
+  /* Single-column split (/docs: a list, no reader): header across, one pane under it. */
+  .io-split.ev2-split--single {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'header' 'primary';
+    max-inline-size: calc(var(--space-16) * 56);
+  }
+}

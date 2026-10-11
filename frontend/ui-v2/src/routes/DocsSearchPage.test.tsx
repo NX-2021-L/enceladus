@@ -47,8 +47,8 @@ describe('/docs on the kit CollectionSearch', () => {
         </QueryClientProvider>,
       )
     })
-    const section = container.querySelector('section[data-io-search]')!
-    expect(section.firstElementChild!.textContent).toMatch(/Documents.*\(1\)/) // project_id=devops narrows 2 docs to 1
+    // R16: the page header (title + count) lives in the SplitPage header slot, above the columns.
+    expect(container.querySelector('.io-split__header [data-page-header]')!.textContent).toMatch(/Documents.*\(1\)/) // project_id=devops narrows 2 docs to 1
     const results = [...container.querySelectorAll('.io-search__results > li')]
     expect(results.map((li) => li.textContent).join(' ')).toContain('DOC-A')
     expect(results.map((li) => li.textContent).join(' ')).not.toContain('DVP-TSK-1')

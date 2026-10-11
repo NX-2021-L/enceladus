@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { IndexRow, Query } from '@io-kit/search'
-import { CollectionSearch } from '@io-kit/search-ui/cloudscape'
 import { relateRecords } from '../api/actions'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { Alert } from '../design-system'
@@ -10,6 +9,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { FeedReadingPane } from '../routes/FeedReadingPane'
 import { RecentlyViewedNav } from '../routes/RecentlyViewedNav'
 import { useUiStore } from '../store/uiStore'
+import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useEnceladusCorpus } from '../search/CorpusProvider'
 import { decodeFeedSearch, encodeFeedSearch, persistFeedReturnSearch, type FeedRouteSearch } from '../search/feedUrl'
 import { hostSearchSource } from '../search/enceladusSearchSource'
@@ -26,7 +26,8 @@ import '@io-kit/search-ui/components.css'
 import '@io-kit/search-ui/themes/enceladus.css'
 import '../routes/feed.css'
 
-const WIDE_MEDIA = '(min-width: 64rem)'
+// R16: the split (and the reading pane) starts at the kit's 960px switch.
+const WIDE_MEDIA = '(min-width: 960px)'
 const HYBRID_CAP_MS = 15_000
 const DATE_PRESETS = [
   { key: '1d', days: 1 },
@@ -49,10 +50,8 @@ export default function FeedSearchPage() {
   const { query, sortId } = decodeFeedSearch(feedSearch)
   // focus=1 (header SearchLauncher) is a one-shot mount hint; it never enters the persisted return search.
   const autoFocus = feedSearch.focus === 1
-  const persistable = useMemo<FeedRouteSearch>(
-    () => ({ q: feedSearch.q, f: feedSearch.f, op: feedSearch.op, sort: feedSearch.sort, scroll: feedSearch.scroll }),
-    [feedSearch.q, feedSearch.f, feedSearch.op, feedSearch.sort, feedSearch.scroll],
-  )
+  // React Compiler memoizes this by its inputs; the effect below only re-runs when a persisted field changes.
+  const persistable: FeedRouteSearch = { q: feedSearch.q, f: feedSearch.f, op: feedSearch.op, sort: feedSearch.sort, scroll: feedSearch.scroll }
   // The legacy saved searches move into the kit store once, before the component reads it.
   const [store] = useState(() => {
     migrateLegacySavedSearches(localSavedFilterStore)
@@ -125,29 +124,6 @@ export default function FeedSearchPage() {
   }
 
   const projectId = projects[0]?.project_id ?? 'enceladus'
-  const search = (
-    <CollectionSearch
-      title="Feed"
-      things="records"
-      rows={corpus.rows}
-      properties={ENCELADUS_PROPERTIES}
-      query={query}
-      onQueryChange={(next) => patch(next, sortId)}
-      sortOptions={SORT_OPTIONS}
-      sortId={sortId}
-      onSortChange={(id) => patch(query, id)}
-      dateRange={{ propertyKey: 'updated_at', presets: DATE_PRESETS }}
-      savedFilters={{ store, surface: 'feed' }}
-      hybrid={{ source: hostSearchSource, filters: { project_id: projectId }, hardCapMs: HYBRID_CAP_MS }}
-      corpusPending={corpus.status === 'seeding' && corpus.rows.length === 0}
-      error={corpus.status === 'error' ? corpus.error : null}
-      placeholder="Search records"
-      pageSize={50}
-      restoreKey="feed"
-      autoFocus={autoFocus}
-      renderRow={renderRow}
-    />
-  )
   const stale = corpus.staleNotice ? (
     <div className="feed-route__stale">
       <Alert type="warning" header="Results may be out of date">
@@ -156,24 +132,50 @@ export default function FeedSearchPage() {
     </div>
   ) : null
 
+  // R16: header across both columns (count from the search state), pinned search rows + scrolling results on the left,
+  // the record detail hub as its own scroller on the right; below 960px a single column in the page scroll.
   return (
-    <div className="feed-route" data-feed-engine="kit-search">
-      {stale}
-      {isWide ? (
-        <div className="feed-route__split">
-          <div className="feed-route__list-scroll">{search}</div>
-          <div className="feed-route__pane">
-            <RecentlyViewedNav
-              items={recentItems}
-              currentRecordId={selectedHit?.recordId ?? null}
-              onSelect={(entry) => setChosen(hitFromRecent(entry))}
-            />
-            <FeedReadingPane hit={selectedHit} />
-          </div>
-        </div>
-      ) : (
-        <div className="ev2-rc-grid">{search}</div>
-      )}
-    </div>
+    <SearchSplitPage
+      className="feed-route"
+      engine="kit-search"
+      above={stale}
+      {...(isWide
+        ? {
+            actions: (
+              <RecentlyViewedNav
+                items={recentItems}
+                currentRecordId={selectedHit?.recordId ?? null}
+                onSelect={(entry) => setChosen(hitFromRecent(entry))}
+              />
+            ),
+            secondary: (
+              <div className="feed-route__pane">
+                <FeedReadingPane hit={selectedHit} />
+              </div>
+            ),
+          }
+        : {})}
+      search={{
+        title: 'Feed',
+        things: 'records',
+        rows: corpus.rows,
+        properties: ENCELADUS_PROPERTIES,
+        query,
+        onQueryChange: (next) => patch(next, sortId),
+        sortOptions: SORT_OPTIONS,
+        sortId,
+        onSortChange: (id) => patch(query, id),
+        dateRange: { propertyKey: 'updated_at', presets: DATE_PRESETS },
+        savedFilters: { store, surface: 'feed' },
+        hybrid: { source: hostSearchSource, filters: { project_id: projectId }, hardCapMs: HYBRID_CAP_MS },
+        corpusPending: corpus.status === 'seeding' && corpus.rows.length === 0,
+        error: corpus.status === 'error' ? corpus.error : null,
+        placeholder: 'Search records',
+        pageSize: 50,
+        restoreKey: 'feed',
+        autoFocus,
+        renderRow,
+      }}
+    />
   )
 }

@@ -66,3 +66,18 @@ a {
   outline: 2px solid var(--enc-teal);
   outline-offset: 2px;
 }
+
+/* DVP-TSK-A09 (R16): kit scrollbar + split tokens, mapped from this site's design system.
+ * Source tokens: frontend/design-system-2/colors_and_type.css (--enc-teal, --enc-teal-light, --enc-seafoam) and
+ * frontend/design-system-2/v2/tokens.css (--v2-divider, --v2-panel-border: the same teal hue family at .12/.2 alpha).
+ * Thumb = --enc-teal at low alpha, hover = --enc-teal-light stronger, track transparent. Quiet until hover, focus
+ * or scroll (the kit's .io-scroll). html[data-io-scrollbars] (index.html) skins any remaining native scroller. */
+:root {
+  --io-scrollbar-size: 8px;
+  --io-scrollbar-thumb: color-mix(in srgb, var(--enc-teal) 35%, transparent);
+  --io-scrollbar-thumb-hover: color-mix(in srgb, var(--enc-teal-light) 60%, transparent);
+  --io-scrollbar-track: transparent;
+  /* Split page: the list column narrows with the viewport (the nav takes 220px) and the header gap matches .ev2-page. */
+  --io-split-primary: minmax(17.5rem, min(460px, 42%));
+  --io-split-header-gap: var(--space-5);
+}

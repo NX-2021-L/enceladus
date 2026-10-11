@@ -31,12 +31,12 @@ describe('focus=1 survives route validation', () => {
 
   it('/feed and /docs pass autoFocus on focus=1 and a restoreKey to CollectionSearch', () => {
     const feed = read('feed/FeedSearchPage.tsx')
-    expect(feed).toMatch(/autoFocus=\{autoFocus\}/)
+    expect(feed).toMatch(/\n\s+autoFocus,\n/)
     expect(feed).toMatch(/feedSearch\.focus === 1/)
-    expect(feed).toMatch(/restoreKey="feed"/)
+    expect(feed).toMatch(/restoreKey: 'feed'/)
     const docs = read('routes/DocsSearchPage.tsx')
-    expect(docs).toMatch(/autoFocus=\{focus === 1\}/)
-    expect(docs).toMatch(/restoreKey="docs"/)
+    expect(docs).toMatch(/autoFocus: focus === 1/)
+    expect(docs).toMatch(/restoreKey: 'docs'/)
   })
 
   it('focus never enters the persisted feed return search', () => {

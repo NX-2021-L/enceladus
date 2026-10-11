@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch } from '@tanstack/react-router'
 import type { Query } from '@io-kit/search'
-import { CollectionSearch } from '@io-kit/search-ui/cloudscape'
 import { Alert } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
+import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useEnceladusCorpus } from '../search/CorpusProvider'
 import { hostSearchSource } from '../search/enceladusSearchSource'
@@ -38,39 +38,45 @@ export default function DocsSearchPage() {
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const docs = corpus.rows.filter((r) => r.type === 'document')
 
+  const stale = corpus.staleNotice ? (
+    <div className="docs-route__stale">
+      <Alert type="warning" header="Documents may be out of date">
+        {corpus.staleNotice}
+      </Alert>
+    </div>
+  ) : null
+
+  // R16: the same split frame as /feed, single column (docs has a list and no reader): header across, pinned search
+  // rows, results in their own scroller from 960px; one page scroll below.
   return (
-    <div className="docs-route">
-      {corpus.staleNotice ? (
-        <div className="docs-route__stale">
-          <Alert type="warning" header="Documents may be out of date">
-            {corpus.staleNotice}
-          </Alert>
-        </div>
-      ) : null}
-      <CollectionSearch
-        title="Documents"
-        things="documents"
-        rows={docs}
-        properties={DOCS_PROPERTIES}
-        query={query}
-        onQueryChange={setQuery}
-        sortOptions={SORT_OPTIONS}
-        sortId={sortId}
-        onSortChange={setSortId}
-        dateRange={{ propertyKey: 'updated_at', presets: DATE_PRESETS }}
-        savedFilters={{ store: docSavedStore, surface: 'docs' }}
-        hybrid={{
+    <SearchSplitPage
+      className="docs-route"
+      single
+      above={stale}
+      search={{
+        title: 'Documents',
+        things: 'documents',
+        rows: docs,
+        properties: DOCS_PROPERTIES,
+        query,
+        onQueryChange: setQuery,
+        sortOptions: SORT_OPTIONS,
+        sortId,
+        onSortChange: setSortId,
+        dateRange: { propertyKey: 'updated_at', presets: DATE_PRESETS },
+        savedFilters: { store: docSavedStore, surface: 'docs' },
+        hybrid: {
           source: hostSearchSource,
           filters: { project_id: projects[0]?.project_id ?? 'enceladus', record_type: 'document' },
           hardCapMs: 15_000,
-        }}
-        corpusPending={corpus.status === 'seeding' && docs.length === 0}
-        error={corpus.status === 'error' ? corpus.error : null}
-        placeholder="Search documents"
-        pageSize={50}
-        restoreKey="docs"
-        autoFocus={focus === 1}
-        renderRow={(row, ctx) =>
+        },
+        corpusPending: corpus.status === 'seeding' && docs.length === 0,
+        error: corpus.status === 'error' ? corpus.error : null,
+        placeholder: 'Search documents',
+        pageSize: 50,
+        restoreKey: 'docs',
+        autoFocus: focus === 1,
+        renderRow: (row, ctx) =>
           renderFeedRow(rowToHit(row, ctx.hybrid), {
             projects,
             isWide: false,
@@ -80,10 +86,9 @@ export default function DocsSearchPage() {
             evidenceFor: () => undefined,
             pins: {},
             onPin: () => {},
-          })
-        }
-      />
-    </div>
+          }),
+      }}
+    />
   )
 }
 
