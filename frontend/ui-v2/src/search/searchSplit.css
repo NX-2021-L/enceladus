@@ -16,8 +16,19 @@
  * would turn that element into the sticky scroller, or detach the block): layoutContract / searchControls tests pin it.
  * From 960px the split already pins the controls and the kit makes them static. */
 .ev2-fill {
-  --io-search-sticky-top: 0;
+  /* DVP-TSK-A14 (measured on gamma at 390px): the page scroller (.ev2-al__content, design-system-2 AppLayout) has
+   * padding-top 16px (= --space-4), and sticky positions inside that padding box, so a 0 edge stuck the block 16px
+   * below the scroller top with cards showing through above it. Pull the edge up by the padding... */
+  --io-search-sticky-top: calc(-1 * var(--space-4));
   --io-search-sticky-bg: var(--enc-void);
+}
+@media (max-width: 959.98px) {
+  /* ...and give the block an equal opaque band (padding cancelled by a negative margin, so the unstuck layout is
+   * unchanged): stuck, the input keeps its 16px of air below the app bar and nothing scrolls through above it. */
+  .ev2-fill .io-search__controls {
+    padding-block-start: var(--space-4);
+    margin-block-start: calc(-1 * var(--space-4));
+  }
 }
 /* The primary column holds one CollectionSearch (pinned rows + its own results scroller): it fills the column. */
 .io-split__own > .io-search--split {
