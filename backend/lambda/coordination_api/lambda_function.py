@@ -10442,6 +10442,123 @@ def _invoke_tracker_mutation_api(
     return inner
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-967 (DVP-PLN-013 E4-W1.2): gate-card view + F-10 fail-closed expiry.
+# Deliberate mirror of the helpers in tracker_mutation (separate Lambda
+# package, no shared import path). Legacy ESC records read back as
+# kind=escalation with the F-10 defaults backfilled ON READ (no migration).
+# ---------------------------------------------------------------------------
+_GATE_KINDS = (
+    "acceptance", "reconciliation", "escalation", "tool_call", "limit",
+    "security", "stale_lock", "drift", "notice",
+)
+_GATE_STATES = ("pending", "snoozed", "decided", "expired", "superseded")
+# kind -> (default ttl seconds | None, default onExpire, default risk)
+_GATE_KIND_DEFAULTS = {
+    "acceptance": (7 * 86400, "regenerate", "medium"),
+    "reconciliation": (7 * 86400, "regenerate", "medium"),
+    "stale_lock": (7 * 86400, "regenerate", "low"),
+    "escalation": (72 * 3600, "deny", "high"),
+    "tool_call": (72 * 3600, "deny", "high"),
+    "security": (72 * 3600, "deny", "critical"),
+    "limit": (24 * 3600, "deny", "medium"),
+    "drift": (None, "auto_clear", "low"),
+    "notice": (7 * 86400, "auto_clear", "low"),
+}
+
+
+def _gate_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _gate_parse_ts(value: Any) -> Optional[dt.datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _gate_fmt(ts: dt.datetime) -> str:
+    return ts.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gate_csv(value: Any) -> List[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _escalation_expiry_info(escalation: Dict[str, Any],
+                            now: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    """{expiresAt, expired, onExpire} -- FAIL-CLOSED: a decision-family record
+    whose expiry cannot be established is treated as expired."""
+    now = now or _gate_now()
+    kind = str(escalation.get("kind") or "escalation")
+    ttl, default_on_expire, _risk = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    on_expire = str(escalation.get("onExpire") or default_on_expire)
+    expires = _gate_parse_ts(escalation.get("expiresAt"))
+    if expires is None:
+        base = _gate_parse_ts(escalation.get("created_at"))
+        if base is not None and ttl is not None:
+            expires = base + dt.timedelta(seconds=ttl)
+    if expires is None:
+        return {"expiresAt": None, "expired": ttl is not None, "onExpire": on_expire}
+    return {"expiresAt": _gate_fmt(expires), "expired": now >= expires, "onExpire": on_expire}
+
+
+def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
+    """Additively project kind/family/risk/onExpire/expiresAt/state (D9)."""
+    now = _gate_now()
+    kind = str(escalation.get("kind") or "escalation")
+    _ttl, default_on_expire, default_risk = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    escalation["kind"] = kind
+    escalation.setdefault("family", "telemetry" if kind in ("drift", "notice") else "decision")
+    escalation.setdefault("risk", default_risk)
+    escalation.setdefault("onExpire", default_on_expire)
+    info = _escalation_expiry_info(escalation, now)
+    if not escalation.get("expiresAt") and info["expiresAt"]:
+        escalation["expiresAt"] = info["expiresAt"]
+    for key in ("candidates", "evidence", "blastRadius"):
+        raw = escalation.get(key)
+        if isinstance(raw, str):
+            try:
+                escalation[key] = json.loads(raw)
+            except (ValueError, TypeError):
+                pass
+    status = escalation.get("status")
+    if status == "expired" or (status == "requested" and info["expired"]):
+        state = "superseded" if info["onExpire"] == "regenerate" else "expired"
+    elif status == "requested":
+        snoozed = _gate_parse_ts(escalation.get("snoozedUntil"))
+        state = "snoozed" if (snoozed is not None and snoozed > now) else "pending"
+    else:
+        state = "decided"
+    escalation["state"] = state
+
+
+def _gate_list_project_ids() -> List[str]:
+    ddb = _get_ddb()
+    ids: List[str] = []
+    kwargs: Dict[str, Any] = {"TableName": PROJECTS_TABLE, "ProjectionExpression": "project_id"}
+    while True:
+        page = ddb.scan(**kwargs)
+        for raw in page.get("Items", []):
+            pid = (raw.get("project_id") or {}).get("S")
+            if pid:
+                ids.append(pid)
+        last = page.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted(set(ids))
+
+
 def _escalation_payload_dict(escalation: Dict[str, Any]) -> Dict[str, Any]:
     """The escalation payload is stored as a JSON string on the item."""
     raw = escalation.get("payload")
@@ -10676,6 +10793,20 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
     params = event.get("queryStringParameters") or {}
     project_id = str(params.get("project_id") or "enceladus").strip()
     status_filter = str(params.get("status") or "").strip()
+    # ENC-TSK-967 / ENC-ISS-773: state and kind filters (comma lists) and the
+    # all-projects scope. Default single-project behaviour is unchanged.
+    kind_filter = _gate_csv(params.get("kind"))
+    state_filter = _gate_csv(params.get("state"))
+    bad_kinds = [k for k in kind_filter if k not in _GATE_KINDS]
+    if bad_kinds:
+        return _error(400, f"Invalid kind filter {bad_kinds}. Allowed: {list(_GATE_KINDS)}")
+    bad_states = [x for x in state_filter if x not in _GATE_STATES]
+    if bad_states:
+        return _error(400, f"Invalid state filter {bad_states}. Allowed: {list(_GATE_STATES)}")
+    cross_project = (
+        project_id in ("*", "_")
+        or str(params.get("all_projects") or "").strip().lower() in ("1", "true", "yes")
+    )
 
     ddb = _get_ddb()
     query_kwargs: Dict[str, Any] = {
@@ -10693,34 +10824,55 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
 
     escalations = []
     try:
-        while True:
-            page = ddb.query(**query_kwargs)
-            escalations.extend(_deserialize(raw) for raw in page.get("Items", []))
-            last_key = page.get("LastEvaluatedKey")
-            if not last_key or len(escalations) >= 200:
-                break
-            query_kwargs["ExclusiveStartKey"] = last_key
+        scan_projects = _gate_list_project_ids() if cross_project else [project_id]
+        for scan_pid in scan_projects:
+            query_kwargs["ExpressionAttributeValues"][":pid"] = _serialize(scan_pid)
+            query_kwargs.pop("ExclusiveStartKey", None)
+            project_rows: List[Dict[str, Any]] = []
+            while True:
+                page = ddb.query(**query_kwargs)
+                project_rows.extend(_deserialize(raw) for raw in page.get("Items", []))
+                last_key = page.get("LastEvaluatedKey")
+                if not last_key or len(project_rows) >= 200:
+                    break
+                query_kwargs["ExclusiveStartKey"] = last_key
+            escalations.extend(project_rows)
     except Exception as exc:
         logger.error("escalations feed query failed: %s", exc)
         return _error(500, "Failed to read escalations.")
 
     for escalation in escalations:
         escalation["payload"] = _escalation_payload_dict(escalation)
-        if escalation.get("status") == "requested":
+        _escalation_gate_view(escalation)
+    if kind_filter:
+        escalations = [e for e in escalations if e.get("kind") in kind_filter]
+    if state_filter:
+        escalations = [e for e in escalations if e.get("state") in state_filter]
+    for escalation in escalations:
+        # An expired-but-unswept 'requested' record is not actionable: no diff,
+        # not in the pending list (decide would 410 it anyway).
+        if escalation.get("status") == "requested" and escalation.get("state") in ("pending", "snoozed"):
             target = _read_escalation_target(
-                project_id, str(escalation.get("target_record_id") or ""))
+                str(escalation.get("project_id") or project_id),
+                str(escalation.get("target_record_id") or ""))
             escalation["diff"] = _render_escalation_diff(escalation, target)
 
     escalations.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-    pending = [e for e in escalations if e.get("status") == "requested"]
-    terminal = [e for e in escalations if e.get("status") != "requested"]
-    return _response(200, {
+    actionable = ("pending", "snoozed")
+    pending = [e for e in escalations
+               if e.get("status") == "requested" and e.get("state") in actionable]
+    terminal = [e for e in escalations if e not in pending]
+    feed_payload: Dict[str, Any] = {
         "success": True,
         "project_id": project_id,
         "pending": pending,
         "terminal": terminal,
         "count": len(escalations),
-    })
+    }
+    if cross_project:
+        feed_payload["scope"] = "all_projects"
+        feed_payload["projects_scanned"] = len(scan_projects)
+    return _response(200, feed_payload)
 
 
 def _record_escalation_decision(
@@ -10837,6 +10989,20 @@ def _handle_escalation_decision(
             f"Escalation {escalation_id} is '{current_status}'; only 'requested' "
             "escalations can be decided."
         ))
+    # ENC-TSK-967 (F-10): FAIL-CLOSED -- an expired escalation (stored or
+    # backfilled expiresAt) can be neither approved nor denied, and no applier
+    # call is made. The tracker_mutation sweeper moves it to its terminal state.
+    expiry = _escalation_expiry_info(escalation)
+    if expiry["expired"]:
+        return _error(
+            410,
+            f"Escalation {escalation_id} expired at {expiry['expiresAt']}; expired "
+            "escalations cannot be decided (F-10 fail-closed). File a new escalation.",
+            escalation_id=escalation_id,
+            state="superseded" if expiry["onExpire"] == "regenerate" else "expired",
+            expiresAt=expiry["expiresAt"],
+            onExpire=expiry["onExpire"],
+        )
 
     decider = _resolve_decider_identity(claims)
     actor = str(claims.get("sub") or decider)

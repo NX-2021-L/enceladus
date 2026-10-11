@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enceladus.jreese.net/schemas/parity/gates/v1/gates.schema.json",
+  "title": "Enceladus generalized escalation entity (GateCard) v1",
+  "description": "Wire contract for the escalation entity generalized to all gate kinds (DVP-TSK-967, DVP-PLN-013 E4-W1.2; spec DOC-1931CDD35AAA s1). The ENC-FTR-121 ESC record is the entity; this schema is the GateCard projection @io-kit/gates (DVP-TSK-965) mirrors. Additive over the legacy ESC shape (D9): legacy fields (item_id, status, mutation_type, target_record_id, payload, created_at, ...) stay on the record and are declared optional here. Fields marked 'phase 2' are specified now so the contract is stable and become populated by the decide-hardening work.",
+  "x-schemaVersion": "1.0.0",
+  "$ref": "#/$defs/GateCard",
+  "$defs": {
+    "GateKind": {
+      "enum": ["acceptance", "reconciliation", "escalation", "tool_call", "limit", "security", "stale_lock", "drift", "notice"],
+      "description": "Decision family: acceptance, reconciliation, escalation, tool_call, limit, security, stale_lock. Telemetry family: drift, notice (producer API only; escalation.request refuses them)."
+    },
+    "Family": { "enum": ["decision", "telemetry"], "description": "Derived from kind; a supplied family that contradicts kind is rejected." },
+    "Risk": { "enum": ["low", "medium", "high", "critical"] },
+    "State": {
+      "enum": ["pending", "snoozed", "decided", "expired", "superseded"],
+      "description": "Derived from the legacy FSM status: requested->pending|snoozed, approved|applying|applied|failed|denied|denied_with_guidance->decided, expired->expired (onExpire deny) or superseded (onExpire regenerate)."
+    },
+    "OnExpire": { "enum": ["deny", "regenerate", "auto_clear"], "description": "Decision family accepts deny|regenerate only; auto_clear is telemetry." },
+    "RequiredAuth": { "enum": ["session", "interactive_human", "step_up"] },
+    "AuthMethod": {
+      "enum": ["interactive_human", "step_up"],
+      "description": "How the decider authenticated. step_up is treated as interactive_human until DVP-TSK-980 lands (recorded degraded mode, see assurance)."
+    },
+    "Assurance": {
+      "enum": ["session", "interactive_human", "step_up", "step_up_degraded"],
+      "description": "step_up_degraded = a method-tagged step-up proof was supplied but not yet verified server-side, so the decision is recorded at interactive_human strength."
+    },
+    "ProofMethod": { "enum": ["none", "webauthn", "cognito_acr"], "description": "Method tag of the step-up proof (DVP-FTR-105 AC1)." },
+    "Timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "Sha256Hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Subject": {
+      "type": "object",
+      "required": ["record_id", "version"],
+      "properties": {
+        "record_id": { "type": "string", "minLength": 1 },
+        "project": { "type": "string" },
+        "version": { "type": "string", "description": "Subject record version pinned at request time (empty string when the requester pinned none)." }
+      },
+      "additionalProperties": false
+    },
+    "ToolAnnotations": {
+      "type": "object",
+      "required": ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"],
+      "properties": {
+        "readOnlyHint": { "type": "boolean" },
+        "destructiveHint": { "type": "boolean" },
+        "idempotentHint": { "type": "boolean" },
+        "openWorldHint": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "ResolvedCall": {
+      "type": "object",
+      "description": "Phase 2. A fully bound call (spec R3); callHash is sha256 over the canonical JSON of the other fields.",
+      "required": ["capability", "method", "path", "args", "annotations", "ifMatch", "callHash"],
+      "properties": {
+        "capability": { "type": "string", "minLength": 1 },
+        "mcpTool": { "type": "string" },
+        "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
+        "path": { "type": "string", "minLength": 1 },
+        "args": { "type": "object" },
+        "annotations": { "$ref": "#/$defs/ToolAnnotations" },
+        "ifMatch": { "type": "string", "minLength": 1 },
+        "callHash": { "$ref": "#/$defs/Sha256Hex" }
+      },
+      "additionalProperties": false
+    },
+    "Candidate": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "rule": { "type": "string" },
+        "call": { "$ref": "#/$defs/ResolvedCall" }
+      },
+      "additionalProperties": true
+    },
+    "Evidence": {
+      "type": "object",
+      "required": ["label", "ref"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "minLength": 1 },
+        "excerpt": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "BlastRadius": {
+      "type": "object",
+      "required": ["records", "stacks", "irreversible"],
+      "properties": {
+        "records": { "type": "integer", "minimum": 0 },
+        "stacks": { "type": "array", "items": { "type": "string" } },
+        "irreversible": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "Decision": {
+      "type": "object",
+      "description": "One hash-chained decision-log entry as surfaced on the card. Every entry records auth_method, auth_time and assurance (DVP-TSK-967 AC2). Phase 2 populates the chain fields.",
+      "required": ["decision", "decider", "decidedAt", "auth_method", "auth_time", "assurance"],
+      "properties": {
+        "decision": { "enum": ["approve", "deny", "snooze", "ack", "promote", "expire"] },
+        "decider": { "type": "string", "minLength": 1 },
+        "decidedAt": { "$ref": "#/$defs/Timestamp" },
+        "auth_method": { "$ref": "#/$defs/AuthMethod" },
+        "auth_time": { "$ref": "#/$defs/Timestamp" },
+        "assurance": { "$ref": "#/$defs/Assurance" },
+        "proof_method": { "$ref": "#/$defs/ProofMethod" },
+        "callHash": { "$ref": "#/$defs/Sha256Hex" },
+        "idempotencyKey": { "type": "string", "minLength": 1 },
+        "note": { "type": "string" },
+        "candidateId": { "type": "string" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "prevHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "64 zeros for seq 1." },
+        "hash": { "$ref": "#/$defs/Sha256Hex" }
+      },
+      "additionalProperties": true
+    },
+    "GateCard": {
+      "type": "object",
+      "required": ["kind", "family", "risk", "state", "subject", "evidence", "onExpire"],
+      "properties": {
+        "id": { "type": "string", "description": "Escalation id (ENC-ESC-..); alias of the legacy item_id." },
+        "project_id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/GateKind" },
+        "family": { "$ref": "#/$defs/Family" },
+        "risk": { "$ref": "#/$defs/Risk" },
+        "state": { "$ref": "#/$defs/State" },
+        "title": { "type": "string" },
+        "subject": { "$ref": "#/$defs/Subject" },
+        "candidates": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "$ref": "#/$defs/Candidate" } },
+        "proposedCalls": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ResolvedCall" }, "description": "Phase 2. Legacy records carry the proposed mutation as mutation_type + payload." },
+        "blastRadius": { "$ref": "#/$defs/BlastRadius" },
+        "evidence": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "$ref": "#/$defs/Evidence" } },
+        "requestedBy": { "type": "string", "description": "Principal that raised the card; must differ from the decider (no self-review). Legacy: requested_by.session_id." },
+        "sourcePrincipal": { "type": "string", "description": "Per-source producer principal (think, vagamod, ...). Phase 2 binds it to the authenticated caller." },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "expiresAt": { "$ref": "#/$defs/Timestamp", "description": "Mandatory for the decision family; max 30d from creation; F-10 defaults backfilled on read for legacy records." },
+        "onExpire": { "$ref": "#/$defs/OnExpire" },
+        "snoozedUntil": { "$ref": "#/$defs/Timestamp", "description": "<= expiresAt; snooze never extends expiry." },
+        "requiredAuth": { "$ref": "#/$defs/RequiredAuth" },
+        "etag": { "type": "string", "description": "Phase 2. Card version the human saw; decide requires it as If-Match." },
+        "decision": { "$ref": "#/$defs/Decision" },
+        "gateBackfilled": { "type": "array", "items": { "type": "string" }, "description": "Names of fields derived at read time rather than stored (legacy ESC records)." },
+        "item_id": { "type": "string" },
+        "status": { "type": "string", "description": "Legacy ENC-FTR-121 FSM status." },
+        "mutation_type": { "type": "string" },
+        "target_record_id": { "type": "string" },
+        "payload": {},
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "family": { "const": "telemetry" } }, "required": ["family"] },
+          "then": {
+            "not": { "anyOf": [{ "required": ["proposedCalls"] }, { "required": ["candidates"] }] },
+            "properties": { "onExpire": { "enum": ["auto_clear"] } }
+          },
+          "else": { "required": ["expiresAt"], "properties": { "onExpire": { "enum": ["deny", "regenerate"] } } }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "DecideRequest": {
+      "type": "object",
+      "description": "Phase 2 decide body. HTTP carries If-Match (card etag) and Idempotency-Key; both are mirrored here so a client can validate before sending. Server order: auth, self-review, state (410 expired / 409 decided), idempotency, card etag (412 card_changed), subject version (412 subject_changed), callHash (412 call_changed), candidate (422), write-ahead log, execute, record.",
+      "required": ["verdict", "ifMatch", "idempotencyKey"],
+      "properties": {
+        "verdict": { "enum": ["approve", "deny", "snooze", "ack", "promote"] },
+        "ifMatch": { "type": "string", "minLength": 1, "description": "Card etag the human saw." },
+        "subjectVersion": { "type": "string", "description": "Subject record version the human saw; checked against the live subject on approve." },
+        "callHash": { "$ref": "#/$defs/Sha256Hex", "description": "Hash of the ResolvedCall the human saw; recomputed server-side on approve." },
+        "idempotencyKey": { "type": "string", "minLength": 1, "description": "${cardId}:${verdict}:${nonce}" },
+        "candidateId": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 },
+        "until": { "$ref": "#/$defs/Timestamp" },
+        "note": { "type": "string" },
+        "stepUp": {
+          "type": "object",
+          "required": ["kind", "assertion"],
+          "properties": {
+            "kind": { "enum": ["webauthn", "cognito_acr"] },
+            "assertion": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "verdict": { "const": "deny" } }, "required": ["verdict"] }, "then": { "required": ["reason"] } },
+        { "if": { "properties": { "verdict": { "const": "snooze" } }, "required": ["verdict"] }, "then": { "required": ["until"] } }
+      ],
+      "additionalProperties": false
+    },
+    "ListQuery": {
+      "type": "object",
+      "description": "Query for GET .../escalation[/list] and GET /api/v1/coordination/escalations. project_id '*' (or '_') or all_projects=true lists every project (ENC-ISS-773). state and kind accept a comma-separated list. Default single-project behaviour and response shape are unchanged.",
+      "properties": {
+        "project_id": { "type": "string", "minLength": 1, "description": "Project id, or '*' / '_' for all projects." },
+        "all_projects": { "type": "boolean" },
+        "state": { "type": "string", "pattern": "^(pending|snoozed|decided|expired|superseded)(,(pending|snoozed|decided|expired|superseded))*$" },
+        "kind": { "type": "string", "pattern": "^(acceptance|reconciliation|escalation|tool_call|limit|security|stale_lock|drift|notice)(,(acceptance|reconciliation|escalation|tool_call|limit|security|stale_lock|drift|notice))*$" },
+        "status": { "type": "string", "description": "Legacy FSM status filter (requested, approved, applying, applied, failed, denied, denied_with_guidance, expired)." },
+        "target_record_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+        "next_cursor": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
