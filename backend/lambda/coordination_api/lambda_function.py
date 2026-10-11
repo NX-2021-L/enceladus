@@ -51,6 +51,11 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from enceladus_shared.appconfig_flags import flag as _appconfig_flag
 
+try:  # DVP-TSK-A17 (E4-R14): hub token exchange lives in the shared layer; absent -> fail closed
+    from enceladus_shared import hub_exchange as _hub_exchange
+except Exception:  # noqa: BLE001
+    _hub_exchange = None  # type: ignore[assignment]
+
 try:
     from mcp_client import CoordinationMcpClient
 except ModuleNotFoundError:
@@ -1244,9 +1249,76 @@ def _log_auth_failure(endpoint: str, error_type: str, event: Dict[str, Any], **e
     logger.warning("[AUTH_FAILURE] %s", json.dumps(payload, sort_keys=True, default=str))
 
 
+# DVP-TSK-A17 (E4-R14): hub token exchange glue. A HubExchange principal is a
+# short-lived, HMAC-signed human principal minted by POST /hub/exchange from an
+# allow-listed issuer's ID token. It is accepted ONLY on these human hub routes
+# (escalations list/feed + approve/deny decide); every other route refuses it,
+# so it can never reach the MCP path or any other io-session surface.
+_HUB_PRINCIPAL_ROUTES = (
+    ("GET", re.compile(r"/api/v1/coordination/escalations")),
+    ("POST", re.compile(r"/api/v1/coordination/escalations/[a-z0-9_\-]+/[A-Za-z0-9\-]+/(approve|deny)")),
+)
+_HUB_CORS_PATH_RE = re.compile(
+    r"/api/v1/coordination/(hub/exchange|escalations|escalations/[a-z0-9_\-]+/[A-Za-z0-9\-]+/(approve|deny))"
+)
+
+
+def _hub_cors_origin(event: Dict[str, Any], path: str) -> Optional[str]:
+    """Allowed shell origin to echo for exchange/list/decide routes, else None."""
+    if _hub_exchange is None or not _HUB_CORS_PATH_RE.fullmatch(path or ""):
+        return None
+    origin = _hub_exchange.cors_origin(event.get("headers"), {CORS_ORIGIN})
+    return origin if origin and origin != CORS_ORIGIN else None
+
+
+def _authenticate_hub_exchange(
+    event: Dict[str, Any], token: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    method, path = _path_method(event)
+    if not any(m == method and rx.fullmatch(path or "") for m, rx in _HUB_PRINCIPAL_ROUTES):
+        _log_auth_failure("/coordination", "hub_exchange_route_not_permitted", event)
+        return None, _error(403, "The hub exchange principal is not accepted on this route.")
+    try:
+        hub_claims = _hub_exchange.verify_hub_token(token)
+    except _hub_exchange.HubExchangeError as exc:
+        _log_auth_failure("/coordination", "hub_exchange_rejected", event, error_detail=exc.reason)
+        return None, _error(exc.status, exc.public_message)
+    return _hub_exchange.principal_claims(hub_claims), None
+
+
+def _handle_hub_exchange(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/hub/exchange -- {id_token} -> short-lived hub principal.
+
+    Public route: the credential is the allow-listed issuer's ID token in the
+    body. Refusals are generic (no issuer / identity detail leaks).
+    """
+    if _hub_exchange is None:
+        return _error(503, "Hub exchange is unavailable.")
+    try:
+        body = _json_body(event)
+    except Exception:  # noqa: BLE001
+        body = None
+    if not isinstance(body, dict):
+        return _error(400, "A JSON body with id_token is required.")
+    id_token = str(body.get("id_token") or "").strip()
+    if not id_token:
+        return _error(400, "A JSON body with id_token is required.")
+    try:
+        result = _hub_exchange.exchange(id_token, _load_escalation_approver_allowlist)
+    except _hub_exchange.HubExchangeError as exc:
+        _log_auth_failure("/coordination/hub/exchange", "hub_exchange_refused", event, error_detail=exc.reason)
+        return _error(exc.status, exc.public_message)
+    logger.info("[INFO] hub exchange minted issuer=%s", result.get("issuer"))
+    return _response(200, {"success": True, **result})
+
+
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     # Optional internal auth path for trusted orchestrators / smoke tests.
     headers = event.get("headers") or {}
+    if _hub_exchange is not None:
+        hub_token = _hub_exchange.extract_hub_token(headers)
+        if hub_token is not None:
+            return _authenticate_hub_exchange(event, hub_token)
     internal_key = (
         headers.get("x-coordination-internal-key")
         or headers.get("X-Coordination-Internal-Key")
@@ -1300,15 +1372,21 @@ def _has_managed_permission(claims: Dict[str, Any], *required: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# DVP-TSK-A17: per-request shell origin echoed on the hub routes only (see _hub_cors_origin).
+_request_cors: Dict[str, Optional[str]] = {"origin": None}
+
+
 def _cors_headers() -> Dict[str, str]:
+    hub_origin = _request_cors.get("origin")
     return {
-        "Access-Control-Allow-Origin": CORS_ORIGIN,
+        "Access-Control-Allow-Origin": hub_origin or CORS_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": (
             "Accept, Authorization, Content-Type, Cookie, X-Coordination-Callback-Token, "
             "X-Coordination-Internal-Key, X-Checkout-Assistant-Key"
         ),
         "Access-Control-Allow-Credentials": "true",
+        **({"Vary": "Origin"} if hub_origin else {}),
     }
 
 
@@ -9335,6 +9413,9 @@ def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
         (e.g. *@enceladus.internal).
     """
     claims = claims or {}
+    if claims.get("auth_mode") == "hub_exchange":
+        # DVP-TSK-A17: a verified HubExchange principal (human, allow-list checked by the caller).
+        return _hub_exchange is not None and _hub_exchange.is_human_hub_principal(claims)
     if str(claims.get("token_use") or "").strip().lower() != "id":
         return False
     if claims.get("client_id") and not claims.get("aud"):
@@ -11075,6 +11156,13 @@ def _gate_epoch_to_ts(value: Any) -> Optional[str]:
         return None
 
 
+def _escalation_auth_method(claims: Dict[str, Any]) -> str:
+    """interactive_human for Cognito; hub_exchange:<issuer-name> for an exchanged principal."""
+    if str((claims or {}).get("auth_mode") or "") == "hub_exchange":
+        return str(claims.get("auth_method") or "hub_exchange:unknown")
+    return "interactive_human"
+
+
 def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
                               now: dt.datetime) -> Tuple[Optional[Dict[str, Any]], str]:
     """Decide-time authentication evidence recorded on every log entry.
@@ -11089,7 +11177,7 @@ def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
     """
     auth_time = _gate_epoch_to_ts(claims.get("auth_time")) or _gate_epoch_to_ts(claims.get("iat"))
     evidence: Dict[str, Any] = {
-        "auth_method": "interactive_human", "auth_time": auth_time,
+        "auth_method": _escalation_auth_method(claims), "auth_time": auth_time,
         "assurance": "aal1", "proof_method": "none",
     }
     proof = body.get("stepUp")
@@ -18209,6 +18297,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
 
     # --- Standard API Gateway HTTP routing ---
     method, path = _path_method(event)
+    _request_cors["origin"] = _hub_cors_origin(event, path)
 
     if method == "OPTIONS":
         return _response(200, {"success": True})
@@ -18246,6 +18335,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # before the generic auth gate below.
     if method == "POST" and path.endswith("/api/v1/cursor/webhook"):
         return _handle_cursor_webhook(event)
+
+    # DVP-TSK-A17 (E4-R14): hub token exchange. Public route; the credential is the
+    # allow-listed issuer's ID token in the body (verified inside the handler).
+    if method == "POST" and path == "/api/v1/coordination/hub/exchange":
+        return _handle_hub_exchange(event)
 
     # Auth all other routes.
     claims, auth_err = _authenticate(event)
