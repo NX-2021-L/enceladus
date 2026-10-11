@@ -1,0 +1,10 @@
+/* DVP-TSK-A09 (measured on gamma c20fc43): cascade-layer order, declared before any other stylesheet.
+ *
+ * io-kit.css sits in @layer io-kit.* and was imported before styles.css, whose `@import 'tailwindcss'` declares
+ * `theme, base, components, utilities` afterwards. Layers rank by first appearance, so Tailwind's preflight
+ * (`@layer base { * { margin: 0 } }`) out-ranked every kit rule: the split pane's gutter margin computed to 0 and
+ * result cards stopped 11px short of the Clear edge (605 vs 616) and the detail card short of the header (1119 vs 1130).
+ *
+ * Order: Tailwind's reset (base) < the kit (io-kit) < Tailwind components and utilities. Unlayered design-system-2
+ * styles still beat every layer, as before. */
+@layer theme, base, io-kit, components, utilities;
