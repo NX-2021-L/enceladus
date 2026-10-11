@@ -61,6 +61,9 @@ describe('KitMarkdownContent parity with the legacy parser', () => {
     const md = SNIPPETS.bareUrl
     const out = renderToStaticMarkup(<KitMarkdownContent text={md} />)
     expect(out.match(/<a /g)).toHaveLength(1)
+    const same = '[https://x.test](https://x.test)'
+    expect(kit(same)).toBe(legacy(same))
+    expect(renderToStaticMarkup(<KitMarkdownContent text={same} />)).toContain('<a href="https://x.test"')
     expect(out).toContain('target="_blank" rel="noreferrer" class="ev2-md__link"')
     expect(out).toContain('Plain https://example.com/a?b=1 and http://x.test')
   })

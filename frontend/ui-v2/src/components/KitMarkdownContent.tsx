@@ -15,7 +15,6 @@ import './markdownContent.css'
  *  - tables, images and hard breaks render as real elements instead of
  *    being flattened into paragraph text (nested lists are flattened like the legacy model; a thematic
  *    break keeps the legacy literal "---" paragraph);
- *  - bare URLs are NOT autolinked (the legacy parser never linked them; the autolink is rendered as text);
  *  - `<!-- enc:block:ID -->` marker lines are removed before rendering (the legacy whole-body fallback
  *    showed them as literal paragraph text; sections are already sliced without them);
  *  - the legacy fence scanner toggled on EVERY ``` line, so a ```yaml line inside an open fence flipped
@@ -44,6 +43,8 @@ export function hostMarkdownPlugins(resolver: IdResolver, wide: boolean): MdPlug
     claimBadges: false,
     anchors: false,
     longTokens: false,
+    // bare URLs, www. hosts and emails stay text (the legacy parser never linked them); [t](u) still links
+    autolinkLiterals: false,
   })
 }
 
@@ -103,9 +104,6 @@ function Anchor({ className, href, children }: Props) {
     )
   }
   if (!href) return <>{children}</>
-  // gfm autolink literal (http(s) URL, www. host or email: text derives from href): the legacy parser left bare URLs as text
-  const label = textOf(children)
-  if (label === href || href === `http://${label}` || href === `mailto:${label}`) return <>{children}</>
   return (
     <a href={href} target="_blank" rel="noreferrer" className="ev2-md__link">
       {children}
