@@ -18,6 +18,7 @@ import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { GateInboxPanel, isLegacyEscalations } from './GateInboxPanel'
 import { pausedApprovalRows, pendingEscalationRows, staleLockRows, type QueueRow } from './homeQueue'
 import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedUrl'
 import {
@@ -192,6 +193,7 @@ export function HomeRoute() {
     queryKey: ['home', 'queue', 'stale-locks'] as const,
     queryFn: ({ signal }) => fetchStaleLocks({ signal }),
   })
+  const legacyQueue = isLegacyEscalations()
   const queueRows: QueueRow[] = [
     ...pendingEscalationRows(escalationsQuery.data ?? []),
     ...pausedApprovalRows(pausedApprovalsQuery.data ?? []),
@@ -359,10 +361,14 @@ export function HomeRoute() {
         <div className="home-route__section-label home-route__section-label--alert">
           Requires io
           <span className="home-route__section-hint">
-            {queueRows.length} item{queueRows.length === 1 ? '' : 's'} only the principal can unblock
+            {legacyQueue
+              ? `${queueRows.length} item${queueRows.length === 1 ? '' : 's'} only the principal can unblock`
+              : 'all projects, every kind'}
           </span>
         </div>
-        {escalationsQuery.isLoading ? (
+        {!legacyQueue ? (
+          <GateInboxPanel compact />
+        ) : escalationsQuery.isLoading ? (
           <p className="home-route__empty">Loading escalations…</p>
         ) : (
           <div className="home-route__queue-list">
