@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
+import { ScrollTopZone, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
 import { AppLayout, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
@@ -78,6 +79,22 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const activeHref = resolveActiveHref(pathname)
 
+  // DVP-TSK-956: the ds2 frame scrolls ONE inner element (.ev2-al__content,
+  // owned by AppLayout), not the window. Find it once, mark it as the kit's
+  // scroller convention, and drive tap-to-top / keyboard reveal from it.
+  const frameRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    const scroller = frameRef.current?.querySelector<HTMLElement>('.ev2-al__content') ?? null
+    scrollerRef.current = scroller
+    scroller?.setAttribute('data-io-scroller', '')
+  }, [])
+  const scrollToTop = useScrollToTop(scrollerRef)
+  // Keyboard: sizes the frame to the visible area (shell.css) and reveals the
+  // focused field inside the scroller; the fixed record action bar is hidden
+  // while the keyboard is open.
+  useVisualViewportFrame({ target: frameRef })
+
   const navigationOpen = useUiStore((s) => s.sidebarOpen)
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)
@@ -128,6 +145,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       return
     }
     if (href) {
+      // Re-tapping the active destination scrolls to the top (kit Nav default).
+      if (href === activeHref) scrollToTop()
       navigate({ to: href })
       if (!window.matchMedia(DESKTOP_QUERY).matches) {
         setSidebarOpen(false)
@@ -138,7 +157,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const shellClass = navigationOpen ? 'ev2-shell ev2-shell--nav-open' : 'ev2-shell'
 
   return (
-    <div className={shellClass}>
+    <div className={shellClass} ref={frameRef}>
       {navigationOpen ? (
         <button
           type="button"
@@ -149,35 +168,37 @@ export function AppShell({ children }: { children: ReactNode }) {
       ) : null}
       <AppLayout
         topNavigation={
-          <TopNavigation
-            identity={{ title: 'ENCELADUS', href: '/', iconSrc: enceladusMarkUrl, version: __APP_VERSION__ }}
-            search={{
-              value: commandQuery,
-              onChange: setCommandQuery,
-              placeholder: 'Search…',
-              // Mobile taps expand to the existing full-screen overlay;
-              // desktop focus widens the box in place and opens the
-              // anchored dropdown instead (ENC-TSK-N46).
-              onFocus: () => openCommandPalette(window.matchMedia(DESKTOP_QUERY).matches),
-              onBlur: () => {
-                // Only the anchored (desktop) mode should close on blur --
-                // on mobile, focus moving into CommandPalette's own
-                // full-screen input fires this same blur and would
-                // otherwise close the overlay the instant it opens.
-                if (commandPaletteOpen && window.matchMedia(DESKTOP_QUERY).matches) {
-                  closeCommandPalette()
-                }
-              },
-              onKeyDown: (event) => {
-                if (event.key === 'Enter') submitCommand()
-                if (event.key === 'Escape') {
-                  closeCommandPalette()
-                  event.currentTarget.blur()
-                }
-              },
-            }}
-            utilities={[{ text: 'Menu', onClick: toggleSidebar }]}
-          />
+          <ScrollTopZone scrollerRef={scrollerRef} className="io-safe-top ev2-shell__bar">
+            <TopNavigation
+              identity={{ title: 'ENCELADUS', href: '/', iconSrc: enceladusMarkUrl, version: __APP_VERSION__ }}
+              search={{
+                value: commandQuery,
+                onChange: setCommandQuery,
+                placeholder: 'Search…',
+                // Mobile taps expand to the existing full-screen overlay;
+                // desktop focus widens the box in place and opens the
+                // anchored dropdown instead (ENC-TSK-N46).
+                onFocus: () => openCommandPalette(window.matchMedia(DESKTOP_QUERY).matches),
+                onBlur: () => {
+                  // Only the anchored (desktop) mode should close on blur --
+                  // on mobile, focus moving into CommandPalette's own
+                  // full-screen input fires this same blur and would
+                  // otherwise close the overlay the instant it opens.
+                  if (commandPaletteOpen && window.matchMedia(DESKTOP_QUERY).matches) {
+                    closeCommandPalette()
+                  }
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submitCommand()
+                  if (event.key === 'Escape') {
+                    closeCommandPalette()
+                    event.currentTarget.blur()
+                  }
+                },
+              }}
+              utilities={[{ text: 'Menu', onClick: toggleSidebar }]}
+            />
+          </ScrollTopZone>
         }
         navigation={
           // No `header` here (ENC-ISS-513 / FND-01): the wordmark already

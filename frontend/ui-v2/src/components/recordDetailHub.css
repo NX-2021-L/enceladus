@@ -8,7 +8,7 @@
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  padding-bottom: calc(64px + var(--space-4));
+  padding-bottom: calc(64px + var(--space-4) + var(--io-safe-bottom));
 }
 
 .ev2-rdh__main {
@@ -110,7 +110,9 @@
   right: 0;
   bottom: 0;
   z-index: 20;
-  padding: var(--space-3) var(--space-4);
+  /* DVP-TSK-956: touches left, right and bottom, so each takes its inset. */
+  padding: var(--space-3) max(var(--space-4), var(--io-safe-right))
+    calc(var(--space-3) + var(--io-safe-bottom)) max(var(--space-4), var(--io-safe-left));
   /* ENC-TSK-M75: was var(--bg-elevated) — an UNDEFINED token, so the bar
    * rendered with no background (transparent) and page text (the DESCRIPTION
    * heading) bled through and garbled the buttons on scroll. Use the opaque

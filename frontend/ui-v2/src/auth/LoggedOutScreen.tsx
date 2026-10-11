@@ -19,7 +19,8 @@ export function LoggedOutScreen() {
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        padding: 'var(--space-6)',
+        padding:
+          'calc(var(--space-6) + var(--io-safe-top)) calc(var(--space-6) + var(--io-safe-right)) calc(var(--space-6) + var(--io-safe-bottom)) calc(var(--space-6) + var(--io-safe-left))',
         background: 'var(--enc-void)',
       }}
     >
