@@ -24,6 +24,10 @@ _SPEC = importlib.util.spec_from_file_location(
 coordination_lambda = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = coordination_lambda
 _SPEC.loader.exec_module(coordination_lambda)
+# ENC-TSK-967: fixtures are dated 2026-07-02; pin the F-10 expiry clock inside
+# their 72h window (expiry behaviour has its own suite, test_escalation_gate_e4.py).
+import datetime as _dt
+coordination_lambda._gate_now = lambda: _dt.datetime(2026, 7, 2, 5, 0, tzinfo=_dt.timezone.utc)
 
 INTERNAL_CLAIMS = {"auth_mode": "internal-key"}
 MANAGED_CLAIMS = {"auth_mode": "managed-token"}
@@ -161,7 +165,7 @@ class TestEscalationDecisions(unittest.TestCase):
         self.assertEqual("applied", body["status"])
         self.assertEqual("io@jreese.net", body["approved_by"])
 
-        update = ddb.update_item.call_args.kwargs
+        update = ddb.update_item.call_args_list[0].kwargs
         self.assertIn("#st = :requested", update["ConditionExpression"])
         values = update["ExpressionAttributeValues"]
         self.assertEqual("approved", values[":new_status"]["S"])

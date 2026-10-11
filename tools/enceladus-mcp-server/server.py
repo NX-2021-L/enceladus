@@ -6534,6 +6534,11 @@ async def _escalation_request(args: dict) -> list[TextContent]:
                          "coordination_request_id", "dispatch_id"):
         if args.get(optional_key) is not None:
             payload[optional_key] = args[optional_key]
+    # ENC-TSK-967 phase 2b: gate-card / producer fields pass straight through.
+    for gate_key in ("kind", "candidates", "proposedCalls", "source_principal", "source",
+                     "subject", "title", "risk", "evidence"):
+        if args.get(gate_key) is not None:
+            payload[gate_key] = args[gate_key]
 
     resp = _tracker_api_request("POST", f"/{project_id}/escalation", payload=payload)
     return _result_text(resp)
@@ -6559,6 +6564,11 @@ async def _escalation_list(args: dict) -> list[TextContent]:
         "target_record_id": args.get("target_record_id"),
         "session_id": args.get("session_id"),
         "page_size": args.get("page_size"),
+        # ENC-TSK-967 phase 2b / ENC-ISS-773: additive filters, default shape unchanged.
+        "kind": args.get("kind"),
+        "state": args.get("state"),
+        "all_projects": (None if args.get("all_projects") in (None, "")
+                         else str(args["all_projects"]).lower()),
     }
     # ENC-TSK-J69: the "list" pseudo-id rides the API Gateway route
     # GET /{projectId}/{recordType}/{recordId} — the bare collection path has

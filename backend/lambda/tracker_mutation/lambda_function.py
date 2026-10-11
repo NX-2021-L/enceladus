@@ -531,13 +531,17 @@ ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
 # the current status value (approved OR failed) keeps exactly-once semantics
 # even when two re-drives race.
 _ESCALATION_FSM = {
-    "requested": {"approved", "denied", "denied_with_guidance"},
+    "requested": {"approved", "denied", "denied_with_guidance", "expired"},
     "approved": {"applying"},
     "applying": {"applied", "failed"},
     "denied": set(),
     "denied_with_guidance": set(),
     "applied": set(),
     "failed": {"applying"},
+    # ENC-TSK-967 (F-10): fail-closed expiry terminal written by the sweeper.
+    # `superseded` is deliberately NOT an escalation status (it is a normal
+    # task status); the gate state superseded is derived from onExpire=regenerate.
+    "expired": set(),
 }
 _ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
 _ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
@@ -8494,6 +8498,393 @@ def _parse_escalation_target(target_record_id: str):
     return record_type, f"{record_type}#{target_record_id}", ""
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-967 (DVP-PLN-013 E4-W1.2): the escalation entity generalised to the
+# gate-card contract (tools/enceladus-mcp-server/parity/schema/gates.schema.json).
+# Strictly additive (D9): legacy ESC records are read back as kind=escalation
+# with F-10 defaults backfilled ON READ -- no data migration -- and every new
+# request field is optional.
+# ---------------------------------------------------------------------------
+_GATE_DECISION_KINDS = (
+    "acceptance", "reconciliation", "escalation", "tool_call",
+    "limit", "security", "stale_lock",
+)
+_GATE_TELEMETRY_KINDS = ("drift", "notice")
+_GATE_KINDS = set(_GATE_DECISION_KINDS) | set(_GATE_TELEMETRY_KINDS)
+_GATE_RISKS = ("low", "medium", "high", "critical")
+_GATE_STATES = ("pending", "snoozed", "decided", "expired", "superseded")
+_GATE_DECISION_ON_EXPIRE = ("deny", "regenerate")
+_GATE_EXPIRY_MAX_SECONDS = 30 * 86400  # F-10 hard max (spec s1.1 expiry_rules)
+_GATE_TTL_72H = 72 * 3600
+_GATE_TTL_24H = 24 * 3600
+_GATE_TTL_7D = 7 * 86400
+# kind -> (default ttl seconds | None, default onExpire, default risk)
+_GATE_KIND_DEFAULTS = {
+    "acceptance": (_GATE_TTL_7D, "regenerate", "medium"),
+    "reconciliation": (_GATE_TTL_7D, "regenerate", "medium"),
+    "stale_lock": (_GATE_TTL_7D, "regenerate", "low"),
+    "escalation": (_GATE_TTL_72H, "deny", "high"),
+    "tool_call": (_GATE_TTL_72H, "deny", "high"),
+    "security": (_GATE_TTL_72H, "deny", "critical"),
+    "limit": (_GATE_TTL_24H, "deny", "medium"),
+    "drift": (None, "auto_clear", "low"),
+    "notice": (_GATE_TTL_7D, "auto_clear", "low"),
+}
+_GATE_MAX_CANDIDATES = 20
+_GATE_MAX_EVIDENCE = 50
+
+
+def _gate_now() -> "dt.datetime":
+    """Clock for gate expiry decisions (separate from _now_z so tests can pin it)."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _gate_parse_ts(value: Any) -> Optional["dt.datetime"]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _gate_fmt(ts: "dt.datetime") -> str:
+    return ts.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gate_family(kind: str) -> str:
+    return "telemetry" if kind in _GATE_TELEMETRY_KINDS else "decision"
+
+
+def _gate_default_expires_at(kind: str, created_at: Any) -> Optional[str]:
+    """F-10 default expiry: created_at + the kind's ttl (None for ttl-less kinds)."""
+    ttl = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])[0]
+    base = _gate_parse_ts(created_at)
+    if ttl is None or base is None:
+        return None
+    return _gate_fmt(base + dt.timedelta(seconds=ttl))
+
+
+def _escalation_expiry(record: Dict, now: Optional["dt.datetime"] = None) -> Dict[str, Any]:
+    """Resolve {expiresAt, expired, onExpire} for an escalation record.
+
+    FAIL-CLOSED: a decision-family record whose expiry cannot be established
+    (unparsable stored expiresAt, or no stored expiresAt and an unparsable
+    created_at) is treated as expired -- an unverifiable authorisation window
+    never executes a call.
+    """
+    now = now or _gate_now()
+    kind = str(record.get("kind") or "escalation")
+    defaults = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    on_expire = str(record.get("onExpire") or defaults[1])
+    raw = record.get("expiresAt")
+    if not (isinstance(raw, str) and raw.strip()):
+        raw = _gate_default_expires_at(kind, record.get("created_at"))
+    expires = _gate_parse_ts(raw)
+    if expires is None:
+        return {
+            "expiresAt": None,
+            "expired": _gate_family(kind) == "decision" and defaults[0] is not None,
+            "onExpire": on_expire,
+        }
+    return {"expiresAt": _gate_fmt(expires), "expired": now >= expires, "onExpire": on_expire}
+
+
+def _escalation_gate_state(record: Dict, expiry: Dict[str, Any], now: "dt.datetime") -> str:
+    status = record.get("status")
+    if status == "expired" or (status == "requested" and expiry["expired"]):
+        return "superseded" if expiry["onExpire"] == "regenerate" else "expired"
+    if status == "requested":
+        snoozed = _gate_parse_ts(record.get("snoozedUntil"))
+        if snoozed is not None and snoozed > now:
+            return "snoozed"
+        return "pending"
+    return "decided"
+
+
+def _escalation_apply_gate_view(record: Dict) -> None:
+    """Additively project the gate-card fields onto a deserialised escalation.
+
+    Legacy ESC records (no `kind`) read back as kind=escalation with the F-10
+    defaults; stored values always win over defaults. Backfilled field names
+    are listed in `gateBackfilled` so a consumer can tell stored from derived.
+    """
+    now = _gate_now()
+    kind = str(record.get("kind") or "escalation")
+    defaults = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    backfilled = []
+    if not record.get("kind"):
+        backfilled.append("kind")
+    record["kind"] = kind
+    for name, value in (("family", _gate_family(kind)), ("risk", defaults[2]),
+                        ("onExpire", defaults[1])):
+        if not record.get(name):
+            record[name] = value
+            backfilled.append(name)
+    if not record.get("expiresAt"):
+        derived = _gate_default_expires_at(kind, record.get("created_at"))
+        if derived:
+            record["expiresAt"] = derived
+            backfilled.append("expiresAt")
+    target = str(record.get("target_record_id") or "")
+    if target:
+        if not record.get("subject"):
+            record["subject"] = {
+                "record_id": target,
+                "project": record.get("project_id") or "",
+                "version": str(record.get("expected_version") or ""),
+            }
+        if not record.get("evidence"):
+            record["evidence"] = [{"label": "target", "ref": target}]
+            backfilled.append("evidence")
+    if not record.get("id") and record.get("item_id"):
+        record["id"] = record["item_id"]
+    if not record.get("createdAt") and record.get("created_at"):
+        record["createdAt"] = record["created_at"]
+    if not record.get("title") and record.get("mutation_type"):
+        record["title"] = f"{record.get('mutation_type')} on {target}".strip()
+    requested_by = record.get("requested_by")
+    if not record.get("requestedBy") and isinstance(requested_by, dict):
+        session = str(requested_by.get("session_id") or "")
+        if session:
+            record["requestedBy"] = session
+    expiry = _escalation_expiry(record, now)
+    record["state"] = _escalation_gate_state(record, expiry, now)
+    if backfilled:
+        record["gateBackfilled"] = backfilled
+
+
+def _gate_list_project_ids() -> list:
+    """All registered project ids (cross-project escalation list, ENC-ISS-773)."""
+    ddb = _get_ddb()
+    ids = []
+    kwargs: Dict[str, Any] = {
+        "TableName": PROJECTS_TABLE,
+        "ProjectionExpression": "project_id",
+    }
+    while True:
+        resp = ddb.scan(**kwargs)
+        for raw in resp.get("Items", []):
+            pid = (raw.get("project_id") or {}).get("S")
+            if pid:
+                ids.append(pid)
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted(set(ids))
+
+
+def _gate_csv(value: Any) -> list:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _gate_pick(body: Dict, *names):
+    for name in names:
+        if body.get(name) not in (None, ""):
+            return body.get(name)
+    return None
+
+
+def _gate_producer_principals() -> Dict[str, set]:
+    """Per-source producer allow-list (ENC-TSK-967 phase 2b).
+
+    GATE_PRODUCER_PRINCIPALS='{"think": ["<principal>", ...], "vagamod": [...]}'.
+    FAIL-CLOSED: unset, empty or malformed config yields an empty map, so every
+    producer request is refused until the allow-list is configured.
+    """
+    raw = os.environ.get("GATE_PRODUCER_PRINCIPALS", "")
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(src): {str(p).strip() for p in principals if str(p).strip()}
+        for src, principals in parsed.items()
+        if isinstance(principals, (list, tuple))
+    }
+
+
+def _gate_resolve_producer(principal: str, source: Any):
+    """Resolve (source, error) for a producer principal; error is a 403 message."""
+    allow = _gate_producer_principals()
+    matches = sorted(src for src, principals in allow.items() if principal in principals)
+    if not matches:
+        return None, "source_principal is not allow-listed for any producer source."
+    if source not in (None, ""):
+        if str(source) not in matches:
+            return None, f"source_principal is not allow-listed for source '{source}'."
+        return str(source), None
+    if len(matches) > 1:
+        return None, f"source_principal is allow-listed for several sources {matches}; pass 'source'."
+    return matches[0], None
+
+
+def _gate_is_producer_request(body: Dict) -> bool:
+    """A request without mutation_type that carries a producer marker."""
+    if str(body.get("mutation_type") or "").strip():
+        return False
+    return _gate_pick(body, "proposedCalls", "proposed_calls", "sourcePrincipal",
+                      "source_principal", "source") is not None
+
+
+_GATE_CALL_KEYS = {"capability", "mcpTool", "method", "path", "args", "annotations",
+                   "ifMatch", "callHash"}
+
+
+def _gate_validate_resolved_call(call: Any, where: str) -> Optional[str]:
+    """Shape-check one ResolvedCall (gates.schema.json). The hash is not recomputed here."""
+    if not isinstance(call, dict):
+        return f"{where} must be an object."
+    extra = sorted(set(call) - _GATE_CALL_KEYS)
+    if extra:
+        return f"{where} has unknown fields {extra}."
+    for name in ("capability", "path", "ifMatch"):
+        if not (isinstance(call.get(name), str) and call[name].strip()):
+            return f"{where}.{name} must be a non-empty string."
+    if call.get("method") not in ("POST", "PUT", "PATCH", "DELETE"):
+        return f"{where}.method must be one of POST, PUT, PATCH, DELETE."
+    if not isinstance(call.get("args"), dict) or not isinstance(call.get("annotations"), dict):
+        return f"{where}.args and {where}.annotations must be objects."
+    import re as _re
+    if not (isinstance(call.get("callHash"), str) and _re.fullmatch(r"[0-9a-f]{64}", call["callHash"])):
+        return f"{where}.callHash must be a lowercase sha256 hex digest."
+    return None
+
+
+def _gate_validate_actions(proposed: Any, candidates: Any) -> Optional[str]:
+    if proposed is not None:
+        if not isinstance(proposed, list) or not proposed or len(proposed) > _GATE_MAX_CANDIDATES:
+            return f"Field 'proposedCalls' must be a list of 1..{_GATE_MAX_CANDIDATES} resolved calls."
+        for idx, call in enumerate(proposed):
+            err = _gate_validate_resolved_call(call, f"proposedCalls[{idx}]")
+            if err:
+                return err
+    for idx, cand in enumerate(candidates or []):
+        if cand.get("call") is not None:
+            err = _gate_validate_resolved_call(cand["call"], f"candidates[{idx}].call")
+            if err:
+                return err
+    return None
+
+
+def _escalation_gate_request_fields(body: Dict, now: "dt.datetime", allow_telemetry: bool = False):
+    """Validate the optional gate-card fields of escalation.request.
+
+    Returns (fields, error). Every field is optional; legacy requests (no
+    gate fields) resolve to kind=escalation with the F-10 defaults. Camel-case
+    names are canonical; snake_case aliases are accepted for MCP ergonomics.
+    """
+    def pick(*names):
+        for name in names:
+            if body.get(name) not in (None, ""):
+                return body.get(name)
+        return None
+
+    kind = str(pick("kind") or "escalation").strip()
+    if kind not in _GATE_KINDS:
+        return None, f"Invalid kind '{kind}'. Allowed: {sorted(_GATE_KINDS)}."
+    family = _gate_family(kind)
+    supplied_family = pick("family")
+    if supplied_family is not None and str(supplied_family) != family:
+        return None, f"family '{supplied_family}' contradicts kind '{kind}' (family is {family})."
+    if family == "telemetry" and not allow_telemetry:
+        return None, (
+            f"Telemetry kind '{kind}' carries no proposed action and is not "
+            "accepted by escalation.request."
+        )
+    ttl, default_on_expire, default_risk = _GATE_KIND_DEFAULTS[kind]
+
+    risk = str(pick("risk") or default_risk).strip()
+    if risk not in _GATE_RISKS:
+        return None, f"Invalid risk '{risk}'. Allowed: {list(_GATE_RISKS)}."
+    on_expire = str(pick("onExpire", "on_expire") or default_on_expire).strip()
+    allowed_on_expire = _GATE_DECISION_ON_EXPIRE + (("auto_clear",) if family == "telemetry" else ())
+    if on_expire not in allowed_on_expire:
+        return None, f"Invalid onExpire '{on_expire}'. Allowed: {list(allowed_on_expire)}."
+
+    expires_raw = pick("expiresAt", "expires_at")
+    if expires_raw is None:
+        expires = now + dt.timedelta(seconds=ttl) if ttl is not None else None
+    else:
+        expires = _gate_parse_ts(expires_raw)
+        if expires is None:
+            return None, "Field 'expiresAt' must be an ISO-8601 timestamp."
+        if expires <= now:
+            return None, "Field 'expiresAt' is already in the past."
+        if (expires - now).total_seconds() > _GATE_EXPIRY_MAX_SECONDS:
+            return None, "Field 'expiresAt' exceeds the 30d hard maximum (F-10)."
+
+    snoozed_raw = pick("snoozedUntil", "snoozed_until")
+    snoozed = None
+    if snoozed_raw is not None:
+        snoozed = _gate_parse_ts(snoozed_raw)
+        if snoozed is None:
+            return None, "Field 'snoozedUntil' must be an ISO-8601 timestamp."
+        if expires is not None and snoozed > expires:
+            return None, "Field 'snoozedUntil' must be <= expiresAt (snooze never extends expiry)."
+
+    candidates = pick("candidates")
+    if candidates is not None:
+        if not isinstance(candidates, list) or not candidates or len(candidates) > _GATE_MAX_CANDIDATES:
+            return None, f"Field 'candidates' must be a list of 1..{_GATE_MAX_CANDIDATES} objects."
+        seen = set()
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                return None, "Each candidate must be an object."
+            cid = cand.get("id")
+            if not (isinstance(cid, str) and cid.strip() and isinstance(cand.get("label"), str)
+                    and cand["label"].strip()):
+                return None, "Each candidate requires non-empty string 'id' and 'label'."
+            if cid in seen:
+                return None, f"Duplicate candidate id '{cid}'."
+            seen.add(cid)
+
+    evidence = pick("evidence")
+    if evidence is not None:
+        if not isinstance(evidence, list) or not evidence or len(evidence) > _GATE_MAX_EVIDENCE:
+            return None, f"Field 'evidence' must be a list of 1..{_GATE_MAX_EVIDENCE} objects."
+        for item in evidence:
+            if not (isinstance(item, dict) and isinstance(item.get("label"), str)
+                    and item["label"].strip() and isinstance(item.get("ref"), str)
+                    and item["ref"].strip()):
+                return None, "Each evidence item requires non-empty string 'label' and 'ref'."
+
+    blast = pick("blastRadius", "blast_radius")
+    if blast is not None:
+        records = blast.get("records") if isinstance(blast, dict) else None
+        stacks = blast.get("stacks") if isinstance(blast, dict) else None
+        irreversible = blast.get("irreversible") if isinstance(blast, dict) else None
+        if not (isinstance(records, int) and not isinstance(records, bool) and records >= 0
+                and isinstance(stacks, list) and all(isinstance(x, str) for x in stacks)
+                and isinstance(irreversible, bool)):
+            return None, (
+                "Field 'blastRadius' must be {records:int>=0, stacks:[str], irreversible:bool}."
+            )
+
+    return {
+        "kind": kind,
+        "family": family,
+        "risk": risk,
+        "onExpire": on_expire,
+        "expiresAt": _gate_fmt(expires) if expires else "",
+        "snoozedUntil": _gate_fmt(snoozed) if snoozed else "",
+        "candidates": candidates,
+        "evidence": evidence,
+        "blastRadius": blast,
+        "title": str(pick("title") or "").strip()[:200],
+        "sourcePrincipal": str(pick("sourcePrincipal", "source_principal") or "").strip()[:200],
+    }, None
+
+
 def _escalation_event(event_type: str, actor: str, detail: Optional[Dict] = None,
                       guidance_note: str = "") -> Dict:
     """Build one §11.2 event object in DynamoDB attribute shape (append-only)."""
@@ -8518,6 +8909,13 @@ def _escalation_public(item: Dict) -> Dict:
             record["payload"] = json.loads(raw_payload)
         except (ValueError, TypeError):
             pass
+    for gate_key in ("candidates", "evidence", "blastRadius", "proposedCalls", "subject"):
+        raw_gate = record.get(gate_key)
+        if isinstance(raw_gate, str):
+            try:
+                record[gate_key] = json.loads(raw_gate)
+            except (ValueError, TypeError):
+                pass
     for event in record.get("events") or []:
         raw_detail = event.get("detail") if isinstance(event, dict) else None
         if isinstance(raw_detail, str):
@@ -8525,6 +8923,7 @@ def _escalation_public(item: Dict) -> Dict:
                 event["detail"] = json.loads(raw_detail)
             except (ValueError, TypeError):
                 pass
+    _escalation_apply_gate_view(record)  # ENC-TSK-967: additive, read-time backfill
     return record
 
 
@@ -8538,6 +8937,11 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+
+    if _gate_is_producer_request(body):
+        return _handle_escalation_produce(project_id, body)  # ENC-TSK-967 phase 2b
+    if _gate_pick(body, "proposedCalls", "proposed_calls") is not None:
+        return _error(400, "proposedCalls belongs to the producer API; it cannot be combined with mutation_type.")
 
     target_record_id = str(body.get("target_record_id") or "").strip()
     mutation_type = str(body.get("mutation_type") or "").strip()
@@ -8582,6 +8986,15 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     validation_error = handler["validate_payload"](payload, target_type)
     if validation_error:
         return _error(400, validation_error)
+
+    # ENC-TSK-967: optional gate-card fields (kind/risk/expiry/candidates/...).
+    gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now())
+    if gate_err:
+        return _error(400, gate_err)
+    if gate_fields["sourcePrincipal"]:  # a claimed producer principal is always verified
+        _src, principal_err = _gate_resolve_producer(gate_fields["sourcePrincipal"], body.get("source"))
+        if principal_err:
+            return _error(403, principal_err)
 
     # Target must exist — read fresh, never trust the caller's snapshot.
     ddb = _get_ddb()
@@ -8630,6 +9043,14 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     }
     if expected_version:
         item["expected_version"] = _ser_s(expected_version)
+    for gate_key in ("kind", "family", "risk", "onExpire", "expiresAt"):
+        item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key in ("snoozedUntil", "title", "sourcePrincipal"):
+        if gate_fields[gate_key]:
+            item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key in ("candidates", "evidence", "blastRadius"):
+        if gate_fields[gate_key] is not None:
+            item[gate_key] = _ser_s(json.dumps(gate_fields[gate_key], default=str))
 
     try:
         ddb.put_item(
@@ -8655,6 +9076,110 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
         "target_record_type": target_type,
         "mutation_type": mutation_type,
         "created_at": now,
+        # ENC-TSK-967 additive gate-card fields (D9).
+        "kind": gate_fields["kind"],
+        "family": gate_fields["family"],
+        "risk": gate_fields["risk"],
+        "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
+        "expiresAt": gate_fields["expiresAt"],
+        "onExpire": gate_fields["onExpire"],
+    })
+
+
+def _handle_escalation_produce(project_id: str, body: Dict) -> Dict:
+    """Producer API (ENC-TSK-967 phase 2b): escalation.request for external sources.
+
+    think and vagamod post gate cards of any kind under a per-source principal
+    (GATE_PRODUCER_PRINCIPALS). A decision-family card carries EXACTLY ONE of
+    proposedCalls or candidates; telemetry kinds (drift, notice) carry neither.
+    The principal check runs first (403) so an unlisted caller learns nothing
+    about the validation rules. Legacy mutation_type requests never reach here.
+    """
+    principal = str(_gate_pick(body, "sourcePrincipal", "source_principal") or "").strip()
+    if not principal:
+        return _error(400, "Field 'source_principal' is required for producer requests.")
+    source, principal_err = _gate_resolve_producer(principal, body.get("source"))
+    if principal_err:
+        return _error(403, principal_err)
+
+    gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now(), allow_telemetry=True)
+    if gate_err:
+        return _error(400, gate_err)
+    proposed = _gate_pick(body, "proposedCalls", "proposed_calls")
+    candidates = gate_fields["candidates"]
+    if gate_fields["family"] == "telemetry":
+        if proposed is not None or candidates is not None:
+            return _error(400, f"Telemetry kind '{gate_fields['kind']}' carries no proposed action "
+                               "(neither proposedCalls nor candidates).")
+    elif (proposed is None) == (candidates is None):
+        return _error(400, "Exactly one of 'proposedCalls' or 'candidates' is required "
+                           "for a decision-family producer request.")
+    action_err = _gate_validate_actions(proposed, candidates)
+    if action_err:
+        return _error(400, action_err)
+    subject = _gate_pick(body, "subject")
+    if subject is not None and not (
+            isinstance(subject, dict) and isinstance(subject.get("record_id"), str)
+            and subject["record_id"].strip()):
+        return _error(400, "Field 'subject' must be an object with a non-empty 'record_id'.")
+
+    prefix = _get_project_prefix(project_id)
+    if not prefix:
+        return _error(404, f"Project '{project_id}' not found or has no prefix.")
+    escalation_id = _next_record_id(project_id, prefix, "escalation")
+    now = _now_z()
+    kind = gate_fields["kind"]
+    item = {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"escalation#{escalation_id}"),
+        "item_id": _ser_s(escalation_id),
+        "record_type": _ser_s("escalation"),
+        "source": _ser_s(source),
+        "requested_by": {"M": {
+            "session_id": _ser_s(principal),
+            "agent_type_id": _ser_s(""),
+            "sci_present": {"BOOL": False},
+        }},
+        "status": _ser_s("requested"),
+        "events": {"L": [_escalation_event(
+            "requested", principal,
+            detail={"kind": kind, "source": source, "source_principal": principal},
+        )]},
+        "created_at": _ser_s(now),
+        "updated_at": _ser_s(now),
+        "write_source": _build_write_source(body),
+    }
+    justification = str(body.get("justification") or "").strip()
+    if justification:
+        item["justification"] = _ser_s(justification)
+    for gate_key in ("kind", "family", "risk", "onExpire", "sourcePrincipal"):
+        item[gate_key] = _ser_s(gate_fields[gate_key] or principal)
+    if gate_fields["expiresAt"]:
+        item["expiresAt"] = _ser_s(gate_fields["expiresAt"])
+    for gate_key in ("snoozedUntil", "title"):
+        if gate_fields[gate_key]:
+            item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key, value in (("candidates", candidates), ("evidence", gate_fields["evidence"]),
+                            ("blastRadius", gate_fields["blastRadius"]),
+                            ("proposedCalls", proposed), ("subject", subject)):
+        if value is not None:
+            item[gate_key] = _ser_s(json.dumps(value, default=str))
+    try:
+        _get_ddb().put_item(TableName=DYNAMODB_TABLE, Item=item,
+                            ConditionExpression="attribute_not_exists(record_id)")
+    except Exception as exc:
+        logger.error("producer escalation put_item failed: %s", exc)
+        return _error(500, "Database write failed while creating escalation.")
+    _notify_escalation_event("requested", escalation_id,
+                             (subject or {}).get("record_id", f"{source}:{kind}"), kind,
+                             principal, note=justification or gate_fields["title"])
+    return _response(201, {
+        "success": True, "escalation_id": escalation_id, "status": "requested",
+        "created_at": now, "kind": kind, "family": gate_fields["family"],
+        "risk": gate_fields["risk"],
+        "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
+        "expiresAt": gate_fields["expiresAt"] or None, "onExpire": gate_fields["onExpire"],
+        "source": source, "sourcePrincipal": principal,
     })
 
 
@@ -8824,6 +9349,21 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     status_filter = str(query_params.get("status") or "").strip()
     target_filter = str(query_params.get("target_record_id") or "").strip()
     session_filter = str(query_params.get("session_id") or "").strip()
+    # ENC-TSK-967: derived-state and kind filters (comma lists) are applied
+    # post-read because legacy records carry neither attribute.
+    kind_filter = _gate_csv(query_params.get("kind"))
+    state_filter = _gate_csv(query_params.get("state"))
+    bad_kinds = [k for k in kind_filter if k not in _GATE_KINDS]
+    if bad_kinds:
+        return _error(400, f"Invalid kind filter {bad_kinds}. Allowed: {sorted(_GATE_KINDS)}")
+    bad_states = [x for x in state_filter if x not in _GATE_STATES]
+    if bad_states:
+        return _error(400, f"Invalid state filter {bad_states}. Allowed: {list(_GATE_STATES)}")
+    # ENC-ISS-773: project '*' / '_' or all_projects=true lists every project.
+    cross_project = (
+        project_id in ("*", "_")
+        or str(query_params.get("all_projects") or "").strip().lower() in ("1", "true", "yes")
+    )
     if status_filter and status_filter not in _ESCALATION_STATUSES:
         return _error(
             400,
@@ -8889,21 +9429,34 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["ExpressionAttributeNames"] = expression_names
 
     escalations = []
-    pages_fetched = 0
     last_key = None
     try:
-        while True:
-            resp = ddb.query(**kwargs)
-            escalations.extend(
-                _escalation_public(raw) for raw in resp.get("Items", [])
-            )
-            pages_fetched += 1
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            if len(escalations) >= page_size or pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
+        scan_projects = _gate_list_project_ids() if cross_project else [project_id]
+        for scan_pid in scan_projects:
+            key_values[":pid"] = _ser_s(scan_pid)
+            kwargs.pop("ExclusiveStartKey", None)
+            pages_fetched = 0
+            while True:
+                resp = ddb.query(**kwargs)
+                for raw in resp.get("Items", []):
+                    public = _escalation_public(raw)
+                    if kind_filter and public.get("kind") not in kind_filter:
+                        continue
+                    if state_filter and public.get("state") not in state_filter:
+                        continue
+                    escalations.append(public)
+                pages_fetched += 1
+                page_last = resp.get("LastEvaluatedKey")
+                if not page_last:
+                    break
+                # Cross-project: never stop early on size -- the global
+                # (created_at, item_id) sort needs every project's items or the
+                # cursor boundary could skip newer items in an unread project.
+                if ((not cross_project and len(escalations) >= page_size)
+                        or pages_fetched >= _ESCALATION_LIST_MAX_PAGES):
+                    last_key = page_last
+                    break
+                kwargs["ExclusiveStartKey"] = page_last
     except Exception as exc:
         logger.error("escalation list query failed: %s", exc)
         return _error(500, "Database query failed.")
@@ -8932,7 +9485,77 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     }
     if next_cursor:
         payload["next_cursor"] = next_cursor
+    if cross_project:
+        payload["scope"] = "all_projects"
+        payload["projects_scanned"] = len(scan_projects)
     return _response(200, payload)
+
+
+def _handle_escalation_sweep(project_id: str, body: Dict) -> Dict:
+    """POST /{project}/escalation/sweep -- F-10 fail-closed expiry sweeper.
+
+    Walks status=requested escalations whose (stored or backfilled) expiry has
+    passed and moves them requested->expired (gate state expired for onExpire
+    deny, superseded for onExpire regenerate) through the ordinary
+    conditional FSM edge, appending the audit event. No applier is ever
+    invoked. Project '*' / '_' sweeps every project. Idempotent: a record that
+    lost the conditional write (decided concurrently) is skipped.
+    """
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+    actor = "system:escalation-expiry-sweeper"
+    ddb = _get_ddb()
+    swept = []
+    scanned = 0
+    try:
+        project_ids = _gate_list_project_ids() if project_id in ("*", "_") else [project_id]
+        for pid in project_ids:
+            kwargs: Dict[str, Any] = {
+                "TableName": DYNAMODB_TABLE,
+                "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :esc_prefix)",
+                "FilterExpression": "#st = :requested",
+                "ExpressionAttributeNames": {"#st": "status"},
+                "ExpressionAttributeValues": {
+                    ":pid": _ser_s(pid),
+                    ":esc_prefix": _ser_s("escalation#"),
+                    ":requested": _ser_s("requested"),
+                },
+            }
+            pages = 0
+            while True:
+                resp = ddb.query(**kwargs)
+                for raw in resp.get("Items", []):
+                    esc = _escalation_public(raw)
+                    scanned += 1
+                    expiry = _escalation_expiry(esc)
+                    if not expiry["expired"]:
+                        continue
+                    to_status = "expired"
+                    esc_id = str(esc.get("item_id") or "")
+                    if _escalation_fsm_transition(
+                        pid, esc_id, "requested", to_status, actor,
+                        detail={"expiresAt": expiry["expiresAt"], "onExpire": expiry["onExpire"],
+                                "kind": esc.get("kind")},
+                    ):
+                        swept.append({"project_id": pid, "escalation_id": esc_id,
+                                      "status": to_status, "expiresAt": expiry["expiresAt"],
+                                      "kind": esc.get("kind")})
+                        _notify_escalation_event(
+                            to_status, esc_id, str(esc.get("target_record_id") or ""),
+                            str(esc.get("mutation_type") or ""), actor,
+                            note=f"expired {expiry['expiresAt']} (onExpire={expiry['onExpire']})",
+                        )
+                pages += 1
+                last = resp.get("LastEvaluatedKey")
+                if not last or pages >= _ESCALATION_LIST_MAX_PAGES:
+                    break
+                kwargs["ExclusiveStartKey"] = last
+    except Exception as exc:
+        logger.error("escalation sweep failed: %s", exc)
+        return _error(500, "Escalation expiry sweep failed.")
+    return _response(200, {
+        "success": True, "scanned": scanned, "swept_count": len(swept), "swept": swept,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -9091,6 +9714,25 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "Only the Cognito-human approval flow can authorize application."
         ))
 
+    # ENC-TSK-967 (F-10): FAIL-CLOSED expiry -- an expired escalation (stored or
+    # backfilled expiresAt) is never applied, whatever its decision status.
+    expiry = _escalation_expiry(escalation)
+    if expiry["expired"]:
+        return _response(410, {
+            "success": False,
+            "error": (
+                f"Escalation {escalation_id} expired at {expiry['expiresAt']}; "
+                "expired escalations cannot be applied (F-10 fail-closed). "
+                "File a new escalation."
+            ),
+            "escalation_id": escalation_id,
+            "state": "superseded" if expiry["onExpire"] == "regenerate" else "expired",
+            "expiresAt": expiry["expiresAt"],
+            "onExpire": expiry["onExpire"],
+        })
+
+    if not escalation.get("mutation_type"):
+        return _error(409, "Producer escalation has no mutation_type; escalation.apply cannot execute its proposed calls.")
     handler = _ESCALATION_MUTATION_HANDLERS.get(str(escalation.get("mutation_type")))
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
@@ -9199,7 +9841,7 @@ _RE_DEDUP_REVIEW = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
 )
 _RE_ESCALATION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/escalation"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_*-]+)/escalation"
     r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>apply))?)?$"
 )
 _RE_RELATIONSHIP = re.compile(
@@ -9288,7 +9930,18 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         )
         if auth_err:
             return auth_err
-        project_err = _validate_project_exists(project_id)
+        # ENC-ISS-773: '*' / '_' = all projects, valid only for the list read
+        # and the expiry sweep.
+        cross_scope = project_id in ("*", "_")
+        if cross_scope and not (
+            (method == "GET" and escalation_id in (None, "list"))
+            or (method == "POST" and escalation_id == "sweep")
+        ):
+            return _error(400, (
+                "Project '*' / '_' (all projects) is valid only for "
+                "GET /escalation[/list] and POST /escalation/sweep."
+            ))
+        project_err = None if cross_scope else _validate_project_exists(project_id)
         if project_err:
             return _error(404, project_err)
         if method == "POST" and escalation_sub == "apply":
@@ -9298,6 +9951,12 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
             return _handle_escalation_apply(project_id, escalation_id, body)
+        elif method == "POST" and escalation_id == "sweep":
+            try:
+                body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                body = {}
+            return _handle_escalation_sweep(project_id, body if isinstance(body, dict) else {})
         elif method == "POST" and not escalation_id:
             try:
                 body = json.loads(event.get("body") or "{}")
