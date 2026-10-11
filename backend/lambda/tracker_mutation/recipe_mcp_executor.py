@@ -204,7 +204,7 @@ class EnceladusMcpExecutor:
             raise McpError(err["code"], f"{action}: {err['message']}")
         return payload
 
-    def register_session(self, project_id: str, run_id: str) -> Dict[str, Optional[str]]:
+    def register_session(self, project_id: str, run_id: str, governance_hash: Optional[str] = None) -> Dict[str, Optional[str]]:
         if not self.agent_type_id:
             raise McpError("RUNNER_AGENT_TYPE_MISSING", "RECIPE_RUNNER_AGENT_TYPE_ID is not configured.")
         reg = self._coord("agent.register", {"agent_type_id": self.agent_type_id, "runtime": RUNTIME,
@@ -212,7 +212,11 @@ class EnceladusMcpExecutor:
         sid = _find_key(reg, "session_id")
         if not sid:
             raise McpError("RUNNER_SESSION_MISSING", "agent.register returned no session_id.")
-        claim = self._coord("agent.claim", {"session_id": sid, "project_id": project_id})
+        # agent.claim takes exactly {session_id, governance_hash} (verified live); project_id is rejected.
+        ghash = governance_hash or self.governance_hash()
+        if not ghash:
+            raise McpError("GOVERNANCE_HASH_UNAVAILABLE", "agent.claim needs the governance_hash; connection_health returned none.")
+        claim = self._coord("agent.claim", {"session_id": sid, "governance_hash": ghash})
         return {"session_id": sid, "sci": _find_key(claim, "sci")}
 
     def heartbeat(self, project_id: str, session_id: Optional[str]) -> None:

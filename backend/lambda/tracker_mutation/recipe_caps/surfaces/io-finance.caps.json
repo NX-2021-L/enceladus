@@ -1,0 +1,3007 @@
+{
+  "actions": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_health",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Health",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sql": {
+            "description": "A single SELECT or WITH statement.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "finance_query",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Query",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "months": {
+            "default": 12,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_spend_by_category",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Spend by category",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_cash_position",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Cash position",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_net_worth",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Net worth",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tax_year": {
+            "description": "The tax year, e.g. '2026'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tax_year"
+        ],
+        "type": "object"
+      },
+      "name": "finance_annual_comp",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Annual comp",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_immaterial": {
+            "default": true,
+            "description": "Keep the excluded_immaterial list. True by default: an exclusion nobody can see is indistinguishable from a bug.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Return only the top N ranked accounts. The metrics are computed over the full population either way.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_capture_backlog",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Capture backlog",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_unmatched": {
+            "default": true,
+            "description": "Keep groups that match no registered account. True by default: a counterparty the dimension has never heard of is the case io most needs to see, though ordinary merchants land there too.",
+            "type": "boolean"
+          },
+          "min_rows": {
+            "default": 1,
+            "description": "Hide groups smaller than this. The `totals` rollups still cover every group.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_type_reclassification_candidates",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Type reclassification candidates",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "authoritative_source": {
+            "description": "Which `source` outranks the others. Defaults to fidelity-csv. An argument rather than a constant because this is precisely the decision io has not made, and a report that could not show the other ruling's consequences would be arguing for one.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Cap the rows returned PER LIST. `totals` is computed over everything first, so a limit truncates the listing without understating the problem.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since": {
+            "description": "Inclusive ISO lower bound on trade_date.",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "Restrict to one ticker.",
+            "type": "string"
+          },
+          "until": {
+            "description": "Inclusive ISO upper bound on trade_date.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_order_duplicate_candidates",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Order duplicate candidates",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "month": {
+            "description": "Month as YYYY-MM; defaults to the current month.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_budget_vs_actual",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Budget vs actual",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "horizon_days": {
+            "default": 90,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_compute_forecast",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Compute forecast",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "The account this movement belongs to, from finance.list_accounts. An unknown UID is rejected; accounts are added deliberately with finance.create_account.",
+            "type": "string"
+          },
+          "amount": {
+            "description": "Signed amount: deposits positive, outflows negative.",
+            "type": "number"
+          },
+          "category": {
+            "description": "Free-text counterparty or bucket, retained as evidence (category_legacy) rather than as a classification -- it never creates a category. It still decides the TYPE rule when it names a registered account exactly, so 'AMEX' on a checking outflow must be a TRANSFER, not a DEBIT.",
+            "type": "string"
+          },
+          "category_uid": {
+            "description": "The classification of record, from finance.list_categories. An unknown UID is rejected; categories are added deliberately with finance.create_category. OMIT IT to capture the row as UNCLASSIFIED -- unlike account_uid this is not required, because a movement nobody has classified is still a movement worth recording.",
+            "type": "string"
+          },
+          "date": {
+            "description": "ISO date YYYY-MM-DD. Must not be later than today -- the ledger records what happened, not what is planned.",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "notes": {
+            "type": "string"
+          },
+          "settled_by_ledger_id": {
+            "description": "Optional: the id of the CASH ledger row that paid off this CREDIT row. Must reference an existing row whose settlement_layer is CASH.",
+            "type": "string"
+          },
+          "settlement_layer": {
+            "default": "CASH",
+            "description": "CASH when money moved between io's own cash accounts; CREDIT for a charge on a credit instrument. Defaults to CASH.",
+            "enum": [
+              "CASH",
+              "CREDIT"
+            ],
+            "type": "string"
+          },
+          "settles_ledger_ids": {
+            "description": "The other direction, for the common case: this row is the TRANSFER paying a card, and these are the CREDIT rows it settles. Each is back-linked via settled_by_ledger_id. Only valid on a TRANSFER, and the rows must be named explicitly -- nothing infers 'every unsettled charge', because a partial payment or a disputed charge breaks that.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": {
+            "description": "DEPOSIT (inflow) | DEBIT (outflow that LEAVES io's balance sheet) | TRANSFER (between accounts io holds, including a card payment from checking) | FEE | INTEREST. FEE and INTEREST are first-class: do not fold them into DEBIT.",
+            "enum": [
+              "DEPOSIT",
+              "DEBIT",
+              "TRANSFER",
+              "FEE",
+              "INTEREST"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "type",
+          "amount",
+          "account_uid"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_transaction",
+      "outputSchema": {
+        "properties": {
+          "row": {
+            "properties": {
+              "id": {
+                "description": "The minted cash_flow_ledger row id; never supply on input.",
+                "type": "string",
+                "x-io-minted": true
+              }
+            },
+            "type": "object"
+          },
+          "settlement": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "requiresGovernanceHash": false,
+      "title": "Record transaction",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "additionalProperties": false,
+            "description": "Column -> new value. Allowed keys: amount, date, confirmation_state, notes, description, category_uid, category_legacy, category.",
+            "properties": {
+              "amount": {
+                "type": "number"
+              },
+              "category": {
+                "type": "string"
+              },
+              "category_legacy": {
+                "type": "string"
+              },
+              "category_uid": {
+                "type": "string"
+              },
+              "confirmation_state": {
+                "enum": [
+                  "CONFIRMED",
+                  "PENDING",
+                  "QUERIED",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              "date": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "ledger_id": {
+            "description": "The cash_flow_ledger primary key to correct.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ledger_id",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "name": "finance_update_transaction",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Update transaction",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "actual_ledger_id": {
+            "description": "The CONFIRMED cash_flow_ledger row that explains it.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "pending_ledger_id": {
+            "description": "The PENDING cash_flow_ledger row being explained/retracted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending_ledger_id",
+          "actual_ledger_id"
+        ],
+        "type": "object"
+      },
+      "name": "finance_actualize_transaction",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Actualize transaction",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "ledger_id": {
+            "description": "The cash_flow_ledger primary key to remove.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Non-empty justification (genuine duplicate, capture error, etc). Stored verbatim on the archive row.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ledger_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "finance_delete_transaction",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Delete transaction",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "additionalProperties": true,
+            "description": "Column -> new value (billing_day, amount_actual, amount_estimated, annualized, category, settlement_layer, active, notes). settlement_layer is CASH|CREDIT, case-insensitive; anything else is refused rather than defaulted.",
+            "type": "object"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "name": "finance_update_monthly_charge",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Update monthly charge",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "EXPENSE",
+              "INCOME",
+              "TRANSFER",
+              "INVESTMENT",
+              "TAX"
+            ],
+            "type": "string"
+          },
+          "parent_category_uid": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_list_categories",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "List categories",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_unclustered": {
+            "default": true,
+            "type": "boolean"
+          },
+          "min_rows": {
+            "default": 1,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_category_vocabulary_candidates",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Category vocabulary candidates",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "kind": {
+            "enum": [
+              "EXPENSE",
+              "INCOME",
+              "TRANSFER",
+              "INVESTMENT",
+              "TAX"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "parent_category_uid": {
+            "description": "Optional. Must itself be a top-level category.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "name": "finance_create_category",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Create category",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "category_uid": {
+            "type": "string"
+          },
+          "changes": {
+            "additionalProperties": true,
+            "description": "Column -> new value (name, kind, parent_category_uid, active, notes).",
+            "type": "object"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category_uid",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "name": "finance_update_category",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Update category",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "fund_class": {
+            "enum": [
+              "cash",
+              "savings",
+              "assets",
+              "retirement"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_list_accounts",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "List accounts",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_last4": {
+            "description": "Last four digits only.",
+            "type": "string"
+          },
+          "account_type": {
+            "enum": [
+              "checking",
+              "savings",
+              "hsa",
+              "cash",
+              "brokerage",
+              "retirement",
+              "crypto",
+              "credit_card",
+              "loan",
+              "other"
+            ],
+            "type": "string"
+          },
+          "closed_date": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "fund_class": {
+            "description": "Required for accounts that hold funds; omit for credit_card/loan.",
+            "enum": [
+              "cash",
+              "savings",
+              "assets",
+              "retirement"
+            ],
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "institution": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "opened_date": {
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "account_type"
+        ],
+        "type": "object"
+      },
+      "name": "finance_create_account",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Create account",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "type": "string"
+          },
+          "changes": {
+            "additionalProperties": true,
+            "description": "Column -> new value (display_name, institution, account_type, fund_class, account_last4, status, opened_date, closed_date, notes).",
+            "type": "object"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_uid",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "name": "finance_update_account",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Update account",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "owned",
+              "sold"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_list_property",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "List property",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "acquired_date": {
+            "type": "string"
+          },
+          "acquisition_cost": {
+            "type": "number"
+          },
+          "category": {
+            "enum": [
+              "vehicle",
+              "real_estate",
+              "collectible",
+              "equipment",
+              "other"
+            ],
+            "type": "string"
+          },
+          "disposal_proceeds": {
+            "type": "number"
+          },
+          "disposed_date": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "status": {
+            "default": "owned",
+            "enum": [
+              "owned",
+              "sold"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "category"
+        ],
+        "type": "object"
+      },
+      "name": "finance_create_property",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Create property",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of_date": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "notes": {
+            "type": "string"
+          },
+          "property_uid": {
+            "description": "From finance_list_property.",
+            "type": "string"
+          },
+          "valuation_source": {
+            "enum": [
+              "kbb",
+              "appraisal",
+              "purchase",
+              "estimate",
+              "other"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "property_uid",
+          "as_of_date",
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_property_valuation",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record property valuation",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "property_uid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "property_uid"
+        ],
+        "type": "object"
+      },
+      "name": "finance_property_depreciation",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Property depreciation",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "From finance_list_accounts.",
+            "type": "string"
+          },
+          "as_of_date": {
+            "type": "string"
+          },
+          "balance": {
+            "type": "number"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of_date",
+          "account_uid",
+          "balance"
+        ],
+        "type": "object"
+      },
+      "name": "finance_upsert_cash_balance",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Upsert cash balance",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "From finance_list_accounts.",
+            "type": "string"
+          },
+          "as_of_date": {
+            "type": "string"
+          },
+          "balance": {
+            "type": "number"
+          },
+          "credit_limit": {
+            "type": "number"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          }
+        },
+        "required": [
+          "as_of_date",
+          "account_uid",
+          "balance"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_credit_balance",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record credit balance",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "From finance_list_accounts.",
+            "type": "string"
+          },
+          "acquisition_type": {
+            "enum": [
+              "rsu_vest",
+              "purchase",
+              "transfer",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "buy_date": {
+            "description": "ISO date the lot was acquired.",
+            "type": "string"
+          },
+          "cost_basis_per_share": {
+            "type": "number"
+          },
+          "cost_basis_total": {
+            "description": "Derived from shares x per-share if omitted.",
+            "type": "number"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "notes": {
+            "type": "string"
+          },
+          "sell_date": {
+            "description": "ISO date; omit while the lot is open.",
+            "type": "string"
+          },
+          "shares": {
+            "type": "number"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_uid",
+          "symbol",
+          "buy_date"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_lot",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record lot",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "symbols": {
+            "description": "Defaults to every symbol in an open lot.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_refresh_prices",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Refresh prices",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_portfolio_value",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Portfolio value",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of_date": {
+            "type": "string"
+          },
+          "bureau": {
+            "enum": [
+              "equifax",
+              "experian",
+              "transunion",
+              "vantage",
+              "fico"
+            ],
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "model": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "as_of_date",
+          "bureau",
+          "score"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_credit_score",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record credit score",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_to": {
+            "description": "ISO date the range stops, EXCLUSIVE -- the first day NOT covered. To hand over to a successor starting 2026-02-27, close at 2026-02-27. If you are reading a LAST DAY off a document, send last_day instead and let this surface do the conversion.",
+            "type": "string"
+          },
+          "last_day": {
+            "description": "ISO date of the LAST DAY the term applies, INCLUSIVE -- the spelling every source document uses ('last day 2026-04-17', 'project end December 31, 2026'). Stored as the exclusive bound: last_day 2026-04-17 becomes effective_to 2026-04-18. Supply this OR effective_to, never both -- they can disagree by exactly the one day this convention exists to settle, and a disagreement is refused rather than resolved.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "WHY this term stops applying, in your own words. Required, appended to notes. Say what changed, not that something changed.",
+            "type": "string"
+          },
+          "term_id": {
+            "description": "The compensation_terms row id to close -- the 32-hex `id`, which the overlap refusal hands back in conflicts[] and finance_query lists.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "finance_close_term_range",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Close term range",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_from": {
+            "description": "ISO date of the FIRST day of employment.",
+            "type": "string"
+          },
+          "effective_to": {
+            "description": "ISO date the relationship stops, EXCLUSIVE -- the first day NOT employed. Omit for an ongoing relationship, but see last_day and the 'unknown' note above.",
+            "type": "string"
+          },
+          "employer_uid": {
+            "description": "A known employer_uid from finance_list_employers (FIN-TSK-157, D8). An unrecognised value is rejected as unknown_employer, never substituted.",
+            "type": "string"
+          },
+          "employment_type": {
+            "description": "Use 'unknown' when the shape is not evidenced, rather than guessing a plausible one.",
+            "enum": [
+              "w2_permanent",
+              "w2_temporary",
+              "w2_seasonal",
+              "contract_1099",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "last_day": {
+            "description": "ISO date of the LAST day employed, INCLUSIVE -- the spelling documents use. last_day 2026-04-17 is stored as effective_to 2026-04-18. Supply this OR effective_to, never both.",
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "source_doc": {
+            "description": "DOC-* or artifact filename evidencing the dates. An employment period asserted without a source is a guess.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "employer_uid",
+          "effective_from",
+          "employment_type",
+          "source_doc"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_employment_period",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record employment period",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "WHY this row was never a term, in your own words. Required, appended to notes. Say what makes it a misfiling, not that it is one.",
+            "type": "string"
+          },
+          "term_id": {
+            "description": "The compensation_terms row id to retire -- the 32-hex `id` that finance_query lists.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "finance_retire_compensation_term",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Retire compensation term",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "WHY this capture is being retired, in your own words. Required and non-empty. Say what was wrong with it, not that it was wrong: 'wrong statement_type bank; net-only line' outlives 'bad row'.",
+            "type": "string"
+          },
+          "statement_id": {
+            "description": "The business statement_id from finance_list_statements -- e.g. 'sia-partners-2026-03-15-e5f78fe8'. Not the internal row id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "finance_void_statement",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Void statement",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "type": "number"
+          },
+          "artifact_sha256": {
+            "type": "string"
+          },
+          "authority": {
+            "enum": [
+              "ssa",
+              "irs_w2",
+              "irs_1099g",
+              "irs_1099b",
+              "wa_esd",
+              "employer_pay_summary"
+            ],
+            "type": "string"
+          },
+          "issuer_uid": {
+            "type": "string"
+          },
+          "metric": {
+            "enum": [
+              "fica_wages",
+              "medicare_wages",
+              "fica_tax_ee",
+              "fica_tax_er",
+              "medicare_tax_ee",
+              "medicare_tax_er",
+              "w2_box1",
+              "w2_box2",
+              "w2_box3",
+              "w2_box4",
+              "w2_box5",
+              "w2_box6",
+              "w2_box12",
+              "w2_box16",
+              "w2_box17",
+              "ui_paid",
+              "ui_fed_withheld",
+              "employer_ytd_gross",
+              "employer_ytd_net",
+              "employer_ytd_hours",
+              "ssa_est_age_62",
+              "ssa_est_age_67",
+              "ssa_est_age_70",
+              "ssa_est_disability",
+              "ssa_est_death_lump",
+              "ssa_est_survivor_spouse",
+              "ssa_est_survivor_child"
+            ],
+            "type": "string"
+          },
+          "source_doc": {
+            "type": "string"
+          },
+          "statement_date": {
+            "type": "string"
+          },
+          "tax_year": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "authority",
+          "tax_year",
+          "metric",
+          "amount",
+          "statement_date",
+          "source_doc"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_attestation",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record attestation",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_sha256": {
+            "type": "string"
+          },
+          "component": {
+            "enum": [
+              "base_salary",
+              "hourly_rate",
+              "bonus_target_pct",
+              "bonus_max_pct",
+              "rsu_grant_shares",
+              "rsu_grant_value",
+              "signing_bonus",
+              "relocation",
+              "match_pct_401k",
+              "default_pct_401k",
+              "weekly_benefit"
+            ],
+            "type": "string"
+          },
+          "effective_from": {
+            "type": "string"
+          },
+          "effective_to": {
+            "description": "ISO date the range stops, EXCLUSIVE -- the first day NOT covered. If you are reading a LAST DAY off a document, send last_day instead.",
+            "type": "string"
+          },
+          "employer_uid": {
+            "type": "string"
+          },
+          "last_day": {
+            "description": "ISO date of the LAST DAY the term applies, INCLUSIVE -- the spelling every source document uses. Stored as the exclusive bound: last_day 2026-04-17 becomes effective_to 2026-04-18. Supply this OR effective_to, never both; a disagreement is refused rather than resolved.",
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "source_doc": {
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "usd_annual",
+              "usd_hourly",
+              "usd_lump",
+              "pct",
+              "shares",
+              "usd_weekly"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "employer_uid",
+          "component",
+          "value",
+          "unit",
+          "effective_from",
+          "source_doc"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_compensation_term",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record compensation term",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_overlap": {
+            "default": false,
+            "description": "Insert a positive flow even though an active positive flow already covers its span. Say yes only when these are genuinely different income streams; the default refusal is what stops a corrected pay schedule from being added ON TOP OF the one it replaces.",
+            "type": "boolean"
+          },
+          "active": {
+            "default": true,
+            "type": "boolean"
+          },
+          "amount": {
+            "description": "Signed: inflows positive, outflows negative.",
+            "type": "number"
+          },
+          "date": {
+            "description": "First occurrence, ISO date.",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "recurrence": {
+            "enum": [
+              "once",
+              "weekly",
+              "biweekly",
+              "semimonthly",
+              "monthly"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "description",
+          "amount",
+          "recurrence"
+        ],
+        "type": "object"
+      },
+      "name": "finance_add_scheduled_flow",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Add scheduled flow",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_overlap": {
+            "default": false,
+            "type": "boolean"
+          },
+          "active": {
+            "description": "Defaults to false, i.e. retire. true un-retires.",
+            "type": "boolean"
+          },
+          "amount": {
+            "description": "Signed replacement amount.",
+            "type": "number"
+          },
+          "description": {
+            "type": "string"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "flow_id": {
+            "description": "The scheduled_flows primary key. Never a date or description predicate -- both select more rows than the caller looked at.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "superseded_by": {
+            "description": "What replaces this flow: a task id, a document id, or the id of the schedule that supersedes it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "flow_id",
+          "superseded_by"
+        ],
+        "type": "object"
+      },
+      "name": "finance_retire_scheduled_flow",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Retire scheduled flow",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "description": "The account this statement belongs to. When promote=true this must resolve to a row in the accounts dimension (its display name), because promoted ledger rows carry a required account_uid; an unresolvable name promotes nothing.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "institution": {
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "account_uid": {
+                  "description": "From finance_list_accounts. Omit and the line inherits the statement's account. Set it for a MULTI-ACCOUNT artifact -- a Fidelity quarterly export is one statement spanning several accounts, so the statement-level answer is wrong for it by construction. Validated strictly: an unknown UID is rejected, never substituted.",
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "number"
+                },
+                "category": {
+                  "description": "Free-text label. Retained as evidence (category_legacy), not as a classification; it does not create a category.",
+                  "type": "string"
+                },
+                "category_uid": {
+                  "description": "From finance.list_categories. Omit to capture the line as UNCLASSIFIED -- capture is never blocked by classification uncertainty.",
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "line_no": {
+                  "type": "integer"
+                },
+                "type": {
+                  "description": "Optional flow type read off the document. Set it for the lines a statement prints outside its transactions table -- INTEREST and FEE especially, which nothing downstream can recover from the amount or the description. Omit it for ordinary transaction lines: promotion then types the line by its counterparty (a payment to a card io holds is a TRANSFER) and falls back to DEPOSIT/DEBIT by sign.",
+                  "enum": [
+                    "DEPOSIT",
+                    "DEBIT",
+                    "TRANSFER",
+                    "FEE",
+                    "INTEREST"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "description",
+                "amount"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "period_end": {
+            "type": "string"
+          },
+          "period_start": {
+            "type": "string"
+          },
+          "promote": {
+            "default": false,
+            "type": "boolean"
+          },
+          "s3_key": {
+            "description": "Optional raw-artifact key under statements/<statement_id>/.",
+            "type": "string"
+          },
+          "statement_id": {
+            "type": "string"
+          },
+          "statement_type": {
+            "enum": [
+              "bank",
+              "card",
+              "brokerage"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement_id",
+          "account",
+          "institution",
+          "statement_type",
+          "period_start",
+          "period_end"
+        ],
+        "type": "object"
+      },
+      "name": "finance_ingest_statement",
+      "outputSchema": {
+        "properties": {
+          "already_registered": {
+            "type": "boolean"
+          },
+          "lines_added": {
+            "type": "integer"
+          },
+          "promoted": {
+            "properties": {
+              "ledger_ids": {
+                "items": {
+                  "description": "A minted cash_flow_ledger row id; never supply on input.",
+                  "type": "string",
+                  "x-io-minted": true
+                },
+                "type": "array"
+              },
+              "promoted": {
+                "type": "integer"
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "statement": {
+            "properties": {
+              "statement_id": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "requiresGovernanceHash": false,
+      "title": "Ingest statement",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "capture_medium": {
+            "description": "What kind of artifact these lines were read off. The difference between a CSV column map and OCR over a phone screenshot is the difference between a transcription and an interpretation, and a reviewer needs to know which produced the rows in front of them.",
+            "enum": [
+              "PDF",
+              "SCREENSHOT",
+              "CSV",
+              "MANUAL"
+            ],
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string",
+            "x-io-minted": true
+          },
+          "lines": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "account_uid": {
+                  "description": "From finance_list_accounts. Omit and the line inherits the statement's account. Set it for a MULTI-ACCOUNT artifact -- a Fidelity quarterly export is one statement spanning several accounts, so the statement-level answer is wrong for it by construction. Validated strictly: an unknown UID is rejected, never substituted.",
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "number"
+                },
+                "capture_status": {
+                  "description": "What the page said about THIS row. OMIT IT for a posted row: the convention is inverted, because a card surface labels only its Pending and Processing rows and prints nothing beside the real ones, so an absent status means POSTED. PENDING and PROCESSING are REFUSED (io, 2026-08-08: pending transactions are not real, sometimes they won't post). A pending charge is a forecast; ingesting it writes a transaction that may never have existed, and when it later posts it arrives again as a different artifact with a different digest that nothing dedupes against -- so the duplicate is guaranteed, not merely risked. Capture the row once it has posted.",
+                  "enum": [
+                    "POSTED",
+                    "PENDING",
+                    "PROCESSING"
+                  ],
+                  "type": "string"
+                },
+                "category": {
+                  "description": "Free-text label. Retained as evidence (category_legacy), not as a classification; it does not create a category.",
+                  "type": "string"
+                },
+                "category_uid": {
+                  "description": "From finance.list_categories. Omit to capture the line as UNCLASSIFIED -- capture is never blocked by classification uncertainty.",
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "line_no": {
+                  "description": "Position of this line in the ARTIFACT. Defaults to its position in this payload, which is what makes a replay a no-op; supply it explicitly when appending a second batch.",
+                  "type": "integer"
+                },
+                "parse_confidence": {
+                  "description": "How sure the parser was about THIS line. Three buckets, not a percentage: a float invites arithmetic nobody can justify, while three buckets are a triage instruction.",
+                  "enum": [
+                    "HIGH",
+                    "MEDIUM",
+                    "LOW"
+                  ],
+                  "type": "string"
+                },
+                "type": {
+                  "description": "Optional flow type read off the document. Set it for the lines a statement prints outside its transactions table -- INTEREST and FEE especially, which nothing downstream can recover from the amount or the description. Omit it for ordinary transaction lines: promotion then types the line by its counterparty (a payment to a card io holds is a TRANSFER) and falls back to DEPOSIT/DEBIT by sign.",
+                  "enum": [
+                    "DEPOSIT",
+                    "DEBIT",
+                    "TRANSFER",
+                    "FEE",
+                    "INTEREST"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "description",
+                "amount"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "parse_confidence": {
+            "description": "The STATEMENT-level score. Set LOW for a partial parse: the lines that did resolve are kept rather than rejected, because a captured row nobody has classified beats a classified row in a screenshot nobody processed.",
+            "enum": [
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ],
+            "type": "string"
+          },
+          "review_state": {
+            "description": "Defaults to UNREVIEWED at the write path. REJECTED is not a delete: the lines stay, flagged, because 'we read this and it was wrong' is information.",
+            "enum": [
+              "UNREVIEWED",
+              "REVIEWED",
+              "REJECTED"
+            ],
+            "type": "string"
+          },
+          "statement_id": {
+            "description": "A statement already registered by finance_ingest_statement.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement_id",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "name": "finance_capture_statement_lines",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Capture statement lines",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_list_statements",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "List statements",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "From finance_list_accounts.",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "Report what would match, write nothing.",
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "since": {
+            "description": "Inclusive ISO lower bound on the line's date.",
+            "type": "string"
+          },
+          "statement_id": {
+            "description": "Restrict to one statement.",
+            "type": "string"
+          },
+          "tolerance_days": {
+            "description": "Date window half-width; defaults to 3.",
+            "type": "integer"
+          },
+          "until": {
+            "description": "Inclusive ISO upper bound on the line's date.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_reconcile_statement_lines",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Reconcile statement lines",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "require_reviewed": {
+            "default": false,
+            "description": "Refuse unless the owning statement's review_state is REVIEWED. Off by default because every live statement is still UNREVIEWED; the state is reported either way.",
+            "type": "boolean"
+          },
+          "statement_line_id": {
+            "description": "statement_lines.id, as returned by finance_reconciliation_exceptions.",
+            "type": "string"
+          },
+          "statement_line_ids": {
+            "description": "Array form (F-08): promote up to 100 lines in one call instead of statement_line_id. Per-id results; each id is atomic on its own, the batch is not.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_promote_statement_line",
+      "outputSchema": {
+        "properties": {
+          "atomicity": {
+            "enum": [
+              "per-id"
+            ],
+            "type": "string"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "ledger_id": {
+            "type": "string",
+            "x-io-minted": true
+          },
+          "promoted": {
+            "type": "integer"
+          },
+          "requested": {
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "properties": {
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ledger_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "statement_line_id": {
+                  "type": "string"
+                },
+                "transaction_id": {
+                  "description": "The minted cash_flow_ledger row id; null when ok is false.",
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "x-io-minted": true
+                }
+              },
+              "required": [
+                "statement_line_id",
+                "ok",
+                "transaction_id",
+                "error"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "statement_line_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "requiresGovernanceHash": false,
+      "title": "Promote statement line",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "From finance_list_accounts.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Cap rows PER GROUP; counts stay complete.",
+            "type": "integer"
+          },
+          "near_miss_floor_cents": {
+            "description": "Floor of the amount-mismatch band, in cents. Defaults to 100 ($1.00).",
+            "type": "integer"
+          },
+          "near_miss_ratio_bps": {
+            "description": "Proportional half of the band, in basis points. Defaults to 200 (2%). Lower it when the report is noisy.",
+            "type": "integer"
+          },
+          "since": {
+            "type": "string"
+          },
+          "stale_after_days": {
+            "description": "How long an in-flight movement may sit before it is an exception. Defaults to 60. PENDING is a movement io saw applied on one side without seeing the matching debit land; QUERIED is one io has disputed. Each row carries its confirmation_state, because a stale query and a stale debit resolve differently.",
+            "type": "integer"
+          },
+          "tolerance_days": {
+            "description": "Date window half-width; defaults to 3.",
+            "type": "integer"
+          },
+          "until": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_reconciliation_exceptions",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Reconciliation exceptions",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "Restrict to one account. The Cash Flow tab is a SoFi checking register, so omitting this returns the whole population. From finance_list_accounts.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_observation_signal",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Observation signal",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "Your own identification of the account, which outranks anything printed on the document. Validated strictly: an unknown UID raises and nothing is ever created. Omit it to resolve from the artifact's own evidence, and supply it when that resolution refuses as ambiguous.",
+            "type": "string"
+          },
+          "artifact": {
+            "description": "The captured statement: period (start/end, which is what resolves a row printed 'May 20' or '05/05/26'), account_evidence, date_format, statement_type, capture_medium, sections[] of printed line text with a per-section direction, and optionally summary and balance_buckets for the reconciliation checks. See the artifact_schema section of finance_data_specs(sections=['capture']).",
+            "type": "object"
+          },
+          "artifact_sha256": {
+            "description": "Optional ASSERTION, verified and never trusted: the SHA-256 this artifact is expected to digest to. The server recomputes it from the content sent (including the asserted sign_convention) and refuses on mismatch. This is the value the idempotency key is built from -- take it from the first drop's response and assert it on re-drops.",
+            "type": "string"
+          },
+          "sign_convention": {
+            "description": "REQUIRED, and asserted rather than detected. CHARGES_POSITIVE for the ordinary card statement that prints a charge as a positive number; DEBITS_NEGATIVE for a bank export already signed the way the ledger is; MAGNITUDE_ONLY when the document prints no sign at all and the section direction is the only source there is. Lines are stored in the LEDGER's convention either way -- outflows negative, inflows positive.",
+            "enum": [
+              "DEBITS_NEGATIVE",
+              "CHARGES_POSITIVE",
+              "MAGNITUDE_ONLY"
+            ],
+            "type": "string"
+          },
+          "statement_id": {
+            "description": "Optional. Defaults to one derived from the artifact's own content, so it is stable across re-drops. Supply it to attach this parse to a statement already registered by finance_ingest_statement; a second, different artifact claiming an id that is already parsed is refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact",
+          "sign_convention"
+        ],
+        "type": "object"
+      },
+      "name": "finance_ingest_artifact",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Ingest artifact",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tables": {
+            "description": "Registered table names to export. Omit to export all of them, which is the right default after a migration -- a migration's blast radius is rarely one table, and the export is cheap and idempotent. An unknown name is REFUSED with the registered list rather than skipped, so a typo cannot look like a successful export. Names come from finance_health -> database.row_counts.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_export_warehouse",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Export warehouse",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "arn": {
+            "description": "arn:aws:s3:::<scratch-bucket>/<key>. Equivalent to `uri`, for callers holding the ARN spelling. Also a real address, and confined to the same one bucket.",
+            "type": "string"
+          },
+          "etag": {
+            "description": "TWO MEANINGS, and the difference matters. WITH a uri/arn/key it is an INTEGRITY ASSERTION, applied as If-Match: a file replaced since you copied the reference fails loudly instead of being read as though nothing changed. ALONE it is a last-resort SEARCH -- S3 has no get-by-etag, so the bucket is listed and matched, and the call is REFUSED (never silently resolved) when more than one object carries it, because an ETag identifies CONTENT rather than location and identical bytes under two names share one. The search covers current versions only. Prefer the uri; it is the reference that actually addresses an object.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The object key on its own, without a bucket -- e.g. 'statements/amex-2026-07.json'. The most direct form: the bucket is the server's, always.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "s3://<scratch-bucket>/<key> -- exactly what the S3 console's 'Copy S3 URI' button puts on your clipboard, and what `aws s3 cp` prints. This is a real ADDRESS. A URI naming any other bucket is refused; only the upload inbox is readable here.",
+            "type": "string"
+          },
+          "version_id": {
+            "description": "Optional S3 version to pin. The bucket is versioned, so this is how you re-read exactly the bytes an earlier call reported rather than whatever occupies that key now. Omit for the current version.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_read_scratch_object",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Read scratch object",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_uid": {
+            "description": "Your own identification of the account, which outranks anything printed on the document. An unknown UID raises and nothing is ever created. Omit it to resolve from the artifact's own evidence, and supply it when that resolution refuses as ambiguous.",
+            "type": "string"
+          },
+          "arn": {
+            "description": "arn:aws:s3:::<scratch-bucket>/<key>. Equivalent to `uri`, for callers holding the ARN spelling. Also a real address, and confined to the same one bucket.",
+            "type": "string"
+          },
+          "artifact_sha256": {
+            "description": "Optional ASSERTION about the artifact's CONTENT, verified and never trusted -- distinct from `etag`, which asserts the stored OBJECT's identity. Both can be sent: one pins the file you meant, the other pins what it contains.",
+            "type": "string"
+          },
+          "etag": {
+            "description": "TWO MEANINGS, and the difference matters. WITH a uri/arn/key it is an INTEGRITY ASSERTION, applied as If-Match: a file replaced since you copied the reference fails loudly instead of being read as though nothing changed. ALONE it is a last-resort SEARCH -- S3 has no get-by-etag, so the bucket is listed and matched, and the call is REFUSED (never silently resolved) when more than one object carries it, because an ETag identifies CONTENT rather than location and identical bytes under two names share one. The search covers current versions only. Prefer the uri; it is the reference that actually addresses an object.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The object key on its own, without a bucket -- e.g. 'statements/amex-2026-07.json'. The most direct form: the bucket is the server's, always.",
+            "type": "string"
+          },
+          "sign_convention": {
+            "description": "REQUIRED, and asserted rather than detected. CHARGES_POSITIVE for the ordinary card statement that prints a charge as a positive number; DEBITS_NEGATIVE for a bank export already signed the way the ledger is; MAGNITUDE_ONLY when the document prints no sign at all. An artifact that DECLARES a different one is refused rather than reconciled.",
+            "enum": [
+              "DEBITS_NEGATIVE",
+              "CHARGES_POSITIVE",
+              "MAGNITUDE_ONLY"
+            ],
+            "type": "string"
+          },
+          "statement_id": {
+            "description": "Optional. Defaults to one derived from the artifact's own content, so it is stable across re-drops.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "s3://<scratch-bucket>/<key> -- exactly what the S3 console's 'Copy S3 URI' button puts on your clipboard, and what `aws s3 cp` prints. This is a real ADDRESS. A URI naming any other bucket is refused; only the upload inbox is readable here.",
+            "type": "string"
+          },
+          "version_id": {
+            "description": "Optional S3 version to pin. The bucket is versioned, so this is how you re-read exactly the bytes an earlier call reported rather than whatever occupies that key now. Omit for the current version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sign_convention"
+        ],
+        "type": "object"
+      },
+      "name": "finance_ingest_scratch_artifact",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Ingest scratch artifact",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sections": {
+            "description": "Which sections to return. Omit for the index plus rules and open_contradictions -- the useful default, not everything, because 20 tables and every tool description on every call is mostly waste. Use ['all'] for the complete contract.",
+            "items": {
+              "enum": [
+                "tables",
+                "tools",
+                "rules",
+                "open_contradictions",
+                "business_logic",
+                "capture",
+                "propagation",
+                "vocabulary",
+                "all"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_data_specs",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Data specs",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_structuring": {
+            "description": "YOUR reading of io's words, as JSON. Stored in a separate column that is never merged with io_verbatim, and it is not authority: where the two disagree io_verbatim is right. Point each claim at the io statement it came from.",
+            "type": "object"
+          },
+          "effective_from": {
+            "description": "The date io's statement takes effect -- io's date, not the date you are writing the row.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "io_verbatim": {
+            "description": "IO'S OWN WORDS, quoted exactly -- typos, casing and all. REQUIRED. Never your paraphrase of them. Nothing is stripped or normalised. If you find yourself improving the grammar, you are writing agent_structuring instead.",
+            "type": "string"
+          },
+          "provenance": {
+            "description": "DOC-/FIN-ISS-/FIN-TSK- ids for where io said this. Pointers into Enceladus, not copies of its text.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "supersede_reason": {
+            "description": "REQUIRED when revising: why the prior reading stopped applying. The prior reading is retained, not corrected.",
+            "type": "string"
+          },
+          "supersedes_version": {
+            "description": "The version being replaced. Omit for a new topic; it is inferred from the current head for an existing one.",
+            "type": "integer"
+          },
+          "title": {
+            "description": "Human-readable title.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "Stable slug identifying the subject, e.g. 'cash-flow-colour-semantics'. The same topic always resolves to the same entry, so reusing one is how you revise it.",
+            "type": "string"
+          },
+          "unresolved": {
+            "description": "What io has NOT settled, preserved rather than tidied away. Give each item what it leaves open, why it matters, what NOT to do with it, and how io could close it.",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "topic",
+          "io_verbatim",
+          "effective_from"
+        ],
+        "type": "object"
+      },
+      "name": "finance_business_logic_propose",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Business logic propose",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_phrase": {
+            "description": "Exactly 'Changes Approved.' as io typed it. Byte-exact and case-sensitive; nothing is stripped or normalised, because every leniency here is a way to accept a phrase io did not type.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "nonce": {
+            "description": "The one-time nonce finance_business_logic_propose returned. Only its digest is stored, so it cannot be read back out of the database.",
+            "type": "string"
+          },
+          "proposal_id": {
+            "description": "The id finance_business_logic_propose returned.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "nonce",
+          "approval_phrase"
+        ],
+        "type": "object"
+      },
+      "name": "finance_business_logic_commit",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Business logic commit",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "dryRun": false,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "active",
+              "former"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_list_employers",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "List employers",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_name": {
+            "description": "The UNIQUE machine key every write path joins on. Lowercase letters, digits and underscores; 2-64 chars; no leading or trailing underscore. e.g. 'aws'.",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "What a human reads, 1-128 chars, trimmed. e.g. 'Amazon Web Services, Inc.'. Free to be corrected later without reminting the employer_uid.",
+            "type": "string"
+          },
+          "notes": {
+            "description": "Why this employer exists as its own row -- the only prose this dimension carries. e.g. 'W-2 issuing entity, distinct from Amazon.com Services LLC'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical_name",
+          "display_name"
+        ],
+        "type": "object"
+      },
+      "name": "finance_create_employer",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Create employer",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "additionalProperties": true,
+            "description": "Column -> new value. ONLY display_name (1-128 chars, trimmed, validated exactly as on create) and notes (free text; null clears it). status, canonical_name and employer_uid are each refused by name with the reason.",
+            "type": "object"
+          },
+          "employer_uid": {
+            "description": "The employer to correct. Must already exist -- read it from finance_list_employers; an unknown uid is refused with unknown_employer rather than created.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "employer_uid",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "name": "finance_update_employer",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Update employer",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "benefit": {
+            "type": "string"
+          },
+          "effective_from": {
+            "type": "string"
+          },
+          "effective_to": {
+            "type": "string"
+          },
+          "elected": {
+            "type": "integer"
+          },
+          "employee_per_period": {
+            "type": "number"
+          },
+          "employer_per_period": {
+            "type": "number"
+          },
+          "employer_uid": {
+            "type": "string"
+          },
+          "plan_name": {
+            "type": "string"
+          },
+          "source_doc": {
+            "type": "string"
+          },
+          "tax_treatment": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "employer_uid",
+          "benefit",
+          "employee_per_period",
+          "employer_per_period",
+          "tax_treatment",
+          "elected",
+          "effective_from",
+          "source_doc"
+        ],
+        "type": "object"
+      },
+      "name": "finance_record_benefit_election",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Record benefit election",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "additionalProperties": false,
+            "description": "The confirm's own printed institution/last4, used only when account_uid is omitted.",
+            "properties": {
+              "institution": {
+                "type": "string"
+              },
+              "last4": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "account_uid": {
+            "description": "Asserted account_uid, from finance_list_accounts. Outranks account{} when both are given.",
+            "type": "string"
+          },
+          "artifact_sha256": {
+            "description": "sha256 of the source confirm document. Drives the per-row idempotency_key.",
+            "type": "string"
+          },
+          "expected_line_count": {
+            "type": "integer"
+          },
+          "expected_net_amount": {
+            "type": "number"
+          },
+          "sign_convention": {
+            "description": "The caller's assertion of which way is positive. Checked against every trade's amount, never used to flip it.",
+            "enum": [
+              "buy_negative_sell_positive"
+            ],
+            "type": "string"
+          },
+          "trades": {
+            "description": "One entry per trade this confirm prints. Min 1.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "buy | sell | dividend | transfer | other.",
+                  "type": "string"
+                },
+                "amount": {
+                  "description": "NET trade amount, signed per sign_convention (buy negative, sell positive). Asserted, not inferred -- a row that disagrees refuses the WHOLE call.",
+                  "type": "number"
+                },
+                "commission": {
+                  "type": "number"
+                },
+                "confirmation_number": {
+                  "type": "string"
+                },
+                "fees": {
+                  "type": "number"
+                },
+                "line_no": {
+                  "description": "1-based position within this confirm; part of the per-row idempotency_key.",
+                  "type": "integer"
+                },
+                "price": {
+                  "type": "number"
+                },
+                "quantity": {
+                  "type": "number"
+                },
+                "settlement_date": {
+                  "description": "ISO date the trade settles. NEVER derived from trade_date -- stored exactly as printed.",
+                  "type": "string"
+                },
+                "symbol": {
+                  "type": "string"
+                },
+                "trade_date": {
+                  "description": "ISO date the trade executed.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "line_no",
+                "symbol",
+                "action",
+                "trade_date",
+                "quantity",
+                "price",
+                "amount"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "write_mode": {
+            "default": "second_row",
+            "enum": [
+              "second_row",
+              "enrich"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_sha256",
+          "sign_convention",
+          "trades"
+        ],
+        "type": "object"
+      },
+      "name": "finance_ingest_trade_confirmation",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Ingest trade confirmation",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "category_uid": {
+            "description": "Optional: also reclassify, from finance.list_categories. Omit to leave each row's category as it is.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Client-supplied idempotency key. A repeated key returns the original result without re-applying the mutation.",
+            "type": "string"
+          },
+          "ledger_id": {
+            "description": "Retype ONE row: the cash_flow_ledger primary key. Pass exactly one of ledger_id / ledger_ids.",
+            "type": "string"
+          },
+          "ledger_ids": {
+            "description": "Retype SEVERAL rows to the same new_type under one reason, all-or-nothing. Pass exactly one of ledger_id / ledger_ids. With an idempotency_key each row's key is <idempotency_key>:<ledger_id>.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "new_type": {
+            "description": "The type the row(s) should carry.",
+            "enum": [
+              "DEPOSIT",
+              "DEBIT",
+              "TRANSFER",
+              "FEE",
+              "INTEREST"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the type was wrong. Required; recorded verbatim in the row's notes.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_type",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "finance_retype_transaction",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Retype transaction",
+      "via": "top-level"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "dryRun": true,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "finance_consistency_check",
+      "outputSchema": null,
+      "requiresGovernanceHash": false,
+      "title": "Consistency check",
+      "via": "top-level"
+    }
+  ],
+  "generatedAt": "2026-10-11T21:47:21Z",
+  "schemaVersion": "1.1.0",
+  "surface": "io-finance"
+}

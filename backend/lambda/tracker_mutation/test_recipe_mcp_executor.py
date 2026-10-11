@@ -124,8 +124,9 @@ def test_session_register_claim_heartbeat_retire():
     assert exe.register_session("devops", "DVP-RUN-001") == {"session_id": "ENC-SES-RUN1", "sci": "SCI-9"}
     assert fake.calls[0] == ("coordination", {"action": "agent.register", "arguments": {
         "agent_type_id": "ENC-AGT-007", "runtime": "recipe_runner", "project_id": "devops", "purpose": "recipe run DVP-RUN-001"}})
-    assert fake.calls[1][1]["action"] == "agent.claim" and fake.calls[1][1]["arguments"]["session_id"] == "ENC-SES-RUN1"
+    assert fake.calls[1][0] == "search"  # governance_hash fetched for agent.claim
+    assert fake.calls[2] == ("coordination", {"action": "agent.claim", "arguments": {"session_id": "ENC-SES-RUN1", "governance_hash": fake.hash}})
     exe.heartbeat("devops", "ENC-SES-RUN1")
     exe.retire("devops", "ENC-SES-RUN1")
-    assert fake.calls[2] == ("coordination", {"action": "escalation.watch", "arguments": {"session_id": "ENC-SES-RUN1", "project_id": "devops"}})
+    assert fake.calls[3] == ("coordination", {"action": "escalation.watch", "arguments": {"session_id": "ENC-SES-RUN1", "project_id": "devops"}})
     assert fake.calls[3][1]["action"] == "agent.retire"

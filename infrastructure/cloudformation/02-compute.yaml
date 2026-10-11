@@ -11,7 +11,7 @@ Description: >
 Parameters:
   RecipeMcpApiKeySecretArn:
     Type: String
-    Default: ""
+    Default: "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/recipe-runner/mcp-api-key-nvFY2Z"
     Description: DVP-TSK-968 - ARN of the SAME Secrets Manager secret the MCP lambda's ENCELADUS_MCP_API_KEY comes from (never a new copy). Empty keeps the recipe runner on the in-process path and disables the sweep rule.
   RecipeMcpUrl:
     Type: String
@@ -19,7 +19,7 @@ Parameters:
     Description: DVP-TSK-968 - streamable-HTTP endpoint of the governed MCP server used by the recipe runner (E4-R16).
   RecipeRunnerAgentTypeId:
     Type: String
-    Default: ""
+    Default: "ENC-AGT-00N"
     Description: DVP-TSK-968 - registered agent type (ENC-AGT-00N) the recipe runner claims one session per run under.
   Environment:
     Type: String

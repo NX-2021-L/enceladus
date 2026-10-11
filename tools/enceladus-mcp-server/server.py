@@ -8374,7 +8374,7 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
 from mcp_server.actions import ActionFeatureFlags, build_action_registries
 from mcp_server.catalog import build_action_catalog, tool_annotations as _catalog_tool_annotations
 from mcp_server.runtime import bind_runtime
-from mcp_server.tools.context import get_compact_context_meta
+from mcp_server.tools.context import get_compact_context_meta, recipe_record_kind
 from mcp_server.tools.coordination import coordination_meta, register_actions as register_coordination_actions
 from mcp_server.tools.execute import execute, register_actions as register_execute_actions
 from mcp_server.tools.search import register_actions as register_search_actions, search
@@ -8472,6 +8472,8 @@ _COMPACT_CONTEXT_ROUTE_PARAMS = (
 
 def _compact_context_route_query(args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """get_compact_context args -> route query params; None if not expressible."""
+    if recipe_record_kind(args.get("record_id")):
+        return None  # DVP-TSK-968: recipe / recipe-run ids compose locally from the recipe get handlers
     allowed = set(_COMPACT_CONTEXT_ROUTE_PARAMS) | {"domains"}
     if any(k not in allowed for k in args):
         return None  # unknown/extra arg: compose locally to keep exact semantics

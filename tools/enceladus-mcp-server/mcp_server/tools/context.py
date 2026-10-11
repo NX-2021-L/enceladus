@@ -18,6 +18,45 @@ from mcp_server.runtime import RUNTIME
 
 logger = logging.getLogger(__name__)
 
+# DVP-TSK-968: recipe primitive ids (DVP-REC-001) and run ids (DVP-RUN-001) are not tracker issue-context
+# records; compact context for them reads the recipe / recipe_run get handler instead.
+_RECIPE_ID_KINDS = {"REC": ("recipe_get", "recipe_id"), "RUN": ("recipe_run_get", "run_id")}
+
+
+def recipe_record_kind(record_id: Any):
+    """('recipe_get'|'recipe_run_get', arg name) for REC-/RUN- ids, else None."""
+    parts = str(record_id or "").strip().upper().split("-")
+    if len(parts) == 3 and parts[1] in _RECIPE_ID_KINDS and parts[2].isalnum():
+        return _RECIPE_ID_KINDS[parts[1]]
+    return None
+
+
+async def _recipe_record_context(mode: str, record_id: str, args: dict, kind) -> list[TextContent]:
+    tool, id_arg = kind
+    project_id = str(args.get("project_id") or "").strip()
+    if not project_id:
+        try:
+            project_id = RUNTIME.parse_record_id(record_id)[0]
+        except Exception:
+            project_id = ""
+    if not project_id:
+        return meta_tool_error("get_compact_context", code="invalid_input",
+                               message="project_id is required for recipe and recipe-run context", mode=mode)
+    try:
+        call = await RUNTIME.invoke_raw_tool(tool, {"project_id": project_id, id_arg: record_id})
+    except PermissionError as exc:
+        return meta_tool_error("get_compact_context", code="boundary_denied", message=str(exc), mode=mode)
+    except Exception as exc:
+        return meta_tool_error("get_compact_context", code="tool_resolution_failed", message=str(exc), mode=mode)
+    calls = [raw_call_summary(call)]
+    if call["status"] != "success":
+        return meta_tool_error("get_compact_context", code=call.get("error_code") or "tool_error",
+                               message=f"Underlying {tool} failed", mode=mode, underlying_calls=calls,
+                               details={"result": call["payload"]})
+    return meta_tool_success("get_compact_context", mode=mode, underlying_calls=calls,
+                             result={"record_context": call["payload"], "record_kind": tool.replace("_get", "")},
+                             metadata={"section_count": 1})
+
 async def get_compact_context_meta(args: dict) -> list[TextContent]:
     mode = str(args.get("mode") or "").strip().lower()
     if not mode:
@@ -52,6 +91,10 @@ async def get_compact_context_meta(args: dict) -> list[TextContent]:
                 message="record_id is required for record-oriented context modes",
                 mode=mode,
             )
+
+        recipe_kind = recipe_record_kind(record_id)
+        if recipe_kind:
+            return await _recipe_record_context(mode, record_id, args, recipe_kind)
 
         raw_args = {
             "record_id": record_id,
