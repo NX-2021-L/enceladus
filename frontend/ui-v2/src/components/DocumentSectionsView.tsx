@@ -8,7 +8,6 @@ import { DocumentSection } from './DocumentSection'
 import { SectionEditor } from './SectionEditor'
 import { MarkdownContent } from './MarkdownContent'
 import type { DocumentSection as DocumentSectionModel } from '../utils/documentSections'
-import { resolveMarkdownEngine } from '../utils/markdownEngine'
 import './documentSections.css'
 
 // DVP-TSK-916: lazy so the kit (and its unified/remark stack) stays out of the main chunk while the flag is off.
@@ -29,8 +28,10 @@ export function DocumentSectionsView({ record }: { record: Document }) {
   // DVP-TSK-916 (DVP-PLN-011 E3-W2.3): ?md=kit (or the ev2.md.engine preference)
   // swaps in the @io-kit/md docstore renderer. Default stays 'legacy' this
   // release; the flip-and-remove step is DVP-TSK-924 (E3-W3.4).
-  const [engine] = useState(() => resolveMarkdownEngine())
-  if (engine === 'kit') {
+  // DVP-TSK-935: the default is the kit-backed MarkdownContent INSIDE this same section view, so the
+  // document UI is unchanged. The whole-document KitDocumentView is opt-in via ?md=kitdoc.
+  const [kitDoc] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('md') === 'kitdoc')
+  if (kitDoc) {
     return (
       <Suspense fallback={<p className="ev2-docsec__manifest-loading">Loading document&hellip;</p>}>
         <KitDocumentView record={record} />

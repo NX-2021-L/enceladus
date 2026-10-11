@@ -1,39 +1,17 @@
-import { useState, type AnchorHTMLAttributes } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRouter } from '@tanstack/react-router'
-import { KitMarkdown } from '@io-kit/md/react'
-import '@io-kit/md/docstore.css'
+import { KitMarkdown } from '@io-kit/md/lean/react'
+import './markdownContent.css'
+import './kitDocumentView.css'
 import type { Document } from '../types/records'
 import { recordKeys } from '../api/queryOptions'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { useDocumentOutline } from '../hooks/useDocumentOutline'
-import { kitDocstorePlugins, kitSections } from '../utils/kitDocstore'
+import { kitSections, makeKitIdResolver } from '../utils/kitDocstore'
+import { hostMarkdownComponents, hostMarkdownPlugins } from './KitMarkdownContent'
 import type { DocumentSection } from '../utils/documentSections'
 import { SectionEditor } from './SectionEditor'
 import './documentSections.css'
-
-/** Internal (host-route) links navigate in-app; everything else keeps the browser default. */
-function HostLink({ href, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
-  const router = useRouter()
-  const internal = !!href && href.startsWith('/') && !href.startsWith('//')
-  return (
-    <a
-      href={href}
-      {...rest}
-      onClick={
-        internal
-          ? (e) => {
-              if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
-              e.preventDefault()
-              router.history.push(href)
-            }
-          : rest.onClick
-      }
-    >
-      {children}
-    </a>
-  )
-}
 
 /**
  * DVP-TSK-916 (DVP-PLN-011 E3-W2.3): the document Content tab rendered through
@@ -61,6 +39,9 @@ export default function KitDocumentView({ record }: { record: Document }) {
     onLiveMutation: invalidateDocument,
   })
 
+  // Same host look as MarkdownContent (legacy classes via kit slots), every id form linked to its ui-v2 route,
+  // yaml as a plain code block (tolerant: no parse, no warning, no tree).
+  const plugins = hostMarkdownPlugins(makeKitIdResolver(projects), true)
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [editIfMatch, setEditIfMatch] = useState('')
 
@@ -108,8 +89,9 @@ export default function KitDocumentView({ record }: { record: Document }) {
 
       <KitMarkdown
         source={doc}
-        plugins={kitDocstorePlugins(projects)}
-        components={{ a: HostLink } as never}
+        plugins={plugins}
+        components={hostMarkdownComponents}
+        className="ev2-md ev2-kitdoc"
       />
 
       {editing && (
