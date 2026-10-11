@@ -113,7 +113,7 @@ import tempfile
 # would-be downgrade. Moving a function to a new layer version and bumping this pin are
 # ONE change, not two.
 CANONICAL_SHARED_LAYER_ARN = (
-    "arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12"
+    "arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:15"
 )
 
 # ENC-TSK-H28 / ENC-ISS-385: the sanctioned compute-deploy workflow that MUST pass

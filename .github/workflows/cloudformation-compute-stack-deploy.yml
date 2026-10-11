@@ -513,7 +513,7 @@ jobs:
               AppConfigApplicationId="${APPCFG_APP}" \
               AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
-              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12" \
+              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:15" \
               RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
               RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
               RhythmBeatsEnabled="${RHYTHM_BEATS_ENABLED}" \
