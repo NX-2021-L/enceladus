@@ -1,0 +1,16 @@
+/* KitDocumentView (?md=kitdoc): Enceladus design-system tokens for the whole-document kit view.
+ * Body typography, headings, code, quotes and links come from markdownContent.css (same classes the
+ * kit slots emit); this file only covers what the section view supplies elsewhere. */
+.ev2-kitdoc {
+  display: block;
+  padding: var(--space-4) 0;
+  color: var(--enc-starlight);
+}
+
+.ev2-kitdoc > .ev2-md__heading:first-child {
+  margin-top: 0;
+}
+
+.ev2-kitdoc .ev2-md__pre {
+  max-width: 100%;
+}

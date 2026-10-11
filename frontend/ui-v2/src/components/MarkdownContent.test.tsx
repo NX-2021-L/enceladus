@@ -22,6 +22,8 @@ describe('MarkdownContent', () => {
   let root: Root
 
   beforeEach(() => {
+    // these assertions pin the legacy parser's DOM; kit parity lives in KitMarkdownContent.parity.test.tsx
+    window.localStorage.setItem('ev2.md.engine', 'legacy')
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -29,6 +31,7 @@ describe('MarkdownContent', () => {
   })
 
   afterEach(() => {
+    window.localStorage.removeItem('ev2.md.engine')
     act(() => root.unmount())
     container.remove()
   })
