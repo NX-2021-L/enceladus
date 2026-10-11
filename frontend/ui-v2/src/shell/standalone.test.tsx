@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { standaloneMeta } from '@io-kit/shell'
 
 /**
@@ -124,7 +125,6 @@ describe('inset contract', () => {
         'src/auth/AuthGate.tsx',
         'src/auth/LoggedOutScreen.tsx',
         'src/shell/AppShell.tsx',
-        'src/shell/CommandPalette.tsx',
         'src/shell/shell.css',
       ].sort(),
     )
@@ -179,8 +179,11 @@ describe('tap-to-top', () => {
       MutationErrorFlashbar: () => null,
       OfflinePendingFlashbar: () => null,
     }))
-    vi.doMock('./useCommandNavigation', () => ({ useCommandNavigation: () => ({ submit: vi.fn() }) }))
-    vi.doMock('./CommandPalette', () => ({ CommandPalette: () => null }))
+    // DVP-TSK-995: the header search is the kit SearchLauncher (HeaderSearch); the project registry feeds its suggestions.
+    vi.doMock('../api/projectRegistry', async (orig) => ({
+      ...(await orig<typeof import('../api/projectRegistry')>()),
+      projectRegistryQueryOptions: { queryKey: ['test-projects'], queryFn: async () => [] },
+    }))
     vi.doMock('../auth/logout', () => ({ performLogout: vi.fn() }))
     vi.doMock('../offline/swUpdate', () => ({ refreshApp: vi.fn() }))
     host = document.createElement('div')
@@ -199,7 +202,15 @@ describe('tap-to-top', () => {
   async function mount() {
     const { AppShell } = await import('./AppShell')
     root = createRoot(host)
-    act(() => root.render(<AppShell><p>page</p></AppShell>))
+    act(() =>
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <AppShell>
+            <p>page</p>
+          </AppShell>
+        </QueryClientProvider>,
+      ),
+    )
     const scroller = host.querySelector<HTMLElement>('.ev2-al__content')!
     const scrollTo = vi.fn()
     scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo
@@ -221,7 +232,7 @@ describe('tap-to-top', () => {
     expect(scrollTo.mock.calls[0][0]).toMatchObject({ top: 0 })
     scrollTo.mockClear()
     click(host.querySelector('.ev2-tn__btn')!)
-    click(host.querySelector('.ev2-tn__search-input')!)
+    click(host.querySelector('button[aria-label="Search"]')!) // DVP-TSK-995: the kit launcher is a button, so it opts out
     click(host.querySelector('a.ev2-tn__brand')!)
     expect(scrollTo).not.toHaveBeenCalled()
   })

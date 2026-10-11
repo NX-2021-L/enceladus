@@ -5,9 +5,9 @@ import { RecordCard } from '../components/RecordCard'
 import { formatRelativeTime } from '../format/relativeTime'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import { feedRowAccent, priorityBadgeColor, sessionStateBadge } from '../search/feedRowPresentation'
-import type { useTieredSearch } from '../search/useTieredSearch'
 import type { SearchResultHit } from '../types/search'
 import { SignalReadout } from '@io-kit/search/react'
+import type { SignalAvailability, SignalEvidence } from '@io-kit/search'
 
 export type PinState = 'pending' | 'done' | 'error'
 
@@ -19,14 +19,16 @@ export interface FeedRowContext {
   onSelect(hit: SearchResultHit): void
   /** Narrow viewports link to the record page; called before leaving so the return search is persisted. */
   onLeave(): void
-  tiered: Pick<ReturnType<typeof useTieredSearch>, 'evidenceById' | 'availability'>
+  /** Per-row hybrid evidence (signal -> rank) and the signal states to render it against. */
+  evidenceFor(recordId: string): SignalEvidence[] | undefined
+  availability?: SignalAvailability
   pins: Record<string, PinState>
   onPin(sourceId: string, targetId: string): void
 }
 
 /**
- * ENC-TSK-M35 / DVP-TSK-921 / DVP-TSK-931: the one feed-row rendering, shared by the legacy list and the
- * @io-kit/feed panel (renderCard slot) so both engines emit the same card markup. Plain function, not a
+ * ENC-TSK-M35 / DVP-TSK-921 / DVP-TSK-931: the one feed-row rendering, shared by /feed and /docs (kit
+ * CollectionSearch renderRow) so both surfaces emit the same card markup. Plain function, not a
  * component: the DOM must stay exactly what LegacyFeedRoute always produced.
  */
 export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
@@ -59,7 +61,7 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
         : { href, onSelect: () => cx.onLeave() })}
     />
   )
-  const evidence = cx.tiered.evidenceById.get(hit.recordId)
+  const evidence = cx.evidenceFor(hit.recordId)
   const canPin =
     isWide &&
     selectedHit &&
@@ -70,8 +72,8 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
     <div key={hit.recordId} className="feed-route__row-wrap">
       {card}
       <div className="feed-route__row-extras">
-        {evidence && cx.tiered.availability ? (
-          <SignalReadout evidence={evidence} availability={cx.tiered.availability} mode="chips" />
+        {evidence && cx.availability ? (
+          <SignalReadout evidence={evidence} availability={cx.availability} mode="chips" />
         ) : null}
         {canPin ? (
           <button
