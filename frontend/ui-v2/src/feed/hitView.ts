@@ -54,3 +54,23 @@ export function feedHitCount(loaded: number, serverCorpusTotal: number | null, q
   if (q.trim() || f.trim() || serverCorpusTotal === null) return loaded
   return Math.max(loaded, serverCorpusTotal)
 }
+
+/** DVP-TSK-947: the last server corpus total, remembered so the first paint can count the corpus like legacy. */
+export const SERVER_TOTAL_STORAGE_KEY = 'ev2.feed.serverCorpusTotal'
+
+export function readRememberedServerTotal(storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage): number | null {
+  try {
+    const n = Number(storage?.getItem(SERVER_TOTAL_STORAGE_KEY))
+    return Number.isInteger(n) && n > 0 ? n : null
+  } catch {
+    return null
+  }
+}
+
+export function rememberServerTotal(total: number, storage: Pick<Storage, 'setItem'> | undefined = globalThis.localStorage): void {
+  try {
+    storage?.setItem(SERVER_TOTAL_STORAGE_KEY, String(total))
+  } catch {
+    // storage blocked (private mode, quota): the count falls back to loaded rows until the server answers
+  }
+}
