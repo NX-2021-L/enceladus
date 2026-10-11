@@ -17,8 +17,8 @@ export type MarkdownEngine = 'kit' | 'legacy'
 export const MARKDOWN_ENGINE_QUERY_PARAM = 'md'
 export const MARKDOWN_ENGINE_STORAGE_KEY = 'ev2.md.engine'
 
-/** The release default. DVP-TSK-924 flips this to 'kit' and deletes the legacy path. */
-export const DEFAULT_MARKDOWN_ENGINE: MarkdownEngine = 'legacy'
+/** The release default (DVP-TSK-935: 'kit'; 'legacy' stays selectable for one release, then the relay task deletes it). */
+export const DEFAULT_MARKDOWN_ENGINE: MarkdownEngine = 'kit'
 
 function parseEngine(value: string | null | undefined): MarkdownEngine | null {
   const v = value?.trim().toLowerCase()

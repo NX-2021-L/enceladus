@@ -17,10 +17,10 @@
   },
   "dependencies": {
     "@io-kit/auth": "1.0.0",
-    "@io-kit/feed": "1.0.0",
-    "@io-kit/md": "1.0.0",
+    "@io-kit/feed": "1.1.0",
+    "@io-kit/md": "1.2.0",
     "@io-kit/schema_form": "0.2.1",
-    "@io-kit/search": "0.2.0",
+    "@io-kit/search": "0.3.0",
     "@io-kit/shell": "0.1.0",
     "@io-kit/tokens": "0.1.0",
     "@tanstack/react-form": "1.33.5",
