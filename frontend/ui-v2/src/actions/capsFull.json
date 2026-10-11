@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-10T16:59:57Z",
+  "generatedAt": "2026-10-11T21:44:20Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -2639,6 +2639,18 @@
           "page_size": {
             "type": "integer",
             "description": "Maximum records per page."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Gate kind filter, comma list (acceptance, reconciliation, escalation, tool_call, limit, security, stale_lock, drift, notice)."
+          },
+          "state": {
+            "type": "string",
+            "description": "Derived state filter, comma list (pending, snoozed, decided, expired, superseded)."
+          },
+          "all_projects": {
+            "type": "boolean",
+            "description": "List across ALL projects (ENC-ISS-773); project_id is then only the route anchor."
           }
         },
         "required": [
@@ -2708,6 +2720,55 @@
           "dispatch_id": {
             "type": "string",
             "description": "Dispatch id (DSP-*)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Gate kind (acceptance, reconciliation, escalation, tool_call, limit, security, stale_lock, drift, notice). Default escalation."
+          },
+          "source_principal": {
+            "type": "string",
+            "description": "Producer principal (think/vagamod); verified against the per-source allow-list. Required for producer requests.",
+            "x-io-required-by": "backend"
+          },
+          "source": {
+            "type": "string",
+            "description": "Producer source name (think, vagamod); optional when the principal maps to one source."
+          },
+          "proposedCalls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Producer API: fully bound calls to run on approve (exactly one of proposedCalls or candidates).",
+            "x-io-required-by": "backend"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Producer API: candidate resolutions {id,label,rule?,call?} (exactly one of proposedCalls or candidates).",
+            "x-io-required-by": "backend"
+          },
+          "subject": {
+            "type": "object",
+            "description": "Producer API: {record_id, project, version} the card is about.",
+            "x-io-required-by": "backend"
+          },
+          "title": {
+            "type": "string",
+            "description": "Card title."
+          },
+          "risk": {
+            "type": "string",
+            "description": "Risk override (low, medium, high, critical)."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Evidence items [{label, ref}]."
           }
         },
         "required": [
