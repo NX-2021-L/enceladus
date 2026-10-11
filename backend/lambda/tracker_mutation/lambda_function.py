@@ -8685,7 +8685,98 @@ def _gate_csv(value: Any) -> list:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
 
 
-def _escalation_gate_request_fields(body: Dict, now: "dt.datetime"):
+def _gate_pick(body: Dict, *names):
+    for name in names:
+        if body.get(name) not in (None, ""):
+            return body.get(name)
+    return None
+
+
+def _gate_producer_principals() -> Dict[str, set]:
+    """Per-source producer allow-list (ENC-TSK-967 phase 2b).
+
+    GATE_PRODUCER_PRINCIPALS='{"think": ["<principal>", ...], "vagamod": [...]}'.
+    FAIL-CLOSED: unset, empty or malformed config yields an empty map, so every
+    producer request is refused until the allow-list is configured.
+    """
+    raw = os.environ.get("GATE_PRODUCER_PRINCIPALS", "")
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(src): {str(p).strip() for p in principals if str(p).strip()}
+        for src, principals in parsed.items()
+        if isinstance(principals, (list, tuple))
+    }
+
+
+def _gate_resolve_producer(principal: str, source: Any):
+    """Resolve (source, error) for a producer principal; error is a 403 message."""
+    allow = _gate_producer_principals()
+    matches = sorted(src for src, principals in allow.items() if principal in principals)
+    if not matches:
+        return None, "source_principal is not allow-listed for any producer source."
+    if source not in (None, ""):
+        if str(source) not in matches:
+            return None, f"source_principal is not allow-listed for source '{source}'."
+        return str(source), None
+    if len(matches) > 1:
+        return None, f"source_principal is allow-listed for several sources {matches}; pass 'source'."
+    return matches[0], None
+
+
+def _gate_is_producer_request(body: Dict) -> bool:
+    """A request without mutation_type that carries a producer marker."""
+    if str(body.get("mutation_type") or "").strip():
+        return False
+    return _gate_pick(body, "proposedCalls", "proposed_calls", "sourcePrincipal",
+                      "source_principal", "source") is not None
+
+
+_GATE_CALL_KEYS = {"capability", "mcpTool", "method", "path", "args", "annotations",
+                   "ifMatch", "callHash"}
+
+
+def _gate_validate_resolved_call(call: Any, where: str) -> Optional[str]:
+    """Shape-check one ResolvedCall (gates.schema.json). The hash is not recomputed here."""
+    if not isinstance(call, dict):
+        return f"{where} must be an object."
+    extra = sorted(set(call) - _GATE_CALL_KEYS)
+    if extra:
+        return f"{where} has unknown fields {extra}."
+    for name in ("capability", "path", "ifMatch"):
+        if not (isinstance(call.get(name), str) and call[name].strip()):
+            return f"{where}.{name} must be a non-empty string."
+    if call.get("method") not in ("POST", "PUT", "PATCH", "DELETE"):
+        return f"{where}.method must be one of POST, PUT, PATCH, DELETE."
+    if not isinstance(call.get("args"), dict) or not isinstance(call.get("annotations"), dict):
+        return f"{where}.args and {where}.annotations must be objects."
+    import re as _re
+    if not (isinstance(call.get("callHash"), str) and _re.fullmatch(r"[0-9a-f]{64}", call["callHash"])):
+        return f"{where}.callHash must be a lowercase sha256 hex digest."
+    return None
+
+
+def _gate_validate_actions(proposed: Any, candidates: Any) -> Optional[str]:
+    if proposed is not None:
+        if not isinstance(proposed, list) or not proposed or len(proposed) > _GATE_MAX_CANDIDATES:
+            return f"Field 'proposedCalls' must be a list of 1..{_GATE_MAX_CANDIDATES} resolved calls."
+        for idx, call in enumerate(proposed):
+            err = _gate_validate_resolved_call(call, f"proposedCalls[{idx}]")
+            if err:
+                return err
+    for idx, cand in enumerate(candidates or []):
+        if cand.get("call") is not None:
+            err = _gate_validate_resolved_call(cand["call"], f"candidates[{idx}].call")
+            if err:
+                return err
+    return None
+
+
+def _escalation_gate_request_fields(body: Dict, now: "dt.datetime", allow_telemetry: bool = False):
     """Validate the optional gate-card fields of escalation.request.
 
     Returns (fields, error). Every field is optional; legacy requests (no
@@ -8705,7 +8796,7 @@ def _escalation_gate_request_fields(body: Dict, now: "dt.datetime"):
     supplied_family = pick("family")
     if supplied_family is not None and str(supplied_family) != family:
         return None, f"family '{supplied_family}' contradicts kind '{kind}' (family is {family})."
-    if family == "telemetry":
+    if family == "telemetry" and not allow_telemetry:
         return None, (
             f"Telemetry kind '{kind}' carries no proposed action and is not "
             "accepted by escalation.request."
@@ -8716,12 +8807,13 @@ def _escalation_gate_request_fields(body: Dict, now: "dt.datetime"):
     if risk not in _GATE_RISKS:
         return None, f"Invalid risk '{risk}'. Allowed: {list(_GATE_RISKS)}."
     on_expire = str(pick("onExpire", "on_expire") or default_on_expire).strip()
-    if on_expire not in _GATE_DECISION_ON_EXPIRE:
-        return None, f"Invalid onExpire '{on_expire}'. Allowed: {list(_GATE_DECISION_ON_EXPIRE)}."
+    allowed_on_expire = _GATE_DECISION_ON_EXPIRE + (("auto_clear",) if family == "telemetry" else ())
+    if on_expire not in allowed_on_expire:
+        return None, f"Invalid onExpire '{on_expire}'. Allowed: {list(allowed_on_expire)}."
 
     expires_raw = pick("expiresAt", "expires_at")
     if expires_raw is None:
-        expires = now + dt.timedelta(seconds=ttl)
+        expires = now + dt.timedelta(seconds=ttl) if ttl is not None else None
     else:
         expires = _gate_parse_ts(expires_raw)
         if expires is None:
@@ -8737,7 +8829,7 @@ def _escalation_gate_request_fields(body: Dict, now: "dt.datetime"):
         snoozed = _gate_parse_ts(snoozed_raw)
         if snoozed is None:
             return None, "Field 'snoozedUntil' must be an ISO-8601 timestamp."
-        if snoozed > expires:
+        if expires is not None and snoozed > expires:
             return None, "Field 'snoozedUntil' must be <= expiresAt (snooze never extends expiry)."
 
     candidates = pick("candidates")
@@ -8783,7 +8875,7 @@ def _escalation_gate_request_fields(body: Dict, now: "dt.datetime"):
         "family": family,
         "risk": risk,
         "onExpire": on_expire,
-        "expiresAt": _gate_fmt(expires),
+        "expiresAt": _gate_fmt(expires) if expires else "",
         "snoozedUntil": _gate_fmt(snoozed) if snoozed else "",
         "candidates": candidates,
         "evidence": evidence,
@@ -8817,7 +8909,7 @@ def _escalation_public(item: Dict) -> Dict:
             record["payload"] = json.loads(raw_payload)
         except (ValueError, TypeError):
             pass
-    for gate_key in ("candidates", "evidence", "blastRadius"):
+    for gate_key in ("candidates", "evidence", "blastRadius", "proposedCalls", "subject"):
         raw_gate = record.get(gate_key)
         if isinstance(raw_gate, str):
             try:
@@ -8845,6 +8937,11 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+
+    if _gate_is_producer_request(body):
+        return _handle_escalation_produce(project_id, body)  # ENC-TSK-967 phase 2b
+    if _gate_pick(body, "proposedCalls", "proposed_calls") is not None:
+        return _error(400, "proposedCalls belongs to the producer API; it cannot be combined with mutation_type.")
 
     target_record_id = str(body.get("target_record_id") or "").strip()
     mutation_type = str(body.get("mutation_type") or "").strip()
@@ -8894,6 +8991,10 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now())
     if gate_err:
         return _error(400, gate_err)
+    if gate_fields["sourcePrincipal"]:  # a claimed producer principal is always verified
+        _src, principal_err = _gate_resolve_producer(gate_fields["sourcePrincipal"], body.get("source"))
+        if principal_err:
+            return _error(403, principal_err)
 
     # Target must exist — read fresh, never trust the caller's snapshot.
     ddb = _get_ddb()
@@ -8982,6 +9083,103 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
         "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
         "expiresAt": gate_fields["expiresAt"],
         "onExpire": gate_fields["onExpire"],
+    })
+
+
+def _handle_escalation_produce(project_id: str, body: Dict) -> Dict:
+    """Producer API (ENC-TSK-967 phase 2b): escalation.request for external sources.
+
+    think and vagamod post gate cards of any kind under a per-source principal
+    (GATE_PRODUCER_PRINCIPALS). A decision-family card carries EXACTLY ONE of
+    proposedCalls or candidates; telemetry kinds (drift, notice) carry neither.
+    The principal check runs first (403) so an unlisted caller learns nothing
+    about the validation rules. Legacy mutation_type requests never reach here.
+    """
+    principal = str(_gate_pick(body, "sourcePrincipal", "source_principal") or "").strip()
+    if not principal:
+        return _error(400, "Field 'source_principal' is required for producer requests.")
+    source, principal_err = _gate_resolve_producer(principal, body.get("source"))
+    if principal_err:
+        return _error(403, principal_err)
+
+    gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now(), allow_telemetry=True)
+    if gate_err:
+        return _error(400, gate_err)
+    proposed = _gate_pick(body, "proposedCalls", "proposed_calls")
+    candidates = gate_fields["candidates"]
+    if gate_fields["family"] == "telemetry":
+        if proposed is not None or candidates is not None:
+            return _error(400, f"Telemetry kind '{gate_fields['kind']}' carries no proposed action "
+                               "(neither proposedCalls nor candidates).")
+    elif (proposed is None) == (candidates is None):
+        return _error(400, "Exactly one of 'proposedCalls' or 'candidates' is required "
+                           "for a decision-family producer request.")
+    action_err = _gate_validate_actions(proposed, candidates)
+    if action_err:
+        return _error(400, action_err)
+    subject = _gate_pick(body, "subject")
+    if subject is not None and not (
+            isinstance(subject, dict) and isinstance(subject.get("record_id"), str)
+            and subject["record_id"].strip()):
+        return _error(400, "Field 'subject' must be an object with a non-empty 'record_id'.")
+
+    prefix = _get_project_prefix(project_id)
+    if not prefix:
+        return _error(404, f"Project '{project_id}' not found or has no prefix.")
+    escalation_id = _next_record_id(project_id, prefix, "escalation")
+    now = _now_z()
+    kind = gate_fields["kind"]
+    item = {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"escalation#{escalation_id}"),
+        "item_id": _ser_s(escalation_id),
+        "record_type": _ser_s("escalation"),
+        "source": _ser_s(source),
+        "requested_by": {"M": {
+            "session_id": _ser_s(principal),
+            "agent_type_id": _ser_s(""),
+            "sci_present": {"BOOL": False},
+        }},
+        "status": _ser_s("requested"),
+        "events": {"L": [_escalation_event(
+            "requested", principal,
+            detail={"kind": kind, "source": source, "source_principal": principal},
+        )]},
+        "created_at": _ser_s(now),
+        "updated_at": _ser_s(now),
+        "write_source": _build_write_source(body),
+    }
+    justification = str(body.get("justification") or "").strip()
+    if justification:
+        item["justification"] = _ser_s(justification)
+    for gate_key in ("kind", "family", "risk", "onExpire", "sourcePrincipal"):
+        item[gate_key] = _ser_s(gate_fields[gate_key] or principal)
+    if gate_fields["expiresAt"]:
+        item["expiresAt"] = _ser_s(gate_fields["expiresAt"])
+    for gate_key in ("snoozedUntil", "title"):
+        if gate_fields[gate_key]:
+            item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key, value in (("candidates", candidates), ("evidence", gate_fields["evidence"]),
+                            ("blastRadius", gate_fields["blastRadius"]),
+                            ("proposedCalls", proposed), ("subject", subject)):
+        if value is not None:
+            item[gate_key] = _ser_s(json.dumps(value, default=str))
+    try:
+        _get_ddb().put_item(TableName=DYNAMODB_TABLE, Item=item,
+                            ConditionExpression="attribute_not_exists(record_id)")
+    except Exception as exc:
+        logger.error("producer escalation put_item failed: %s", exc)
+        return _error(500, "Database write failed while creating escalation.")
+    _notify_escalation_event("requested", escalation_id,
+                             (subject or {}).get("record_id", f"{source}:{kind}"), kind,
+                             principal, note=justification or gate_fields["title"])
+    return _response(201, {
+        "success": True, "escalation_id": escalation_id, "status": "requested",
+        "created_at": now, "kind": kind, "family": gate_fields["family"],
+        "risk": gate_fields["risk"],
+        "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
+        "expiresAt": gate_fields["expiresAt"] or None, "onExpire": gate_fields["onExpire"],
+        "source": source, "sourcePrincipal": principal,
     })
 
 
@@ -9533,6 +9731,8 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "onExpire": expiry["onExpire"],
         })
 
+    if not escalation.get("mutation_type"):
+        return _error(409, "Producer escalation has no mutation_type; escalation.apply cannot execute its proposed calls.")
     handler = _ESCALATION_MUTATION_HANDLERS.get(str(escalation.get("mutation_type")))
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
