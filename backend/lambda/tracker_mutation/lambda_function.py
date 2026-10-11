@@ -7083,6 +7083,12 @@ _RELATIONSHIP_TYPES = frozenset({
     "affects", "affected-by",
     "tests", "tested-by",
     "consumes-from", "produces-for",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun relationship types
+    "recipe-uses-tool", "tool-used-by-recipe",
+    "recipe-serves-project", "project-served-by-recipe",
+    "recipe-implements-feature", "implemented-by-recipe",
+    "run-instance-of-recipe", "recipe-has-run",
+    "run-opened-escalation", "escalation-opened-by-run",
     # ENC-FTR-058: Plan primitive relationship types
     "plan-contains", "contained-by-plan",
     "plan-attached-doc", "doc-attached-to-plan",
@@ -7120,6 +7126,12 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "affects": "affected-by", "affected-by": "affects",
     "tests": "tested-by", "tested-by": "tests",
     "consumes-from": "produces-for", "produces-for": "consumes-from",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": "tool-used-by-recipe", "tool-used-by-recipe": "recipe-uses-tool",
+    "recipe-serves-project": "project-served-by-recipe", "project-served-by-recipe": "recipe-serves-project",
+    "recipe-implements-feature": "implemented-by-recipe", "implemented-by-recipe": "recipe-implements-feature",
+    "run-instance-of-recipe": "recipe-has-run", "recipe-has-run": "run-instance-of-recipe",
+    "run-opened-escalation": "escalation-opened-by-run", "escalation-opened-by-run": "run-opened-escalation",
     # ENC-FTR-058: Plan primitive
     "plan-contains": "contained-by-plan", "contained-by-plan": "plan-contains",
     "plan-attached-doc": "doc-attached-to-plan", "doc-attached-to-plan": "plan-attached-doc",
@@ -7166,6 +7178,17 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     "tested-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
     "consumes-from": {"asymmetric": True, "irreflexive": True, "transitive": False},
     "produces-for":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "tool-used-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-serves-project": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "project-served-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-implements-feature": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "implemented-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-instance-of-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-has-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-opened-escalation": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "escalation-opened-by-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"asymmetric": True, "irreflexive": True, "transitive": False},
     "contained-by-plan":  {"asymmetric": True, "irreflexive": True, "transitive": False},
@@ -7214,6 +7237,17 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     "tested-by":     {"source": frozenset({"feature", "issue"}), "target": frozenset({"task"})},
     "consumes-from": {"source": None, "target": None},
     "produces-for":  {"source": None, "target": None},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun (endpoints are non-tracker ids; unconstrained)
+    "recipe-uses-tool": {"source": None, "target": None},
+    "tool-used-by-recipe": {"source": None, "target": None},
+    "recipe-serves-project": {"source": None, "target": None},
+    "project-served-by-recipe": {"source": None, "target": None},
+    "recipe-implements-feature": {"source": None, "target": None},
+    "implemented-by-recipe": {"source": None, "target": None},
+    "run-instance-of-recipe": {"source": None, "target": None},
+    "recipe-has-run": {"source": None, "target": None},
+    "run-opened-escalation": {"source": None, "target": None},
+    "escalation-opened-by-run": {"source": None, "target": None},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"source": frozenset({"plan"}), "target": frozenset({"task", "issue", "feature"})},
     "contained-by-plan":  {"source": frozenset({"task", "issue", "feature"}), "target": frozenset({"plan"})},
@@ -9896,6 +9930,11 @@ _RECIPE_REGISTRY_CACHE: Dict[str, Any] = {}
 
 def _recipe_to_ddb(item: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
+    if item.get("record_kind") == "run" and not item.get("record_type"):
+        # DVP-TSK-968 part D: stamp the stream-visible type so graph_sync / the AppSync feed classify runs.
+        ref = item.get("recipe_ref") if isinstance(item.get("recipe_ref"), dict) else {}
+        item = dict(item, record_type="recipe_run", item_id=item.get("run_id"),
+                    title=f"{ref.get('recipe_id') or 'recipe'} run {item.get('run_id')}")
     for key, val in item.items():
         if val is None:
             continue

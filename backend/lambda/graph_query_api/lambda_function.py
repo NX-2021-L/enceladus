@@ -626,6 +626,17 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "DERIVED_FROM",       # AgentCredential -> parent AgentCredential (rotation lineage)
     "TRIGGERED_BY",       # AgentSession -> triggering session/routine
     "MUTATED",            # AgentSession -> any record it wrote (write_source.provider)
+    # DVP-TSK-968 / DVP-FTR-106 (RP-0 s8): Recipe / RecipeRun edges (byte-identical to graph_sync).
+    "RECIPE_USES_TOOL",
+    "TOOL_USED_BY_RECIPE",
+    "RECIPE_SERVES_PROJECT",
+    "PROJECT_SERVED_BY_RECIPE",
+    "RECIPE_IMPLEMENTS_FEATURE",
+    "IMPLEMENTED_BY_RECIPE",
+    "RUN_INSTANCE_OF_RECIPE",
+    "RECIPE_HAS_RUN",
+    "RUN_OPENED_ESCALATION",
+    "ESCALATION_OPENED_BY_RUN",
 })
 
 
@@ -843,7 +854,7 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
     record_type = params.get("record_type", "")
 
     if record_type:
-        label_map = {"task": "Task", "issue": "Issue", "feature": "Feature"}
+        label_map = {"task": "Task", "issue": "Issue", "feature": "Feature", "recipe": "Recipe", "recipe_run": "RecipeRun"}
         label = label_map.get(record_type.lower(), "")
         if label:
             cypher = (
@@ -1856,6 +1867,8 @@ def _hybrid_keyword_ranks(
             "plan": "Plan",
             "lesson": "Lesson",
             "document": "Document",
+            "recipe": "Recipe",  # DVP-TSK-968
+            "recipe_run": "RecipeRun",  # DVP-TSK-968
         }
         label = label_map.get(record_type_filter.lower())
         if label:
