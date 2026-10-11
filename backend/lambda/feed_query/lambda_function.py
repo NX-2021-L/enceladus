@@ -98,7 +98,7 @@ MAX_SCOPE_RECORD_IDS = 500
 MAX_SCOPE_STATUSES = 20
 MAX_DURATION_MINUTES = 10080
 DEFAULT_DURATION_MINUTES = 60
-VALID_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan"}
+VALID_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "recipe", "recipe_run"}
 VALID_DELIVERY_MODES = {"poll", "push"}
 
 _CLOSED_STATUSES = {"closed", "complete", "completed"}

@@ -118,6 +118,8 @@ class _ApplierBase(unittest.TestCase):
         self._patches = [
             mock.patch.object(lf, "ENABLE_ESCALATION_PRIMITIVE", True),
             mock.patch.object(lf, "_get_events", return_value=mock.MagicMock()),
+            # ENC-TSK-967: legacy fixtures are 2026-07-02; pin the F-10 clock inside the 72h window.
+            mock.patch.object(lf, "_gate_now", return_value=__import__("datetime").datetime(2026, 7, 2, 5, 0, tzinfo=__import__("datetime").timezone.utc)),
         ]
         for patch in self._patches:
             patch.start()

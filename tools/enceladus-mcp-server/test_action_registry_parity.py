@@ -293,7 +293,7 @@ def test_declared_schemas_cover_exactly_the_tools_without_a_raw_definition(serve
     assert undeclared == set(ACTION_INPUT_SCHEMAS), (
         sorted(undeclared - set(ACTION_INPUT_SCHEMAS)), sorted(set(ACTION_INPUT_SCHEMAS) - undeclared),
     )
-    assert len(undeclared) == 55
+    assert len(undeclared) == 66
 
 
 def test_declared_schemas_are_well_formed():
@@ -454,9 +454,9 @@ def test_emitted_caps_validate_against_the_bundled_schema(server):
     assert caps["schemaVersion"] == "1.1.0" and caps["surface"] == "enceladus"
     emit_caps.validate_caps(caps)
     names = [a["name"] for a in caps["actions"]]
-    assert len(names) == len(set(names)) == 106
+    assert len(names) == len(set(names)) == 117
     flagged = [a for a in caps["actions"] if "flag" in a]
-    assert len(flagged) == 24
+    assert len(flagged) == 35
 
 
 def test_schema_rejects_an_action_missing_annotations(server):

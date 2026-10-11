@@ -415,8 +415,8 @@ def _publish_lesson_scoring_request(project_id: str, record_id: str, item_id: st
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
 _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
 _DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted", "generation": "drafted"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN", "escalation": "ESC"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN", "escalation": "ESC", "recipe": "REC", "recipe_run": "RUN"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation", "ESC": "escalation", "REC": "recipe", "RUN": "recipe_run"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
@@ -531,13 +531,17 @@ ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
 # the current status value (approved OR failed) keeps exactly-once semantics
 # even when two re-drives race.
 _ESCALATION_FSM = {
-    "requested": {"approved", "denied", "denied_with_guidance"},
+    "requested": {"approved", "denied", "denied_with_guidance", "expired"},
     "approved": {"applying"},
     "applying": {"applied", "failed"},
     "denied": set(),
     "denied_with_guidance": set(),
     "applied": set(),
     "failed": {"applying"},
+    # ENC-TSK-967 (F-10): fail-closed expiry terminal written by the sweeper.
+    # `superseded` is deliberately NOT an escalation status (it is a normal
+    # task status); the gate state superseded is derived from onExpire=regenerate.
+    "expired": set(),
 }
 _ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
 _ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
@@ -7079,6 +7083,12 @@ _RELATIONSHIP_TYPES = frozenset({
     "affects", "affected-by",
     "tests", "tested-by",
     "consumes-from", "produces-for",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun relationship types
+    "recipe-uses-tool", "tool-used-by-recipe",
+    "recipe-serves-project", "project-served-by-recipe",
+    "recipe-implements-feature", "implemented-by-recipe",
+    "run-instance-of-recipe", "recipe-has-run",
+    "run-opened-escalation", "escalation-opened-by-run",
     # ENC-FTR-058: Plan primitive relationship types
     "plan-contains", "contained-by-plan",
     "plan-attached-doc", "doc-attached-to-plan",
@@ -7116,6 +7126,12 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "affects": "affected-by", "affected-by": "affects",
     "tests": "tested-by", "tested-by": "tests",
     "consumes-from": "produces-for", "produces-for": "consumes-from",
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": "tool-used-by-recipe", "tool-used-by-recipe": "recipe-uses-tool",
+    "recipe-serves-project": "project-served-by-recipe", "project-served-by-recipe": "recipe-serves-project",
+    "recipe-implements-feature": "implemented-by-recipe", "implemented-by-recipe": "recipe-implements-feature",
+    "run-instance-of-recipe": "recipe-has-run", "recipe-has-run": "run-instance-of-recipe",
+    "run-opened-escalation": "escalation-opened-by-run", "escalation-opened-by-run": "run-opened-escalation",
     # ENC-FTR-058: Plan primitive
     "plan-contains": "contained-by-plan", "contained-by-plan": "plan-contains",
     "plan-attached-doc": "doc-attached-to-plan", "doc-attached-to-plan": "plan-attached-doc",
@@ -7162,6 +7178,17 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     "tested-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
     "consumes-from": {"asymmetric": True, "irreflexive": True, "transitive": False},
     "produces-for":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun
+    "recipe-uses-tool": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "tool-used-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-serves-project": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "project-served-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-implements-feature": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "implemented-by-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-instance-of-recipe": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "recipe-has-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "run-opened-escalation": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "escalation-opened-by-run": {"asymmetric": True, "irreflexive": True, "transitive": False},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"asymmetric": True, "irreflexive": True, "transitive": False},
     "contained-by-plan":  {"asymmetric": True, "irreflexive": True, "transitive": False},
@@ -7210,6 +7237,17 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     "tested-by":     {"source": frozenset({"feature", "issue"}), "target": frozenset({"task"})},
     "consumes-from": {"source": None, "target": None},
     "produces-for":  {"source": None, "target": None},
+    # DVP-TSK-968 / DVP-FTR-106: Recipe + RecipeRun (endpoints are non-tracker ids; unconstrained)
+    "recipe-uses-tool": {"source": None, "target": None},
+    "tool-used-by-recipe": {"source": None, "target": None},
+    "recipe-serves-project": {"source": None, "target": None},
+    "project-served-by-recipe": {"source": None, "target": None},
+    "recipe-implements-feature": {"source": None, "target": None},
+    "implemented-by-recipe": {"source": None, "target": None},
+    "run-instance-of-recipe": {"source": None, "target": None},
+    "recipe-has-run": {"source": None, "target": None},
+    "run-opened-escalation": {"source": None, "target": None},
+    "escalation-opened-by-run": {"source": None, "target": None},
     # ENC-FTR-058: Plan primitive
     "plan-contains":      {"source": frozenset({"plan"}), "target": frozenset({"task", "issue", "feature"})},
     "contained-by-plan":  {"source": frozenset({"task", "issue", "feature"}), "target": frozenset({"plan"})},
@@ -8494,6 +8532,404 @@ def _parse_escalation_target(target_record_id: str):
     return record_type, f"{record_type}#{target_record_id}", ""
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-967 (DVP-PLN-013 E4-W1.2): the escalation entity generalised to the
+# gate-card contract (tools/enceladus-mcp-server/parity/schema/gates.schema.json).
+# Strictly additive (D9): legacy ESC records are read back as kind=escalation
+# with F-10 defaults backfilled ON READ -- no data migration -- and every new
+# request field is optional.
+# ---------------------------------------------------------------------------
+_GATE_DECISION_KINDS = (
+    "acceptance", "reconciliation", "escalation", "tool_call",
+    "limit", "security", "stale_lock",
+)
+_GATE_TELEMETRY_KINDS = ("drift", "notice")
+_GATE_KINDS = set(_GATE_DECISION_KINDS) | set(_GATE_TELEMETRY_KINDS)
+_GATE_RISKS = ("low", "medium", "high", "critical")
+_GATE_STATES = ("pending", "snoozed", "decided", "expired", "superseded")
+_GATE_DECISION_ON_EXPIRE = ("deny", "regenerate")
+_GATE_EXPIRY_MAX_SECONDS = 30 * 86400  # F-10 hard max (spec s1.1 expiry_rules)
+_GATE_TTL_72H = 72 * 3600
+_GATE_TTL_24H = 24 * 3600
+_GATE_TTL_7D = 7 * 86400
+# kind -> (default ttl seconds | None, default onExpire, default risk)
+_GATE_KIND_DEFAULTS = {
+    "acceptance": (_GATE_TTL_7D, "regenerate", "medium"),
+    "reconciliation": (_GATE_TTL_7D, "regenerate", "medium"),
+    "stale_lock": (_GATE_TTL_7D, "regenerate", "low"),
+    "escalation": (_GATE_TTL_72H, "deny", "high"),
+    "tool_call": (_GATE_TTL_72H, "deny", "high"),
+    "security": (_GATE_TTL_72H, "deny", "critical"),
+    "limit": (_GATE_TTL_24H, "deny", "medium"),
+    "drift": (None, "auto_clear", "low"),
+    "notice": (_GATE_TTL_7D, "auto_clear", "low"),
+}
+_GATE_MAX_CANDIDATES = 20
+_GATE_MAX_EVIDENCE = 50
+
+
+def _gate_now() -> "dt.datetime":
+    """Clock for gate expiry decisions (separate from _now_z so tests can pin it)."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _gate_parse_ts(value: Any) -> Optional["dt.datetime"]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _gate_fmt(ts: "dt.datetime") -> str:
+    return ts.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gate_family(kind: str) -> str:
+    return "telemetry" if kind in _GATE_TELEMETRY_KINDS else "decision"
+
+
+def _gate_default_expires_at(kind: str, created_at: Any) -> Optional[str]:
+    """F-10 default expiry: created_at + the kind's ttl (None for ttl-less kinds)."""
+    ttl = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])[0]
+    base = _gate_parse_ts(created_at)
+    if ttl is None or base is None:
+        return None
+    return _gate_fmt(base + dt.timedelta(seconds=ttl))
+
+
+def _escalation_expiry(record: Dict, now: Optional["dt.datetime"] = None) -> Dict[str, Any]:
+    """Resolve {expiresAt, expired, onExpire} for an escalation record.
+
+    FAIL-CLOSED: a decision-family record whose expiry cannot be established
+    (unparsable stored expiresAt, or no stored expiresAt and an unparsable
+    created_at) is treated as expired -- an unverifiable authorisation window
+    never executes a call.
+    """
+    now = now or _gate_now()
+    kind = str(record.get("kind") or "escalation")
+    defaults = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    on_expire = str(record.get("onExpire") or defaults[1])
+    raw = record.get("expiresAt")
+    if not (isinstance(raw, str) and raw.strip()):
+        raw = _gate_default_expires_at(kind, record.get("created_at"))
+    expires = _gate_parse_ts(raw)
+    if expires is None:
+        return {
+            "expiresAt": None,
+            "expired": _gate_family(kind) == "decision" and defaults[0] is not None,
+            "onExpire": on_expire,
+        }
+    return {"expiresAt": _gate_fmt(expires), "expired": now >= expires, "onExpire": on_expire}
+
+
+def _escalation_gate_state(record: Dict, expiry: Dict[str, Any], now: "dt.datetime") -> str:
+    status = record.get("status")
+    if status == "expired" or (status == "requested" and expiry["expired"]):
+        return "superseded" if expiry["onExpire"] == "regenerate" else "expired"
+    if status == "requested":
+        snoozed = _gate_parse_ts(record.get("snoozedUntil"))
+        if snoozed is not None and snoozed > now:
+            return "snoozed"
+        return "pending"
+    return "decided"
+
+
+def _escalation_apply_gate_view(record: Dict) -> None:
+    """Additively project the gate-card fields onto a deserialised escalation.
+
+    Legacy ESC records (no `kind`) read back as kind=escalation with the F-10
+    defaults; stored values always win over defaults. Backfilled field names
+    are listed in `gateBackfilled` so a consumer can tell stored from derived.
+    """
+    now = _gate_now()
+    kind = str(record.get("kind") or "escalation")
+    defaults = _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])
+    backfilled = []
+    if not record.get("kind"):
+        backfilled.append("kind")
+    record["kind"] = kind
+    for name, value in (("family", _gate_family(kind)), ("risk", defaults[2]),
+                        ("onExpire", defaults[1])):
+        if not record.get(name):
+            record[name] = value
+            backfilled.append(name)
+    if not record.get("expiresAt"):
+        derived = _gate_default_expires_at(kind, record.get("created_at"))
+        if derived:
+            record["expiresAt"] = derived
+            backfilled.append("expiresAt")
+    target = str(record.get("target_record_id") or "")
+    if target:
+        if not record.get("subject"):
+            record["subject"] = {
+                "record_id": target,
+                "project": record.get("project_id") or "",
+                "version": str(record.get("expected_version") or ""),
+            }
+        if not record.get("evidence"):
+            record["evidence"] = [{"label": "target", "ref": target}]
+            backfilled.append("evidence")
+    if not record.get("id") and record.get("item_id"):
+        record["id"] = record["item_id"]
+    if not record.get("createdAt") and record.get("created_at"):
+        record["createdAt"] = record["created_at"]
+    if not record.get("title") and record.get("mutation_type"):
+        record["title"] = f"{record.get('mutation_type')} on {target}".strip()
+    requested_by = record.get("requested_by")
+    if not record.get("requestedBy") and isinstance(requested_by, dict):
+        session = str(requested_by.get("session_id") or "")
+        if session:
+            record["requestedBy"] = session
+    expiry = _escalation_expiry(record, now)
+    record["state"] = _escalation_gate_state(record, expiry, now)
+    if backfilled:
+        record["gateBackfilled"] = backfilled
+
+
+def _gate_list_project_ids() -> list:
+    """All registered project ids (cross-project escalation list, ENC-ISS-773)."""
+    ddb = _get_ddb()
+    ids = []
+    kwargs: Dict[str, Any] = {
+        "TableName": PROJECTS_TABLE,
+        "ProjectionExpression": "project_id",
+    }
+    while True:
+        resp = ddb.scan(**kwargs)
+        for raw in resp.get("Items", []):
+            pid = (raw.get("project_id") or {}).get("S")
+            if pid:
+                ids.append(pid)
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted(set(ids))
+
+
+def _gate_csv(value: Any) -> list:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _gate_pick(body: Dict, *names):
+    for name in names:
+        if body.get(name) not in (None, ""):
+            return body.get(name)
+    return None
+
+
+def _gate_producer_principals() -> Dict[str, set]:
+    """Per-source producer allow-list (ENC-TSK-967 phase 2b).
+
+    GATE_PRODUCER_PRINCIPALS='{"think": ["<principal>", ...], "vagamod": [...]}'.
+    FAIL-CLOSED: unset, empty or malformed config yields an empty map, so every
+    producer request is refused until the allow-list is configured.
+    """
+    raw = os.environ.get("GATE_PRODUCER_PRINCIPALS", "")
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(src): {str(p).strip() for p in principals if str(p).strip()}
+        for src, principals in parsed.items()
+        if isinstance(principals, (list, tuple))
+    }
+
+
+import contextvars as _contextvars
+
+# DVP-TSK-968: the recipe service files its publish/retire gates through the producer path
+# under the internal principal "recipe-runner". It is honoured ONLY while the in-process
+# context flag is set by _recipe_escalate; an HTTP caller claiming it is refused (403).
+_INTERNAL_PRODUCER = _contextvars.ContextVar("internal_producer", default=None)
+_INTERNAL_PRODUCER_PRINCIPALS = {"recipe-runner": "recipe"}
+
+
+def _gate_resolve_producer(principal: str, source: Any):
+    """Resolve (source, error) for a producer principal; error is a 403 message."""
+    if principal in _INTERNAL_PRODUCER_PRINCIPALS and _INTERNAL_PRODUCER.get() == principal:
+        return _INTERNAL_PRODUCER_PRINCIPALS[principal], None
+    allow = _gate_producer_principals()
+    matches = sorted(src for src, principals in allow.items() if principal in principals)
+    if not matches:
+        return None, "source_principal is not allow-listed for any producer source."
+    if source not in (None, ""):
+        if str(source) not in matches:
+            return None, f"source_principal is not allow-listed for source '{source}'."
+        return str(source), None
+    if len(matches) > 1:
+        return None, f"source_principal is allow-listed for several sources {matches}; pass 'source'."
+    return matches[0], None
+
+
+def _gate_is_producer_request(body: Dict) -> bool:
+    """A request without mutation_type that carries a producer marker."""
+    if str(body.get("mutation_type") or "").strip():
+        return False
+    return _gate_pick(body, "proposedCalls", "proposed_calls", "sourcePrincipal",
+                      "source_principal", "source") is not None
+
+
+_GATE_CALL_KEYS = {"capability", "mcpTool", "method", "path", "args", "annotations",
+                   "ifMatch", "callHash"}
+
+
+def _gate_validate_resolved_call(call: Any, where: str) -> Optional[str]:
+    """Shape-check one ResolvedCall (gates.schema.json). The hash is not recomputed here."""
+    if not isinstance(call, dict):
+        return f"{where} must be an object."
+    extra = sorted(set(call) - _GATE_CALL_KEYS)
+    if extra:
+        return f"{where} has unknown fields {extra}."
+    for name in ("capability", "path", "ifMatch"):
+        if not (isinstance(call.get(name), str) and call[name].strip()):
+            return f"{where}.{name} must be a non-empty string."
+    if call.get("method") not in ("POST", "PUT", "PATCH", "DELETE"):
+        return f"{where}.method must be one of POST, PUT, PATCH, DELETE."
+    if not isinstance(call.get("args"), dict) or not isinstance(call.get("annotations"), dict):
+        return f"{where}.args and {where}.annotations must be objects."
+    import re as _re
+    if not (isinstance(call.get("callHash"), str) and _re.fullmatch(r"[0-9a-f]{64}", call["callHash"])):
+        return f"{where}.callHash must be a lowercase sha256 hex digest."
+    return None
+
+
+def _gate_validate_actions(proposed: Any, candidates: Any) -> Optional[str]:
+    if proposed is not None:
+        if not isinstance(proposed, list) or not proposed or len(proposed) > _GATE_MAX_CANDIDATES:
+            return f"Field 'proposedCalls' must be a list of 1..{_GATE_MAX_CANDIDATES} resolved calls."
+        for idx, call in enumerate(proposed):
+            err = _gate_validate_resolved_call(call, f"proposedCalls[{idx}]")
+            if err:
+                return err
+    for idx, cand in enumerate(candidates or []):
+        if cand.get("call") is not None:
+            err = _gate_validate_resolved_call(cand["call"], f"candidates[{idx}].call")
+            if err:
+                return err
+    return None
+
+
+def _escalation_gate_request_fields(body: Dict, now: "dt.datetime", allow_telemetry: bool = False):
+    """Validate the optional gate-card fields of escalation.request.
+
+    Returns (fields, error). Every field is optional; legacy requests (no
+    gate fields) resolve to kind=escalation with the F-10 defaults. Camel-case
+    names are canonical; snake_case aliases are accepted for MCP ergonomics.
+    """
+    def pick(*names):
+        for name in names:
+            if body.get(name) not in (None, ""):
+                return body.get(name)
+        return None
+
+    kind = str(pick("kind") or "escalation").strip()
+    if kind not in _GATE_KINDS:
+        return None, f"Invalid kind '{kind}'. Allowed: {sorted(_GATE_KINDS)}."
+    family = _gate_family(kind)
+    supplied_family = pick("family")
+    if supplied_family is not None and str(supplied_family) != family:
+        return None, f"family '{supplied_family}' contradicts kind '{kind}' (family is {family})."
+    if family == "telemetry" and not allow_telemetry:
+        return None, (
+            f"Telemetry kind '{kind}' carries no proposed action and is not "
+            "accepted by escalation.request."
+        )
+    ttl, default_on_expire, default_risk = _GATE_KIND_DEFAULTS[kind]
+
+    risk = str(pick("risk") or default_risk).strip()
+    if risk not in _GATE_RISKS:
+        return None, f"Invalid risk '{risk}'. Allowed: {list(_GATE_RISKS)}."
+    on_expire = str(pick("onExpire", "on_expire") or default_on_expire).strip()
+    allowed_on_expire = _GATE_DECISION_ON_EXPIRE + (("auto_clear",) if family == "telemetry" else ())
+    if on_expire not in allowed_on_expire:
+        return None, f"Invalid onExpire '{on_expire}'. Allowed: {list(allowed_on_expire)}."
+
+    expires_raw = pick("expiresAt", "expires_at")
+    if expires_raw is None:
+        expires = now + dt.timedelta(seconds=ttl) if ttl is not None else None
+    else:
+        expires = _gate_parse_ts(expires_raw)
+        if expires is None:
+            return None, "Field 'expiresAt' must be an ISO-8601 timestamp."
+        if expires <= now:
+            return None, "Field 'expiresAt' is already in the past."
+        if (expires - now).total_seconds() > _GATE_EXPIRY_MAX_SECONDS:
+            return None, "Field 'expiresAt' exceeds the 30d hard maximum (F-10)."
+
+    snoozed_raw = pick("snoozedUntil", "snoozed_until")
+    snoozed = None
+    if snoozed_raw is not None:
+        snoozed = _gate_parse_ts(snoozed_raw)
+        if snoozed is None:
+            return None, "Field 'snoozedUntil' must be an ISO-8601 timestamp."
+        if expires is not None and snoozed > expires:
+            return None, "Field 'snoozedUntil' must be <= expiresAt (snooze never extends expiry)."
+
+    candidates = pick("candidates")
+    if candidates is not None:
+        if not isinstance(candidates, list) or not candidates or len(candidates) > _GATE_MAX_CANDIDATES:
+            return None, f"Field 'candidates' must be a list of 1..{_GATE_MAX_CANDIDATES} objects."
+        seen = set()
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                return None, "Each candidate must be an object."
+            cid = cand.get("id")
+            if not (isinstance(cid, str) and cid.strip() and isinstance(cand.get("label"), str)
+                    and cand["label"].strip()):
+                return None, "Each candidate requires non-empty string 'id' and 'label'."
+            if cid in seen:
+                return None, f"Duplicate candidate id '{cid}'."
+            seen.add(cid)
+
+    evidence = pick("evidence")
+    if evidence is not None:
+        if not isinstance(evidence, list) or not evidence or len(evidence) > _GATE_MAX_EVIDENCE:
+            return None, f"Field 'evidence' must be a list of 1..{_GATE_MAX_EVIDENCE} objects."
+        for item in evidence:
+            if not (isinstance(item, dict) and isinstance(item.get("label"), str)
+                    and item["label"].strip() and isinstance(item.get("ref"), str)
+                    and item["ref"].strip()):
+                return None, "Each evidence item requires non-empty string 'label' and 'ref'."
+
+    blast = pick("blastRadius", "blast_radius")
+    if blast is not None:
+        records = blast.get("records") if isinstance(blast, dict) else None
+        stacks = blast.get("stacks") if isinstance(blast, dict) else None
+        irreversible = blast.get("irreversible") if isinstance(blast, dict) else None
+        if not (isinstance(records, int) and not isinstance(records, bool) and records >= 0
+                and isinstance(stacks, list) and all(isinstance(x, str) for x in stacks)
+                and isinstance(irreversible, bool)):
+            return None, (
+                "Field 'blastRadius' must be {records:int>=0, stacks:[str], irreversible:bool}."
+            )
+
+    return {
+        "kind": kind,
+        "family": family,
+        "risk": risk,
+        "onExpire": on_expire,
+        "expiresAt": _gate_fmt(expires) if expires else "",
+        "snoozedUntil": _gate_fmt(snoozed) if snoozed else "",
+        "candidates": candidates,
+        "evidence": evidence,
+        "blastRadius": blast,
+        "title": str(pick("title") or "").strip()[:200],
+        "sourcePrincipal": str(pick("sourcePrincipal", "source_principal") or "").strip()[:200],
+    }, None
+
+
 def _escalation_event(event_type: str, actor: str, detail: Optional[Dict] = None,
                       guidance_note: str = "") -> Dict:
     """Build one §11.2 event object in DynamoDB attribute shape (append-only)."""
@@ -8518,6 +8954,13 @@ def _escalation_public(item: Dict) -> Dict:
             record["payload"] = json.loads(raw_payload)
         except (ValueError, TypeError):
             pass
+    for gate_key in ("candidates", "evidence", "blastRadius", "proposedCalls", "subject"):
+        raw_gate = record.get(gate_key)
+        if isinstance(raw_gate, str):
+            try:
+                record[gate_key] = json.loads(raw_gate)
+            except (ValueError, TypeError):
+                pass
     for event in record.get("events") or []:
         raw_detail = event.get("detail") if isinstance(event, dict) else None
         if isinstance(raw_detail, str):
@@ -8525,10 +8968,11 @@ def _escalation_public(item: Dict) -> Dict:
                 event["detail"] = json.loads(raw_detail)
             except (ValueError, TypeError):
                 pass
+    _escalation_apply_gate_view(record)  # ENC-TSK-967: additive, read-time backfill
     return record
 
 
-def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
+def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] = None) -> Dict:
     """POST /{project}/escalation — governed escalation.request (§5.4).
 
     Validates the §11.1 envelope via the mutation-handler registry, mints an
@@ -8538,6 +8982,16 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     """
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+
+    if hub is not None:  # DVP-TSK-A17 part 2: derived principal, confined kinds, producer path only
+        body, hub_err = _hub_prepare_producer_body(body, hub)
+        if hub_err:
+            return hub_err
+        return _handle_escalation_produce(project_id, body, hub=hub)
+    if _gate_is_producer_request(body):
+        return _handle_escalation_produce(project_id, body)  # ENC-TSK-967 phase 2b
+    if _gate_pick(body, "proposedCalls", "proposed_calls") is not None:
+        return _error(400, "proposedCalls belongs to the producer API; it cannot be combined with mutation_type.")
 
     target_record_id = str(body.get("target_record_id") or "").strip()
     mutation_type = str(body.get("mutation_type") or "").strip()
@@ -8582,6 +9036,15 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     validation_error = handler["validate_payload"](payload, target_type)
     if validation_error:
         return _error(400, validation_error)
+
+    # ENC-TSK-967: optional gate-card fields (kind/risk/expiry/candidates/...).
+    gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now())
+    if gate_err:
+        return _error(400, gate_err)
+    if gate_fields["sourcePrincipal"]:  # a claimed producer principal is always verified
+        _src, principal_err = _gate_resolve_producer(gate_fields["sourcePrincipal"], body.get("source"))
+        if principal_err:
+            return _error(403, principal_err)
 
     # Target must exist — read fresh, never trust the caller's snapshot.
     ddb = _get_ddb()
@@ -8630,6 +9093,14 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     }
     if expected_version:
         item["expected_version"] = _ser_s(expected_version)
+    for gate_key in ("kind", "family", "risk", "onExpire", "expiresAt"):
+        item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key in ("snoozedUntil", "title", "sourcePrincipal"):
+        if gate_fields[gate_key]:
+            item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key in ("candidates", "evidence", "blastRadius"):
+        if gate_fields[gate_key] is not None:
+            item[gate_key] = _ser_s(json.dumps(gate_fields[gate_key], default=str))
 
     try:
         ddb.put_item(
@@ -8655,6 +9126,213 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
         "target_record_type": target_type,
         "mutation_type": mutation_type,
         "created_at": now,
+        # ENC-TSK-967 additive gate-card fields (D9).
+        "kind": gate_fields["kind"],
+        "family": gate_fields["family"],
+        "risk": gate_fields["risk"],
+        "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
+        "expiresAt": gate_fields["expiresAt"],
+        "onExpire": gate_fields["onExpire"],
+    })
+
+
+# DVP-TSK-A17 part 2 (E4-R18): a HubExchange principal (Authorization: HubExchange <token>,
+# minted by coordination_api POST /hub/exchange for an allow-listed human at an allow-listed
+# issuer) may CREATE producer escalations. The source principal is DERIVED from the token's
+# issuer name; it is never taken from the client. It is accepted ONLY on POST /{project}/escalation.
+_HUB_PRODUCER_KINDS = frozenset({"tool_call", "reconciliation", "drift", "notice"})
+_HUB_DEFAULT_PRODUCERS = {"vagamod-keycloak": "vagamod", "think-iograph": "think", "coach-cognito": "coach"}
+
+
+def _hub_exchange_mod():
+    try:
+        from enceladus_shared import hub_exchange as hx
+        return hx
+    except Exception:  # noqa: BLE001 - layer without the module: hub path stays closed
+        return None
+
+
+def _hub_exchange_producers() -> Dict[str, str]:
+    """HUB_EXCHANGE_PRODUCERS: {issuer name: producer principal}. Unset -> defaults; malformed -> {} (closed)."""
+    raw = os.environ.get("HUB_EXCHANGE_PRODUCERS")
+    if raw is None or not raw.strip():
+        return dict(_HUB_DEFAULT_PRODUCERS)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in parsed.items() if isinstance(v, str) and v.strip()}
+
+
+def _hub_token_from_event(event: Dict) -> Optional[str]:
+    """The HubExchange token of the request, "" when the scheme has no token, None when absent."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        auth = str((event.get("headers") or {}).get("authorization")
+                   or (event.get("headers") or {}).get("Authorization") or "").strip()
+        return "" if auth.lower().startswith("hubexchange") else None
+    return hx.extract_hub_token(event.get("headers"))
+
+
+def _authenticate_hub_exchange(token: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Verify the hub token exactly as coordination_api does (HMAC, exp, issuer allow-list; human only)."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        return None, _error(503, "Hub exchange is unavailable.")
+    try:
+        hub_claims = hx.verify_hub_token(token)
+    except hx.HubExchangeError as exc:
+        logger.warning("hub exchange rejected: %s", exc.reason)
+        return None, _error(exc.status, exc.public_message)
+    claims = hx.principal_claims(hub_claims)
+    if not hx.is_human_hub_principal(claims):
+        return None, _error(403, "Identity is not permitted.")
+    return claims, None
+
+
+def _hub_cors_override(event: Dict, resp: Dict) -> Dict:
+    """Echo an allow-listed shell origin (and admit Authorization) on a hub-exchange response."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        return resp
+    origin = hx.cors_origin(event.get("headers"), {CORS_ORIGIN})
+    if origin and origin != CORS_ORIGIN:
+        headers = dict(resp.get("headers") or {})
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        headers["Vary"] = "Origin"
+        resp = dict(resp, headers=headers)
+    return resp
+
+
+def _hub_prepare_producer_body(body: Dict, hub: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """(body, error): derive the source principal, confine the kinds, stamp the assurance evidence."""
+    if not isinstance(body, dict):
+        return None, _error(400, "Invalid JSON body.")
+    derived = _hub_exchange_producers().get(str(hub.get("hub_source_name") or ""))
+    if not derived:
+        return None, _error(403, "The hub exchange issuer is not allow-listed as a producer.")
+    claimed = str(_gate_pick(body, "sourcePrincipal", "source_principal") or "").strip()
+    if claimed and claimed != derived:
+        return None, _error(403, "source_principal does not match the exchanged identity's producer.")
+    if str(body.get("mutation_type") or "").strip() or str(body.get("kind") or "").strip() not in _HUB_PRODUCER_KINDS:
+        return None, _error(403, "A hub exchange principal may only create kinds "
+                                 f"{sorted(_HUB_PRODUCER_KINDS)} (no escalation / mutation_type requests).")
+    prepared = {k: v for k, v in body.items() if k not in ("sourcePrincipal", "source_principal")}
+    prepared["source_principal"] = derived
+    evidence = prepared.get("evidence")
+    kept = [e for e in evidence if not (isinstance(e, dict) and str(e.get("label") or "").startswith("hub_exchange_"))] \
+        if isinstance(evidence, list) else []
+    kept.extend([
+        {"label": "hub_exchange_issuer", "ref": str(hub.get("hub_source_name") or "")},
+        {"label": "hub_exchange_auth_time", "ref": str(hub.get("auth_time"))},
+        {"label": "hub_exchange_acr", "ref": str(hub.get("acr") or "none")},
+    ])
+    prepared["evidence"] = kept
+    return prepared, None
+
+
+def _handle_escalation_produce(project_id: str, body: Dict, hub: Optional[Dict] = None) -> Dict:
+    """Producer API (ENC-TSK-967 phase 2b): escalation.request for external sources.
+
+    think and vagamod post gate cards of any kind under a per-source principal
+    (GATE_PRODUCER_PRINCIPALS). A decision-family card carries EXACTLY ONE of
+    proposedCalls or candidates; telemetry kinds (drift, notice) carry neither.
+    The principal check runs first (403) so an unlisted caller learns nothing
+    about the validation rules. Legacy mutation_type requests never reach here.
+    """
+    principal = str(_gate_pick(body, "sourcePrincipal", "source_principal") or "").strip()
+    if not principal:
+        return _error(400, "Field 'source_principal' is required for producer requests.")
+    source, principal_err = _gate_resolve_producer(principal, body.get("source"))
+    if principal_err:
+        return _error(403, principal_err)
+
+    gate_fields, gate_err = _escalation_gate_request_fields(body, _gate_now(), allow_telemetry=True)
+    if gate_err:
+        return _error(400, gate_err)
+    proposed = _gate_pick(body, "proposedCalls", "proposed_calls")
+    candidates = gate_fields["candidates"]
+    if gate_fields["family"] == "telemetry":
+        if proposed is not None or candidates is not None:
+            return _error(400, f"Telemetry kind '{gate_fields['kind']}' carries no proposed action "
+                               "(neither proposedCalls nor candidates).")
+    elif (proposed is None) == (candidates is None):
+        return _error(400, "Exactly one of 'proposedCalls' or 'candidates' is required "
+                           "for a decision-family producer request.")
+    action_err = _gate_validate_actions(proposed, candidates)
+    if action_err:
+        return _error(400, action_err)
+    subject = _gate_pick(body, "subject")
+    if subject is not None and not (
+            isinstance(subject, dict) and isinstance(subject.get("record_id"), str)
+            and subject["record_id"].strip()):
+        return _error(400, "Field 'subject' must be an object with a non-empty 'record_id'.")
+
+    prefix = _get_project_prefix(project_id)
+    if not prefix:
+        return _error(404, f"Project '{project_id}' not found or has no prefix.")
+    escalation_id = _next_record_id(project_id, prefix, "escalation")
+    now = _now_z()
+    kind = gate_fields["kind"]
+    item = {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"escalation#{escalation_id}"),
+        "item_id": _ser_s(escalation_id),
+        "record_type": _ser_s("escalation"),
+        "source": _ser_s(source),
+        "requested_by": {"M": {
+            "session_id": _ser_s(principal),
+            "agent_type_id": _ser_s(""),
+            "sci_present": {"BOOL": False},
+        }},
+        "status": _ser_s("requested"),
+        "events": {"L": [_escalation_event(
+            "requested", principal,
+            detail=dict({"kind": kind, "source": source, "source_principal": principal},
+                        **({"initiated_by": str(hub.get("email") or ""),
+                            "hub_source": str(hub.get("hub_source_name") or "")} if hub else {})),
+        )]},
+        "created_at": _ser_s(now),
+        "updated_at": _ser_s(now),
+        "write_source": _build_write_source(body),
+    }
+    if hub:
+        item["initiated_by"] = _ser_s(str(hub.get("email") or ""))
+        item["hub_source"] = _ser_s(str(hub.get("hub_source_name") or ""))
+    justification = str(body.get("justification") or "").strip()
+    if justification:
+        item["justification"] = _ser_s(justification)
+    for gate_key in ("kind", "family", "risk", "onExpire", "sourcePrincipal"):
+        item[gate_key] = _ser_s(gate_fields[gate_key] or principal)
+    if gate_fields["expiresAt"]:
+        item["expiresAt"] = _ser_s(gate_fields["expiresAt"])
+    for gate_key in ("snoozedUntil", "title"):
+        if gate_fields[gate_key]:
+            item[gate_key] = _ser_s(gate_fields[gate_key])
+    for gate_key, value in (("candidates", candidates), ("evidence", gate_fields["evidence"]),
+                            ("blastRadius", gate_fields["blastRadius"]),
+                            ("proposedCalls", proposed), ("subject", subject)):
+        if value is not None:
+            item[gate_key] = _ser_s(json.dumps(value, default=str))
+    try:
+        _get_ddb().put_item(TableName=DYNAMODB_TABLE, Item=item,
+                            ConditionExpression="attribute_not_exists(record_id)")
+    except Exception as exc:
+        logger.error("producer escalation put_item failed: %s", exc)
+        return _error(500, "Database write failed while creating escalation.")
+    _notify_escalation_event("requested", escalation_id,
+                             (subject or {}).get("record_id", f"{source}:{kind}"), kind,
+                             principal, note=justification or gate_fields["title"])
+    return _response(201, {
+        "success": True, "escalation_id": escalation_id, "status": "requested",
+        "created_at": now, "kind": kind, "family": gate_fields["family"],
+        "risk": gate_fields["risk"],
+        "state": "snoozed" if gate_fields["snoozedUntil"] else "pending",
+        "expiresAt": gate_fields["expiresAt"] or None, "onExpire": gate_fields["onExpire"],
+        "source": source, "sourcePrincipal": principal,
     })
 
 
@@ -8824,6 +9502,21 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     status_filter = str(query_params.get("status") or "").strip()
     target_filter = str(query_params.get("target_record_id") or "").strip()
     session_filter = str(query_params.get("session_id") or "").strip()
+    # ENC-TSK-967: derived-state and kind filters (comma lists) are applied
+    # post-read because legacy records carry neither attribute.
+    kind_filter = _gate_csv(query_params.get("kind"))
+    state_filter = _gate_csv(query_params.get("state"))
+    bad_kinds = [k for k in kind_filter if k not in _GATE_KINDS]
+    if bad_kinds:
+        return _error(400, f"Invalid kind filter {bad_kinds}. Allowed: {sorted(_GATE_KINDS)}")
+    bad_states = [x for x in state_filter if x not in _GATE_STATES]
+    if bad_states:
+        return _error(400, f"Invalid state filter {bad_states}. Allowed: {list(_GATE_STATES)}")
+    # ENC-ISS-773: project '*' / '_' or all_projects=true lists every project.
+    cross_project = (
+        project_id in ("*", "_")
+        or str(query_params.get("all_projects") or "").strip().lower() in ("1", "true", "yes")
+    )
     if status_filter and status_filter not in _ESCALATION_STATUSES:
         return _error(
             400,
@@ -8889,21 +9582,34 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
         kwargs["ExpressionAttributeNames"] = expression_names
 
     escalations = []
-    pages_fetched = 0
     last_key = None
     try:
-        while True:
-            resp = ddb.query(**kwargs)
-            escalations.extend(
-                _escalation_public(raw) for raw in resp.get("Items", [])
-            )
-            pages_fetched += 1
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            if len(escalations) >= page_size or pages_fetched >= _ESCALATION_LIST_MAX_PAGES:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
+        scan_projects = _gate_list_project_ids() if cross_project else [project_id]
+        for scan_pid in scan_projects:
+            key_values[":pid"] = _ser_s(scan_pid)
+            kwargs.pop("ExclusiveStartKey", None)
+            pages_fetched = 0
+            while True:
+                resp = ddb.query(**kwargs)
+                for raw in resp.get("Items", []):
+                    public = _escalation_public(raw)
+                    if kind_filter and public.get("kind") not in kind_filter:
+                        continue
+                    if state_filter and public.get("state") not in state_filter:
+                        continue
+                    escalations.append(public)
+                pages_fetched += 1
+                page_last = resp.get("LastEvaluatedKey")
+                if not page_last:
+                    break
+                # Cross-project: never stop early on size -- the global
+                # (created_at, item_id) sort needs every project's items or the
+                # cursor boundary could skip newer items in an unread project.
+                if ((not cross_project and len(escalations) >= page_size)
+                        or pages_fetched >= _ESCALATION_LIST_MAX_PAGES):
+                    last_key = page_last
+                    break
+                kwargs["ExclusiveStartKey"] = page_last
     except Exception as exc:
         logger.error("escalation list query failed: %s", exc)
         return _error(500, "Database query failed.")
@@ -8932,7 +9638,77 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     }
     if next_cursor:
         payload["next_cursor"] = next_cursor
+    if cross_project:
+        payload["scope"] = "all_projects"
+        payload["projects_scanned"] = len(scan_projects)
     return _response(200, payload)
+
+
+def _handle_escalation_sweep(project_id: str, body: Dict) -> Dict:
+    """POST /{project}/escalation/sweep -- F-10 fail-closed expiry sweeper.
+
+    Walks status=requested escalations whose (stored or backfilled) expiry has
+    passed and moves them requested->expired (gate state expired for onExpire
+    deny, superseded for onExpire regenerate) through the ordinary
+    conditional FSM edge, appending the audit event. No applier is ever
+    invoked. Project '*' / '_' sweeps every project. Idempotent: a record that
+    lost the conditional write (decided concurrently) is skipped.
+    """
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+    actor = "system:escalation-expiry-sweeper"
+    ddb = _get_ddb()
+    swept = []
+    scanned = 0
+    try:
+        project_ids = _gate_list_project_ids() if project_id in ("*", "_") else [project_id]
+        for pid in project_ids:
+            kwargs: Dict[str, Any] = {
+                "TableName": DYNAMODB_TABLE,
+                "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :esc_prefix)",
+                "FilterExpression": "#st = :requested",
+                "ExpressionAttributeNames": {"#st": "status"},
+                "ExpressionAttributeValues": {
+                    ":pid": _ser_s(pid),
+                    ":esc_prefix": _ser_s("escalation#"),
+                    ":requested": _ser_s("requested"),
+                },
+            }
+            pages = 0
+            while True:
+                resp = ddb.query(**kwargs)
+                for raw in resp.get("Items", []):
+                    esc = _escalation_public(raw)
+                    scanned += 1
+                    expiry = _escalation_expiry(esc)
+                    if not expiry["expired"]:
+                        continue
+                    to_status = "expired"
+                    esc_id = str(esc.get("item_id") or "")
+                    if _escalation_fsm_transition(
+                        pid, esc_id, "requested", to_status, actor,
+                        detail={"expiresAt": expiry["expiresAt"], "onExpire": expiry["onExpire"],
+                                "kind": esc.get("kind")},
+                    ):
+                        swept.append({"project_id": pid, "escalation_id": esc_id,
+                                      "status": to_status, "expiresAt": expiry["expiresAt"],
+                                      "kind": esc.get("kind")})
+                        _notify_escalation_event(
+                            to_status, esc_id, str(esc.get("target_record_id") or ""),
+                            str(esc.get("mutation_type") or ""), actor,
+                            note=f"expired {expiry['expiresAt']} (onExpire={expiry['onExpire']})",
+                        )
+                pages += 1
+                last = resp.get("LastEvaluatedKey")
+                if not last or pages >= _ESCALATION_LIST_MAX_PAGES:
+                    break
+                kwargs["ExclusiveStartKey"] = last
+    except Exception as exc:
+        logger.error("escalation sweep failed: %s", exc)
+        return _error(500, "Escalation expiry sweep failed.")
+    return _response(200, {
+        "success": True, "scanned": scanned, "swept_count": len(swept), "swept": swept,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -9091,6 +9867,25 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             "Only the Cognito-human approval flow can authorize application."
         ))
 
+    # ENC-TSK-967 (F-10): FAIL-CLOSED expiry -- an expired escalation (stored or
+    # backfilled expiresAt) is never applied, whatever its decision status.
+    expiry = _escalation_expiry(escalation)
+    if expiry["expired"]:
+        return _response(410, {
+            "success": False,
+            "error": (
+                f"Escalation {escalation_id} expired at {expiry['expiresAt']}; "
+                "expired escalations cannot be applied (F-10 fail-closed). "
+                "File a new escalation."
+            ),
+            "escalation_id": escalation_id,
+            "state": "superseded" if expiry["onExpire"] == "regenerate" else "expired",
+            "expiresAt": expiry["expiresAt"],
+            "onExpire": expiry["onExpire"],
+        })
+
+    if not escalation.get("mutation_type"):
+        return _error(409, "Producer escalation has no mutation_type; escalation.apply cannot execute its proposed calls.")
     handler = _ESCALATION_MUTATION_HANDLERS.get(str(escalation.get("mutation_type")))
     if handler is None or "apply" not in handler:
         return _error(500, f"No apply handler for mutation_type '{escalation.get('mutation_type')}'.")
@@ -9199,8 +9994,12 @@ _RE_DEDUP_REVIEW = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
 )
 _RE_ESCALATION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/escalation"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_*-]+)/escalation"
     r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>apply))?)?$"
+)
+_RE_RECIPE = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/recipe"
+    r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>validate|publish-request|deprecate|apply))?)?$"
 )
 _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
@@ -9225,7 +10024,367 @@ _RE_PROJECT = re.compile(
 )
 
 
+# --- DVP-TSK-968 part A (DVP-FTR-106): recipe primitive wiring --------------------------
+try:
+    import recipe_service as _recipe_service
+except ImportError:  # pragma: no cover - packaging guard
+    _recipe_service = None
+
+_RECIPE_JSON_FIELDS = frozenset({"definition", "history", "validation", "deprecation", "tags",
+                                 "project_ids", "related_feature_ids", "recipe_ref", "inputs", "steps", "gate",
+                                 "gate_history", "outputs", "error", "telemetry", "consumed_tokens", "compensations", "blocked"})
+_RECIPE_REGISTRY_CACHE: Dict[str, Any] = {}
+
+
+def _recipe_to_ddb(item: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if item.get("record_kind") == "run" and not item.get("record_type"):
+        # DVP-TSK-968 part D: stamp the stream-visible type so graph_sync / the AppSync feed classify runs.
+        ref = item.get("recipe_ref") if isinstance(item.get("recipe_ref"), dict) else {}
+        item = dict(item, record_type="recipe_run", item_id=item.get("run_id"),
+                    title=f"{ref.get('recipe_id') or 'recipe'} run {item.get('run_id')}")
+    for key, val in item.items():
+        if val is None:
+            continue
+        if key in _RECIPE_JSON_FIELDS:
+            out[key] = _ser_s(json.dumps(val, default=str, sort_keys=True))
+        elif isinstance(val, bool):
+            out[key] = {"BOOL": val}
+        elif isinstance(val, (int, float)):
+            out[key] = {"N": str(val)}
+        else:
+            out[key] = _ser_s(str(val))
+    return out
+
+
+def _recipe_from_ddb(raw: Dict[str, Any]) -> Dict[str, Any]:
+    item = _deser_item(raw)
+    for key in _RECIPE_JSON_FIELDS:
+        if isinstance(item.get(key), str):
+            try:
+                item[key] = json.loads(item[key])
+            except ValueError:
+                pass
+    return item
+
+
+def _recipe_escalate(project_id: str, body: Dict[str, Any]):
+    """File a hub gate as the internal producer principal recipe-runner (never reachable over HTTP)."""
+    token = _INTERNAL_PRODUCER.set("recipe-runner")
+    try:
+        resp = _handle_escalation_produce(project_id, dict(body, source_principal="recipe-runner"))
+    finally:
+        _INTERNAL_PRODUCER.reset(token)
+    try:
+        parsed = json.loads(resp.get("body") or "{}")
+    except (ValueError, TypeError):
+        parsed = {}
+    return int(resp.get("statusCode", 500)), parsed if isinstance(parsed, dict) else {}
+
+
+def _recipe_context():
+    ddb = _get_ddb()
+
+    def get(project, sk):
+        raw = ddb.get_item(TableName=DYNAMODB_TABLE, ConsistentRead=True,
+                           Key={"project_id": _ser_s(project), "record_id": _ser_s(sk)}).get("Item")
+        return _recipe_from_ddb(raw) if raw else None
+
+    def put(project, item, if_absent=False, expect=None):
+        kwargs: Dict[str, Any] = {}
+        if if_absent:
+            kwargs["ConditionExpression"] = "attribute_not_exists(record_id)"
+        elif expect:
+            attr, value = expect
+            kwargs["ConditionExpression"] = "#rv = :rv"
+            kwargs["ExpressionAttributeNames"] = {"#rv": attr}
+            kwargs["ExpressionAttributeValues"] = {":rv": {"N": str(value)} if isinstance(value, (int, float)) else _ser_s(str(value))}
+        try:
+            ddb.put_item(TableName=DYNAMODB_TABLE, Item=_recipe_to_ddb(dict(item, project_id=project)), **kwargs)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if "ConditionalCheckFailed" in str(exc):
+                return False
+            logger.error("recipe put_item failed: %s", exc)
+            raise
+
+    def query(project, prefix):
+        kwargs: Dict[str, Any] = {
+            "TableName": DYNAMODB_TABLE, "ConsistentRead": True,
+            "KeyConditionExpression": "project_id = :p AND begins_with(record_id, :s)",
+            "ExpressionAttributeValues": {":p": _ser_s(project), ":s": _ser_s(prefix)}}
+        items: List[Dict[str, Any]] = []
+        while True:
+            resp = ddb.query(**kwargs)
+            items.extend(_recipe_from_ddb(i) for i in resp.get("Items", []))
+            if not resp.get("LastEvaluatedKey"):
+                return items
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    def mint(project):
+        prefix = _get_project_prefix(project)
+        if not prefix:
+            raise RuntimeError(f"Project '{project}' has no prefix.")
+        return _next_record_id(project, prefix, "recipe")
+
+    def registry():
+        if "v" not in _RECIPE_REGISTRY_CACHE:
+            _RECIPE_REGISTRY_CACHE["v"] = _recipe_service.load_registry()
+        return _RECIPE_REGISTRY_CACHE["v"]
+
+    def escalation(project, esc_id):
+        raw = ddb.get_item(TableName=DYNAMODB_TABLE, ConsistentRead=True,
+                           Key={"project_id": _ser_s(project), "record_id": _ser_s(f"escalation#{esc_id}")}).get("Item")
+        if not raw:
+            return None
+        item = _deser_item(raw)
+        if isinstance(item.get("subject"), str):
+            try:
+                item["subject"] = json.loads(item["subject"])
+            except ValueError:
+                item["subject"] = {}
+        return item
+
+    def active_runs(project, rec, version):
+        live = 0
+        for run in query(project, "recipe_run#"):
+            ref = run.get("recipe_ref") or {}
+            if (run.get("record_kind", "run") == "run" and ref.get("recipe_id") == rec and ref.get("version") == version
+                    and run.get("status") not in ("completed", "failed", "cancelled", "expired")):
+                live += 1
+        return live
+
+    return _recipe_service.RecipeContext(get=get, put=put, query=query, mint=mint, now=_now_z, registry=registry,
+                                         escalate=_recipe_escalate, escalation=escalation,
+                                         active_runs=active_runs)
+
+
+# --- DVP-TSK-968 part B (DVP-FTR-106): recipe runs and the runner -------------------------
+try:
+    import recipe_run_service as _recipe_run_service
+except ImportError:  # pragma: no cover - packaging guard
+    _recipe_run_service = None
+
+_RE_RECIPE_RUN = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/recipe-run"
+    r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>resume|cancel|apply))?)?$"
+)
+
+
+def _recipe_surface_env(surface: str) -> str:
+    return "RECIPE_SURFACE_CREDENTIALS_" + re.sub(r"[^A-Z0-9]", "_", str(surface).upper()) + "_ARN"
+
+
+def _recipe_surface_ready(surface: str) -> bool:
+    return surface == "enceladus" or bool(os.environ.get(_recipe_surface_env(surface), "").strip())
+
+
+def _recipe_surface_post(surface: str, call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """External surface executor (io-finance, io-travel). No credentials ARN -> sanctioned fixture result."""
+    arn = os.environ.get(_recipe_surface_env(surface), "").strip()
+    if not arn:
+        return {"ok": True, "result": {"fixture": True, "surface": surface, "action": call.get("action"),
+                                       "arguments": call.get("arguments"), "dry_run": True}}
+    try:
+        import boto3 as _boto3
+        import urllib.request as _urlreq
+        secret = json.loads(_boto3.client("secretsmanager").get_secret_value(SecretId=arn)["SecretString"])
+        req = _urlreq.Request(
+            str(secret["url"]), method="POST",
+            data=json.dumps({"action": call.get("action"), "arguments": call.get("arguments"), "dry_run": bool(dry_run),
+                             "idempotency_key": call.get("idempotency_key")}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + str(secret.get("token", ""))})
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            return {"ok": True, "result": json.loads(resp.read().decode("utf-8") or "{}")}
+    except Exception as exc:  # noqa: BLE001 - never echo credentials
+        return {"ok": False, "error": {"code": "SURFACE_ERROR", "message": type(exc).__name__ + ": " + str(exc)[:200]}}
+
+
+def _recipe_enceladus_call(batch: Dict[str, Any], call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """In-process Enceladus executor under the recipe-runner principal. Stage 1 routes the recipe.* family;
+    other registry actions answer ACTION_NOT_ROUTABLE until the governed execute path is exposed in-process."""
+    svc, action = _recipe_service, str(call.get("action") or "")
+    args = dict(call.get("arguments") or {})
+    project = str(args.pop("project_id", None) or batch.get("project_id") or "")
+    if svc is None or not action.startswith("recipe."):
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action or '?'} is not routable in-process by the recipe runner yet."}}
+    ctx, actor = _recipe_context(), SOURCE_PRINCIPAL_RECIPE
+    fns = {"recipe.create": svc.create, "recipe.validate": svc.validate,
+           "recipe.publish_request": svc.publish_request, "recipe.deprecate": svc.deprecate}
+    if action == "recipe.get":
+        code, out = svc.get(ctx, project, str(args.get("recipe_id") or ""), args.get("version"))
+    elif action == "recipe.list":
+        code, out = svc.list_recipes(ctx, project, args)
+    elif action in fns:
+        code, out = fns[action](ctx, project, args, actor, dry_run)
+    else:
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action} is not routable in-process."}}
+    if code >= 300:
+        return {"ok": False, "error": {"code": str(out.get("error_code") or "STEP_ERROR"), "message": str(out.get("error") or "step failed")[:300]}}
+    return {"ok": True, "result": out, "receipt": _recipe_run_service.receipt_of(out)}
+
+
+SOURCE_PRINCIPAL_RECIPE = "recipe-runner"
+
+
+def _recipe_run_execute(batch: Dict[str, Any]) -> Dict[str, Any]:
+    """ONE execute call per segment: dispatch each call by surface."""
+    def call_one(call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+        surface = str(call.get("surface") or "enceladus")
+        if surface == "enceladus":
+            return _recipe_enceladus_call(batch, call, dry_run)
+        return _recipe_surface_post(surface, call, dry_run)
+    exe = _recipe_mcp_executor()
+    if exe is None:   # RECIPE_MCP_API_KEY_SECRET_ARN unset: recipe.* in-process, other enceladus steps ACTION_NOT_ROUTABLE
+        return _recipe_run_service.run_batch_locally(batch, call_one)
+    return _recipe_mcp_executor_module.execute_batch(batch, exe, _recipe_runner_session(batch), call_one)
+
+
+try:
+    import recipe_mcp_executor as _recipe_mcp_executor_module
+except Exception:  # noqa: BLE001 - packaging gap: the in-process path keeps working
+    _recipe_mcp_executor_module = None
+_RECIPE_MCP: Dict[str, Any] = {"executor": None}
+
+
+def _recipe_mcp_executor():
+    """DVP-TSK-968 E4-R16: the governed-MCP executor when RECIPE_MCP_API_KEY_SECRET_ARN is configured, else None."""
+    if _recipe_mcp_executor_module is None or not os.environ.get("RECIPE_MCP_API_KEY_SECRET_ARN", "").strip():
+        return None
+    if _RECIPE_MCP["executor"] is None:
+        _RECIPE_MCP["executor"] = _recipe_mcp_executor_module.EnceladusMcpExecutor.from_env()
+    return _RECIPE_MCP["executor"]
+
+
+def _recipe_runner_session(batch: Dict[str, Any]):
+    """The run's agent session (stored on the run item by the claim write that precedes every segment)."""
+    try:
+        item = _recipe_context().get(str(batch.get("project_id") or ""), _recipe_run_service.run_key(str(batch.get("run_id") or "")))
+    except Exception:  # noqa: BLE001
+        item = None
+    if isinstance(item, dict) and item.get("runner_session_id"):
+        return {"session_id": item["runner_session_id"], "sci": item.get("runner_sci")}
+    return None
+
+
+def _recipe_mcp_ctx_kwargs() -> Dict[str, Any]:
+    exe = _recipe_mcp_executor()
+    if exe is None:
+        return {"governance_hash": (lambda: None)}
+    return {"governance_hash": exe.governance_hash, "server_hash": True,
+            "session_start": lambda project, run: exe.register_session(project, str(run.get("run_id") or ""), run.get("governance_hash_last")),
+            "session_heartbeat": lambda project, run: exe.heartbeat(project, run.get("runner_session_id")),
+            "session_end": lambda project, run: exe.retire(project, run.get("runner_session_id"))}
+
+
+def _recipe_run_scheduled_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """EventBridge rate(15 minutes): POST /recipe-run/sweep equivalent per project (expiry + runner heartbeats)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return {"statusCode": 503, "swept": []}
+    projects = [p.strip() for p in str(os.environ.get("RECIPE_SWEEP_PROJECT_IDS") or "enceladus,devops").split(",") if p.strip()]
+    swept = []
+    for project in projects:
+        try:
+            code, _body = svc.sweep(_recipe_run_context(), project, {}, "recipe-sweeper")
+            swept.append({"project_id": project, "status": code})
+        except Exception as exc:  # noqa: BLE001
+            swept.append({"project_id": project, "error": type(exc).__name__})
+    return {"statusCode": 200, "swept": swept}
+
+
+def _recipe_run_context():
+    base = _recipe_context()
+
+    def mint(project):
+        prefix = _get_project_prefix(project)
+        if not prefix:
+            raise RuntimeError(f"Project '{project}' has no prefix.")
+        return _next_record_id(project, prefix, "recipe_run")
+
+    # The Lambda cannot compute the governance hash: the caller's hash (MCP injects its current one on
+    # every resume) is compared with governance_hash_last, so drift is detected per segment.
+    return _recipe_run_service.RunContext(
+        get=base.get, put=base.put, query=base.query, mint=mint, now=base.now, escalate=base.escalate,
+        escalation=base.escalation, execute=_recipe_run_execute, **_recipe_mcp_ctx_kwargs(),
+        surface_ready=_recipe_surface_ready, withdraw=lambda project, esc_id, reason: False)
+
+
+def _handle_recipe_run_route(method: str, project_id: str, run_id: Optional[str], sub: Optional[str],
+                             body: Dict[str, Any], query: Dict[str, Any]) -> Dict:
+    """Routes: POST /recipe-run (start; mode dry_run|to_next_gate), GET /recipe-run/list, GET /recipe-run/{RUN},
+    POST /recipe-run/{RUN}/resume|cancel, POST /recipe-run/{RUN}/apply (hub recipe_run_step applier),
+    POST /recipe-run/sweep (runner sweeper)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return _error(503, "Recipe run service is not packaged with this deployment.")
+    body = body if isinstance(body, dict) else {}
+    actor = str((body.get("write_source") or {}).get("provider") or "unknown")
+    dry_run = body.get("dry_run") is True or str(body.get("dry_run") or "").lower() == "true"
+    ctx = _recipe_run_context()
+    if method == "GET":
+        res = svc.list_runs(ctx, project_id, query or {}) if run_id in (None, "list") else svc.get(ctx, project_id, run_id)
+    elif method == "POST":
+        if run_id in (None, "create") and not sub:
+            res = svc.start(ctx, project_id, body, actor, dry_run)
+        elif run_id == "sweep" and not sub:
+            res = svc.sweep(ctx, project_id, body, actor)
+        elif sub == "resume":
+            res = svc.resume(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "cancel":
+            res = svc.cancel(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "apply":
+            res = svc.apply_gate(ctx, project_id, run_id or "", body, actor)
+            res = (res[0], {"success": True, "status": "applied", "result": res[1]} if res[0] < 300
+                   else dict(res[1], status="failed"))
+        else:
+            return _error(405, f"Unknown recipe-run action '{sub or run_id}'.")
+    else:
+        return _error(405, f"Method {method} not allowed on /recipe-run.")
+    return _response(res[0], res[1])
+
+
+def _handle_recipe_route(method: str, project_id: str, rec_id: Optional[str], sub: Optional[str],
+                         body: Dict[str, Any], query: Dict[str, Any]) -> Dict:
+    """Routes: GET /recipe/list, GET /recipe/{REC}[?version=], POST /recipe (create), POST /recipe/{REC}
+    (new version), POST /recipe/{REC}/validate|publish-request|deprecate, POST /recipe/{REC}/apply (hub hook)."""
+    svc = _recipe_service
+    if svc is None:
+        return _error(503, "Recipe service is not packaged with this deployment.")
+    body = body if isinstance(body, dict) else {}
+    actor = str((body.get("write_source") or {}).get("provider") or "unknown")
+    dry_run = body.get("dry_run") is True or str(body.get("dry_run") or "").lower() == "true"
+    if rec_id and rec_id not in ("list", "create"):
+        body["recipe_id"] = rec_id
+    ctx = _recipe_context()
+    if method == "GET":
+        if rec_id in (None, "list"):
+            res = svc.list_recipes(ctx, project_id, query or {})
+        else:
+            res = svc.get(ctx, project_id, rec_id, (query or {}).get("version"))
+    elif method == "POST":
+        if sub == "apply":
+            res = svc.apply_decision(ctx, project_id, rec_id or "", body, actor)
+            res = (res[0], {"success": True, "status": "applied", "result": res[1]} if res[0] < 300
+                   else dict(res[1], status="failed"))
+        elif sub == "validate":
+            res = svc.validate(ctx, project_id, body, actor, dry_run)
+        elif sub == "publish-request":
+            res = svc.publish_request(ctx, project_id, body, actor, dry_run)
+        elif sub == "deprecate":
+            res = svc.deprecate(ctx, project_id, body, actor, dry_run)
+        elif rec_id in (None, "create") or not sub:
+            res = svc.create(ctx, project_id, body, actor, dry_run)
+        else:
+            return _error(405, f"Unknown recipe action '{sub}'.")
+    else:
+        return _error(405, f"Method {method} not allowed on /recipe.")
+    return _response(res[0], res[1])
+
+
 def lambda_handler(event: Dict, context: Any) -> Dict:
+    if isinstance(event, dict) and event.get("recipe_run_sweep") and "requestContext" not in event:
+        return _recipe_run_scheduled_sweep(event)
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
@@ -9235,7 +10394,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     # CORS preflight
     if method == "OPTIONS":
-        return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
+        preflight = {"statusCode": 204, "headers": _cors_headers(), "body": ""}
+        if _RE_ESCALATION.match(path):
+            preflight = _hub_cors_override(event, preflight)
+        return preflight
 
     # --- Route: GET /pending-updates ---
     if method == "GET" and _RE_PENDING_UPDATES.match(path):
@@ -9282,13 +10444,33 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         project_id = m_escalation.group("project")
         escalation_id = m_escalation.group("id")
         escalation_sub = m_escalation.group("sub")
-        claims, auth_err = _authenticate(
-            event,
-            ["tracker:read"] if method == "GET" else ["tracker:write"],
-        )
+        hub_token = _hub_token_from_event(event)
+        if hub_token is not None:
+            # DVP-TSK-A17 part 2: HubExchange is accepted ONLY on POST /{project}/escalation.
+            if not (method == "POST" and not escalation_id and not escalation_sub):
+                return _hub_cors_override(event, _error(403, "The hub exchange principal is not accepted on this route."))
+            claims, auth_err = _authenticate_hub_exchange(hub_token)
+            if auth_err:
+                return _hub_cors_override(event, auth_err)
+        else:
+            claims, auth_err = _authenticate(
+                event,
+                ["tracker:read"] if method == "GET" else ["tracker:write"],
+            )
         if auth_err:
             return auth_err
-        project_err = _validate_project_exists(project_id)
+        # ENC-ISS-773: '*' / '_' = all projects, valid only for the list read
+        # and the expiry sweep.
+        cross_scope = project_id in ("*", "_")
+        if cross_scope and not (
+            (method == "GET" and escalation_id in (None, "list"))
+            or (method == "POST" and escalation_id == "sweep")
+        ):
+            return _error(400, (
+                "Project '*' / '_' (all projects) is valid only for "
+                "GET /escalation[/list] and POST /escalation/sweep."
+            ))
+        project_err = None if cross_scope else _validate_project_exists(project_id)
         if project_err:
             return _error(404, project_err)
         if method == "POST" and escalation_sub == "apply":
@@ -9298,12 +10480,20 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
             return _handle_escalation_apply(project_id, escalation_id, body)
+        elif method == "POST" and escalation_id == "sweep":
+            try:
+                body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                body = {}
+            return _handle_escalation_sweep(project_id, body if isinstance(body, dict) else {})
         elif method == "POST" and not escalation_id:
             try:
                 body = json.loads(event.get("body") or "{}")
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
+            if hub_token is not None:
+                return _hub_cors_override(event, _handle_escalation_request(project_id, body, hub=claims))
             return _handle_escalation_request(project_id, body)
         elif method == "GET" and escalation_id == "list":
             # Pseudo-id alias: gamma APIGW registers {recordType}/{recordId}
@@ -9317,6 +10507,50 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         elif method == "GET":
             return _handle_escalation_list(project_id, query_params)
         return _error(405, f"Method {method} not allowed on /escalation.")
+
+    # --- Route: recipes (DVP-TSK-968 part A / DVP-FTR-106) ---
+    m_recipe = _RE_RECIPE.match(path)
+    if m_recipe:
+        project_id = m_recipe.group("project")
+        claims, auth_err = _authenticate(event, ["tracker:read"] if method == "GET" else ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        recipe_body: Dict[str, Any] = {}
+        if method == "POST":
+            try:
+                recipe_body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            if not isinstance(recipe_body, dict):
+                return _error(400, "Body must be a JSON object.")
+            _normalize_write_source(recipe_body, claims)
+        return _handle_recipe_route(method, project_id, m_recipe.group("id"), m_recipe.group("sub"),
+                                    recipe_body, query_params)
+
+    # --- Route: recipe runs (DVP-TSK-968 part B / DVP-FTR-106) ---
+    m_run = _RE_RECIPE_RUN.match(path)
+    if m_run:
+        project_id = m_run.group("project")
+        claims, auth_err = _authenticate(event, ["tracker:read"] if method == "GET" else ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        run_body: Dict[str, Any] = {}
+        if method == "POST":
+            try:
+                run_body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            if not isinstance(run_body, dict):
+                return _error(400, "Body must be a JSON object.")
+            _normalize_write_source(run_body, claims)
+        return _handle_recipe_run_route(method, project_id, m_run.group("id"), m_run.group("sub"),
+                                        run_body, query_params)
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)

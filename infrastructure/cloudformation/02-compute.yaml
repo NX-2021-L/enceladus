@@ -9,6 +9,18 @@ Description: >
   The EarlyValidation hook requires Code to be present for import operations.
 
 Parameters:
+  RecipeMcpApiKeySecretArn:
+    Type: String
+    Default: "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/recipe-runner/mcp-api-key-nvFY2Z"
+    Description: DVP-TSK-968 - ARN of the SAME Secrets Manager secret the MCP lambda's ENCELADUS_MCP_API_KEY comes from (never a new copy). Empty keeps the recipe runner on the in-process path and disables the sweep rule.
+  RecipeMcpUrl:
+    Type: String
+    Default: https://mcp.jreese.net/mcp
+    Description: DVP-TSK-968 - streamable-HTTP endpoint of the governed MCP server used by the recipe runner (E4-R16).
+  RecipeRunnerAgentTypeId:
+    Type: String
+    Default: "ENC-AGT-00N"
+    Description: DVP-TSK-968 - registered agent type (ENC-AGT-00N) the recipe runner claims one session per run under.
   Environment:
     Type: String
     Default: production
@@ -20,6 +32,33 @@ Parameters:
     Description: >
       Appended to every resource name. Production uses "" (zero drift),
       gamma uses "-gamma" for parallel deployment.
+  # DVP-TSK-A17 (E4-R14): hub token exchange issuer / origin allow-list. Fail closed:
+  # an empty issuer list means nothing can be exchanged or accepted.
+  HubExchangeIssuers:
+    Type: String
+    Default: '[{"name":"vagamod-keycloak","iss":"https://auth.vagamod.io/realms/mod-one-line-library","jwks_uri":"https://auth.vagamod.io/realms/mod-one-line-library/protocol/openid-connect/certs","audiences":["mod-web-app"]},{"name":"coach-cognito","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["7eo7qrnnsrumsook1v2vttm7gu"]},{"name":"think-iograph","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["6eh4u69l1mqk1m4hfjspeibla8","2mvnpft2mhqa2rjer8179bca8c"]}]'
+    Description: >
+      JSON allow-list of OIDC issuers whose ID tokens may be exchanged for a hub
+      principal: [{"name","iss","jwks_uri","audiences":[...]}] for vagamod-keycloak,
+      coach-cognito, think-iograph. Set per environment at deploy time.
+  # DVP-TSK-A17 part 2 (E4-R18): HubExchange issuer name -> producer principal for the tracker
+  # producer path, and the per-source producer allow-list (principal names, never client-claimed).
+  HubExchangeProducers:
+    Type: String
+    Default: '{"vagamod-keycloak":"vagamod","think-iograph":"think","coach-cognito":"coach"}'
+    Description: JSON map of hub exchange issuer name to the derived producer principal.
+  GateProducerPrincipals:
+    Type: String
+    Default: '{"vagamod":["vagamod"],"think":["think"],"coach":["coach"]}'
+    Description: >
+      JSON map of producer source to its allow-listed principals (GATE_PRODUCER_PRINCIPALS).
+      recipe-runner is internal-only (in-process flag) and is deliberately NOT listed.
+  HubShellOrigins:
+    Type: String
+    Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
+    Description: >
+      Comma list of shell origins allowed (CORS) on the hub exchange / list / decide
+      routes. Append the think origin at deploy time.
   S3EnvPrefix:
     Type: String
     Default: ""
@@ -45,6 +84,7 @@ Parameters:
   SharedLayerArn:
     Type: String
     # ENC-TSK-H05: bumped :7 -> :10 to match the live/working prod layer. The F65 hotfix
+    # (2026-10-11) DVP-TSK-A17: :13 = CI-published from 74487e3 (adds enceladus_shared.hub_exchange; run 38181569019).
     # (2026-04-21) moved functions to enceladus-shared:10 (the version WITH appconfig_flags)
     # out-of-band but never updated this default; the 2026-06-18 deploy then reset functions
     # to :7 -> Runtime.ImportModuleError 'No module named enceladus_shared.appconfig_flags'
@@ -60,7 +100,7 @@ Parameters:
     # the same failure shape as the :7 incident above, one layer version later. :12 is a
     # pure-Python superset of :10 (zero .so) and declares CompatibleArchitectures
     # [x86_64, arm64], so the move is additive for every other function.
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:15
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
     Type: String
@@ -300,6 +340,7 @@ Parameters:
       before the HCE runs a full cycle on a scheduled fire.
 
 Conditions:
+  HasRecipeMcpSecret: !Not [!Equals [!Ref RecipeMcpApiKeySecretArn, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
@@ -502,6 +543,9 @@ Resources:
           # design) publicly readable. This bucket has no CloudFront origin.
           ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
           ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
+          # DVP-TSK-A17 (E4-R14): hub token exchange (fail closed when issuers are empty).
+          HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
+          HUB_SHELL_ORIGINS: !Ref HubShellOrigins
       Tags:
         - Key: Project
           Value: enceladus
@@ -545,6 +589,10 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          RECIPE_MCP_URL: !Ref RecipeMcpUrl
+          RECIPE_MCP_API_KEY_SECRET_ARN: !Ref RecipeMcpApiKeySecretArn
+          RECIPE_RUNNER_AGENT_TYPE_ID: !Ref RecipeRunnerAgentTypeId
+          RECIPE_SWEEP_PROJECT_IDS: "enceladus,devops"
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -576,6 +624,11 @@ Resources:
           # resolves AppConfig-first with default=False, so this fallback is load-bearing
           # whenever AppConfig is unreachable.
           ENABLE_LESSON_PRIMITIVE: "true"
+          # DVP-TSK-A17 part 2 (E4-R18): HubExchange principals may create producer escalations.
+          HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
+          HUB_SHELL_ORIGINS: !Ref HubShellOrigins
+          HUB_EXCHANGE_PRODUCERS: !Ref HubExchangeProducers
+          GATE_PRODUCER_PRINCIPALS: !Ref GateProducerPrincipals
       Tags:
         - Key: Project
           Value: enceladus
@@ -4577,6 +4630,26 @@ Resources:
         - Key: Project
           Value: enceladus
 
+  # DVP-TSK-968 E4-R16: run sweeper (POST /recipe-run/sweep equivalent): expires stale gates, heartbeats awaiting_gate runner sessions.
+  RecipeRunSweepRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Recipe-run sweeper for TrackerMutationFunction (DVP-TSK-968)
+      ScheduleExpression: rate(15 minutes)
+      State: !If [HasRecipeMcpSecret, ENABLED, DISABLED]
+      Targets:
+        - Id: recipe-run-sweep
+          Arn: !GetAtt TrackerMutationFunction.Arn
+          Input: '{"recipe_run_sweep": true}'
+
+  RecipeRunSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TrackerMutationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RecipeRunSweepRule.Arn
+
   TrackerMutationRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
@@ -4612,6 +4685,10 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              - Sid: RecipeRunnerMcpApiKeyRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !If [HasRecipeMcpSecret, !Ref RecipeMcpApiKeySecretArn, !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus-recipe-mcp-key-unset"]
               - Sid: TrackerTableAccess
                 Effect: Allow
                 Action:
@@ -8549,6 +8626,7 @@ Resources:
   # another member of the set or to something already present on this branch
   # (GovernanceAuditFunction, DataStackName, SharedLayerArn, CognitoUserPoolId,
   # CognitoClientId, S3Bucket, EnvironmentSuffix).
+
   EscalationDecisionAuthorizerRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
@@ -8621,6 +8699,11 @@ Resources:
           # publicly readable. This bucket has no CloudFront origin.
           ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
           ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
+          # DVP-TSK-A17 (E4-R14): hub token exchange (fail closed when issuers are empty).
+          HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
+          HUB_SHELL_ORIGINS: !Ref HubShellOrigins
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
       Tags:
         - Key: Project
           Value: enceladus
