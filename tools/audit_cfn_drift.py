@@ -101,8 +101,18 @@ def live_apigw_routes(api_id: str) -> Set[str]:
 _ENV_SUFFIXES = ("-gamma", "-beta", "-staging", "-dev", "-test")
 
 
+# DVP-TSK-968 (DVP-PLN-013): CFN auto-generated physical names of a NON-prod
+# stack look like '<stack>-gamma-<LogicalId>-<RANDOM>' (e.g.
+# 'enceladus-compute-gamma-RecipeRunSweepRule-txz6LVtarSQI'). They carry the
+# environment token mid-name, not as a suffix, so the suffix test alone treated
+# them as PROD live-only drift.
+_ENV_AUTONAME_RE = re.compile(
+    r"-(?:" + "|".join(s.lstrip("-") for s in _ENV_SUFFIXES) + r")-[A-Z][A-Za-z0-9]*-[A-Za-z0-9]{8,}$"
+)
+
+
 def _is_env_sibling(name: str) -> bool:
-    return any(name.endswith(suffix) for suffix in _ENV_SUFFIXES)
+    return any(name.endswith(suffix) for suffix in _ENV_SUFFIXES) or bool(_ENV_AUTONAME_RE.search(name))
 
 
 def resolve_api_id(stack_prefix: str, environment: str = "prod") -> str:
@@ -232,7 +242,7 @@ def _in_environment(name: str, environment: str) -> bool:
     audit even though it is properly CFN-managed on v4/main. Scoping the live
     set to the audited environment fixes the gh#635 inflation at its root.
     """
-    is_gamma = name.endswith("-gamma")
+    is_gamma = name.endswith("-gamma") or bool(re.search(r"-gamma-[A-Z][A-Za-z0-9]*-[A-Za-z0-9]{8,}$", name))
     if environment == "gamma":
         return is_gamma
     # prod: exclude every non-prod environment sibling (-gamma/-beta/-staging/...)
