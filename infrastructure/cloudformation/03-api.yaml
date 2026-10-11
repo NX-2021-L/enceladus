@@ -18,6 +18,13 @@ Parameters:
     Default: "https://jreese.net"
     Description: >
       CORS AllowOrigins value. Override for gamma environment.
+  HubShellOrigins:
+    Type: String
+    Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
+    Description: >
+      DVP-TSK-A17 (E4-R14): comma list of shell origins added to the API CORS allow-list
+      for the hub exchange / list / decide routes. Empty disables. Must match the
+      compute stack HubShellOrigins.
   ComputeStackName:
     Type: String
     Default: enceladus-compute
@@ -28,6 +35,7 @@ Parameters:
 Conditions:
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   IsProduction: !Equals [!Ref EnvironmentSuffix, ""]
+  HasHubShellOrigins: !Not [!Equals [!Ref HubShellOrigins, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -41,8 +49,10 @@ Resources:
       Name: !Ref ApiName
       ProtocolType: HTTP
       CorsConfiguration:
-        AllowOrigins:
-          - !Ref CorsOrigin
+        AllowOrigins: !If
+          - HasHubShellOrigins
+          - !Split [",", !Sub "${CorsOrigin},${HubShellOrigins}"]
+          - [!Ref CorsOrigin]
         AllowMethods:
           - GET
           - POST
@@ -113,8 +123,9 @@ Resources:
       AuthorizerPayloadFormatVersion: '2.0'
       EnableSimpleResponses: true
       AuthorizerResultTtlInSeconds: 0
-      IdentitySource:
-        - "$request.header.Cookie"
+      # DVP-TSK-A17: no IdentitySource -- the authorizer must also see `Authorization: HubExchange`
+      # requests that carry no Cookie (a missing identity source would 401 at the gateway first).
+      # The Lambda still denies anything without a valid cookie session or hub principal.
       AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:escalation-decision-authorizer${EnvironmentSuffix}/invocations"
 
   EscalationDecisionAuthorizerInvokePermission:
@@ -2940,6 +2951,15 @@ Resources:
       Target: !Sub integrations/${CoordinationApiIntegration}
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref EscalationDecisionAuthorizer
+
+  # DVP-TSK-A17 (E4-R14): public hub token exchange. The credential is an allow-listed
+  # issuer's ID token in the body (verified in coordination_api), so no gateway authorizer.
+  RouteHubExchange:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/hub/exchange"
+      Target: !Sub integrations/${CoordinationApiIntegration}
 
   RouteTrackerEscalationApply:
     Type: AWS::ApiGatewayV2::Route
