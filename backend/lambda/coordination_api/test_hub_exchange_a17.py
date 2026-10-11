@@ -167,7 +167,7 @@ class TestHubPrincipal(HubBase):
         logged = _entries(ddb)
         self.assertTrue(logged)
         self.assertEqual("hub_exchange:vagamod-keycloak", logged[-1]["auth_method"])
-        self.assertEqual("aal1", logged[-1]["assurance"])
+        self.assertEqual("aal2", logged[-1]["assurance"])
         self.assertEqual(coord._gate_epoch_to_ts(now - 90), logged[-1]["auth_time"])
 
     def test_decide_invariants_still_refuse_non_allow_listed_and_malformed_hub_claims(self):
