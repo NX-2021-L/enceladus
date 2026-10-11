@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ReactElement } from 'react'
-import { MarkdownContentLegacy } from './MarkdownContentLegacy'
+import { MarkdownContentLegacy } from './__parity__/MarkdownContentLegacy'
 import KitMarkdownContent, { BLOCK_MARKER_LINE, hostMarkdownComponents, hostMarkdownPlugins } from './KitMarkdownContent'
 import { KitMarkdown } from '@io-kit/md/lean/react'
 import { ID_PATTERN_LOOSE } from '@io-kit/md/lean'
