@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createHitView } from './hitView'
+import { createHitView, feedHitCount } from './hitView'
 import type { SearchResultHit } from '../types/search'
 
 const hit = (id: string, title = id): SearchResultHit => ({ recordId: id, recordType: 'task', projectId: 'enceladus', title, tier: 'local' })
@@ -50,5 +50,18 @@ describe('createHitView (DVP-TSK-931)', () => {
     off()
     view.setHits([])
     expect(seen).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('feedHitCount (DVP-TSK-931 meta-line parity)', () => {
+  it('shows the server corpus total when nothing narrows the feed, like the fully seeded legacy cache', () => {
+    expect(feedHitCount(50, 9019, '', '')).toBe(9019)
+  })
+  it('counts matches once a query or property filter narrows the feed', () => {
+    expect(feedHitCount(12, 9019, 'vagamod', '')).toBe(12)
+    expect(feedHitCount(7, 9019, '', 'status:open')).toBe(7)
+  })
+  it('falls back to the loaded count until the server total arrives', () => {
+    expect(feedHitCount(50, null, '', '')).toBe(50)
   })
 })
