@@ -11,6 +11,8 @@ routes:
       - "GET /api/v1/coordination/queue/stale-locks"
       - "GET /api/v1/documents/{id}"
       - "GET /api/v1/feed/corpus"
+      - "GET /api/v1/feed/delta"
+      - "GET /api/v1/feed/{path}"
       - "GET /api/v1/projects"
       - "GET /api/v1/tracker/{project}/{type}/{id}"
       - "GET /api/v1/tracker/{project}?mode=census"
@@ -99,6 +101,9 @@ routes:
     component: "frontend/ui-v2/src/routes/EscalationsRoute.tsx"
     handlers:
       - "GET /api/v1/coordination/escalations"
+      - "GET /api/v1/feed/corpus"
+      - "GET /api/v1/feed/delta"
+      - "GET /api/v1/feed/{path}"
       - "GET /api/v1/projects"
       - "POST /api/v1/coordination/escalations/{project}/{id}/approve"
       - "POST /api/v1/coordination/escalations/{project}/{id}/deny"
