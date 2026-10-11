@@ -43,7 +43,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -10540,6 +10540,12 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     else:
         state = "decided"
     escalation["state"] = state
+    # ENC-TSK-967 phase 2a: decide preconditions + the hash-chained log (additive).
+    log = _escalation_decision_log(escalation)
+    escalation.setdefault("etag", _escalation_etag(escalation))
+    escalation["decision_log"] = log
+    escalation["decision_log_head"] = log[-1].get("hash") if log else None
+    escalation["decision_log_valid"] = _verify_decision_chain(log)[0]
 
 
 def _gate_list_project_ids() -> List[str]:
@@ -10875,12 +10881,393 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
     return _response(200, feed_payload)
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-967 (DVP-PLN-013 E4-W1.2, phase 2a): hardened decide + hash-chained log
+#
+# Decide keeps the ENC-FTR-121 preconditions exactly (Cognito human session,
+# interactive ID token, allow-list, no MCP route) and adds, in server order:
+# auth evidence/step-up proof -> no-self-review -> idempotent replay -> state
+# (409) -> expiry (410) -> card etag (412 card_changed) -> subject version
+# (412 subject_changed) -> candidate (422) -> callHash (409 call_changed) ->
+# inputs (422) -> applier lookup (422, fail-closed) -> write-ahead log entry
+# -> execute -> executed|execution_failed entry. The chain is PER-ESCALATION
+# (stored on the escalation item, appended in the same conditional write as
+# the status transition, seq enforced by size(decision_log)); a per-project
+# head pointer is deferred. Existing clients are untouched (D9): the new
+# preconditions are enforced when supplied and REQUIRED (428) only for
+# records that carry an explicit non-legacy kind or proposedCalls/candidates.
+# ---------------------------------------------------------------------------
+_GATE_CHAIN_ZERO = "0" * 64
+_ESCALATION_INPUTS_MAX_BYTES = 16 * 1024
+_ESCALATION_REQUESTER_KEYS = (
+    "principal", "sub", "email", "id", "user", "user_id", "agent_id",
+    "session_id", "source_principal", "sourcePrincipal", "name",
+)
+
+
+def _gate_json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else str(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    return str(value)
+
+
+def _gate_canonical(value: Any) -> str:
+    """RFC 8785-style canonical JSON for the integer/string/bool/null subset:
+    sorted keys, no insignificant whitespace, UTF-8 (not \\u-escaped)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, default=_gate_json_default)
+
+
+def _gate_call_hash(value: Any) -> str:
+    return hashlib.sha256(_gate_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _gate_header(event: Dict[str, Any], name: str) -> str:
+    wanted = name.lower()
+    for key, val in (event.get("headers") or {}).items():
+        if str(key).lower() == wanted:
+            return str(val if val is not None else "").strip()
+    return ""
+
+
+def _gate_etag_norm(value: str) -> str:
+    text = str(value or "").strip()
+    if text[:2] in ("W/", "w/"):
+        text = text[2:]
+    return text.strip().strip('"')
+
+
+def _escalation_etag(escalation: Dict[str, Any]) -> str:
+    """Card etag: changes on every status transition, event append or log entry."""
+    events = escalation.get("events")
+    log = escalation.get("decision_log")
+    basis = {
+        "id": str(escalation.get("item_id") or ""),
+        "status": str(escalation.get("status") or ""),
+        "updated_at": str(escalation.get("updated_at") or ""),
+        "events": len(events) if isinstance(events, list) else 0,
+        "log": len(log) if isinstance(log, list) else 0,
+    }
+    return '"' + _gate_call_hash(basis)[:32] + '"'
+
+
+def _escalation_decision_log(escalation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = escalation.get("decision_log")
+    if isinstance(raw, str) and raw:
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = []
+    entries = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)]
+    return sorted(entries, key=lambda e: int(e.get("seq") or 0))
+
+
+def _escalation_log_entry(seq: int, prev_hash: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """hash = sha256(prevHash + canonicalJSON(entry without hash))."""
+    entry: Dict[str, Any] = {"seq": int(seq), "prevHash": prev_hash, "at": _gate_fmt(_gate_now())}
+    entry.update({k: v for k, v in fields.items() if v is not None or k == "auth_time"})
+    entry["hash"] = hashlib.sha256(
+        (prev_hash + _gate_canonical({k: v for k, v in entry.items() if k != "hash"})).encode("utf-8")
+    ).hexdigest()
+    return entry
+
+
+def _verify_decision_chain(log: List[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
+    """Recompute the chain; (True, None) or (False, first_bad_seq)."""
+    prev = _GATE_CHAIN_ZERO
+    for index, entry in enumerate(log, start=1):
+        seq = int(entry.get("seq") or 0)
+        body = {k: v for k, v in entry.items() if k != "hash"}
+        want = hashlib.sha256((prev + _gate_canonical(body)).encode("utf-8")).hexdigest()
+        if seq != index or entry.get("prevHash") != prev or entry.get("hash") != want:
+            return False, index
+        prev = want
+    return True, None
+
+
+def _gate_epoch_to_ts(value: Any) -> Optional[str]:
+    try:
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        return _gate_fmt(dt.datetime.fromtimestamp(int(float(value)), dt.timezone.utc))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
+                              now: dt.datetime) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Decide-time authentication evidence recorded on every log entry.
+
+    auth_method is always interactive_human (the FTR-121 proof is a decide
+    precondition). assurance is 'aal1' unless a valid method-tagged proof
+    raises it: {method:'cognito_max_age', auth_time} is verified against the
+    ID token's own auth_time claim and a max age -> 'aal2'. {method:'step_up'}
+    is accepted but NOT verified until DVP-TSK-980: recorded as
+    interactive_human strength with degraded_mode=true. Anything else is
+    refused (fail-closed; never a silent downgrade).
+    """
+    auth_time = _gate_epoch_to_ts(claims.get("auth_time")) or _gate_epoch_to_ts(claims.get("iat"))
+    evidence: Dict[str, Any] = {
+        "auth_method": "interactive_human", "auth_time": auth_time,
+        "assurance": "aal1", "proof_method": "none",
+    }
+    proof = body.get("stepUp")
+    if proof is None:
+        proof = body.get("step_up", body.get("proof"))
+    if proof in (None, "", {}):
+        return evidence, ""
+    if not isinstance(proof, dict):
+        return None, "step-up proof must be an object {method, auth_time}"
+    method = str(proof.get("method") or proof.get("kind") or "").strip().lower()
+    if method == "step_up":
+        evidence.update({"proof_method": "step_up", "degraded_mode": True})
+        return evidence, ""
+    if method == "cognito_max_age":
+        claimed_raw = proof.get("auth_time")
+        claimed = _gate_epoch_to_ts(claimed_raw)
+        if claimed is None and _gate_parse_ts(claimed_raw) is not None:
+            claimed = _gate_fmt(_gate_parse_ts(claimed_raw))
+        token_time = _gate_epoch_to_ts(claims.get("auth_time"))
+        max_age = int(os.environ.get("ESCALATION_STEP_UP_MAX_AGE_SECONDS", "300") or 300)
+        parsed = _gate_parse_ts(token_time)
+        if not token_time or not claimed or claimed != token_time or parsed is None:
+            return None, "cognito_max_age proof does not match the ID token auth_time"
+        age = (now - parsed).total_seconds()
+        if age < -60 or age > max_age:
+            return None, f"cognito_max_age proof is stale (age {int(age)}s > {max_age}s); re-authenticate"
+        evidence.update({"assurance": "aal2", "proof_method": "cognito_max_age"})
+        return evidence, ""
+    return None, f"unsupported step-up proof method {method!r}"
+
+
+def _escalation_barred_principals(escalation: Dict[str, Any]) -> Set[str]:
+    """Principals who must not decide: requester, source principal, distinct_from."""
+    out: Set[str] = set()
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text:
+                out.add(text)
+        elif depth < 3 and isinstance(value, dict):
+            for key in _ESCALATION_REQUESTER_KEYS:
+                if key in value:
+                    collect(value[key], depth + 1)
+        elif depth < 3 and isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item, depth + 1)
+
+    for key in ("requested_by", "requestedBy", "source_principal", "sourcePrincipal", "distinct_from"):
+        collect(escalation.get(key))
+    return out
+
+
+def _escalation_decider_principals(claims: Dict[str, Any], decider: str) -> Set[str]:
+    values = (decider, claims.get("email"), claims.get("sub"), claims.get("cognito:username"))
+    return {str(v).strip().lower() for v in values if v and str(v).strip()}
+
+
+def _gate_validate_schema(value: Any, schema: Any, path: str = "$", depth: int = 0) -> List[str]:
+    """Small JSON-Schema subset (type, enum, const, required, properties,
+    additionalProperties=false, items, min/max Length|Items|imum, pattern).
+    Unknown keywords are ignored; this is input validation, not a full validator."""
+    if not isinstance(schema, dict) or depth > 8:
+        return []
+    errors: List[str] = []
+    types = schema.get("type")
+    if types is not None:
+        names = types if isinstance(types, list) else [types]
+
+        def _ok(name: str) -> bool:
+            if name == "string":
+                return isinstance(value, str)
+            if name == "boolean":
+                return isinstance(value, bool)
+            if name == "integer":
+                return isinstance(value, int) and not isinstance(value, bool) or (
+                    isinstance(value, Decimal) and value == value.to_integral_value())
+            if name == "number":
+                return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+            if name == "object":
+                return isinstance(value, dict)
+            if name == "array":
+                return isinstance(value, list)
+            if name == "null":
+                return value is None
+            return True
+        if not any(_ok(str(n)) for n in names):
+            return [f"{path}: expected type {names}"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: not one of the allowed values")
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}: must equal the constant")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < int(schema["minLength"]):
+            errors.append(f"{path}: shorter than minLength")
+        if "maxLength" in schema and len(value) > int(schema["maxLength"]):
+            errors.append(f"{path}: longer than maxLength")
+        if schema.get("pattern"):
+            try:
+                if not re.search(str(schema["pattern"]), value):
+                    errors.append(f"{path}: does not match pattern")
+            except re.error:
+                pass
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}: below minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path}: above maximum")
+    if isinstance(value, dict):
+        for name in schema.get("required") or []:
+            if name not in value:
+                errors.append(f"{path}.{name}: required")
+        props = schema.get("properties") or {}
+        for name, sub in props.items():
+            if name in value:
+                errors.extend(_gate_validate_schema(value[name], sub, f"{path}.{name}", depth + 1))
+        if schema.get("additionalProperties") is False:
+            for name in value:
+                if name not in props:
+                    errors.append(f"{path}.{name}: additional property not allowed")
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            errors.append(f"{path}: fewer than minItems")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            errors.append(f"{path}: more than maxItems")
+        if isinstance(schema.get("items"), dict):
+            for idx, item in enumerate(value):
+                errors.extend(_gate_validate_schema(item, schema["items"], f"{path}[{idx}]", depth + 1))
+    return errors
+
+
+def _escalation_json_attr(escalation: Dict[str, Any], key: str) -> Any:
+    raw = escalation.get(key)
+    if isinstance(raw, str) and raw:
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw
+
+
+def _escalation_is_strict(escalation: Dict[str, Any]) -> bool:
+    """Non-legacy records (explicit kind other than 'escalation', or carrying
+    proposedCalls/candidates) REQUIRE If-Match + Idempotency-Key (428)."""
+    kind = str(escalation.get("kind") or "")
+    return bool((kind and kind != "escalation")
+                or escalation.get("proposedCalls") or escalation.get("candidates"))
+
+
+def _escalation_subject_type(escalation: Dict[str, Any]) -> str:
+    subject = _escalation_json_attr(escalation, "subject")
+    return str(
+        escalation.get("subject_type")
+        or (subject.get("type") if isinstance(subject, dict) else "")
+        or escalation.get("mutation_type") or ""
+    ).strip()
+
+
+def _escalation_call_basis(escalation: Dict[str, Any], chosen: Optional[Dict[str, Any]]) -> Tuple[Any, str]:
+    """(basis, stored_hash). Chosen candidate's call, else proposedCalls, else
+    the legacy {mutation_type, target_record_id, payload} triple."""
+    if chosen is not None:
+        basis = chosen.get("call", chosen.get("proposedCall", chosen))
+        return basis, str(chosen.get("callHash") or escalation.get("callHash") or "")
+    proposed = _escalation_json_attr(escalation, "proposedCalls")
+    if proposed:
+        return proposed, str(escalation.get("callHash") or "")
+    return ({"mutation_type": escalation.get("mutation_type"),
+             "target_record_id": escalation.get("target_record_id"),
+             "payload": _escalation_payload_dict(escalation)}, str(escalation.get("callHash") or ""))
+
+
+# Pluggable applier registry keyed by subject.type (E4-R12). An applier is
+# fn(project_id, escalation_id, escalation, decider, body) -> a result dict
+# carrying _status_code / status / result / error (the tracker apply shape).
+# Unknown subject types are refused fail-closed (DVP-TSK-968 registers recipes).
+_ESCALATION_APPLIERS: Dict[str, Callable[..., Dict[str, Any]]] = {}
+
+
+def register_escalation_applier(subject_type: str, applier: Callable[..., Dict[str, Any]],
+                                replace: bool = False) -> None:
+    key = str(subject_type or "").strip()
+    if not key or not callable(applier):
+        raise ValueError("subject_type and a callable applier are required")
+    if key in _ESCALATION_APPLIERS and not replace:
+        raise ValueError(f"applier already registered for subject type {key!r}")
+    _ESCALATION_APPLIERS[key] = applier
+
+
+def _apply_escalation_via_tracker(project_id: str, escalation_id: str,
+                                  escalation: Dict[str, Any], decider: str,
+                                  body: Dict[str, Any]) -> Dict[str, Any]:
+    return _invoke_tracker_mutation_api(
+        "POST",
+        f"/api/v1/tracker/{project_id}/escalation/{escalation_id}/apply",
+        body={"write_source": {"provider": f"io:{decider}", "channel": "coordination_api"}},
+    )
+
+
+for _legacy_subject_type in ("deploy_arc_change", "direct_state_override"):
+    register_escalation_applier(_legacy_subject_type, _apply_escalation_via_tracker)
+
+
+def _append_escalation_log_entry(project_id: str, escalation_id: str,
+                                 prev_entry: Dict[str, Any], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Append the post-execution entry; seq enforced by size(decision_log)."""
+    entry = _escalation_log_entry(int(prev_entry["seq"]) + 1, str(prev_entry["hash"]), fields)
+    try:
+        _get_ddb().update_item(
+            TableName=TRACKER_TABLE,
+            Key={"project_id": _serialize(project_id),
+                 "record_id": _serialize(f"escalation#{escalation_id}")},
+            UpdateExpression="SET decision_log = list_append(decision_log, :entry)",
+            ConditionExpression="attribute_exists(record_id) AND size(decision_log) = :n",
+            ExpressionAttributeValues={":entry": _serialize([entry]),
+                                       ":n": _serialize(int(prev_entry["seq"]))},
+        )
+        return entry
+    except Exception as exc:  # noqa: BLE001 — the decided entry is already durable
+        logger.error("escalation log append failed (%s %s): %s", escalation_id, fields.get("event"), exc)
+        return None
+
+
+def _escalation_replay_receipt(escalation: Dict[str, Any], prior: Dict[str, Any],
+                               log: List[Dict[str, Any]]) -> Dict[str, Any]:
+    verdict = str(prior.get("verdict") or "")
+    actor = prior.get("actor") if isinstance(prior.get("actor"), dict) else {}
+    executed = next((e for e in log if e.get("event") in ("executed", "execution_failed")
+                     and e.get("idempotencyKey") == prior.get("idempotencyKey")), None)
+    receipt: Dict[str, Any] = {
+        "success": True,
+        "escalation_id": str(escalation.get("item_id") or ""),
+        "status": str(escalation.get("status") or ""),
+        "idempotent_replay": True,
+        "decision": verdict,
+        "decision_entry": {"seq": prior.get("seq"), "hash": prior.get("hash")},
+        "decision_log_head": log[-1].get("hash") if log else None,
+    }
+    receipt["approved_by" if verdict == "approve" else "denied_by"] = actor.get("id")
+    if executed is not None:
+        receipt["executed"] = executed.get("result")
+    return receipt
+
+
 def _record_escalation_decision(
     project_id: str, escalation_id: str, new_status: str, actor: str,
     approved_by: Optional[Dict[str, str]] = None, guidance_note: str = "",
+    log_entry: Optional[Dict[str, Any]] = None,
+    decision_record: Optional[Dict[str, Any]] = None,
+    expected_updated_at: Optional[str] = None,
 ) -> bool:
     """Conditionally walk requested→{approved|denied|denied_with_guidance},
     appending the §11.2 event. Returns False when the race guard loses.
+
+    ENC-TSK-967: when log_entry is given, the write-ahead 'decided' entry is
+    appended to decision_log in the SAME conditional write (seq enforced by
+    size(decision_log)); expected_updated_at pins the card etag atomically.
     """
     now = _now_z()
     event_entry: Dict[str, Any] = {"event_type": new_status, "at": now, "actor": actor}
@@ -10899,12 +11286,29 @@ def _record_escalation_decision(
         ":empty": _serialize([]),
         ":event": _serialize([event_entry]),
     }
+    condition = "attribute_exists(record_id) AND #st = :requested"
     if approved_by is not None:
         update_parts.append("approved_by = :approved_by")
         values[":approved_by"] = _serialize(approved_by)
     if guidance_note:
         update_parts.append("guidance_note = :guidance_note")
         values[":guidance_note"] = _serialize(guidance_note)
+    if log_entry is not None:
+        update_parts.append("decision_log = list_append(if_not_exists(decision_log, :empty), :log_entry)")
+        values[":log_entry"] = _serialize([log_entry])
+        seq = int(log_entry.get("seq") or 1)
+        if seq <= 1:
+            condition += " AND attribute_not_exists(decision_log)"
+        else:
+            condition += " AND size(decision_log) = :log_n"
+            values[":log_n"] = _serialize(seq - 1)
+    if decision_record is not None:
+        update_parts.append("#dec = :decision_record")
+        names["#dec"] = "decision"
+        values[":decision_record"] = _serialize(decision_record)
+    if expected_updated_at:
+        condition += " AND updated_at = :expected_updated_at"
+        values[":expected_updated_at"] = _serialize(expected_updated_at)
     try:
         _get_ddb().update_item(
             TableName=TRACKER_TABLE,
@@ -10913,7 +11317,7 @@ def _record_escalation_decision(
                 "record_id": _serialize(f"escalation#{escalation_id}"),
             },
             UpdateExpression="SET " + ", ".join(update_parts),
-            ConditionExpression="attribute_exists(record_id) AND #st = :requested",
+            ConditionExpression=condition,
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
         )
@@ -10979,16 +11383,73 @@ def _handle_escalation_decision(
         body = json.loads(event.get("body") or "{}")
     except (ValueError, TypeError):
         body = {}
+    if not isinstance(body, dict):
+        body = {}
 
     escalation = _read_escalation_item(project_id, escalation_id)
     if escalation is None:
         return _error(404, f"Escalation not found: {escalation_id}")
+    now = _gate_now()
+    decider = _resolve_decider_identity(claims)
+    actor = str(claims.get("sub") or decider)
+    verdict = "approve" if decision == "approve" else "deny"
+    kind = str(escalation.get("kind") or "escalation")
+    strict = _escalation_is_strict(escalation)
+
+    # (1) auth evidence: auth_method / auth_time / assurance + step-up proof.
+    evidence, proof_error = _escalation_auth_evidence(claims, body, now)
+    if evidence is None:
+        return _error(403, proof_error, reason="step_up_rejected")
+
+    # (2) no-self-review: the decider differs from requestedBy, the source
+    # principal and every principal in distinct_from.
+    clash = sorted(_escalation_decider_principals(claims, decider)
+                   & _escalation_barred_principals(escalation))
+    if clash:
+        return _error(403, (
+            "No self-review: the decider principal matches the requester / "
+            "distinct_from set for this escalation."
+        ), reason="self_review")
+
+    log = _escalation_decision_log(escalation)
+    chain_ok, bad_seq = _verify_decision_chain(log)
+    if not chain_ok:
+        return _error(409, (
+            f"Escalation {escalation_id} decision log failed chain verification at "
+            f"seq {bad_seq}; refusing to extend it."), reason="log_integrity")
+
+    idem_key = (_gate_header(event, "Idempotency-Key")
+                or str(body.get("idempotencyKey") or body.get("idempotency_key") or "").strip())
+    subject_version = body.get("subject_version", body.get("subjectVersion"))
+    candidate_id = str(body.get("candidateId") or body.get("candidate_id") or "").strip()
+    client_call_hash = str(body.get("callHash") or body.get("call_hash") or "").strip().lower()
+    guidance_note = str(body.get("guidance_note") or "").strip()
+    inputs = body.get("inputs")
+    payload_hash = _gate_call_hash({
+        "verdict": verdict, "candidateId": candidate_id, "callHash": client_call_hash,
+        "subject_version": None if subject_version is None else str(subject_version),
+        "inputs": inputs, "note": guidance_note, "proof": evidence["proof_method"],
+    })
+
+    # (4) idempotency: a repeat of the same key returns the first result and
+    # performs no second write. Evaluated ahead of the state check so a
+    # replay of an already-decided escalation is 200, not 409.
+    if idem_key:
+        prior = next((e for e in log if e.get("event") == "decided"
+                      and e.get("idempotencyKey") == idem_key), None)
+        if prior is not None:
+            if prior.get("payloadHash") != payload_hash:
+                return _error(422, "Idempotency-Key was already used with a different payload.",
+                              reason="idempotency_key_reused")
+            return _response(200, _escalation_replay_receipt(escalation, prior, log))
+
+    # (3) state.
     current_status = str(escalation.get("status") or "")
     if current_status != "requested":
         return _error(409, (
             f"Escalation {escalation_id} is '{current_status}'; only 'requested' "
             "escalations can be decided."
-        ))
+        ), status=current_status, decision_log_head=log[-1].get("hash") if log else None)
     # ENC-TSK-967 (F-10): FAIL-CLOSED -- an expired escalation (stored or
     # backfilled expiresAt) can be neither approved nor denied, and no applier
     # call is made. The tracker_mutation sweeper moves it to its terminal state.
@@ -11004,33 +11465,162 @@ def _handle_escalation_decision(
             onExpire=expiry["onExpire"],
         )
 
-    decider = _resolve_decider_identity(claims)
-    actor = str(claims.get("sub") or decider)
+    def _card() -> Dict[str, Any]:
+        view = dict(escalation)
+        view["payload"] = _escalation_payload_dict(escalation)
+        _escalation_gate_view(view)
+        return view
 
-    if decision == "approve":
+    # (5) layer one of If-Match: the escalation etag the human saw.
+    current_etag = _escalation_etag(escalation)
+    if_match = _gate_header(event, "If-Match") or str(body.get("ifMatch") or body.get("if_match") or "").strip()
+    if strict and not if_match:
+        return _error(428, "If-Match (escalation etag) is required to decide this escalation.",
+                      reason="precondition_required", etag=current_etag)
+    if strict and not idem_key:
+        return _error(428, "Idempotency-Key is required to decide this escalation.",
+                      reason="precondition_required", etag=current_etag)
+    if if_match and if_match != "*" and _gate_etag_norm(if_match) != _gate_etag_norm(current_etag):
+        return _error(412, "Escalation changed since it was rendered; re-render and retry.",
+                      reason="card_changed", etag=current_etag, card=_card())
+
+    chosen: Optional[Dict[str, Any]] = None
+    subject_current: Optional[str] = None
+    call_hash = ""
+    if verdict == "approve":
+        # (6) layer two of If-Match: the subject record's version.
+        target_id = str(escalation.get("target_record_id") or "")
+        if target_id:
+            target = _read_escalation_target(project_id, target_id)
+            raw_version = None if target is None else target.get("sync_version", target.get("version"))
+            subject_current = None if raw_version is None else str(raw_version)
+            if strict and subject_version is None:
+                return _error(428, "subject_version is required to approve this escalation.",
+                              reason="precondition_required", etag=current_etag)
+            if subject_version is not None and (
+                    subject_current is None or str(subject_version) != subject_current):
+                return _error(412, "The subject record changed since it was rendered; "
+                              "no call was made.", reason="subject_changed",
+                              etag=current_etag, subject_version=subject_current, card=_card())
+        # (8) candidate selection.
+        candidates = _escalation_json_attr(escalation, "candidates")
+        if isinstance(candidates, list) and candidates:
+            by_id = {str(c.get("id") or c.get("candidateId") or ""): c
+                     for c in candidates if isinstance(c, dict)}
+            chosen = by_id.get(candidate_id) if candidate_id else None
+            if chosen is None:
+                return _error(422, "Approving requires candidateId from candidates[].",
+                              reason="candidate_required", candidates=sorted(k for k in by_id if k))
+        # (7) callHash: recomputed from the record now; must match the stored
+        # hash and the hash the human saw.
+        basis, stored_hash = _escalation_call_basis(escalation, chosen)
+        call_hash = _gate_call_hash(basis)
+        if stored_hash and stored_hash.lower() != call_hash:
+            return _error(409, "The proposed call no longer matches its stored callHash.",
+                          reason="call_changed", etag=current_etag)
+        if client_call_hash and client_call_hash != call_hash:
+            return _error(409, "callHash does not match the call being approved.",
+                          reason="call_changed", etag=current_etag, callHash=call_hash)
+        if strict and not client_call_hash:
+            return _error(428, "callHash is required to approve this escalation.",
+                          reason="precondition_required", etag=current_etag, callHash=call_hash)
+
+    # (8b) inputs, validated against inputs_schema when present.
+    schema = _escalation_json_attr(escalation, "inputs_schema")
+    if inputs is not None and not isinstance(inputs, dict):
+        return _error(422, "inputs must be an object.", reason="inputs_invalid")
+    if inputs is not None and len(_gate_canonical(inputs).encode("utf-8")) > _ESCALATION_INPUTS_MAX_BYTES:
+        return _error(422, "inputs exceed the 16KB limit.", reason="inputs_invalid")
+    if isinstance(schema, dict) and schema and (verdict == "approve" or inputs is not None):
+        problems = _gate_validate_schema(inputs if inputs is not None else {}, schema)
+        if problems:
+            return _error(422, "inputs failed inputs_schema validation.",
+                          reason="inputs_invalid", errors=problems[:20])
+
+    # Fail-closed applier lookup: an unknown subject type is refused BEFORE
+    # any write (deny executes nothing and is unaffected).
+    applier = None
+    if verdict == "approve":
+        subject_type = _escalation_subject_type(escalation)
+        applier = _ESCALATION_APPLIERS.get(subject_type)
+        if applier is None:
+            return _error(422, f"No applier is registered for subject type {subject_type!r}; "
+                          "refused fail-closed.", reason="unsupported_subject_type",
+                          subject_type=subject_type)
+
+    # (9) write-ahead: the 'decided' entry lands in the same conditional write
+    # as the status transition, BEFORE the call executes.
+    prev_hash = log[-1]["hash"] if log else _GATE_CHAIN_ZERO
+    chain_fields: Dict[str, Any] = {
+        "cardId": escalation_id, "kind": kind,
+        "actor": {"id": decider, "sub": str(claims.get("sub") or ""), "type": "human",
+                  "authLevel": "interactive_human"},
+        "subject": {"recordId": str(escalation.get("target_record_id") or ""),
+                    "project": project_id, "version": subject_current or ""},
+        "callHash": call_hash or None, "cardEtag": current_etag,
+        "idempotencyKey": idem_key or None,
+        "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
+        "assurance": evidence["assurance"], "proof_method": evidence["proof_method"],
+        "degraded_mode": True if evidence.get("degraded_mode") else None,
+    }
+    decided_entry = _escalation_log_entry(len(log) + 1, prev_hash, dict(
+        chain_fields, event="decided", verdict=verdict, payloadHash=payload_hash,
+        candidateId=candidate_id or None, note=guidance_note or None))
+    decision_record: Dict[str, Any] = {
+        "decision": verdict, "decider": decider, "decidedAt": decided_entry["at"],
+        "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
+        "assurance": evidence["assurance"], "proof_method": evidence["proof_method"],
+        "seq": decided_entry["seq"], "prevHash": prev_hash, "hash": decided_entry["hash"],
+    }
+    if evidence.get("degraded_mode"):
+        decision_record["degraded_mode"] = True
+    for key, val in (("callHash", call_hash), ("idempotencyKey", idem_key),
+                     ("note", guidance_note), ("candidateId", candidate_id)):
+        if val:
+            decision_record[key] = val
+    if inputs is not None:
+        decision_record["inputs"] = inputs
+    expected_updated_at = str(escalation.get("updated_at") or "") if if_match else None
+    chain_summary = {"seq": decided_entry["seq"], "hash": decided_entry["hash"],
+                     "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
+                     "assurance": evidence["assurance"], "proof_method": evidence["proof_method"]}
+    if evidence.get("degraded_mode"):
+        chain_summary["degraded_mode"] = True
+
+    if verdict == "approve":
         approved_by = {
             "sub": str(claims.get("sub") or ""),
             "email": str(claims.get("email") or ""),
         }
         if not _record_escalation_decision(
             project_id, escalation_id, "approved", actor, approved_by=approved_by,
+            log_entry=decided_entry, decision_record=decision_record,
+            expected_updated_at=expected_updated_at,
         ):
             return _error(409, "Escalation was decided concurrently; refresh the queue.")
 
+        # (10) execute through the registered applier.
         apply_result: Dict[str, Any] = {}
         apply_error = ""
+        status_code = 0
         try:
-            apply_result = _invoke_tracker_mutation_api(
-                "POST",
-                f"/api/v1/tracker/{project_id}/escalation/{escalation_id}/apply",
-                body={"write_source": {"provider": f"io:{decider}", "channel": "coordination_api"}},
-            )
+            apply_result = applier(project_id, escalation_id, escalation, decider, body)
             status_code = int(apply_result.get("_status_code") or 0)
             if status_code >= 400:
                 apply_error = str(apply_result.get("error") or f"apply returned HTTP {status_code}")
         except Exception as exc:
             logger.error("escalation apply invoke failed: %s", exc)
             apply_error = str(exc)
+
+        # (11) record the outcome (the decided entry is already durable).
+        outcome = {"status": status_code or 500}
+        if apply_result.get("result") is not None and not apply_error:
+            outcome["resultRef"] = escalation_id
+        executed_entry = _append_escalation_log_entry(
+            project_id, escalation_id, decided_entry, dict(
+                chain_fields, event="execution_failed" if apply_error else "executed",
+                verdict="approve", result=outcome))
+        head = (executed_entry or decided_entry)["hash"]
 
         if apply_error:
             return _response(200, {
@@ -11044,6 +11634,8 @@ def _handle_escalation_decision(
                     f"POST /api/v1/tracker/{project_id}/escalation/{escalation_id}/apply "
                     "(idempotent; applies only while status=approved and applied_at unset)"
                 ),
+                "decision_entry": chain_summary,
+                "decision_log_head": head,
             })
         return _response(200, {
             "success": True,
@@ -11052,12 +11644,15 @@ def _handle_escalation_decision(
             "applied": str(apply_result.get("status") or "applied") == "applied",
             "approved_by": decider,
             "apply_result": apply_result.get("result"),
+            "decision_entry": chain_summary,
+            "decision_log_head": head,
         })
 
-    guidance_note = str(body.get("guidance_note") or "").strip()
     new_status = "denied_with_guidance" if guidance_note else "denied"
     if not _record_escalation_decision(
         project_id, escalation_id, new_status, actor, guidance_note=guidance_note,
+        log_entry=decided_entry, decision_record=decision_record,
+        expected_updated_at=expected_updated_at,
     ):
         return _error(409, "Escalation was decided concurrently; refresh the queue.")
     return _response(200, {
@@ -11066,6 +11661,8 @@ def _handle_escalation_decision(
         "status": new_status,
         "denied_by": decider,
         "guidance_note": guidance_note,
+        "decision_entry": chain_summary,
+        "decision_log_head": decided_entry["hash"],
     })
 
 

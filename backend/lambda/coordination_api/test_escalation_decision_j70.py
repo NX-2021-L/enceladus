@@ -165,7 +165,7 @@ class TestEscalationDecisions(unittest.TestCase):
         self.assertEqual("applied", body["status"])
         self.assertEqual("io@jreese.net", body["approved_by"])
 
-        update = ddb.update_item.call_args.kwargs
+        update = ddb.update_item.call_args_list[0].kwargs
         self.assertIn("#st = :requested", update["ConditionExpression"])
         values = update["ExpressionAttributeValues"]
         self.assertEqual("approved", values[":new_status"]["S"])
