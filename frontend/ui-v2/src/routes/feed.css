@@ -2,7 +2,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  max-width: calc(var(--space-16) * 56);
   /* ENC-TSK-M38: floor this flex item's cross-axis auto-minimum so a
      long unbreakable descendant (a token, hash, or native form control)
      can never bubble a wider intrinsic min-content up through
@@ -10,37 +9,9 @@
   min-width: var(--space-0);
 }
 
-.feed-route__header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
 
-.feed-route__eyebrow {
-  margin: var(--space-0);
-  font-family: var(--font-body);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
-}
 
-.feed-route__title {
-  margin: var(--space-0);
-  font-family: var(--font-heading);
-  font-weight: var(--fw-bold);
-  font-size: var(--text-3xl);
-  line-height: var(--lh-tight);
-  color: var(--fg-display);
-}
 
-.feed-route__subtitle {
-  margin: var(--space-0);
-  font-family: var(--font-body);
-  font-size: var(--text-base);
-  line-height: var(--lh-relaxed);
-  color: var(--fg-muted);
-}
 
 .feed-route__toolbar {
   display: flex;
@@ -175,25 +146,12 @@
  * `.feed-pane`/`.record-pane` ratio is asymmetric (narrower dense list,
  * wider reading pane), so this is a dedicated flex wrapper rather than a
  * ColumnLayout instance. */
-.feed-route__split {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-5);
-}
 
-.feed-route__list-scroll {
-  flex: 1 1 380px;
-  max-width: 460px;
-  max-height: calc(var(--space-16) * 28);
-  overflow-y: auto;
-  padding-right: var(--space-2);
-}
 
 .feed-route__pane {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  flex: 1.5 1 0;
   min-width: var(--space-0);
 }
 
@@ -281,7 +239,14 @@
   margin-block: var(--space-2);
 }
 
-/* DVP-TSK-921: per-signal evidence + pin under a result card */
+/* DVP-TSK-921: per-signal evidence chips under a result card (DVP-TSK-A12: no row actions under a card) */
 .feed-route__row-wrap { display: flex; flex-direction: column; }
-.feed-route__row-extras { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 12px 6px; font-size: 12px; }
-.feed-route__pin { cursor: pointer; font-size: 12px; }
+
+/* DVP-TSK-A09 (R16): the reading pane is the SplitPage secondary (its own .io-scroll). Its first card starts on the
+ * same top line as the search input: no margin or padding above it. The recently-viewed stepper lives in the header. */
+.feed-route__pane > :first-child {
+  margin-top: var(--space-0);
+}
+.feed-route__pane .ev2-rdh {
+  padding-top: var(--space-0);
+}

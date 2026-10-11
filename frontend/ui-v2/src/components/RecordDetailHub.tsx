@@ -2,7 +2,8 @@ import { createContext, useContext, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
-import { Modal, Tabs } from '../design-system'
+import { Modal } from '../design-system'
+import { Tabs } from './StripTabs'
 import { recordHrefForType } from '../routes/recordLink'
 import type {
   AcceptanceCriterion,
@@ -13,7 +14,7 @@ import type {
 } from '../types/records'
 import { TypedRelationshipSection } from './TypedRelationshipSection'
 import { RecordLink } from './RecordLink'
-import { getCacheEngine } from '../sync/cacheEngine'
+import { getEnceladusCorpusStore } from '../search/corpusSource'
 import { MarkdownContent } from './MarkdownContent'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { computePrimaryActions, type TransitionAction } from '../utils/transitionArcs'
@@ -573,9 +574,7 @@ export function NeighborGroup({
   // cache already holds, so neighbors read as records rather than bare ids.
   const titleFor = (id: string): string | null => {
     try {
-      const engine = getCacheEngine()
-      if (!engine.isWarm) return null
-      const row = engine.searchIndex.all().find((r) => r.recordId === id)
+      const row = getEnceladusCorpusStore().rows().find((r) => r.id === id)
       return row?.title && row.title !== id ? row.title : null
     } catch {
       return null

@@ -10,7 +10,7 @@ import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
-import { parseFeedSearch } from '../search/feedSearchParams'
+import { parseFeedSearch, parseFocus } from '../search/feedUrl'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,
@@ -97,6 +97,8 @@ const docsRoute = createRoute({
   // ENC-TSK-P59: project-card "Docs" links land pre-filtered by project.
   validateSearch: (raw: Record<string, unknown>) => ({
     project: typeof raw.project === 'string' ? raw.project : '',
+    // DVP-TSK-995: the header SearchLauncher navigates with focus=1; keep it so the page can autoFocus.
+    ...(parseFocus(raw) ? { focus: 1 as const } : {}),
   }),
   component: lazyRouteComponent(() => import('./DocsRoute'), 'DocsRoute'),
 })

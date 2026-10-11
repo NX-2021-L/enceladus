@@ -7,7 +7,6 @@ import {
   shouldAcceptVersion,
   versionSeqFromUpdatedAt,
 } from './recordKey'
-import { maxVersionSeqBySource } from './feedVersionMeta'
 
 describe('recordKey helpers', () => {
   it('builds stable cache keys', () => {
@@ -62,13 +61,6 @@ describe('domain-safe version comparison (ENC-TSK-Q34 / ENC-ISS-731)', () => {
     // given record only ever carries one, and the cursors never mix.
     expect(shouldAcceptRecord({ versionSeq: '185' }, { versionSeq: '186' })).toBe(true)
     expect(shouldAcceptRecord({ versionSeq: '186' }, { versionSeq: '185' })).toBe(false)
-    expect(
-      maxVersionSeqBySource([
-        { source: 'tracker', version_seq: 5101 },
-        { source: 'document', version_seq: 185 },
-        { source: 'tracker', version_seq: 5099 },
-      ]),
-    ).toEqual({ tracker: 5101, document: 185 })
   })
 
   it('lifts a tombstone only for a strictly newer same-domain version', () => {

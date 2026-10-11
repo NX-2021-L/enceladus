@@ -1,14 +1,16 @@
 import type { ReactNode } from 'react'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { RefreshCw } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
-import { ScrollTopZone, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
+import { ScrollRegion, ScrollTopZone, useScrollActivity, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
 import { AppLayout, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
 import { refreshApp } from '../offline/swUpdate'
-import { CommandPalette } from './CommandPalette'
-import { useCommandNavigation } from './useCommandNavigation'
+import { projectRegistryQueryOptions } from '../api/projectRegistry'
+import { useEnceladusCorpus } from '../search/CorpusProvider'
+import { HeaderSearch } from './HeaderSearch'
 import { ConflictMergeModal, MutationErrorFlashbar, OfflinePendingFlashbar } from '../components/OfflineLayer'
 import enceladusMarkUrl from '../../../design-system-2/assets/logos/enceladus-mark.svg'
 import './shell.css'
@@ -16,6 +18,8 @@ import './shell.css'
 const LOGOUT_HREF = '__logout__'
 const REFRESH_APP_HREF = '__refresh_app__'
 const DESKTOP_QUERY = '(min-width: 48.0625rem)'
+// DVP-TSK-A09 (R16): split routes that fill the height from 960px (the page scroller does not scroll there).
+const FILL_ROUTES = ['/feed', '/docs']
 
 const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
@@ -88,7 +92,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     const scroller = frameRef.current?.querySelector<HTMLElement>('.ev2-al__content') ?? null
     scrollerRef.current = scroller
     scroller?.setAttribute('data-io-scroller', '')
+    // R16: the ONE page scroll owner below 960px, themed and quiet (.io-scroll), the tap-to-top target.
+    scroller?.classList.add('io-scroll')
   }, [])
+  useScrollActivity(scrollerRef)
+  useEffect(() => {
+    const fill = FILL_ROUTES.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+    scrollerRef.current?.toggleAttribute('data-ev2-fill', fill)
+  }, [pathname])
   const scrollToTop = useScrollToTop(scrollerRef)
   // Keyboard: sizes the frame to the visible area (shell.css) and reveals the
   // focused field inside the scroller; the fixed record action bar is hidden
@@ -98,15 +109,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const navigationOpen = useUiStore((s) => s.sidebarOpen)
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)
-  const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen)
-  const commandQuery = useUiStore((s) => s.commandQuery)
-  const setCommandQuery = useUiStore((s) => s.setCommandQuery)
-  const openCommandPalette = useUiStore((s) => s.openCommandPalette)
-  const closeCommandPalette = useUiStore((s) => s.closeCommandPalette)
-  // Only used for the desktop anchored search box's own Enter handling --
-  // the mobile full-screen overlay has its own input + submit binding
-  // inside CommandPalette, untouched here.
-  const { submit: submitCommand } = useCommandNavigation(commandQuery)
+  const corpus = useEnceladusCorpus()
+  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
 
   useEffect(() => {
     const desktop = window.matchMedia(DESKTOP_QUERY)
@@ -171,32 +175,17 @@ export function AppShell({ children }: { children: ReactNode }) {
           <ScrollTopZone scrollerRef={scrollerRef} className="io-safe-top ev2-shell__bar">
             <TopNavigation
               identity={{ title: 'ENCELADUS', href: '/', iconSrc: enceladusMarkUrl, version: __APP_VERSION__ }}
-              search={{
-                value: commandQuery,
-                onChange: setCommandQuery,
-                placeholder: 'Search…',
-                // Mobile taps expand to the existing full-screen overlay;
-                // desktop focus widens the box in place and opens the
-                // anchored dropdown instead (ENC-TSK-N46).
-                onFocus: () => openCommandPalette(window.matchMedia(DESKTOP_QUERY).matches),
-                onBlur: () => {
-                  // Only the anchored (desktop) mode should close on blur --
-                  // on mobile, focus moving into CommandPalette's own
-                  // full-screen input fires this same blur and would
-                  // otherwise close the overlay the instant it opens.
-                  if (commandPaletteOpen && window.matchMedia(DESKTOP_QUERY).matches) {
-                    closeCommandPalette()
-                  }
+              utilities={[
+                {
+                  type: 'node',
+                  node: <HeaderSearch rows={corpus.rows} projects={projects} onNavigate={(href) => {
+                    // The launcher hands over a URL (/feed?q=...); the router wants path + search object.
+                    const url = new URL(href, window.location.origin)
+                    void navigate({ to: url.pathname, search: Object.fromEntries(url.searchParams) as never })
+                  }} />,
                 },
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter') submitCommand()
-                  if (event.key === 'Escape') {
-                    closeCommandPalette()
-                    event.currentTarget.blur()
-                  }
-                },
-              }}
-              utilities={[{ text: 'Menu', onClick: toggleSidebar }]}
+                { text: 'Menu', onClick: toggleSidebar },
+              ]}
             />
           </ScrollTopZone>
         }
@@ -204,11 +193,13 @@ export function AppShell({ children }: { children: ReactNode }) {
           // No `header` here (ENC-ISS-513 / FND-01): the wordmark already
           // lives once, in TopNavigation. A second "ENCELADUS" brand mark on
           // the drawer was pure duplication.
-          <SideNavigation
-            items={SIDEBAR_ITEMS}
-            activeHref={activeHref}
-            onFollow={followNav}
-          />
+          <ScrollRegion className="ev2-shell__nav">
+            <SideNavigation
+              items={SIDEBAR_ITEMS}
+              activeHref={activeHref}
+              onFollow={followNav}
+            />
+          </ScrollRegion>
         }
         navigationOpen={navigationOpen}
         content={
@@ -217,7 +208,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         }
       />
-      <CommandPalette />
       <OfflinePendingFlashbar />
       <MutationErrorFlashbar />
       <ConflictMergeModal />

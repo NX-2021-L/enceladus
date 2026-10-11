@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Cards } from '../design-system'
+import { PageHeader } from '../components/PageHeader'
 import { fetchGovernanceDocs, governanceDocKeys } from '../api/documents'
 import { documentHref } from './recordLink'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -62,20 +63,9 @@ export function GovernanceRoute() {
 
   return (
     <div className="governance-route">
-      <header className="governance-route__header">
-        <p className="governance-route__eyebrow">GOVERNANCE · LIVE</p>
-        <h1 className="governance-route__title">Governance documents</h1>
-        <p className="governance-route__subtitle">
-          agents.md, lifecycle-primer, dictionary, and project reference files, fetched live on
-          each load.
-        </p>
-      </header>
+      <PageHeader title="Governance documents" count={isPending ? undefined : docs.length} description="agents.md, lifecycle-primer, dictionary, and project reference files, fetched live on each load." />
 
-      <div className="governance-route__toolbar">
-        <p className="governance-route__meta">
-          {isPending ? 'Loading…' : `${docs.length} document${docs.length === 1 ? '' : 's'}`}
-        </p>
-      </div>
+      {isPending ? <p className="governance-route__meta">Loading…</p> : null}
 
       {isError ? (
         <p className="governance-route__meta governance-route__meta-error">

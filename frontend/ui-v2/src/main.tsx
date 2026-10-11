@@ -3,22 +3,29 @@ import { createRoot } from 'react-dom/client'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { registerSW } from 'virtual:pwa-register'
+import { installIosFocusZoomGuard, watchForUpdates } from '@io-kit/shell'
 import { queryClient } from './api/queryClient'
 import { projectRegistryQueryOptions } from './api/projectRegistry'
 import { router } from './routes/router'
 import { RealtimeFeedProvider } from './realtime/RealtimeFeedProvider'
-import { CacheEngineProvider } from './sync/CacheEngineProvider'
+import { CorpusProvider } from './search/CorpusProvider'
 import { AuthGate } from './auth/AuthGate'
 import { useOfflineStore } from './store/offlineStore'
 import { setUpdateSW } from './offline/swUpdate'
 // DVP-TSK-956: kit 0.4.0 standalone primitives (the safe-area insets, top-inset
 // class and no-focus-zoom class). Everything in it sits in cascade layers, so the
 // unlayered design-system-2 styles always win and the desktop look is unchanged.
+import './layers.css' // DVP-TSK-A09: must load first (cascade-layer order: Tailwind base < io-kit < utilities)
 import '@io-kit/shell/io-kit.css'
 import './styles.css'
 
 const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('Root element #root not found')
+
+// DVP-TSK-A12 (io, iPhone): iOS zooms the page when a field under 16px takes focus. The guard adds maximum-scale=1 to
+// the viewport on iOS/iPadOS only (pinch zoom still works there) and sets html[data-io-zoom-guard], which switches the
+// kit's 16px field bump off so the search controls keep their design-system size (Space Grotesk 14px / Inter 14px).
+installIosFocusZoomGuard()
 
 void queryClient.prefetchQuery(projectRegistryQueryOptions)
 
@@ -34,6 +41,12 @@ if ('serviceWorker' in navigator) {
     onOfflineReady() {
       /* precache warm — no auto reload (registerType: prompt) */
     },
+    // DVP-TSK-A14: re-check for a new worker when the app returns to the foreground (and every 30 min while visible),
+    // so the "App update available" banner appears after a deploy without a manual reload. Installed PWAs stay in
+    // memory and the browser otherwise only checks sw.js on a full navigation.
+    onRegisteredSW(_url, registration) {
+      if (registration) watchForUpdates(registration)
+    },
   })
   setUpdateSW(updateSW)
 }
@@ -42,11 +55,11 @@ createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <AuthGate>
-        <CacheEngineProvider>
+        <CorpusProvider>
           <RealtimeFeedProvider>
             <RouterProvider router={router} />
           </RealtimeFeedProvider>
-        </CacheEngineProvider>
+        </CorpusProvider>
       </AuthGate>
     </QueryClientProvider>
   </StrictMode>,

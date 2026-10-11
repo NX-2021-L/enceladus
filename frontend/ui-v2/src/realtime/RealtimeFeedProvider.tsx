@@ -22,7 +22,7 @@ import {
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 import type { FeedRealtimeEvent } from '../types/feedEvents'
-import { getCacheEngine, tier1FromFeedEvent } from '../sync/cacheEngine'
+import { applyFeedEventToCorpus } from '../search/corpusSource'
 
 interface RealtimeFeedContextValue {
   isHydrating: boolean
@@ -145,23 +145,8 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
           break
         case 'feed_event':
           recordLatency(event.latencyMs)
-          void (async () => {
-            const engine = getCacheEngine()
-            const feedEvent = event.event
-            const tier1 = tier1FromFeedEvent({
-              recordId: feedEvent.recordId,
-              recordType: feedEvent.record_type,
-              projectId: '',
-              title: feedEvent.summary,
-              status: feedEvent.action,
-            })
-            if (!tier1) return
-            if (feedEvent.action === 'removed') {
-              await engine.markTombstone(tier1.recordKey, tier1.recordId)
-            } else {
-              await engine.upsertTier1(tier1)
-            }
-          })()
+          // DVP-TSK-995: /feed/updates events merge into the kit corpus (applyLiveEvent), not the retired cache engine.
+          void applyFeedEventToCorpus(event.event).catch(() => {})
           // ENC-TSK-K24 (B67 AC-11): buffer, never auto-inject. AC-15:
           // startTransition keeps this low-priority relative to anything
           // the user is actively doing (typing, clicking) — a burst of

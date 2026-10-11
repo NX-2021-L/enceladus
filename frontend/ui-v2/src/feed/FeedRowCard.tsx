@@ -5,11 +5,9 @@ import { RecordCard } from '../components/RecordCard'
 import { formatRelativeTime } from '../format/relativeTime'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import { feedRowAccent, priorityBadgeColor, sessionStateBadge } from '../search/feedRowPresentation'
-import type { useTieredSearch } from '../search/useTieredSearch'
 import type { SearchResultHit } from '../types/search'
 import { SignalReadout } from '@io-kit/search/react'
-
-export type PinState = 'pending' | 'done' | 'error'
+import type { SignalAvailability, SignalEvidence } from '@io-kit/search'
 
 export interface FeedRowContext {
   projects: ProjectSummary[]
@@ -19,14 +17,14 @@ export interface FeedRowContext {
   onSelect(hit: SearchResultHit): void
   /** Narrow viewports link to the record page; called before leaving so the return search is persisted. */
   onLeave(): void
-  tiered: Pick<ReturnType<typeof useTieredSearch>, 'evidenceById' | 'availability'>
-  pins: Record<string, PinState>
-  onPin(sourceId: string, targetId: string): void
+  /** Per-row hybrid evidence (signal -> rank) and the signal states to render it against. */
+  evidenceFor(recordId: string): SignalEvidence[] | undefined
+  availability?: SignalAvailability
 }
 
 /**
- * ENC-TSK-M35 / DVP-TSK-921 / DVP-TSK-931: the one feed-row rendering, shared by the legacy list and the
- * @io-kit/feed panel (renderCard slot) so both engines emit the same card markup. Plain function, not a
+ * ENC-TSK-M35 / DVP-TSK-921 / DVP-TSK-931: the one feed-row rendering, shared by /feed and /docs (kit
+ * CollectionSearch renderRow) so both surfaces emit the same card markup. Plain function, not a
  * component: the DOM must stay exactly what LegacyFeedRoute always produced.
  */
 export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
@@ -34,7 +32,7 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
   const href =
     hit.recordType === 'document' ? documentHref(hit.recordId) : recordHrefForType(project, hit.recordType, hit.recordId)
   const cci = sessionStateBadge(hit.checkoutState)
-  const { isWide, selectedHit, pins } = cx
+  const { isWide, selectedHit } = cx
 
   const card = (
     <RecordCard
@@ -59,32 +57,13 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
         : { href, onSelect: () => cx.onLeave() })}
     />
   )
-  const evidence = cx.tiered.evidenceById.get(hit.recordId)
-  const canPin =
-    isWide &&
-    selectedHit &&
-    selectedHit.recordId !== hit.recordId &&
-    (hit.recordType === 'task' || hit.recordType === 'issue' || hit.recordType === 'feature')
-  if (!evidence && !canPin) return card
+  const evidence = cx.evidenceFor(hit.recordId)
+  // DVP-TSK-A12 (io): no per-row action under a card; only the hybrid evidence chips remain.
+  if (!evidence || !cx.availability) return card
   return (
     <div key={hit.recordId} className="feed-route__row-wrap">
       {card}
-      <div className="feed-route__row-extras">
-        {evidence && cx.tiered.availability ? (
-          <SignalReadout evidence={evidence} availability={cx.tiered.availability} mode="chips" />
-        ) : null}
-        {canPin ? (
-          <button
-            type="button"
-            className="feed-route__pin"
-            disabled={pins[hit.recordId] === 'pending' || pins[hit.recordId] === 'done'}
-            onClick={() => cx.onPin(selectedHit.recordId, hit.recordId)}
-            aria-label={`Pin ${hit.recordId} as related to ${selectedHit.recordId}`}
-          >
-            {pins[hit.recordId] === 'done' ? 'Pinned' : pins[hit.recordId] === 'error' ? 'Pin failed - retry' : 'Pin as related'}
-          </button>
-        ) : null}
-      </div>
+      <SignalReadout evidence={evidence} availability={cx.availability} mode="chips" />
     </div>
   )
 }

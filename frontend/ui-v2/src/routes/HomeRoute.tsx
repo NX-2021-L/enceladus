@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { useQueries, useQuery, type UseQueryOptions } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { BarChart, Box, Cards, Header, PieChart, Tabs } from '../design-system'
+import { BarChart, Box, Cards, PieChart } from '../design-system'
+import { Tabs } from '../components/StripTabs'
+import { PageHeader } from '../components/PageHeader'
 import { feedCorpusByTypeQueryOptions, feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
 import { recordQueryOptions } from '../api/queryOptions'
 import { fetchEscalations } from '../api/coordination'
@@ -17,7 +19,7 @@ import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { pausedApprovalRows, pendingEscalationRows, staleLockRows, type QueueRow } from './homeQueue'
-import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedSearchParams'
+import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedUrl'
 import {
   DASHBOARD_RECORD_TYPES,
   DASHBOARD_TYPE_LABEL,
@@ -349,12 +351,7 @@ export function HomeRoute() {
           aria-hidden="true"
         />
         <div className="home-route__hero-content">
-          <Header
-            variant="h1"
-            description="Requires io leads — escalations and other human-only unblocks come first; most-recent activity recedes below."
-          >
-            Home
-          </Header>
+          <PageHeader title="Home" description="Requires io leads — escalations and other human-only unblocks come first; most-recent activity recedes below." />
         </div>
       </div>
 
