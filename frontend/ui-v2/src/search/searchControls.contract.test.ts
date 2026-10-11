@@ -114,3 +114,15 @@ describe('frozen controls: sticky to the page scroller below 960px', () => {
     }
   })
 })
+
+describe('cascade-layer order (DVP-TSK-A09, gamma c20fc43)', () => {
+  it('declares base < io-kit < components < utilities before any other stylesheet', () => {
+    const main = read('main.tsx')
+    const layers = read('layers.css')
+    expect(layers).toMatch(/@layer theme, base, io-kit, components, utilities;/)
+    const first = main.indexOf("import './layers.css'")
+    expect(first).toBeGreaterThan(-1)
+    expect(first).toBeLessThan(main.indexOf("import '@io-kit/shell/io-kit.css'"))
+    expect(first).toBeLessThan(main.indexOf("import './styles.css'"))
+  })
+})
