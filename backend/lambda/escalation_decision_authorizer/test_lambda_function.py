@@ -167,3 +167,52 @@ class TestHumanPrincipalGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# DVP-TSK-A17 (E4-R14): HubExchange principals at the decision authorizer
+# ---------------------------------------------------------------------------
+import json as _json  # noqa: E402
+
+from enceladus_shared import hub_exchange as _hx  # noqa: E402
+
+_HUB_ISSUER = {"name": "vagamod-keycloak", "iss": "https://auth.vagamod.example/realms/vagamod",
+               "jwks_uri": "https://auth.vagamod.example/certs", "audiences": ["vagamod-shell"]}
+
+
+class TestHubExchangeAuthorizer(unittest.TestCase):
+    def setUp(self):
+        for p in (mock.patch.dict(os.environ, {"HUB_EXCHANGE_ISSUERS": _json.dumps([_HUB_ISSUER]),
+                                               "HUB_EXCHANGE_SECRET_ARN": "arn:test"}),
+                  mock.patch.object(_hx, "_fetch_secret", return_value="s" * 64)):
+            p.start()
+            self.addCleanup(p.stop)
+        _hx._secret_cache.update({"value": None, "fetched_at": 0.0})
+
+    def _event(self, token):
+        return {"requestContext": {"requestId": "r"}, "headers": {"authorization": f"HubExchange {token}"}}
+
+    def _token(self, email="io@jreese.net", now=None):
+        import time as _t
+        return _hx.mint_hub_token(sub="u-1", email=email, src_iss=_HUB_ISSUER["iss"], src_name=_HUB_ISSUER["name"],
+                                  auth_time=int(_t.time()) - 30, acr="1", now=now)["hub_token"]
+
+    def _call(self, token, allow=("io@jreese.net",)):
+        with mock.patch.object(authz, "_authenticate", side_effect=AssertionError("cognito path must not run")), \
+             mock.patch.object(authz, "_load_escalation_approver_allowlist", return_value=set(allow)):
+            return authz.lambda_handler(self._event(token), None)
+
+    def test_valid_hub_principal_on_the_allowlist_is_authorized(self):
+        resp = self._call(self._token())
+        self.assertTrue(resp["isAuthorized"])
+        self.assertEqual("io@jreese.net", resp["context"]["email"])
+        self.assertEqual("hub_exchange:vagamod-keycloak", resp["context"]["auth_method"])
+
+    def test_expired_not_allowlisted_machine_and_tampered_hub_principals_are_denied(self):
+        import time as _t
+        self.assertFalse(self._call(self._token(now=int(_t.time()) - 3600))["isAuthorized"])
+        self.assertFalse(self._call(self._token(email="other@example.com"))["isAuthorized"])
+        self.assertFalse(self._call(self._token(email="bot@enceladus.internal"), allow=("bot@enceladus.internal",))["isAuthorized"])
+        head, payload, sig = self._token().split(".")
+        self.assertFalse(self._call(f"{head}.{payload}.{sig[:-2]}AA")["isAuthorized"])
+        self.assertFalse(self._call("")["isAuthorized"])

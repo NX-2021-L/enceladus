@@ -302,6 +302,8 @@ RECORD_TYPE_TO_LABEL = {
     "lesson": "Lesson",  # ENC-FTR-052 / ENC-TSK-983
     "document": "Document",  # ENC-FTR-065 / ENC-PLN-014
     "generation": "Generation",  # GMF DOC-63420302EF65
+    "recipe": "Recipe",  # DVP-TSK-968 / DVP-FTR-106 (projected by _project_recipe_record, not the generic path)
+    "recipe_run": "RecipeRun",  # DVP-TSK-968 / DVP-FTR-106
 }
 
 # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. The three identity
@@ -361,6 +363,8 @@ ID_PREFIX_TO_LABEL = {
     "LSN": "Lesson",
     "DOC": "Document",
     "GEN": "Generation",
+    "REC": "Recipe",  # DVP-TSK-968: <PROJ>-REC-NNN
+    "RUN": "RecipeRun",  # DVP-TSK-968: <PROJ>-RUN-NNN
     "DPL": "DeploymentDecision",
     # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. ENC-SES / ENC-AGT are
     # 3-segment ids (ENC-SES-029) so the parts[1] type_code resolves them here; CRED-<hex>
@@ -1500,6 +1504,17 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "consolidates": "CONSOLIDATES",                    # inverse
     "proposed-by": "PROPOSED_BY",                      # candidate -> proposer
     "proposes": "PROPOSES",                            # inverse
+    # DVP-TSK-968 / DVP-FTR-106 (RP-0 s8): recipe + recipe-run edges; labels byte-identical to graph_query_api.
+    "recipe-uses-tool": "RECIPE_USES_TOOL",
+    "tool-used-by-recipe": "TOOL_USED_BY_RECIPE",
+    "recipe-serves-project": "RECIPE_SERVES_PROJECT",
+    "project-served-by-recipe": "PROJECT_SERVED_BY_RECIPE",
+    "recipe-implements-feature": "RECIPE_IMPLEMENTS_FEATURE",
+    "implemented-by-recipe": "IMPLEMENTED_BY_RECIPE",
+    "run-instance-of-recipe": "RUN_INSTANCE_OF_RECIPE",
+    "recipe-has-run": "RECIPE_HAS_RUN",
+    "run-opened-escalation": "RUN_OPENED_ESCALATION",
+    "escalation-opened-by-run": "ESCALATION_OPENED_BY_RUN",
 }
 
 
@@ -1589,6 +1604,184 @@ def _record_source_and_identifier(raw_record: Dict[str, Any]) -> Tuple[str, Opti
     return "ddb_stream", sequence_number
 
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-968 part D / DVP-FTR-106 AC4: Recipe + RecipeRun graph projection (RP-0 s8)
+# ---------------------------------------------------------------------------
+# Edges follow the plan precedent: label-correct placeholder targets are MERGEd before
+# the edge so edges land regardless of stream event order. The run node is created at
+# start and only its status/gate properties change; per-step results are NEVER projected.
+
+RECIPE_RECORD_TYPES = ("recipe", "recipe_run")
+
+
+def _recipe_json(value: Any) -> Any:
+    """Recipe rows store list/dict fields as JSON strings; accept either shape."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("[", "{"):
+            try:
+                return json.loads(text)
+            except ValueError:
+                return value
+    return value
+
+
+def _recipe_list(value: Any) -> List[str]:
+    parsed = _recipe_json(value)
+    if isinstance(parsed, (list, tuple, set)):
+        return [str(x).strip() for x in parsed if str(x).strip()]
+    return []
+
+
+def _recipe_key(record_id: Any) -> str:
+    """'recipe#DVP-REC-001' / 'recipe#DVP-REC-001@1.0.0' / 'recipe_run#DVP-RUN-001' -> bare id."""
+    return _bare_id(str(record_id or "").strip()).split("@", 1)[0]
+
+
+def _recipe_tools(definition: Any) -> List[str]:
+    """Tool names a definition uses: action steps plus compensate actions (mirrors recipe_service.derive_tools)."""
+    parsed = _recipe_json(definition)
+    tools: Set[str] = set()
+    if isinstance(parsed, dict):
+        for step in parsed.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if isinstance(step.get("action"), str) and step.get("type", "action") == "action":
+                tools.add(step["action"])
+            comp = step.get("compensate")
+            if isinstance(comp, dict) and isinstance(comp.get("action"), str):
+                tools.add(comp["action"])
+    return sorted(tools)
+
+
+def _project_recipe_head(tx, record: Dict[str, Any]) -> None:
+    rec = str(record.get("recipe_id") or _recipe_key(record.get("record_id"))).strip()
+    if not rec:
+        return
+    name = str(record.get("name") or "").strip()
+    props = {
+        "record_id": rec, "record_type": "recipe", "title": name or rec, "name": name,
+        "status": record.get("status"), "project_id": record.get("project_id"),
+        "tags": _recipe_list(record.get("tags")), "latest_published": record.get("latest_published"),
+        "owner": record.get("owner"), "created_at": record.get("created_at"), "updated_at": record.get("updated_at"),
+    }
+    props = {k: v for k, v in props.items() if v is not None and v != ""}
+    tx.run("MERGE (n:Recipe {record_id: $rid}) SET n += $props SET n.is_placeholder = false", rid=rec, props=props)
+    # Reconcile the head-sourced edges from current state; RECIPE_USES_TOOL belongs to version rows.
+    tx.run("MATCH (n:Recipe {record_id: $rid})-[r:RECIPE_SERVES_PROJECT|RECIPE_IMPLEMENTS_FEATURE]->() DELETE r", rid=rec)
+    tx.run("MATCH ()-[r:PROJECT_SERVED_BY_RECIPE|IMPLEMENTED_BY_RECIPE]->(n:Recipe {record_id: $rid}) DELETE r", rid=rec)
+    for pid in _recipe_list(record.get("project_ids")):
+        tx.run(
+            "MATCH (n:Recipe {record_id: $rid}) MERGE (p:Project {project_id: $pid}) "
+            "MERGE (n)-[:RECIPE_SERVES_PROJECT]->(p) MERGE (p)-[:PROJECT_SERVED_BY_RECIPE]->(n)",
+            rid=rec, pid=pid,
+        )
+    for fid in _recipe_list(record.get("related_feature_ids")):
+        tx.run(
+            "MATCH (n:Recipe {record_id: $rid}) MERGE (f:Feature {record_id: $fid}) "
+            "ON CREATE SET f.is_placeholder = true "
+            "MERGE (n)-[:RECIPE_IMPLEMENTS_FEATURE]->(f) MERGE (f)-[:IMPLEMENTED_BY_RECIPE]->(n)",
+            rid=rec, fid=_bare_id(fid),
+        )
+
+
+def _project_recipe_version(tx, record: Dict[str, Any]) -> None:
+    rec = str(record.get("recipe_id") or _recipe_key(record.get("record_id"))).strip()
+    version = str(record.get("version") or "").strip()
+    if not rec or not version:
+        return
+    retired = str(record.get("status") or "").strip().lower() == "retired"
+    tools = [] if retired else _recipe_tools(record.get("definition"))
+    tx.run(
+        "MERGE (n:Recipe {record_id: $rid}) ON CREATE SET n.is_placeholder = true, n.project_id = $pid",
+        rid=rec, pid=record.get("project_id"),
+    )
+    # Drop this version from edges whose tool the version no longer uses (or any, when retired).
+    for edge in ("RECIPE_USES_TOOL", "TOOL_USED_BY_RECIPE"):
+        pattern = (
+            "(n:Recipe {record_id: $rid})-[e:RECIPE_USES_TOOL]->(t:Tool)"
+            if edge == "RECIPE_USES_TOOL"
+            else "(n:Recipe {record_id: $rid})<-[e:TOOL_USED_BY_RECIPE]-(t:Tool)"
+        )
+        tx.run(
+            f"MATCH {pattern} WHERE NOT t.record_id IN $tools AND $v IN coalesce(e.versions, []) "
+            "SET e.versions = [x IN e.versions WHERE x <> $v] WITH e WHERE size(e.versions) = 0 DELETE e",
+            rid=rec, tools=tools, v=version,
+        )
+    for tool in tools:
+        tx.run(
+            "MATCH (n:Recipe {record_id: $rid}) "
+            "MERGE (t:Tool {record_id: $tool}) ON CREATE SET t.is_placeholder = true, t.title = $tool "
+            "MERGE (n)-[e:RECIPE_USES_TOOL]->(t) "
+            "SET e.versions = CASE WHEN $v IN coalesce(e.versions, []) THEN e.versions ELSE coalesce(e.versions, []) + [$v] END "
+            "MERGE (t)-[i:TOOL_USED_BY_RECIPE]->(n) SET i.versions = e.versions",
+            rid=rec, tool=tool, v=version,
+        )
+
+
+def _project_recipe_run(tx, record: Dict[str, Any]) -> None:
+    run_id = str(record.get("run_id") or _recipe_key(record.get("record_id"))).strip()
+    if not run_id:
+        return
+    ref = _recipe_json(record.get("recipe_ref"))
+    ref = ref if isinstance(ref, dict) else {}
+    gate = _recipe_json(record.get("gate"))
+    gate = gate if isinstance(gate, dict) else {}
+    rec = str(ref.get("recipe_id") or "").strip()
+    project_id = record.get("project_id")
+    props = {
+        "record_id": run_id, "record_type": "recipe_run", "title": f"{rec or 'recipe'} run {run_id}",
+        "status": record.get("status"), "project_id": project_id, "recipe_id": rec,
+        "recipe_version": ref.get("version"), "content_hash": ref.get("content_hash"),
+        "started_by": record.get("started_by"), "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+    }
+    props = {k: v for k, v in props.items() if v is not None and v != ""}
+    # Only run-level facts are projected; per-step results/inputs/outputs stay in DynamoDB.
+    tx.run(
+        "MERGE (n:RecipeRun {record_id: $rid}) SET n += $props "
+        "SET n.is_placeholder = false, n.gate_escalation_id = $gesc, n.gate_step_id = $gstep",
+        rid=run_id, props=props, gesc=gate.get("escalation_id"), gstep=gate.get("step_id"),
+    )
+    if rec:
+        tx.run(
+            "MATCH (n:RecipeRun {record_id: $rid}) "
+            "MERGE (r:Recipe {record_id: $rec}) ON CREATE SET r.is_placeholder = true, r.project_id = $pid "
+            "MERGE (n)-[e:RUN_INSTANCE_OF_RECIPE]->(r) SET e.version = $ver, e.content_hash = $ch "
+            "MERGE (r)-[i:RECIPE_HAS_RUN]->(n) SET i.version = $ver, i.content_hash = $ch",
+            rid=run_id, rec=rec, pid=project_id, ver=ref.get("version"), ch=ref.get("content_hash"),
+        )
+    opened: Dict[str, Any] = {}
+    history = _recipe_json(record.get("gate_history"))
+    for entry in list(history if isinstance(history, list) else []) + [gate]:
+        if isinstance(entry, dict) and entry.get("escalation_id"):
+            opened[str(entry["escalation_id"])] = entry.get("step_id")
+    for esc_id, step_id in opened.items():
+        tx.run(
+            "MATCH (n:RecipeRun {record_id: $rid}) "
+            "MERGE (x:Escalation {record_id: $eid}) ON CREATE SET x.is_placeholder = true, x.project_id = $pid "
+            "MERGE (n)-[e:RUN_OPENED_ESCALATION]->(x) SET e.step_id = $sid "
+            "MERGE (x)-[i:ESCALATION_OPENED_BY_RUN]->(n) SET i.step_id = $sid",
+            rid=run_id, eid=_bare_id(esc_id), pid=project_id, sid=step_id,
+        )
+
+
+def _project_recipe_record(driver, record: Dict[str, Any]) -> bool:
+    """Project one recipe-family stream record. Returns False for rows that are not projected (name index rows)."""
+    kind = str(record.get("record_kind") or "").strip()
+    if record.get("record_type") == "recipe_run" or kind == "run":
+        projector = _project_recipe_run
+    elif kind == "version":
+        projector = _project_recipe_version
+    elif kind == "head":
+        projector = _project_recipe_head
+    else:
+        return False
+    with driver.session() as session:
+        session.execute_write(lambda tx: projector(tx, record))
+    return True
+
+
 def _extract_stream_record(sqs_body: Dict) -> Optional[Dict]:
     """Extract the DynamoDB stream record from an SQS message body."""
     # EventBridge Pipe wraps stream records in the SQS body
@@ -1652,6 +1845,15 @@ def _process_record(driver, stream_record: Dict) -> None:
         # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity node + edge projection.
         # Agent rows ride the same async pipe; they carry no project_id / title / embedding
         # so they take a dedicated branch ahead of the generic tracker/document path.
+        # DVP-TSK-968 part D: recipe + recipe-run primitive projection (rows written before the
+        # record_type stamp are recognised by their recipe_run# key).
+        if record_type in RECIPE_RECORD_TYPES or str(record.get("record_id") or "").startswith("recipe_run#"):
+            record["record_type"] = record_type or "recipe_run"
+            projected = _project_recipe_record(driver, record)
+            logger.info("[INFO] %s recipe-family record %s (kind=%s, event=%s)",
+                        "Synced" if projected else "Skipped", record.get("record_id"), record.get("record_kind"), event_name)
+            return
+
         if record_type in AGENT_RECORD_TYPE_TO_LABEL:
             agent_raw_id = str(record.get("record_id") or "").strip()
             if not agent_raw_id or agent_raw_id.startswith("counter#"):

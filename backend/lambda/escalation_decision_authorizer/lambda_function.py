@@ -54,6 +54,11 @@ import boto3
 
 from enceladus_shared.auth import _authenticate
 
+try:  # DVP-TSK-A17 (E4-R14): hub token exchange; absent -> HubExchange requests are denied
+    from enceladus_shared import hub_exchange
+except Exception:  # noqa: BLE001
+    hub_exchange = None  # type: ignore[assignment]
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -176,9 +181,30 @@ def _allow(email: str) -> Dict[str, Any]:
     return {"isAuthorized": True, "context": {"email": email}}
 
 
+def _authorize_hub_exchange(token: str, request_id: str) -> Dict[str, Any]:
+    """DVP-TSK-A17: accept an exchanged hub principal (HMAC + exp + issuer re-verified)
+    only when it is a human principal whose email is still on the approver allowlist."""
+    try:
+        principal = hub_exchange.principal_claims(hub_exchange.verify_hub_token(token))
+    except hub_exchange.HubExchangeError as exc:
+        logger.warning("escalation authorizer: hub token rejected (requestId=%s): %s", request_id, exc.reason)
+        return _deny()
+    if not hub_exchange.is_human_hub_principal(principal):
+        return _deny()
+    email = str(principal.get("email") or "").strip().lower()
+    if not email or email not in _load_escalation_approver_allowlist():
+        logger.warning("escalation authorizer: hub principal not on approver allowlist (requestId=%s)", request_id)
+        return _deny()
+    return {"isAuthorized": True, "context": {"email": email, "auth_method": str(principal["auth_method"])}}
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 HTTP API Lambda REQUEST authorizer (simple response format)."""
     request_id = (event.get("requestContext") or {}).get("requestId", "")
+
+    hub_token = hub_exchange.extract_hub_token(event.get("headers")) if hub_exchange else None
+    if hub_token is not None:
+        return _authorize_hub_exchange(hub_token, request_id)
 
     claims, error = _authenticate(event)
     if error is not None:

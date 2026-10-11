@@ -215,6 +215,39 @@ surfaces:
     "projects.prefix_map":
       handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.create":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.deprecate":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.get":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.list":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.publish_request":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe.validate":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe_run.cancel":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe_run.get":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe_run.list":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe_run.resume":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "recipe_run.start":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "reference.search":
       handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
