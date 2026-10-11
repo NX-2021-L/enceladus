@@ -28,6 +28,8 @@ export const NAV_ITEMS: NavItemInput[] = [
   { id: 'coordination', label: 'Coordination', route: '/coordination' },
   // ENC-TSK-O40: the escalations decision surface (the only approve/deny path).
   { id: 'escalations', label: 'Escalations', route: '/escalations' },
+  // DVP-TSK-974: recipes on the recipe primitive.
+  { id: 'recipes', label: 'Recipes', route: '/recipes' },
   // Former PlaceholderRoute stubs: planned, with an owner, no route until built.
   { id: 'component-registry', label: 'Component registry', route: '/component-registry', placement: 'secondary', ...PLANNED },
   { id: 'deployments', label: 'Deployment manager', route: '/deployments', placement: 'secondary', ...PLANNED },

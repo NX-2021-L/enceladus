@@ -4,11 +4,15 @@ import { BESPOKE_ACTIONS, FLAGGED_ACTIONS } from './registry'
 
 export interface ActionCommand { name: string; title: string; readOnly: boolean }
 
+/** DVP-TSK-974: recipe_run.start is flag-gated out of the registry; this command routes to /recipes (start form per recipe). */
+export const RECIPE_START_COMMAND: ActionCommand = { name: 'recipe_run.start', title: 'Start recipe', readOnly: false }
+
 type SnapAction = { name: string; title: string; flag?: string; annotations?: { readOnlyHint?: boolean } }
 
 export const ACTION_COMMANDS: ActionCommand[] = (capsSnapshot.actions as SnapAction[])
   .filter((a) => !FLAGGED_ACTIONS.has(a.name) && !BESPOKE_ACTIONS.has(a.name))
   .map((a) => ({ name: a.name, title: a.title, readOnly: a.annotations?.readOnlyHint === true }))
+  .concat([RECIPE_START_COMMAND])
   .sort((a, b) => a.name.localeCompare(b.name))
 
 export function matchActionCommands(query: string, limit = 6): ActionCommand[] {

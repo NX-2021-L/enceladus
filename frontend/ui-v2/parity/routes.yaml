@@ -22,10 +22,30 @@ routes:
       - "POST /api/v1/coordination/mcp"
     auth: "session"
     surface: "enceladus"
+  - path: "/actions/recipe_run.start"
+    component: "frontend/ui-v2/src/routes/RecipesRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
   - path: "/actions/$action"
     component: "frontend/ui-v2/src/actions/ActionsRoute.tsx"
     handlers:
       - "POST /api/v1/coordination/mcp"
+    auth: "session"
+    surface: "enceladus"
+  - path: "/recipes"
+    component: "frontend/ui-v2/src/routes/RecipesRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
+  - path: "/recipes/runs/$runId"
+    component: "frontend/ui-v2/src/routes/RecipeRunRoute.tsx"
+    handlers: []
+    auth: "session"
+    surface: "enceladus"
+  - path: "/recipes/$recipeId"
+    component: "frontend/ui-v2/src/routes/RecipeDetailRoute.tsx"
+    handlers: []
     auth: "session"
     surface: "enceladus"
   - path: "/feed"
