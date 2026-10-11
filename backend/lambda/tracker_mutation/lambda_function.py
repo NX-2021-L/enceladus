@@ -9889,7 +9889,8 @@ except ImportError:  # pragma: no cover - packaging guard
     _recipe_service = None
 
 _RECIPE_JSON_FIELDS = frozenset({"definition", "history", "validation", "deprecation", "tags",
-                                 "project_ids", "related_feature_ids"})
+                                 "project_ids", "related_feature_ids", "recipe_ref", "inputs", "steps", "gate",
+                                 "gate_history", "outputs", "error", "telemetry", "consumed_tokens", "compensations", "blocked"})
 _RECIPE_REGISTRY_CACHE: Dict[str, Any] = {}
 
 
@@ -9997,8 +9998,147 @@ def _recipe_context():
                 item["subject"] = {}
         return item
 
+    def active_runs(project, rec, version):
+        live = 0
+        for run in query(project, "recipe_run#"):
+            ref = run.get("recipe_ref") or {}
+            if (run.get("record_kind", "run") == "run" and ref.get("recipe_id") == rec and ref.get("version") == version
+                    and run.get("status") not in ("completed", "failed", "cancelled", "expired")):
+                live += 1
+        return live
+
     return _recipe_service.RecipeContext(get=get, put=put, query=query, mint=mint, now=_now_z, registry=registry,
-                                         escalate=_recipe_escalate, escalation=escalation)
+                                         escalate=_recipe_escalate, escalation=escalation,
+                                         active_runs=active_runs)
+
+
+# --- DVP-TSK-968 part B (DVP-FTR-106): recipe runs and the runner -------------------------
+try:
+    import recipe_run_service as _recipe_run_service
+except ImportError:  # pragma: no cover - packaging guard
+    _recipe_run_service = None
+
+_RE_RECIPE_RUN = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/recipe-run"
+    r"(?:/(?P<id>[A-Za-z0-9_-]+)(?:/(?P<sub>resume|cancel|apply))?)?$"
+)
+
+
+def _recipe_surface_env(surface: str) -> str:
+    return "RECIPE_SURFACE_CREDENTIALS_" + re.sub(r"[^A-Z0-9]", "_", str(surface).upper()) + "_ARN"
+
+
+def _recipe_surface_ready(surface: str) -> bool:
+    return surface == "enceladus" or bool(os.environ.get(_recipe_surface_env(surface), "").strip())
+
+
+def _recipe_surface_post(surface: str, call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """External surface executor (io-finance, io-travel). No credentials ARN -> sanctioned fixture result."""
+    arn = os.environ.get(_recipe_surface_env(surface), "").strip()
+    if not arn:
+        return {"ok": True, "result": {"fixture": True, "surface": surface, "action": call.get("action"),
+                                       "arguments": call.get("arguments"), "dry_run": True}}
+    try:
+        import boto3 as _boto3
+        import urllib.request as _urlreq
+        secret = json.loads(_boto3.client("secretsmanager").get_secret_value(SecretId=arn)["SecretString"])
+        req = _urlreq.Request(
+            str(secret["url"]), method="POST",
+            data=json.dumps({"action": call.get("action"), "arguments": call.get("arguments"), "dry_run": bool(dry_run),
+                             "idempotency_key": call.get("idempotency_key")}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + str(secret.get("token", ""))})
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            return {"ok": True, "result": json.loads(resp.read().decode("utf-8") or "{}")}
+    except Exception as exc:  # noqa: BLE001 - never echo credentials
+        return {"ok": False, "error": {"code": "SURFACE_ERROR", "message": type(exc).__name__ + ": " + str(exc)[:200]}}
+
+
+def _recipe_enceladus_call(batch: Dict[str, Any], call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+    """In-process Enceladus executor under the recipe-runner principal. Stage 1 routes the recipe.* family;
+    other registry actions answer ACTION_NOT_ROUTABLE until the governed execute path is exposed in-process."""
+    svc, action = _recipe_service, str(call.get("action") or "")
+    args = dict(call.get("arguments") or {})
+    project = str(args.pop("project_id", None) or batch.get("project_id") or "")
+    if svc is None or not action.startswith("recipe."):
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action or '?'} is not routable in-process by the recipe runner yet."}}
+    ctx, actor = _recipe_context(), SOURCE_PRINCIPAL_RECIPE
+    fns = {"recipe.create": svc.create, "recipe.validate": svc.validate,
+           "recipe.publish_request": svc.publish_request, "recipe.deprecate": svc.deprecate}
+    if action == "recipe.get":
+        code, out = svc.get(ctx, project, str(args.get("recipe_id") or ""), args.get("version"))
+    elif action == "recipe.list":
+        code, out = svc.list_recipes(ctx, project, args)
+    elif action in fns:
+        code, out = fns[action](ctx, project, args, actor, dry_run)
+    else:
+        return {"ok": False, "error": {"code": "ACTION_NOT_ROUTABLE", "message": f"{action} is not routable in-process."}}
+    if code >= 300:
+        return {"ok": False, "error": {"code": str(out.get("error_code") or "STEP_ERROR"), "message": str(out.get("error") or "step failed")[:300]}}
+    return {"ok": True, "result": out, "receipt": _recipe_run_service.receipt_of(out)}
+
+
+SOURCE_PRINCIPAL_RECIPE = "recipe-runner"
+
+
+def _recipe_run_execute(batch: Dict[str, Any]) -> Dict[str, Any]:
+    """ONE execute call per segment: dispatch each call by surface."""
+    def call_one(call: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
+        surface = str(call.get("surface") or "enceladus")
+        if surface == "enceladus":
+            return _recipe_enceladus_call(batch, call, dry_run)
+        return _recipe_surface_post(surface, call, dry_run)
+    return _recipe_run_service.run_batch_locally(batch, call_one)
+
+
+def _recipe_run_context():
+    base = _recipe_context()
+
+    def mint(project):
+        prefix = _get_project_prefix(project)
+        if not prefix:
+            raise RuntimeError(f"Project '{project}' has no prefix.")
+        return _next_record_id(project, prefix, "recipe_run")
+
+    # The Lambda cannot compute the governance hash: the caller's hash (MCP injects its current one on
+    # every resume) is compared with governance_hash_last, so drift is detected per segment.
+    return _recipe_run_service.RunContext(
+        get=base.get, put=base.put, query=base.query, mint=mint, now=base.now, escalate=base.escalate,
+        escalation=base.escalation, execute=_recipe_run_execute, governance_hash=lambda: None,
+        surface_ready=_recipe_surface_ready, withdraw=lambda project, esc_id, reason: False)
+
+
+def _handle_recipe_run_route(method: str, project_id: str, run_id: Optional[str], sub: Optional[str],
+                             body: Dict[str, Any], query: Dict[str, Any]) -> Dict:
+    """Routes: POST /recipe-run (start; mode dry_run|to_next_gate), GET /recipe-run/list, GET /recipe-run/{RUN},
+    POST /recipe-run/{RUN}/resume|cancel, POST /recipe-run/{RUN}/apply (hub recipe_run_step applier),
+    POST /recipe-run/sweep (runner sweeper)."""
+    svc = _recipe_run_service
+    if svc is None:
+        return _error(503, "Recipe run service is not packaged with this deployment.")
+    body = body if isinstance(body, dict) else {}
+    actor = str((body.get("write_source") or {}).get("provider") or "unknown")
+    dry_run = body.get("dry_run") is True or str(body.get("dry_run") or "").lower() == "true"
+    ctx = _recipe_run_context()
+    if method == "GET":
+        res = svc.list_runs(ctx, project_id, query or {}) if run_id in (None, "list") else svc.get(ctx, project_id, run_id)
+    elif method == "POST":
+        if run_id in (None, "create") and not sub:
+            res = svc.start(ctx, project_id, body, actor, dry_run)
+        elif run_id == "sweep" and not sub:
+            res = svc.sweep(ctx, project_id, body, actor)
+        elif sub == "resume":
+            res = svc.resume(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "cancel":
+            res = svc.cancel(ctx, project_id, run_id or "", body, actor, dry_run)
+        elif sub == "apply":
+            res = svc.apply_gate(ctx, project_id, run_id or "", body, actor)
+            res = (res[0], {"success": True, "status": "applied", "result": res[1]} if res[0] < 300
+                   else dict(res[1], status="failed"))
+        else:
+            return _error(405, f"Unknown recipe-run action '{sub or run_id}'.")
+    else:
+        return _error(405, f"Method {method} not allowed on /recipe-run.")
+    return _response(res[0], res[1])
 
 
 def _handle_recipe_route(method: str, project_id: str, rec_id: Optional[str], sub: Optional[str],
@@ -10170,6 +10310,28 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             _normalize_write_source(recipe_body, claims)
         return _handle_recipe_route(method, project_id, m_recipe.group("id"), m_recipe.group("sub"),
                                     recipe_body, query_params)
+
+    # --- Route: recipe runs (DVP-TSK-968 part B / DVP-FTR-106) ---
+    m_run = _RE_RECIPE_RUN.match(path)
+    if m_run:
+        project_id = m_run.group("project")
+        claims, auth_err = _authenticate(event, ["tracker:read"] if method == "GET" else ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        run_body: Dict[str, Any] = {}
+        if method == "POST":
+            try:
+                run_body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            if not isinstance(run_body, dict):
+                return _error(400, "Body must be a JSON object.")
+            _normalize_write_source(run_body, claims)
+        return _handle_recipe_run_route(method, project_id, m_run.group("id"), m_run.group("sub"),
+                                        run_body, query_params)
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)

@@ -54,8 +54,7 @@ def test_registry_has_recipe_actions_with_governance_and_no_approve_action():
 def test_minted_ids_carry_x_io_minted():
     execute = server._EXECUTE_ACTIONS
     props = execute["recipe.create"]["output"]["properties"]
-    assert props["recipe_id"]["x-io-minted"] is True and props["status"] == {"const": "draft"}
-    assert execute["recipe.create"]["output"]["required"] == ["recipe_id", "version", "status", "content_hash"]
+    assert props["recipe_id"]["x-io-minted"] is True
     assert execute["recipe.publish_request"]["output"]["properties"]["escalation_id"]["x-io-minted"] is True
     assert execute["recipe.deprecate"]["output"]["properties"]["escalation_id"]["x-io-minted"] is True
 

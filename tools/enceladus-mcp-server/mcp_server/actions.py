@@ -261,37 +261,31 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
     if flags.enable_recipe_primitive:
         flag = "enable_recipe_primitive"
 
-        def _out(base: Dict[str, Any], required: Any, **props: Any) -> Dict[str, Any]:
-            out = {"type": "object", "required": list(required), "properties": dict(base["properties"])}
-            out["properties"].update(props)
-            return out
-
         execute_actions["recipe.create"] = _entry(
-            "recipe_create", "Create recipe or recipe version", CREATE, gov=True, flag=flag,
-            output=_out(_minted("recipe_id"), ["recipe_id", "version", "status", "content_hash"],
-                        version={"type": "string"}, status={"const": "draft"}, content_hash={"type": "string"}),
+            "recipe_create", "Create recipe or recipe version", CREATE, gov=True, flag=flag, output=_minted("recipe_id"),
         )
-        search_actions["recipe.get"] = _entry(
-            "recipe_get", "Get recipe", READ, flag=flag,
-            output={"type": "object", "properties": {"head": {"type": "object"}, "version": {"type": "object"}}},
-        )
-        search_actions["recipe.list"] = _entry(
-            "recipe_list", "List recipes", READ, flag=flag,
-            output={"type": "object", "properties": {"items": {"type": "array"}}},
-        )
-        execute_actions["recipe.validate"] = _entry(
-            "recipe_validate", "Validate recipe version", TRANSITION, gov=True, flag=flag,
-            output={"type": "object", "required": ["ok", "errors"],
-                    "properties": {"ok": {"type": "boolean"}, "errors": {"type": "array"}, "status": {"type": "string"}}},
-        )
+        search_actions["recipe.get"] = _entry("recipe_get", "Get recipe", READ, flag=flag)
+        search_actions["recipe.list"] = _entry("recipe_list", "List recipes", READ, flag=flag)
+        execute_actions["recipe.validate"] = _entry("recipe_validate", "Validate recipe version", TRANSITION, gov=True, flag=flag)
         execute_actions["recipe.publish_request"] = _entry(
             "recipe_publish_request", "Request recipe publication (io gate)", CREATE, gov=True, flag=flag,
-            output=_out(_minted("escalation_id"), ["escalation_id"], status={"const": "pending"}),
+            output=_minted("escalation_id"),
         )
         execute_actions["recipe.deprecate"] = _entry(
             "recipe_deprecate", "Deprecate or request retirement of a recipe version", TRANSITION, gov=True, flag=flag,
-            output=_out(_minted("escalation_id"), ["status"], status={"type": "string"}),
+            output=_minted("escalation_id"),
         )
+        # Part B: runs. The runner is server-side; gates are hub escalations (no action approves one).
+        execute_actions["recipe_run.start"] = _entry(
+            "recipe_run_start", "Start a recipe run to its first gate, or dry_run_all", CREATE, gov=True, flag=flag,
+            output=_minted("run_id"),
+        )
+        search_actions["recipe_run.get"] = _entry("recipe_run_get", "Get recipe run", READ, flag=flag)
+        search_actions["recipe_run.list"] = _entry("recipe_run_list", "List recipe runs", READ, flag=flag)
+        execute_actions["recipe_run.resume"] = _entry(
+            "recipe_run_resume", "Resume a recipe run at its decided gate (single-use token)", TRANSITION, gov=True, flag=flag,
+        )
+        execute_actions["recipe_run.cancel"] = _entry("recipe_run_cancel", "Cancel a recipe run", TRANSITION, gov=True, flag=flag)
 
     # ENC-FTR-052: Conditionally register lesson actions behind feature flag
     if flags.enable_lesson_primitive:

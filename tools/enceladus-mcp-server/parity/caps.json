@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-11T22:01:53Z",
+  "generatedAt": "2026-10-11T22:13:17Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -3685,26 +3685,11 @@
       },
       "outputSchema": {
         "type": "object",
-        "required": [
-          "recipe_id",
-          "version",
-          "status",
-          "content_hash"
-        ],
         "properties": {
           "recipe_id": {
             "type": "string",
             "x-io-minted": true,
             "description": "Minted server-side; never supply on input."
-          },
-          "version": {
-            "type": "string"
-          },
-          "status": {
-            "const": "draft"
-          },
-          "content_hash": {
-            "type": "string"
           }
         }
       },
@@ -3767,17 +3752,11 @@
       },
       "outputSchema": {
         "type": "object",
-        "required": [
-          "status"
-        ],
         "properties": {
           "escalation_id": {
             "type": "string",
             "x-io-minted": true,
             "description": "Minted server-side; never supply on input."
-          },
-          "status": {
-            "type": "string"
           }
         }
       },
@@ -3815,17 +3794,7 @@
           "recipe_id"
         ]
       },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "head": {
-            "type": "object"
-          },
-          "version": {
-            "type": "object"
-          }
-        }
-      },
+      "outputSchema": null,
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -3870,14 +3839,7 @@
           "project_id"
         ]
       },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "items": {
-            "type": "array"
-          }
-        }
-      },
+      "outputSchema": null,
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -3932,17 +3894,11 @@
       },
       "outputSchema": {
         "type": "object",
-        "required": [
-          "escalation_id"
-        ],
         "properties": {
           "escalation_id": {
             "type": "string",
             "x-io-minted": true,
             "description": "Minted server-side; never supply on input."
-          },
-          "status": {
-            "const": "pending"
           }
         }
       },
@@ -3990,21 +3946,241 @@
           "version"
         ]
       },
-      "outputSchema": {
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe_run.cancel",
+      "title": "Cancel a recipe run",
+      "inputSchema": {
         "type": "object",
-        "required": [
-          "ok",
-          "errors"
-        ],
         "properties": {
-          "ok": {
-            "type": "boolean"
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
           },
-          "errors": {
-            "type": "array"
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the run is cancelled."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Report what would be cancelled; write nothing."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "run_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe_run.get",
+      "title": "Get recipe run",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id (for example DVP-RUN-001). One read answers completion: status, complete, progress, steps, gate, receipts, outputs."
+          }
+        },
+        "required": [
+          "project_id",
+          "run_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_recipe_primitive"
+    },
+    {
+      "name": "recipe_run.list",
+      "title": "List recipe runs",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Only runs of this recipe."
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "queued, running, awaiting_gate, completed, failed, cancelled or expired."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum items (default 50, max 200)."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_recipe_primitive"
+    },
+    {
+      "name": "recipe_run.resume",
+      "title": "Resume a recipe run at its decided gate (single-use token)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "resume_token": {
+            "type": "string",
+            "description": "The single-use token shown when the gate opened; validated before any state change."
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Gate inputs (normally taken from the hub decision)."
+          },
+          "accept_governance_drift": {
+            "type": "boolean",
+            "description": "Human acknowledgement that the governance_hash changed since the previous segment."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate the token and inputs and report what would happen; consume nothing."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "run_id",
+          "resume_token"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe_run.start",
+      "title": "Start a recipe run to its first gate, or dry_run_all",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Recipe id (DVP-REC-001); the published version is pinned (recipe_ref with content_hash)."
+          },
+          "version": {
+            "type": "string",
+            "description": "Semver; defaults to latest_published."
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Run inputs, validated against the recipe inputs schema. No secrets: pass secret ids by reference."
+          },
+          "mode": {
+            "type": "string",
+            "description": "to_next_gate (default) runs to the first gate; dry_run plans the whole recipe with typed $unresolved placeholders and writes nothing."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "Required unless mode is dry_run; the same key returns the existing run."
+          },
+          "allow_deprecated": {
+            "type": "boolean",
+            "description": "Allow a deprecated version."
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Optional pin check (sha256:...)."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Same as mode dry_run: zero writes, no RUN id minted."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "recipe_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
           }
         }
       },

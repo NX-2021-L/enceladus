@@ -320,6 +320,43 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
          "dry_run": _bool("Validate only: write nothing.")},
         ["project_id", "recipe_id", "version", "reason"],
     ),
+    "recipe_run_start": _governed(
+        {
+            "project_id": _PROJECT,
+            "recipe_id": _str("Recipe id (DVP-REC-001); the published version is pinned (recipe_ref with content_hash)."),
+            "version": _str("Semver; defaults to latest_published."),
+            "inputs": {"type": "object", "description": "Run inputs, validated against the recipe inputs schema. No secrets: pass secret ids by reference."},
+            "mode": _str("to_next_gate (default) runs to the first gate; dry_run plans the whole recipe with typed $unresolved placeholders and writes nothing."),
+            "idempotency_key": _str("Required unless mode is dry_run; the same key returns the existing run."),
+            "allow_deprecated": _bool("Allow a deprecated version."),
+            "content_hash": _str("Optional pin check (sha256:...)."),
+            "dry_run": _bool("Same as mode dry_run: zero writes, no RUN id minted."),
+        },
+        ["project_id", "recipe_id"],
+    ),
+    "recipe_run_get": _schema(
+        {"project_id": _PROJECT, "run_id": _str("Run id (for example DVP-RUN-001). One read answers completion: status, complete, progress, steps, gate, receipts, outputs.")},
+        ["project_id", "run_id"],
+    ),
+    "recipe_run_list": _schema(
+        {"project_id": _PROJECT, "recipe_id": _str("Only runs of this recipe."),
+         "status": _str("queued, running, awaiting_gate, completed, failed, cancelled or expired."),
+         "limit": _int("Maximum items (default 50, max 200).")},
+        ["project_id"],
+    ),
+    "recipe_run_resume": _governed(
+        {"project_id": _PROJECT, "run_id": _str("Run id."),
+         "resume_token": _str("The single-use token shown when the gate opened; validated before any state change."),
+         "inputs": {"type": "object", "description": "Gate inputs (normally taken from the hub decision)."},
+         "accept_governance_drift": _bool("Human acknowledgement that the governance_hash changed since the previous segment."),
+         "dry_run": _bool("Validate the token and inputs and report what would happen; consume nothing.")},
+        ["project_id", "run_id", "resume_token"],
+    ),
+    "recipe_run_cancel": _governed(
+        {"project_id": _PROJECT, "run_id": _str("Run id."), "reason": _str("Why the run is cancelled."),
+         "dry_run": _bool("Report what would be cancelled; write nothing.")},
+        ["project_id", "run_id"],
+    ),
     "tracker_list_lessons": _schema(
         {
             "project_id": _PROJECT,

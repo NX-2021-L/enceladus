@@ -6519,7 +6519,7 @@ async def _tracker_create(args: dict) -> list[TextContent]:
 def _recipe_ids(args: dict, need_id: bool = True):
     import re as _re
     project_id = str(args.get("project_id") or "").strip()
-    rec = str(args.get("recipe_id") or "").strip()
+    rec = str(args.get("recipe_id") or "").strip() if need_id else ""
     if not project_id:
         return None, None, "Field 'project_id' is required."
     if need_id and not rec:
@@ -6529,42 +6529,63 @@ def _recipe_ids(args: dict, need_id: bool = True):
     return project_id, rec, None
 
 
-async def _recipe_mutate(args: dict, tail: str, keys: tuple, need_id: bool = True, required: tuple = ()) -> list[TextContent]:
+def _recipe_project_id(args: dict):
+    project_id = str(args.get("project_id") or "").strip()
+    return (project_id, None) if project_id else (None, "Field 'project_id' is required.")
+
+
+def _recipe_run_ids(args: dict, need_run: bool = True):
+    import re as _re
+    project_id = str(args.get("project_id") or "").strip()
+    run = str(args.get("run_id") or "").strip()
+    if not project_id:
+        return None, None, "Field 'project_id' is required."
+    if need_run and not run:
+        return None, None, "Field 'run_id' is required."
+    if run and not _re.fullmatch(r"[A-Za-z0-9_-]+", run):
+        return None, None, "Field 'run_id' is malformed."
+    return project_id, run, None
+
+
+async def _recipe_post(args: dict, tail: str, body: dict, ids: tuple, required: tuple = (), path: str = "recipe") -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
         return _result_text({"error": governance_error})
-    project_id, rec, problem = _recipe_ids(args, need_id)
+    project_id, ident, problem = ids
     if problem:
         return _result_text({"error": problem})
     for name in required:
-        if args.get(name) in (None, "", [], {}):
+        if body.get(name) in (None, ""):
             return _result_text({"error": f"Field '{name}' is required."})
     payload: Dict[str, Any] = {"governance_hash": args.get("governance_hash", "")}
-    for key in keys:
-        if args.get(key) is not None:
-            payload[key] = args[key]
+    for key, val in body.items():
+        if val is not None:
+            payload[key] = val
     if args.get("dry_run") is not None:
-        payload["dry_run"] = bool(args["dry_run"])
-    path = f"/{project_id}/recipe" + (f"/{rec}{tail}" if tail else "")
-    return _result_text(_tracker_api_request("POST", path, payload=payload))
+        payload["dry_run"] = bool(args.get("dry_run"))
+    route = f"/{project_id}/{path}" + (f"/{ident}{tail}" if ident else "")
+    return _result_text(_tracker_api_request("POST", route, payload=payload))
 
 
 async def _recipe_create(args: dict) -> list[TextContent]:
-    return await _recipe_mutate(args, "", ("recipe_id", "name", "owner", "tags", "project_ids",
-                                           "related_feature_ids", "definition", "version"), need_id=False,
-                                           required=("name", "project_ids", "definition"))
+    body = {"recipe_id": args.get("recipe_id"), "name": args.get("name"), "owner": args.get("owner"), "tags": args.get("tags"),
+            "project_ids": args.get("project_ids"), "related_feature_ids": args.get("related_feature_ids"),
+            "definition": args.get("definition"), "version": args.get("version")}
+    return await _recipe_post(args, "", body, _recipe_ids(args, False), required=("name", "project_ids", "definition"))
 
 
 async def _recipe_validate(args: dict) -> list[TextContent]:
-    return await _recipe_mutate(args, "/validate", ("version",), required=("version",))
+    return await _recipe_post(args, "/validate", {"version": args.get("version")}, _recipe_ids(args), required=("version",))
 
 
 async def _recipe_publish_request(args: dict) -> list[TextContent]:
-    return await _recipe_mutate(args, "/publish-request", ("version", "rationale", "content_hash"), required=("version", "rationale"))
+    body = {"version": args.get("version"), "rationale": args.get("rationale"), "content_hash": args.get("content_hash")}
+    return await _recipe_post(args, "/publish-request", body, _recipe_ids(args), required=("version", "rationale"))
 
 
 async def _recipe_deprecate(args: dict) -> list[TextContent]:
-    return await _recipe_mutate(args, "/deprecate", ("version", "reason", "target", "replaced_by"), required=("version", "reason"))
+    body = {"version": args.get("version"), "reason": args.get("reason"), "target": args.get("target"), "replaced_by": args.get("replaced_by")}
+    return await _recipe_post(args, "/deprecate", body, _recipe_ids(args), required=("version", "reason"))
 
 
 async def _recipe_get(args: dict) -> list[TextContent]:
@@ -6575,11 +6596,50 @@ async def _recipe_get(args: dict) -> list[TextContent]:
 
 
 async def _recipe_list(args: dict) -> list[TextContent]:
-    project_id, _rec, problem = _recipe_ids(args, need_id=False)
+    project_id, problem = _recipe_project_id(args)
     if problem:
         return _result_text({"error": problem})
-    query = {k: args.get(k) for k in ("serves_project_id", "status", "tag", "query", "limit")}
+    query = {"serves_project_id": args.get("serves_project_id"), "status": args.get("status"), "tag": args.get("tag"),
+             "query": args.get("query"), "limit": args.get("limit")}
     return _result_text(_tracker_api_request("GET", f"/{project_id}/recipe/list", query=query))
+
+
+# --- DVP-TSK-968 part B: recipe runs (tracker.recipe_run) --------------------------------
+# The runner is server-side; these actions only start, read, resume and cancel. There is NO action
+# that approves a gate: that is a Cognito human-admin decision in the escalations hub.
+
+async def _recipe_run_start(args: dict) -> list[TextContent]:
+    body = {"recipe_id": args.get("recipe_id"), "version": args.get("version"), "inputs": args.get("inputs"),
+            "mode": args.get("mode"), "idempotency_key": args.get("idempotency_key"),
+            "allow_deprecated": args.get("allow_deprecated"), "content_hash": args.get("content_hash")}
+    # recipe_id is validated here; idempotency_key is enforced by the backend for every non-dry_run start
+    ids = _recipe_ids(args)
+    return await _recipe_post(args, "", dict(body), (ids[0], "", ids[2]), path="recipe-run")
+
+
+async def _recipe_run_get(args: dict) -> list[TextContent]:
+    project_id, run, problem = _recipe_run_ids(args)
+    if problem:
+        return _result_text({"error": problem})
+    return _result_text(_tracker_api_request("GET", f"/{project_id}/recipe-run/{run}"))
+
+
+async def _recipe_run_list(args: dict) -> list[TextContent]:
+    project_id, problem = _recipe_project_id(args)
+    if problem:
+        return _result_text({"error": problem})
+    query = {"recipe_id": args.get("recipe_id"), "status": args.get("status"), "limit": args.get("limit")}
+    return _result_text(_tracker_api_request("GET", f"/{project_id}/recipe-run/list", query=query))
+
+
+async def _recipe_run_resume(args: dict) -> list[TextContent]:
+    body = {"resume_token": args.get("resume_token"), "inputs": args.get("inputs"),
+            "accept_governance_drift": args.get("accept_governance_drift")}
+    return await _recipe_post(args, "/resume", body, _recipe_run_ids(args), required=("resume_token",), path="recipe-run")
+
+
+async def _recipe_run_cancel(args: dict) -> list[TextContent]:
+    return await _recipe_post(args, "/cancel", {"reason": args.get("reason")}, _recipe_run_ids(args), path="recipe-run")
 
 
 # --- ENC-FTR-121 / ENC-TSK-J68: Escalations request/read surface ------------
@@ -10536,6 +10596,11 @@ _TOOL_HANDLERS = {
     "recipe_validate": _recipe_validate,
     "recipe_publish_request": _recipe_publish_request,
     "recipe_deprecate": _recipe_deprecate,
+    "recipe_run_start": _recipe_run_start,
+    "recipe_run_get": _recipe_run_get,
+    "recipe_run_list": _recipe_run_list,
+    "recipe_run_resume": _recipe_run_resume,
+    "recipe_run_cancel": _recipe_run_cancel,
     "escalation_get": _escalation_get,
     "escalation_list": _escalation_list,
     # ENC-FTR-121 / ENC-TSK-J71: session-scoped event polling

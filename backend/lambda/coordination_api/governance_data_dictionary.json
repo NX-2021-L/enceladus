@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-11.02",
-  "updated_at": "2026-10-11T22:30:00Z",
-  "last_change_summary": "DVP-TSK-968 (DVP-PLN-013 E4-W2.2 part A): recipe primitive on the tracker. Record types recipe (REC) and recipe_run (RUN) are minted server-side; new MCP/HTTP actions recipe.create, recipe.get, recipe.list, recipe.validate, recipe.publish_request and recipe.deprecate (mutating ones take governance_hash and dry_run; minted ids are x-io-minted and null on dry_run); publish and retire are io gates filed as acceptance escalations under the internal producer principal recipe-runner and applied by the recipe_version applier only from an approved decision. No MCP action approves or publishes. Additive: no existing response shape changes.",
+  "version": "2026-10-11.03",
+  "updated_at": "2026-10-11T23:30:00Z",
+  "last_change_summary": "DVP-TSK-968 (DVP-PLN-013 E4-W2.2 part B): recipe run primitive and runner. New MCP/HTTP actions recipe_run.start (mode dry_run|to_next_gate, idempotency_key required, x-io-minted run_id), recipe_run.get, recipe_run.list, recipe_run.resume (single-use resume token validated before any state change; replay executes nothing) and recipe_run.cancel; runs are stored at recipe_run#RUN with a pinned recipe_ref, per-step status, receipts and gate escalation ids; a run's human gates are consolidated-hub escalations filed as recipe-runner (subject recipe_run_step) and applied by the registered recipe_run_step applier; governance_hash is re-fetched per segment and drift blocks resume (GOVERNANCE_DRIFT); external surfaces without RECIPE_SURFACE_CREDENTIALS_<SURFACE>_ARN run dry with fixture_mode.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-11.03",
+      "date": "2026-10-11",
+      "summary": "DVP-TSK-968 (DVP-PLN-013 E4-W2.2 part B): recipe run primitive and runner. New MCP/HTTP actions recipe_run.start (mode dry_run|to_next_gate, idempotency_key required, x-io-minted run_id), recipe_run.get, recipe_run.list, recipe_run.resume (single-use resume token validated before any state change; replay executes nothing) and recipe_run.cancel; runs are stored at recipe_run#RUN with a pinned recipe_ref, per-step status, receipts and gate escalation ids; a run's human gates are consolidated-hub escalations filed as recipe-runner (subject recipe_run_step) and applied by the registered recipe_run_step applier; governance_hash is re-fetched per segment and drift blocks resume (GOVERNANCE_DRIFT); external surfaces without RECIPE_SURFACE_CREDENTIALS_<SURFACE>_ARN run dry with fixture_mode."
+    },
     {
       "version": "2026-10-11.02",
       "date": "2026-10-11",
