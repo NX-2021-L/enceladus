@@ -71,6 +71,7 @@ import {
 } from './escalationRows'
 import { useCanExecute } from '../auth/useCan'
 import './escalations.css'
+import { GateInboxPanel, isLegacyEscalations } from './GateInboxPanel'
 
 /** Project filter's "everything" option — never a real project_id, so it can
  *  never collide with one (project ids are lowercase slugs like 'enceladus'). */
@@ -125,7 +126,7 @@ async function fetchEscalationsAcrossProjects(
   return { feeds, errors }
 }
 
-export function EscalationsRoute() {
+function LegacyEscalationsRoute() {
   useDocumentTitle('Escalations')
   const queryClient = useQueryClient()
 
@@ -496,6 +497,25 @@ function EscalationDetail({ row }: { row: EscalationRow }) {
           <pre className="ev2-esc__payload">{JSON.stringify(item.diff, null, 2)}</pre>
         </Container>
       )}
+    </div>
+  )
+}
+
+/**
+ * DVP-TSK-970: /escalations is the ONE all-projects inbox (ruling F-04). It renders
+ * the @io-kit/gates inbox; the pre-kit decide page above stays reachable behind
+ * ?escalations=legacy for one release.
+ */
+export function EscalationsRoute() {
+  return isLegacyEscalations() ? <LegacyEscalationsRoute /> : <EscalationsInboxRoute />
+}
+
+function EscalationsInboxRoute() {
+  useDocumentTitle('Escalations')
+  return (
+    <div className="ev2-page">
+      <PageHeader title="Escalations" description="Every gate from every project that needs a human verdict. Clear or reject with the exact call shown; each verdict is bound to the card's version and recorded as a receipt." />
+      <GateInboxPanel />
     </div>
   )
 }

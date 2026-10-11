@@ -119,6 +119,8 @@ describe('EscalationsRoute — cross-project aggregation (ENC-ISS-773)', () => {
   let root: Root
 
   beforeEach(() => {
+    // DVP-TSK-970: this suite covers the pre-kit decide page, reachable behind the flag.
+    window.history.replaceState(null, '', '/escalations?escalations=legacy')
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     container = document.createElement('div')
