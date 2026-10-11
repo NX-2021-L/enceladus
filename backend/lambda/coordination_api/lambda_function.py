@@ -11163,50 +11163,107 @@ def _escalation_auth_method(claims: Dict[str, Any]) -> str:
     return "interactive_human"
 
 
+class _StepUpRefusal(str):
+    """Refusal text carrying the machine-readable 403 reason."""
+
+    def __new__(cls, text: str, reason: str) -> "_StepUpRefusal":
+        obj = super().__new__(cls, text)
+        obj.reason = reason
+        return obj
+
+
+def _escalation_required_assurance(escalation: Optional[Dict[str, Any]]) -> str:
+    """'aal2' (step-up proof required) or 'aal1'. requiredAuth wins when present;
+    otherwise risk high|critical (the kind default when risk is absent) needs aal2."""
+    if not isinstance(escalation, dict):
+        return "aal1"
+    required = str(escalation.get("requiredAuth") or escalation.get("required_auth") or "").strip().lower()
+    if required:
+        return "aal2" if required in ("step_up", "aal2") else "aal1"
+    kind = str(escalation.get("kind") or "escalation")
+    risk = str(escalation.get("risk") or
+               _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])[2]).strip().lower()
+    return "aal2" if risk in ("high", "critical") else "aal1"
+
+
+def _verify_proof_cognito_max_age(claims: Dict[str, Any], proof: Dict[str, Any],
+                                  now: dt.datetime) -> str:
+    """'' when the proof matches the caller's token auth_time and is fresh, else why not.
+    Serves Cognito ID tokens and HubExchange principals (source auth_time) alike."""
+    claimed_raw = proof.get("auth_time")
+    claimed = _gate_epoch_to_ts(claimed_raw)
+    if claimed is None and _gate_parse_ts(claimed_raw) is not None:
+        claimed = _gate_fmt(_gate_parse_ts(claimed_raw))
+    token_time = _gate_epoch_to_ts(claims.get("auth_time"))
+    max_age = int(os.environ.get("ESCALATION_STEP_UP_MAX_AGE_SECONDS", "300") or 300)
+    parsed = _gate_parse_ts(token_time)
+    if not token_time or not claimed or claimed != token_time or parsed is None:
+        return "cognito_max_age proof does not match the caller's token auth_time"
+    age = (now - parsed).total_seconds()
+    if age < -60 or age > max_age:
+        return f"cognito_max_age proof is stale (age {int(age)}s > {max_age}s); re-authenticate"
+    return ""
+
+
+# Verifier registry keyed by proof method. DVP-TSK-983 adds the 'webauthn' entry
+# (and nothing else changes at any call site: DVP-FTR-105 / ruling F-06).
+_STEP_UP_VERIFIERS = {"cognito_max_age": _verify_proof_cognito_max_age}
+_STEP_UP_RESERVED_METHODS = frozenset({"webauthn"})
+
+
 def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
-                              now: dt.datetime) -> Tuple[Optional[Dict[str, Any]], str]:
+                              now: dt.datetime,
+                              escalation: Optional[Dict[str, Any]] = None
+                              ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Decide-time authentication evidence recorded on every log entry.
 
-    auth_method is always interactive_human (the FTR-121 proof is a decide
-    precondition). assurance is 'aal1' unless a valid method-tagged proof
-    raises it: {method:'cognito_max_age', auth_time} is verified against the
-    ID token's own auth_time claim and a max age -> 'aal2'. {method:'step_up'}
-    is accepted but NOT verified until DVP-TSK-980: recorded as
-    interactive_human strength with degraded_mode=true. Anything else is
-    refused (fail-closed; never a silent downgrade).
+    auth_method / auth_time / assurance are mandatory: when any cannot be
+    determined the decide is refused (auth_context_incomplete) before any write.
+    assurance is 'aal1' unless a verified method-tagged proof raises it to
+    'aal2'. An escalation whose required assurance is step-up (requiredAuth
+    'step_up', or risk high|critical) refuses a verdict without such a proof
+    (step_up_required). The unverified 'step_up' method is retired
+    (step_up_unverified); 'webauthn' is a reserved slot (method_not_enabled).
+    Fail-closed; never a silent downgrade. The failure value is a str carrying .reason.
     """
+    required = _escalation_required_assurance(escalation)
+    miss = "step_up_required" if required == "aal2" else "step_up_rejected"
     auth_time = _gate_epoch_to_ts(claims.get("auth_time")) or _gate_epoch_to_ts(claims.get("iat"))
     evidence: Dict[str, Any] = {
         "auth_method": _escalation_auth_method(claims), "auth_time": auth_time,
         "assurance": "aal1", "proof_method": "none",
     }
+    if not all(evidence.get(k) for k in ("auth_method", "auth_time", "assurance")):
+        return None, _StepUpRefusal(
+            "auth_method, auth_time and assurance must all be determinable for a decision",
+            "auth_context_incomplete")
     proof = body.get("stepUp")
     if proof is None:
         proof = body.get("step_up", body.get("proof"))
     if proof in (None, "", {}):
+        if required == "aal2":
+            return None, _StepUpRefusal(
+                "this escalation requires a fresh step-up proof {method:'cognito_max_age', auth_time}",
+                "step_up_required")
         return evidence, ""
     if not isinstance(proof, dict):
-        return None, "step-up proof must be an object {method, auth_time}"
+        return None, _StepUpRefusal("step-up proof must be an object {method, auth_time}", miss)
     method = str(proof.get("method") or proof.get("kind") or "").strip().lower()
     if method == "step_up":
-        evidence.update({"proof_method": "step_up", "degraded_mode": True})
-        return evidence, ""
-    if method == "cognito_max_age":
-        claimed_raw = proof.get("auth_time")
-        claimed = _gate_epoch_to_ts(claimed_raw)
-        if claimed is None and _gate_parse_ts(claimed_raw) is not None:
-            claimed = _gate_fmt(_gate_parse_ts(claimed_raw))
-        token_time = _gate_epoch_to_ts(claims.get("auth_time"))
-        max_age = int(os.environ.get("ESCALATION_STEP_UP_MAX_AGE_SECONDS", "300") or 300)
-        parsed = _gate_parse_ts(token_time)
-        if not token_time or not claimed or claimed != token_time or parsed is None:
-            return None, "cognito_max_age proof does not match the ID token auth_time"
-        age = (now - parsed).total_seconds()
-        if age < -60 or age > max_age:
-            return None, f"cognito_max_age proof is stale (age {int(age)}s > {max_age}s); re-authenticate"
-        evidence.update({"assurance": "aal2", "proof_method": "cognito_max_age"})
-        return evidence, ""
-    return None, f"unsupported step-up proof method {method!r}"
+        return None, _StepUpRefusal(
+            "the unverified 'step_up' proof method is retired; use a verifiable method",
+            "step_up_unverified")
+    verifier = _STEP_UP_VERIFIERS.get(method)
+    if verifier is None:
+        if method in _STEP_UP_RESERVED_METHODS:
+            return None, _StepUpRefusal(
+                f"step-up proof method {method!r} is not enabled yet", "method_not_enabled")
+        return None, _StepUpRefusal(f"unsupported step-up proof method {method!r}", miss)
+    problem = verifier(claims, proof, now)
+    if problem:
+        return None, _StepUpRefusal(problem, miss)
+    evidence.update({"assurance": "aal2", "proof_method": method})
+    return evidence, ""
 
 
 def _escalation_barred_principals(escalation: Dict[str, Any]) -> Set[str]:
@@ -11611,9 +11668,10 @@ def _handle_escalation_decision(
     strict = _escalation_is_strict(escalation)
 
     # (1) auth evidence: auth_method / auth_time / assurance + step-up proof.
-    evidence, proof_error = _escalation_auth_evidence(claims, body, now)
+    evidence, proof_error = _escalation_auth_evidence(claims, body, now, escalation)
     if evidence is None:
-        return _error(403, proof_error, reason="step_up_rejected")
+        return _error(403, str(proof_error),
+                      reason=getattr(proof_error, "reason", "step_up_rejected"))
 
     # (2) no-self-review: the decider differs from requestedBy, the source
     # principal and every principal in distinct_from.
@@ -11768,14 +11826,13 @@ def _handle_escalation_decision(
     chain_fields: Dict[str, Any] = {
         "cardId": escalation_id, "kind": kind,
         "actor": {"id": decider, "sub": str(claims.get("sub") or ""), "type": "human",
-                  "authLevel": "interactive_human"},
+                  "authLevel": "step_up" if evidence["assurance"] == "aal2" else "interactive_human"},
         "subject": {"recordId": str(escalation.get("target_record_id") or ""),
                     "project": project_id, "version": subject_current or ""},
         "callHash": call_hash or None, "cardEtag": current_etag,
         "idempotencyKey": idem_key or None,
         "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
         "assurance": evidence["assurance"], "proof_method": evidence["proof_method"],
-        "degraded_mode": True if evidence.get("degraded_mode") else None,
     }
     decided_entry = _escalation_log_entry(len(log) + 1, prev_hash, dict(
         chain_fields, event="decided", verdict=verdict, payloadHash=payload_hash,
@@ -11786,8 +11843,6 @@ def _handle_escalation_decision(
         "assurance": evidence["assurance"], "proof_method": evidence["proof_method"],
         "seq": decided_entry["seq"], "prevHash": prev_hash, "hash": decided_entry["hash"],
     }
-    if evidence.get("degraded_mode"):
-        decision_record["degraded_mode"] = True
     for key, val in (("callHash", call_hash), ("idempotencyKey", idem_key),
                      ("note", guidance_note), ("candidateId", candidate_id)):
         if val:
@@ -11798,8 +11853,6 @@ def _handle_escalation_decision(
     chain_summary = {"seq": decided_entry["seq"], "hash": decided_entry["hash"],
                      "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
                      "assurance": evidence["assurance"], "proof_method": evidence["proof_method"]}
-    if evidence.get("degraded_mode"):
-        chain_summary["degraded_mode"] = True
 
     if verdict == "approve":
         approved_by = {

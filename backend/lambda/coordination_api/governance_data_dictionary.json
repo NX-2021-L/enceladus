@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-11.05",
-  "updated_at": "2026-10-11T22:41:18Z",
-  "last_change_summary": "DVP-TSK-968 (DVP-PLN-013 E4-W2, DVP-FTR-106): recipe primitive -- recipe/recipe_run record types (REC/RUN), lifecycles, runner via governed execute (ENC-AGT-00N session per run), hub gate escalations and appliers, graph/search/feed parity, 11 MCP actions with dry_run + x-io-minted outputSchema.",
+  "version": "2026-10-11.06",
+  "updated_at": "2026-10-11T22:46:21Z",
+  "last_change_summary": "DVP-TSK-980: hub decide enforces method-tagged step-up proofs for high/critical escalations, mandatory auth_method/auth_time/assurance, degraded interactive_human mode retired",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-11.06",
+      "date": "2026-10-11",
+      "summary": "DVP-TSK-980: hub decide enforces method-tagged step-up proofs for high/critical escalations, mandatory auth_method/auth_time/assurance, degraded interactive_human mode retired"
+    },
     {
       "version": "2026-10-11.05",
       "date": "2026-10-11",
