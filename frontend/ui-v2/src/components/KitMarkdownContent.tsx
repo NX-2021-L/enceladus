@@ -103,8 +103,9 @@ function Anchor({ className, href, children }: Props) {
     )
   }
   if (!href) return <>{children}</>
-  // gfm autolink literal (text == href): the legacy parser left bare URLs as text
-  if (textOf(children) === href) return <>{children}</>
+  // gfm autolink literal (http(s) URL, www. host or email: text derives from href): the legacy parser left bare URLs as text
+  const label = textOf(children)
+  if (label === href || href === `http://${label}` || href === `mailto:${label}`) return <>{children}</>
   return (
     <a href={href} target="_blank" rel="noreferrer" className="ev2-md__link">
       {children}

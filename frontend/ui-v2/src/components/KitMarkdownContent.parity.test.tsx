@@ -43,6 +43,7 @@ const SNIPPETS: Record<string, string> = {
   list: '- one ENC-TSK-1\n- two\n- three `x`\n\n1. first\n2. second',
   quote: '> a quoted line\n> and a second with DOC-488491DADD6C',
   fence: 'Before\n\n```yaml\nkey: value: oops\n  - bad\n```\n\n```\nplain <b>not html</b>\n```\n\nAfter',
+  bareUrl: 'Plain https://example.com/a?b=1 and http://x.test, then (https://y.test/z) and an explicit [label](https://z.test/q) link; also www.example.com.',
   worklog: 'Merged PR #57 (DVP-TSK-783) -- snake_case objectives_set and source_record_id stay literal.',
 }
 
@@ -55,6 +56,14 @@ describe('KitMarkdownContent parity with the legacy parser', () => {
       expect(kit(md)).toBe(legacy(md))
     })
   }
+
+  it('bare URLs stay plain text like the legacy parser (no autolink); explicit links keep the legacy anchor', () => {
+    const md = SNIPPETS.bareUrl
+    const out = renderToStaticMarkup(<KitMarkdownContent text={md} />)
+    expect(out.match(/<a /g)).toHaveLength(1)
+    expect(out).toContain('target="_blank" rel="noreferrer" class="ev2-md__link"')
+    expect(out).toContain('Plain https://example.com/a?b=1 and http://x.test')
+  })
 
   it('empty input renders nothing in both', () => {
     expect(renderToStaticMarkup(<KitMarkdownContent text="  " />)).toBe('')
