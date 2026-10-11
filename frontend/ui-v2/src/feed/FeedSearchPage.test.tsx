@@ -73,12 +73,50 @@ describe('/feed on the kit CollectionSearch', () => {
     const header = container.querySelector('.io-split__header [data-page-header]')!
     expect(header.textContent).toMatch(/Feed/)
     expect(header.textContent).toMatch(/\(2\)/) // status=open -> 2 of 3 rows
-    expect(header.querySelectorAll('button')).toHaveLength(0)
+    // DVP-TSK-A12: the only header control is the tiny "hide toggles" link (no action button)
+    expect([...header.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['hide toggles'])
+    expect(container.textContent).not.toMatch(/Pin as related/)
     // results are the existing record cards (status=open filter from the old-style URL applied)
     const results = container.querySelectorAll('.io-search__results > li')
     expect(results).toHaveLength(2)
     expect(results[0]!.textContent).toContain('ENC-TSK-2')
     // the old two-box toolbar and pill filter are gone
     expect(container.querySelector('.feed-route__toolbar')).toBeNull()
+  }, 30_000)
+
+  it('puts "hide toggles" right after the count, hides the control block, and persists it under the feed key', async () => {
+    const storageKey = 'io-search:controls:feed'
+    sessionStorage.removeItem(storageKey)
+    const { default: FeedSearchPage } = await import('./FeedSearchPage')
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <FeedSearchPage />
+        </QueryClientProvider>,
+      )
+    })
+    try {
+      const header = container.querySelector('.io-split__header [data-page-header]')!
+      const toggle = header.querySelector('button.io-search__controls-toggle') as HTMLButtonElement
+      expect(toggle.textContent).toBe('hide toggles')
+      // in the title row, directly after the muted count
+      expect(toggle.closest('.ev2-page-header__meta')!.previousElementSibling!.classList.contains('ev2-header__counter')).toBe(true)
+      // one toggle only: CollectionSearch's own header link is off
+      expect(container.querySelectorAll('.io-search__controls-toggle')).toHaveLength(1)
+      const controls = container.querySelector('.io-search__controls') as HTMLElement
+      expect(controls.id).not.toBe('')
+      expect(toggle.getAttribute('aria-controls')).toBe(controls.id)
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(controls.hidden).toBe(false)
+      await act(async () => {
+        toggle.click()
+      })
+      expect(toggle.textContent).toBe('show toggles')
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(controls.hidden).toBe(true)
+      expect(sessionStorage.getItem(storageKey)).toBe('1')
+    } finally {
+      sessionStorage.removeItem(storageKey)
+    }
   }, 30_000)
 })

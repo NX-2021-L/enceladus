@@ -13,3 +13,10 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+/* DVP-TSK-A12: the inline control after the count ("hide toggles"). The control carries its own tiny meta type. */
+.ev2-page-header .ev2-page-header__meta {
+  display: inline-flex;
+  align-items: baseline;
+  font-weight: 400;
+  line-height: 1;
+}

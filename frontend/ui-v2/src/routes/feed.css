@@ -239,10 +239,8 @@
   margin-block: var(--space-2);
 }
 
-/* DVP-TSK-921: per-signal evidence + pin under a result card */
+/* DVP-TSK-921: per-signal evidence chips under a result card (DVP-TSK-A12: no row actions under a card) */
 .feed-route__row-wrap { display: flex; flex-direction: column; }
-.feed-route__row-extras { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 12px 6px; font-size: 12px; }
-.feed-route__pin { cursor: pointer; font-size: 12px; }
 
 /* DVP-TSK-A09 (R16): the reading pane is the SplitPage secondary (its own .io-scroll). Its first card starts on the
  * same top line as the search input: no margin or padding above it. The recently-viewed stepper lives in the header. */

@@ -84,8 +84,6 @@ export default function DocsSearchPage() {
             onSelect: () => {},
             onLeave: () => {},
             evidenceFor: () => undefined,
-            pins: {},
-            onPin: () => {},
           }),
       }}
     />
