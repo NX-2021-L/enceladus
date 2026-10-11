@@ -9,8 +9,6 @@ import type { SearchResultHit } from '../types/search'
 import { SignalReadout } from '@io-kit/search/react'
 import type { SignalAvailability, SignalEvidence } from '@io-kit/search'
 
-export type PinState = 'pending' | 'done' | 'error'
-
 export interface FeedRowContext {
   projects: ProjectSummary[]
   isWide: boolean
@@ -22,8 +20,6 @@ export interface FeedRowContext {
   /** Per-row hybrid evidence (signal -> rank) and the signal states to render it against. */
   evidenceFor(recordId: string): SignalEvidence[] | undefined
   availability?: SignalAvailability
-  pins: Record<string, PinState>
-  onPin(sourceId: string, targetId: string): void
 }
 
 /**
@@ -36,7 +32,7 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
   const href =
     hit.recordType === 'document' ? documentHref(hit.recordId) : recordHrefForType(project, hit.recordType, hit.recordId)
   const cci = sessionStateBadge(hit.checkoutState)
-  const { isWide, selectedHit, pins } = cx
+  const { isWide, selectedHit } = cx
 
   const card = (
     <RecordCard
@@ -62,31 +58,12 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
     />
   )
   const evidence = cx.evidenceFor(hit.recordId)
-  const canPin =
-    isWide &&
-    selectedHit &&
-    selectedHit.recordId !== hit.recordId &&
-    (hit.recordType === 'task' || hit.recordType === 'issue' || hit.recordType === 'feature')
-  if (!evidence && !canPin) return card
+  // DVP-TSK-A12 (io): no per-row action under a card; only the hybrid evidence chips remain.
+  if (!evidence || !cx.availability) return card
   return (
     <div key={hit.recordId} className="feed-route__row-wrap">
       {card}
-      <div className="feed-route__row-extras">
-        {evidence && cx.availability ? (
-          <SignalReadout evidence={evidence} availability={cx.availability} mode="chips" />
-        ) : null}
-        {canPin ? (
-          <button
-            type="button"
-            className="feed-route__pin"
-            disabled={pins[hit.recordId] === 'pending' || pins[hit.recordId] === 'done'}
-            onClick={() => cx.onPin(selectedHit.recordId, hit.recordId)}
-            aria-label={`Pin ${hit.recordId} as related to ${selectedHit.recordId}`}
-          >
-            {pins[hit.recordId] === 'done' ? 'Pinned' : pins[hit.recordId] === 'error' ? 'Pin failed - retry' : 'Pin as related'}
-          </button>
-        ) : null}
-      </div>
+      <SignalReadout evidence={evidence} availability={cx.availability} mode="chips" />
     </div>
   )
 }

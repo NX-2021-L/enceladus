@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { IndexRow, Query } from '@io-kit/search'
-import { relateRecords } from '../api/actions'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { Alert } from '../design-system'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -19,7 +18,7 @@ import { ENCELADUS_SIGNAL_AVAILABILITY, rowToHit } from '../search/rowHit'
 import { localSavedFilterStore, migrateLegacySavedSearches } from '../search/savedSearchMigration'
 import { SORT_OPTIONS } from '../search/sortOptions'
 import type { SearchResultHit } from '../types/search'
-import { renderFeedRow, type PinState } from './FeedRowCard'
+import { renderFeedRow } from './FeedRowCard'
 // DVP-TSK-995: the kit search skin loads with this (lazy) route chunk, never with the initial route.
 import '@io-kit/search-ui/theme.css'
 import '@io-kit/search-ui/components.css'
@@ -98,15 +97,6 @@ export default function FeedSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, selectedType])
 
-  const [pins, setPins] = useState<Record<string, PinState>>({})
-  function pinToSelected(sourceId: string, targetId: string) {
-    setPins((p) => ({ ...p, [targetId]: 'pending' }))
-    relateRecords(sourceId, targetId).then(
-      () => setPins((p) => ({ ...p, [targetId]: 'done' })),
-      () => setPins((p) => ({ ...p, [targetId]: 'error' })),
-    )
-  }
-
   const renderRow = (row: IndexRow, ctx: { index: number; hybrid: boolean; evidence?: import('@io-kit/search').SignalEvidence[] }) => {
     const hit = rowToHit(row, ctx.hybrid)
     if (ctx.index === 0) firstRef.current = hit
@@ -118,8 +108,6 @@ export default function FeedSearchPage() {
       onLeave: () => persistFeedReturnSearch(persistable),
       evidenceFor: (id) => (id === hit.recordId ? ctx.evidence : undefined),
       availability: ENCELADUS_SIGNAL_AVAILABILITY,
-      pins,
-      onPin: pinToSelected,
     })
   }
 
