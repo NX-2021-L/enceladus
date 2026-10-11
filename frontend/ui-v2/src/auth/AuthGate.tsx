@@ -32,7 +32,7 @@ function Gate({ children }: { children: ReactNode }) {
 /** Minimal pre-auth splash — design tokens only, no shell, no data. */
 function AuthSplash() {
   return (
-    <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--enc-void)' }}>
+    <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--enc-void)', padding: 'var(--io-safe-top) var(--io-safe-right) var(--io-safe-bottom) var(--io-safe-left)' }}>
       <p style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', color: 'var(--fg-muted)', margin: 0 }}>
         Enceladus · Governance Cockpit
       </p>

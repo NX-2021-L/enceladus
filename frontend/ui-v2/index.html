@@ -1,9 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="io-no-focus-zoom">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- DVP-TSK-956: standaloneMeta({ title: 'Enceladus', themeColor: '#0A0A0F' }) from
+         @io-kit/shell 0.4.0, written out because index.html is static. viewport-fit=cover
+         is what makes the --io-safe-* insets non-zero; no maximum-scale / user-scalable=no
+         so pinch zoom stays on. src/shell/standalone.test.ts pins this block to the kit output. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0A0A0F" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Enceladus" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
