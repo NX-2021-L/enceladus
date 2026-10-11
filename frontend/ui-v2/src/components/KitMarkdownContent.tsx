@@ -2,7 +2,7 @@ import { Children, isValidElement, type ComponentType, type ReactElement, type R
 import { Link } from '@tanstack/react-router'
 import { KitMarkdown } from '@io-kit/md/lean/react'
 import { docstore, ID_PATTERN_LOOSE, type IdResolver, type MdPlugin } from '@io-kit/md/lean'
-import { ID_TOKEN_SOURCE, resolveIdHref } from './MarkdownContentLegacy'
+import { ID_TOKEN_SOURCE, resolveIdHref } from './markdownIds'
 import type { MarkdownContentProps } from './markdownContentTypes'
 import './markdownContent.css'
 

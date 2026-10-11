@@ -25,7 +25,7 @@ import type { RecordType } from '../types/records'
 import { createEnceladusFeedSource, createSignalBridge, type FeedCorpusRecord } from './enceladusFeedSource'
 import { FeedHeader, FeedMeta, FeedToolbar, useSavedSearches } from './FeedChrome'
 import { renderFeedRow, type PinState } from './FeedRowCard'
-import { createHitView } from './hitView'
+import { createHitView, feedHitCount } from './hitView'
 
 const WIDE_MEDIA = '(min-width: 64rem)'
 const VALID_TYPES: RecordType[] = ['task', 'issue', 'feature', 'plan', 'lesson', 'document']
@@ -198,13 +198,8 @@ export default function KitFeedPanel() {
         })
       }
       renderStatus={{
-        stale: () => (
-          <div className="feed-route__stale">
-            <Alert type="warning" header="Results may be out of date">
-              Showing saved results while the feed refreshes.
-            </Alert>
-          </div>
-        ),
+        // Legacy shows no notice while a cached snapshot refreshes (its stale alert is for seed errors only).
+        stale: () => null,
         gap: (ack) => (
           <div className="feed-route__stale">
             <Alert type="warning" header="Some updates were missed">
@@ -259,7 +254,7 @@ export default function KitFeedPanel() {
         corpus={rows}
         onChange={(next) => patchFeedSearch({ f: serializeFilterQuery(next), op: next.operation ?? 'and', scroll: 0 })}
       />
-      <FeedMeta count={filteredHits.length} serverCorpusTotal={serverCorpusTotal} tiered={tiered} />
+      <FeedMeta count={feedHitCount(filteredHits.length, serverCorpusTotal, q ?? '', f ?? '')} serverCorpusTotal={serverCorpusTotal} tiered={tiered} />
       {state.status === 'loading' && filteredHits.length === 0 ? <p className="feed-route__empty">Loading feed snapshot…</p> : null}
       {state.status === 'ready' && state.items.length === 0 ? <p className="feed-route__empty">No results — adjust search or filters.</p> : null}
       {state.items.length > 0 && filteredHits.length === 0 ? (

@@ -44,3 +44,13 @@ export function createHitView<T>(base: Feed<T, never>): HitView {
   }
   return view
 }
+
+/**
+ * DVP-TSK-931: the meta-line count. The legacy route searches the fully seeded warm cache, so with no query and
+ * no property filter its count equals the corpus size. The kit pages the corpus in, so in that case the count is
+ * the server corpus total instead of the number of rows loaded so far.
+ */
+export function feedHitCount(loaded: number, serverCorpusTotal: number | null, q: string, f: string): number {
+  if (q.trim() || f.trim() || serverCorpusTotal === null) return loaded
+  return Math.max(loaded, serverCorpusTotal)
+}
