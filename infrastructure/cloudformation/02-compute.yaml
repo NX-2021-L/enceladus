@@ -84,6 +84,7 @@ Parameters:
   SharedLayerArn:
     Type: String
     # ENC-TSK-H05: bumped :7 -> :10 to match the live/working prod layer. The F65 hotfix
+    # (2026-10-11) DVP-TSK-A17: :13 = CI-published from 74487e3 (adds enceladus_shared.hub_exchange; run 38181569019).
     # (2026-04-21) moved functions to enceladus-shared:10 (the version WITH appconfig_flags)
     # out-of-band but never updated this default; the 2026-06-18 deploy then reset functions
     # to :7 -> Runtime.ImportModuleError 'No module named enceladus_shared.appconfig_flags'
@@ -99,7 +100,7 @@ Parameters:
     # the same failure shape as the :7 incident above, one layer version later. :12 is a
     # pure-Python superset of :10 (zero .so) and declares CompatibleArchitectures
     # [x86_64, arm64], so the move is additive for every other function.
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:13
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
     Type: String
