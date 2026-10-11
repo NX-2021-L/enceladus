@@ -69,7 +69,8 @@ describe('/feed on the kit CollectionSearch', () => {
     expect(row2.textContent).toMatch(/Updated/)
     expect(row2.textContent).toMatch(/Clear/)
     // header: title + count, and no action control
-    const header = section.firstElementChild!
+    // R16: the page header (title + count) lives in the SplitPage header slot, above the columns.
+    const header = container.querySelector('.io-split__header [data-page-header]')!
     expect(header.textContent).toMatch(/Feed/)
     expect(header.textContent).toMatch(/\(2\)/) // status=open -> 2 of 3 rows
     expect(header.querySelectorAll('button')).toHaveLength(0)

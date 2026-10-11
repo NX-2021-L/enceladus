@@ -10,6 +10,8 @@ import { DEFAULT_SORT_ID, resolveSortId } from './sortOptions'
 export type FeedSort = 'tier' | 'id' | 'status' | 'title' | 'updated'
 
 export interface FeedRouteSearch {
+  /** DVP-TSK-995: the header SearchLauncher navigates with focus=1; the page focuses its search input on mount. */
+  focus?: 1
   q: string
   f: string
   op: 'and' | 'or'
@@ -31,7 +33,13 @@ export function parseFeedSearch(raw: Record<string, unknown>): FeedRouteSearch {
     op: raw.op === 'or' ? 'or' : 'and',
     sort: typeof raw.sort === 'string' && raw.sort ? raw.sort : DEFAULT_SORT_ID,
     scroll: Number.isFinite(scroll) && scroll > 0 ? Math.round(scroll) : 0,
+    ...(parseFocus(raw) ? { focus: 1 as const } : {}),
   }
+}
+
+/** `focus=1` (string from a launcher URL, number from a parsed one, or true) means: focus the search input on mount. */
+export function parseFocus(raw: Record<string, unknown>): boolean {
+  return raw.focus === 1 || raw.focus === '1' || raw.focus === true
 }
 
 function rekey(query: Query): Query {

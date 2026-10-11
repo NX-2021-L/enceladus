@@ -7,7 +7,8 @@ import {
   agentTypesQueryOptions,
 } from '../api/agentSessionsQueryOptions'
 import type { AgentSession, AgentSessionStatus } from '../api/agentSessions'
-import { KeyValuePairs, StatusIndicator, Table } from '../design-system'
+import { KeyValuePairs, StatusIndicator } from '../design-system'
+import { Table } from '../components/StackedTable'
 import { SkeletonCard } from '../components/SkeletonCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { AGENT_ROUTE_PATH } from './recordLink'

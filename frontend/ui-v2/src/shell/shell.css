@@ -162,3 +162,65 @@
   font-size: var(--text-sm);
   color: var(--accent);
 }
+
+/* ---------------------------------------------------------------------------------------------------------------
+ * DVP-TSK-A09 (R16 clean lines). One scroll owner per region.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/* The nav panel runs the full available height and scrolls as its own .io-scroll (.ev2-shell__nav). */
+.ev2-shell .ev2-al__nav {
+  overflow: hidden;
+  box-shadow: inset -1px 0 0 var(--v2-divider);
+}
+.ev2-shell__nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  scrollbar-gutter: auto;
+}
+.ev2-shell__nav > .ev2-sn {
+  min-height: 100%;
+  border-right: 0;
+}
+@media (min-width: 48.0625rem) {
+  .ev2-shell .ev2-al__nav:not(.ev2-al__nav--collapsed) {
+    display: flex;
+    flex-direction: column;
+    align-self: stretch;
+    min-height: 0;
+    padding-bottom: var(--io-safe-bottom);
+    background: var(--enc-surface-alt);
+  }
+}
+
+/* Fill routes (/feed, /docs; AppShell sets data-ev2-fill on the page scroller): from 960px the split fills the
+ * height and the page scroller does not scroll; the panes own their scrollbars. Below 960px it is one page scroll. */
+@media (min-width: 960px) {
+  .ev2-shell .ev2-al__content[data-ev2-fill] {
+    overflow: hidden;
+  }
+  .ev2-shell .ev2-al__content[data-ev2-fill] .ev2-shell__main {
+    display: flex;
+    flex-direction: column;
+  }
+  .ev2-shell .ev2-al__content[data-ev2-fill] .ev2-shell__main > .ev2-fill {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+}
+
+/* Every route root: header first, then one fixed gap to the first component. */
+.ev2-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: var(--space-0);
+}
+/* Card grids start at the header's left edge; cards in a row share one top. */
+.ev2-shell .ev2-cards {
+  margin: var(--space-0);
+  padding: var(--space-0);
+}
+.ev2-shell .ev2-cards__grid {
+  align-items: stretch;
+  align-content: start;
+}

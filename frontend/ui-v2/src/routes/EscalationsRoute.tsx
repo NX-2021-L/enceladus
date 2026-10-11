@@ -40,19 +40,10 @@
  */
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  Alert,
-  Box,
-  Button,
-  Container,
-  FormField,
-  Header,
-  KeyValuePairs,
-  Modal,
-  Select,
-  Table,
-  Tabs,
-} from '../design-system'
+import { Alert, Button, Container, FormField, Header, KeyValuePairs, Modal, Select } from '../design-system'
+import { Table } from '../components/StackedTable'
+import { Tabs } from '../components/StripTabs'
+import { PageHeader } from '../components/PageHeader'
 import { Badge } from '../components/Badge'
 import { StatusChip } from '../components/StatusChip'
 import { RecordLink } from '../components/RecordLink'
@@ -305,14 +296,8 @@ export function EscalationsRoute() {
   }))
 
   return (
-    <Box>
-      <Header
-        variant="h1"
-        counter={`(${counts.pending} pending)`}
-        description="Governed mutations an agent could not perform itself, routed here for your explicit human approval. Approving applies the mutation; denying can return a guidance note to the requesting session."
-      >
-        Escalations
-      </Header>
+    <div className="ev2-page">
+      <PageHeader title="Escalations" count={`${counts.pending} pending`} description="Governed mutations an agent could not perform itself, routed here for your explicit human approval. Approving applies the mutation; denying can return a guidance note to the requesting session." />
 
       {notice && (
         <div className="ev2-esc__notice">
@@ -424,7 +409,7 @@ export function EscalationsRoute() {
           </div>
         )}
       </Modal>
-    </Box>
+    </div>
   )
 }
 

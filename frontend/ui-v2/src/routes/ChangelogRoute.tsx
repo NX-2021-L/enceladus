@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { changelogHistoryQueryOptions, type ChangelogEntry } from '../api/changelog'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
-import { Container, Header, Table } from '../design-system'
+import { Table } from '../components/StackedTable'
+import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { TableColumnDefinition } from '../../../design-system-2/v2/components/Table/Table'
 
@@ -124,17 +125,8 @@ export function ChangelogRoute() {
   const isPending = projectsPending || (projectIds.length > 0 && entriesPending)
 
   return (
-    <div className="ev2-changelog">
-      <Container
-        header={
-          <Header
-            variant="h1"
-            description="Live release history across every governed project — GET /api/v1/changelog/history."
-          >
-            Changelog
-          </Header>
-        }
-      >
+    <div className="ev2-changelog ev2-page">
+      <PageHeader title="Changelog" description="Live release history across every governed project — GET /api/v1/changelog/history." />
         {isError ? (
           <div className="ev2-changelog__error">
             <p>Failed to load changelog{error instanceof Error ? `: ${error.message}` : ''}.</p>
@@ -158,7 +150,7 @@ export function ChangelogRoute() {
             empty={isPending ? 'Loading changelog…' : 'No changelog entries yet'}
           />
         )}
-      </Container>
+      
     </div>
   )
 }

@@ -2,7 +2,8 @@ import { createContext, useContext, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
-import { Modal, Tabs } from '../design-system'
+import { Modal } from '../design-system'
+import { Tabs } from './StripTabs'
 import { recordHrefForType } from '../routes/recordLink'
 import type {
   AcceptanceCriterion,

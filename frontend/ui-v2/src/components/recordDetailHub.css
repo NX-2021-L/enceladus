@@ -91,7 +91,8 @@
   box-shadow: var(--shadow-md);
   box-sizing: border-box;
   max-width: 100%;
-  overflow-x: hidden;
+  /* R16: clip, not hidden: hidden makes overflow-y compute to auto, a nested scroller in the detail pane. */
+  overflow-x: clip;
 }
 
 .ev2-rdh__actionbar {

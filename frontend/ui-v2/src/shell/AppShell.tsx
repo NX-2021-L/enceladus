@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
-import { ScrollTopZone, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
+import { ScrollRegion, ScrollTopZone, useScrollActivity, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
 import { AppLayout, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
@@ -18,6 +18,8 @@ import './shell.css'
 const LOGOUT_HREF = '__logout__'
 const REFRESH_APP_HREF = '__refresh_app__'
 const DESKTOP_QUERY = '(min-width: 48.0625rem)'
+// DVP-TSK-A09 (R16): split routes that fill the height from 960px (the page scroller does not scroll there).
+const FILL_ROUTES = ['/feed', '/docs']
 
 const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
@@ -90,7 +92,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     const scroller = frameRef.current?.querySelector<HTMLElement>('.ev2-al__content') ?? null
     scrollerRef.current = scroller
     scroller?.setAttribute('data-io-scroller', '')
+    // R16: the ONE page scroll owner below 960px, themed and quiet (.io-scroll), the tap-to-top target.
+    scroller?.classList.add('io-scroll')
   }, [])
+  useScrollActivity(scrollerRef)
+  useEffect(() => {
+    const fill = FILL_ROUTES.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+    scrollerRef.current?.toggleAttribute('data-ev2-fill', fill)
+  }, [pathname])
   const scrollToTop = useScrollToTop(scrollerRef)
   // Keyboard: sizes the frame to the visible area (shell.css) and reveals the
   // focused field inside the scroller; the fixed record action bar is hidden
@@ -184,11 +193,13 @@ export function AppShell({ children }: { children: ReactNode }) {
           // No `header` here (ENC-ISS-513 / FND-01): the wordmark already
           // lives once, in TopNavigation. A second "ENCELADUS" brand mark on
           // the drawer was pure duplication.
-          <SideNavigation
-            items={SIDEBAR_ITEMS}
-            activeHref={activeHref}
-            onFollow={followNav}
-          />
+          <ScrollRegion className="ev2-shell__nav">
+            <SideNavigation
+              items={SIDEBAR_ITEMS}
+              activeHref={activeHref}
+              onFollow={followNav}
+            />
+          </ScrollRegion>
         }
         navigationOpen={navigationOpen}
         content={

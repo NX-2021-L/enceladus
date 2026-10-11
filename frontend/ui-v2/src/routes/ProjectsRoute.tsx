@@ -10,17 +10,8 @@
  */
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  Box,
-  Button,
-  Cards,
-  Form,
-  FormField,
-  Header,
-  Input,
-  Modal,
-  Select,
-} from '../design-system'
+import { Box, Button, Cards, Form, FormField, Input, Modal, Select } from '../design-system'
+import { PageHeader } from '../components/PageHeader'
 import { projectRegistryKeys, projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
   createProject,
@@ -212,15 +203,8 @@ export function ProjectsRoute() {
   }
 
   return (
-    <div className="projects-route">
-      <Header
-        variant="h1"
-        counter={`(${projects.length})`}
-        description="All governed Enceladus projects. Create a new project to register it with the tracker, docstore, and reference-doc pipeline."
-        actions={<Button variant="primary" onClick={openModal}>Create project</Button>}
-      >
-        Projects
-      </Header>
+    <div className="projects-route ev2-page">
+      <PageHeader title="Projects" count={projects.length} description="All governed Enceladus projects. Create a new project to register it with the tracker, docstore, and reference-doc pipeline." actions={<Button variant="primary" onClick={openModal}>Create project</Button>} />
 
       {isPending && <Box padding="l">Loading projects…</Box>}
       {isError && <Box padding="l">Failed to load projects.</Box>}
