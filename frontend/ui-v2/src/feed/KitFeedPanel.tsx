@@ -25,7 +25,7 @@ import type { RecordType } from '../types/records'
 import { createEnceladusFeedSource, createSignalBridge, type FeedCorpusRecord } from './enceladusFeedSource'
 import { FeedHeader, FeedMeta, FeedToolbar, useSavedSearches } from './FeedChrome'
 import { renderFeedRow, type PinState } from './FeedRowCard'
-import { createHitView, feedHitCount } from './hitView'
+import { createHitView, feedHitCount, readRememberedServerTotal, rememberServerTotal } from './hitView'
 
 const WIDE_MEDIA = '(min-width: 64rem)'
 const VALID_TYPES: RecordType[] = ['task', 'issue', 'feature', 'plan', 'lesson', 'document']
@@ -86,7 +86,8 @@ export default function KitFeedPanel() {
       source: createEnceladusFeedSource({ subscribe: bridge.subscribe }),
       filter: { sort: 'updated_at_desc' },
       pageSize: 50,
-      buffer: 'pill',
+      // DVP-TSK-947: like legacy, new records merge in silently at the top; the pill only shows when scrolled down.
+      buffer: 'auto-when-at-top',
       persist: { idb: 'enceladus-feed', maxAgeMs: WARM_START_MAX_AGE_MS, storage: createIdbStorage({ dbName: 'ev2-feed' }) },
     }),
   )
@@ -129,6 +130,11 @@ export default function KitFeedPanel() {
   useRequestFirstPageTelemetry(`${q}|${f}|${op}|${sort}`, Boolean(q.trim()), tiered.hybridPending)
 
   const serverCorpusTotal = useQuery(feedCorpusQueryOptions({ limit: 1 })).data?.total_matches ?? null
+  // DVP-TSK-947: the corpus query is slow, so the first paint counts with the last total seen.
+  const [rememberedTotal] = useState(readRememberedServerTotal)
+  useEffect(() => {
+    if (serverCorpusTotal !== null) rememberServerTotal(serverCorpusTotal)
+  }, [serverCorpusTotal])
 
   const needle = q.trim().toLowerCase()
   const suggestions = rows
@@ -254,7 +260,7 @@ export default function KitFeedPanel() {
         corpus={rows}
         onChange={(next) => patchFeedSearch({ f: serializeFilterQuery(next), op: next.operation ?? 'and', scroll: 0 })}
       />
-      <FeedMeta count={feedHitCount(filteredHits.length, serverCorpusTotal, q ?? '', f ?? '')} serverCorpusTotal={serverCorpusTotal} tiered={tiered} />
+      <FeedMeta count={feedHitCount(filteredHits.length, serverCorpusTotal ?? rememberedTotal, q ?? '', f ?? '')} serverCorpusTotal={serverCorpusTotal} tiered={tiered} />
       {state.status === 'loading' && filteredHits.length === 0 ? <p className="feed-route__empty">Loading feed snapshot…</p> : null}
       {state.status === 'ready' && state.items.length === 0 ? <p className="feed-route__empty">No results — adjust search or filters.</p> : null}
       {state.items.length > 0 && filteredHits.length === 0 ? (

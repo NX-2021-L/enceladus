@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createHitView, feedHitCount } from './hitView'
+import { createHitView, feedHitCount, readRememberedServerTotal, rememberServerTotal, SERVER_TOTAL_STORAGE_KEY } from './hitView'
 import type { SearchResultHit } from '../types/search'
 
 const hit = (id: string, title = id): SearchResultHit => ({ recordId: id, recordType: 'task', projectId: 'enceladus', title, tier: 'local' })
@@ -63,5 +63,29 @@ describe('feedHitCount (DVP-TSK-931 meta-line parity)', () => {
   })
   it('falls back to the loaded count until the server total arrives', () => {
     expect(feedHitCount(50, null, '', '')).toBe(50)
+  })
+})
+
+describe('remembered server corpus total (DVP-TSK-947 first-paint count)', () => {
+  const mem = () => {
+    const m = new Map<string, string>()
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
+  }
+  it('round-trips the last total so the first paint counts the corpus', () => {
+    const s = mem()
+    expect(readRememberedServerTotal(s)).toBeNull()
+    rememberServerTotal(9027, s)
+    expect(s.m.get(SERVER_TOTAL_STORAGE_KEY)).toBe('9027')
+    expect(readRememberedServerTotal(s)).toBe(9027)
+    expect(feedHitCount(50, readRememberedServerTotal(s), '', '')).toBe(9027)
+  })
+  it('ignores junk and survives blocked storage', () => {
+    expect(readRememberedServerTotal({ getItem: () => 'nope' })).toBeNull()
+    expect(readRememberedServerTotal({ getItem: () => '0' })).toBeNull()
+    const boom = () => {
+      throw new Error('SecurityError')
+    }
+    expect(readRememberedServerTotal({ getItem: boom })).toBeNull()
+    expect(() => rememberServerTotal(1, { setItem: boom })).not.toThrow()
   })
 })
