@@ -1,4 +1,5 @@
 import {
+  redirect,
   createRootRoute,
   createRoute,
   createRouter,
@@ -11,6 +12,7 @@ import { PlaceholderRoute } from './PlaceholderRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
 import { parseFeedSearch, parseFocus } from '../search/feedUrl'
+import { parseRecipesSearch } from './recipesView'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,
@@ -135,6 +137,35 @@ const escalationsRoute = createRoute({
   // stays as the read-only monitor view; this is the decision surface.
   component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationsRoute'),
 })
+// DVP-TSK-974: recipes over the primitive (lazy chunks; the kits stay out of the initial bundle).
+const recipesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/recipes',
+  validateSearch: parseRecipesSearch,
+  component: lazyRouteComponent(() => import('./RecipesRoute'), 'RecipesRoute'),
+})
+const recipeRunRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/recipes/runs/$runId',
+  validateSearch: parseRecipesSearch,
+  component: lazyRouteComponent(() => import('./RecipeRunRoute'), 'RecipeRunRoute'),
+})
+const recipeDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/recipes/$recipeId',
+  validateSearch: parseRecipesSearch,
+  component: lazyRouteComponent(() => import('./RecipeDetailRoute'), 'RecipeDetailRoute'),
+})
+// recipe_run.start is flag-gated out of the generic registry; the palette command lands on the recipe list, whose
+// detail pages render the start inputs as a generated form.
+const recipeStartRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/actions/recipe_run.start',
+  component: lazyRouteComponent(() => import('./RecipesRoute'), 'RecipesRoute'),
+  beforeLoad: () => {
+    throw redirect({ to: '/recipes', search: { project: 'enceladus' } })
+  },
+})
 const sessionRoute = createSessionDetailRoute(() => rootRoute)
 const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
 
@@ -170,7 +201,11 @@ const actionFormRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   actionsIndexRoute,
+  recipeStartRoute,
   actionFormRoute,
+  recipesRoute,
+  recipeRunRoute,
+  recipeDetailRoute,
   feedRoute,
   projectsRoute,
   docsRoute,
