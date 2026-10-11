@@ -129,4 +129,4 @@ def test_session_register_claim_heartbeat_retire():
     exe.heartbeat("devops", "ENC-SES-RUN1")
     exe.retire("devops", "ENC-SES-RUN1")
     assert fake.calls[3] == ("coordination", {"action": "escalation.watch", "arguments": {"session_id": "ENC-SES-RUN1", "project_id": "devops"}})
-    assert fake.calls[3][1]["action"] == "agent.retire"
+    assert fake.calls[4][1]["action"] == "agent.retire"

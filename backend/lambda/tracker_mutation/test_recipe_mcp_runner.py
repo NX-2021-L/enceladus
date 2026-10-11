@@ -28,7 +28,7 @@ def build(fake):
         get=lambda p, k: copy.deepcopy(store.get((p, k))), put=put, query=lambda p, prefix: list(holder.get("items", [])),
         mint=lambda p: "DVP-RUN-002", now=lambda: "2026-10-11T00:00:00+00:00", escalate=lambda p, b: (201, {}),
         escalation=lambda p, e: None, execute=execute, governance_hash=exe.governance_hash, server_hash=True,
-        session_start=lambda p, r: exe.register_session(p, r["run_id"]),
+        session_start=lambda p, r: exe.register_session(p, r["run_id"], r.get("governance_hash_last")),
         session_heartbeat=lambda p, r: exe.heartbeat(p, r["runner_session_id"]),
         session_end=lambda p, r: exe.retire(p, r["runner_session_id"]))
     return ctx, holder

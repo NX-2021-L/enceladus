@@ -10164,7 +10164,7 @@ def _recipe_mcp_ctx_kwargs() -> Dict[str, Any]:
     if exe is None:
         return {"governance_hash": (lambda: None)}
     return {"governance_hash": exe.governance_hash, "server_hash": True,
-            "session_start": lambda project, run: exe.register_session(project, str(run.get("run_id") or "")),
+            "session_start": lambda project, run: exe.register_session(project, str(run.get("run_id") or ""), run.get("governance_hash_last")),
             "session_heartbeat": lambda project, run: exe.heartbeat(project, run.get("runner_session_id")),
             "session_end": lambda project, run: exe.retire(project, run.get("runner_session_id"))}
 
