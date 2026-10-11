@@ -1,38 +1,21 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { DegradedBanner, SignalReadout } from '@io-kit/search/react'
 import { relateRecords } from '../api/actions'
 import { resolveFeedEngine } from '../feed/feedEngine'
-import { Alert, Autosuggest, ButtonDropdown } from '../design-system'
-import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
+import { Alert } from '../design-system'
+import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
-import { Badge } from '../components/Badge'
-import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { formatRelativeTime } from '../format/relativeTime'
 import { useRealtimeFeed, useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
-import { feedTransportLabel } from '../realtime/transportStatus'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
-import {
-  feedRowAccent,
-  priorityBadgeColor,
-  sessionStateBadge,
-} from '../search/feedRowPresentation'
 import {
   parseFilterQuery,
   persistFeedReturnSearch,
   serializeFilterQuery,
   type FeedRouteSearch,
-  type FeedSort,
 } from '../search/feedSearchParams'
-import {
-  deleteSavedSearch,
-  loadSavedSearches,
-  saveCurrentSearch,
-  type SavedSearch,
-} from '../search/savedSearches'
 import {
   getRecentlyViewed,
   hitFromRecent,
@@ -49,10 +32,10 @@ import {
   useKeystrokeSuggestionTelemetry,
   useRequestFirstPageTelemetry,
 } from '../search/useSearchTelemetry'
-import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import { useUiStore } from '../store/uiStore'
-import { documentHref, recordHrefForType } from '../routes/recordLink'
 import type { SearchResultHit } from '../types/search'
+import { FeedHeader, FeedMeta, FeedToolbar, useSavedSearches } from '../feed/FeedChrome'
+import { renderFeedRow, type PinState } from '../feed/FeedRowCard'
 import { FeedReadingPane } from './FeedReadingPane'
 import { RecentlyViewedNav } from './RecentlyViewedNav'
 import { useFeedScrollRestore } from './useFeedScrollRestore'
@@ -60,18 +43,7 @@ import './feed.css'
 
 const LIST_CHUNK = 24
 const WIDE_MEDIA = '(min-width: 64rem)'
-const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
-  // ENC-TSK-N56 (ENC-TSK-N45 UAT follow-up): 'Last Updated' is offered and is
-  // the default (see FEED_SEARCH_DEFAULTS.sort = 'updated'). 'Tier' remains
-  // available as the search-relevance ordering.
-  { value: 'updated', label: 'Last Updated' },
-  { value: 'tier', label: 'Tier' },
-  { value: 'id', label: 'Record ID' },
-  { value: 'title', label: 'Title' },
-  { value: 'status', label: 'Status' },
-]
-
-// DVP-TSK-919: ?feed=kit mounts the @io-kit/feed panel; legacy stays the default this release.
+// DVP-TSK-931: the @io-kit/feed panel is the default engine; ?feed=legacy keeps LegacyFeedRoute for one release.
 const KitFeedPanel = lazy(() => import('../feed/KitFeedPanel'))
 
 export function FeedRoute() {
@@ -92,7 +64,6 @@ function LegacyFeedRoute() {
   const navigate = useNavigate({ from: '/feed' })
   const { q, f, op, sort, scroll } = feedSearch
 
-  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() => loadSavedSearches())
   const [isWide, setIsWide] = useState(false)
   const [selectedHit, setSelectedHit] = useState<SearchResultHit | null>(null)
   const [visibleCount, setVisibleCount] = useState(LIST_CHUNK)
@@ -144,7 +115,7 @@ function LegacyFeedRoute() {
 
   const tiered = useTieredSearch({ projectId, query: q }, feedCorpus)
   // DVP-TSK-921: onPin -> tracker.relate. Pins the row to the record open in the reading pane.
-  const [pins, setPins] = useState<Record<string, 'pending' | 'done' | 'error'>>({})
+  const [pins, setPins] = useState<Record<string, PinState>>({})
   function pinToSelected(sourceId: string, targetId: string) {
     setPins((p) => ({ ...p, [targetId]: 'pending' }))
     relateRecords(sourceId, targetId).then(
@@ -184,14 +155,6 @@ function LegacyFeedRoute() {
 
   const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
   const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)
-
-  const transportPhase = useFeedConnectionStore((s) => s.phase)
-  const keystrokeP50 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p50Ms)
-  const keystrokeP95 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p95Ms)
-  const localP50 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p50Ms)
-  const localP95 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p95Ms)
-  const serverP50 = useFeedConnectionStore((s) => s.requestFirstPageServer.p50Ms)
-  const serverP95 = useFeedConnectionStore((s) => s.requestFirstPageServer.p95Ms)
 
   const selectHit = (hit: SearchResultHit) => {
     setSelectedHit(hit)
@@ -258,43 +221,7 @@ function LegacyFeedRoute() {
     return () => node.removeEventListener('scroll', onScroll)
   }, [filteredHits.length, isWide])
 
-  const savedItems = [
-    ...savedSearches.map((s) => ({
-      id: s.id,
-      text: s.name,
-      description: s.query || `${s.filterQuery.tokens.length} filters`,
-    })),
-    ...(savedSearches.length > 0 ? [{ id: '__divider', type: 'divider' as const }] : []),
-    { id: '__save', text: 'Save current search…' },
-    ...savedSearches.map((s) => ({
-      id: `__delete:${s.id}`,
-      text: `Delete “${s.name}”`,
-      danger: true,
-    })),
-  ]
-
-  const handleSavedClick = (id: string | undefined) => {
-    if (!id) return
-    if (id === '__save') {
-      const name = window.prompt('Name this search')
-      if (!name) return
-      setSavedSearches(saveCurrentSearch(savedSearches, name, q, filterQuery))
-      return
-    }
-    if (id.startsWith('__delete:')) {
-      const target = id.slice('__delete:'.length)
-      setSavedSearches(deleteSavedSearch(savedSearches, target))
-      return
-    }
-    const saved = savedSearches.find((s) => s.id === id)
-    if (!saved) return
-    patchFeedSearch({
-      q: saved.query,
-      f: serializeFilterQuery(saved.filterQuery),
-      op: saved.filterQuery.operation ?? 'and',
-      scroll: 0,
-    })
-  }
+  const { savedItems, handleSavedClick } = useSavedSearches(q, filterQuery, patchFeedSearch)
 
   // ENC-TSK-M35: one dense feed-row rendering for every viewport (Feed.dc.html
   // §pixel-contract, Enceladus-v4-Feed-Review.md §3 PAR-08) — v4 previously
@@ -303,73 +230,23 @@ function LegacyFeedRoute() {
   // Narrow viewports link straight to the full record page; wide viewports
   // select in place (no navigation) so the row list and reading pane stay in
   // sync (FTR-128 AC-18).
-  const renderFeedRow = (hit: SearchResultHit) => {
-    const project =
-      hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
-    const href =
-      hit.recordType === 'document'
-        ? documentHref(hit.recordId)
-        : recordHrefForType(project, hit.recordType, hit.recordId)
-    const cci = sessionStateBadge(hit.checkoutState)
-
-    const card = (
-      <RecordCard
-        key={hit.recordId}
-        recordId={hit.recordId}
-        recordType={hit.recordType}
-        title={hit.title}
-        status={hit.status}
-        priority={hit.priority}
-        variant="feed"
-        projectLabel={project}
-        timestamp={formatRelativeTime(hit.updatedAt) ?? undefined}
-        accentColor={feedRowAccent(hit)}
-        badges={
-          <>
-            {hit.priority ? <Badge color={priorityBadgeColor(hit.priority)}>{hit.priority}</Badge> : null}
-            {cci ? <Badge color={cci.color}>{cci.label}</Badge> : null}
-          </>
-        }
-        {...(isWide
-          ? { selected: selectedHit?.recordId === hit.recordId, onSelect: () => selectHit(hit) }
-          : { href, onSelect: () => persistFeedReturnSearch(feedSearch) })}
-      />
-    )
-    const evidence = tiered.evidenceById.get(hit.recordId)
-    const canPin =
-      isWide &&
-      selectedHit &&
-      selectedHit.recordId !== hit.recordId &&
-      (hit.recordType === 'task' || hit.recordType === 'issue' || hit.recordType === 'feature')
-    if (!evidence && !canPin) return card
-    return (
-      <div key={hit.recordId} className="feed-route__row-wrap">
-        {card}
-        <div className="feed-route__row-extras">
-          {evidence && tiered.availability ? (
-            <SignalReadout evidence={evidence} availability={tiered.availability} mode="chips" />
-          ) : null}
-          {canPin ? (
-            <button
-              type="button"
-              className="feed-route__pin"
-              disabled={pins[hit.recordId] === 'pending' || pins[hit.recordId] === 'done'}
-              onClick={() => pinToSelected(selectedHit.recordId, hit.recordId)}
-              aria-label={`Pin ${hit.recordId} as related to ${selectedHit.recordId}`}
-            >
-              {pins[hit.recordId] === 'done' ? 'Pinned' : pins[hit.recordId] === 'error' ? 'Pin failed - retry' : 'Pin as related'}
-            </button>
-          ) : null}
-        </div>
-      </div>
-    )
-  }
+  const renderRow = (hit: SearchResultHit) =>
+    renderFeedRow(hit, {
+      projects,
+      isWide,
+      selectedHit,
+      onSelect: selectHit,
+      onLeave: () => persistFeedReturnSearch(feedSearch),
+      tiered,
+      pins,
+      onPin: pinToSelected,
+    })
 
   const resultsBody =
     isWide && filteredHits.length > 0 ? (
       <div className="feed-route__split">
         <div className="feed-route__list-scroll" ref={listRef}>
-          {visibleHits.map(renderFeedRow)}
+          {visibleHits.map(renderRow)}
           {visibleCount < filteredHits.length && (
             <p className="feed-route__scroll-hint">Scroll for more results…</p>
           )}
@@ -384,23 +261,12 @@ function LegacyFeedRoute() {
         </div>
       </div>
     ) : (
-      <div className="ev2-rc-grid">{visibleHits.map(renderFeedRow)}</div>
+      <div className="ev2-rc-grid">{visibleHits.map(renderRow)}</div>
     )
 
   return (
     <div className="feed-route">
-      <header className="feed-route__header">
-        {/* ENC-TSK-M82 (AC-3): truthful transport label — `LIVE` only while the
-            WSS is actually connected (connection_ack + open socket ⇒ phase
-            'connected'); the S3 snapshot/delta fallback reads honestly as
-            SNAPSHOT instead of a hardcoded, always-on LIVE. */}
-        <p className="feed-route__eyebrow">FEED · {feedTransportLabel(transportPhase)}</p>
-        <h1 className="feed-route__title">Results</h1>
-        <p className="feed-route__subtitle">
-          Search across every governed record type. Filters and scroll position are preserved on
-          your way back.
-        </p>
-      </header>
+      <FeedHeader />
 
       {staleNotice && (
         <div className="feed-route__stale">
@@ -410,45 +276,23 @@ function LegacyFeedRoute() {
         </div>
       )}
 
-      <div className="feed-route__toolbar">
-        <div className="feed-route__search">
-          <Autosuggest
-            value={q}
-            options={searchSuggestions}
-            placeholder="Search records or saved name…"
-            ariaLabel="Feed search"
-            onChange={(event) => {
-              markKeystroke()
-              patchFeedSearch({ q: event.detail.value, scroll: 0 })
-            }}
-          />
-        </div>
-        <label className="feed-route__sort">
-          <span>Sort</span>
-          <select
-            value={sort}
-            onChange={(event) => {
-              // ENC-TSK-N56 (ENC-TSK-N45 UAT follow-up): switch the sort
-              // immediately (client-side reorder via sortSearchHits) AND
-              // re-trigger the realtime feed snapshot fetch so the corpus is
-              // refreshed and re-flattened. The feed's tier/delta logic can
-              // otherwise leave gaps in a pure last-updated ordering; refetching
-              // pulls the authoritative set ordered by the selected sort.
-              patchFeedSearch({ sort: event.target.value as FeedSort, scroll: 0 })
-              refetchSnapshot()
-            }}
-          >
-            {SORT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <ButtonDropdown items={savedItems} onItemClick={(event) => handleSavedClick(event.detail.id)}>
-          Saved searches
-        </ButtonDropdown>
-      </div>
+      <FeedToolbar
+        q={q}
+        sort={sort}
+        suggestions={searchSuggestions}
+        savedItems={savedItems}
+        onSavedItemClick={handleSavedClick}
+        onQueryChange={(value) => {
+          markKeystroke()
+          patchFeedSearch({ q: value, scroll: 0 })
+        }}
+        onSortChange={(next) => {
+          // ENC-TSK-N56: switch the sort immediately (client-side reorder) AND re-trigger the realtime feed
+          // snapshot fetch so the corpus is refreshed and re-flattened.
+          patchFeedSearch({ sort: next, scroll: 0 })
+          refetchSnapshot()
+        }}
+      />
 
       <FeedPropertyFilter
         query={filterQuery}
@@ -462,49 +306,7 @@ function LegacyFeedRoute() {
         }
       />
 
-      <div className="feed-route__meta">
-        <span>
-          {filteredHits.length} hit{filteredHits.length === 1 ? '' : 's'}
-          {/* ENC-TSK-P60: server corpus total beside the local count makes
-              snapshot staleness visible instead of silent. */}
-          {serverCorpusTotal !== null ? ` · server corpus ${serverCorpusTotal}` : ''}
-          {tiered.hybridPending ? ' · hybrid loading…' : ''}
-        </span>
-        {tiered.hybridError && (
-          <span className="feed-route__meta-error">{tiered.hybridError.message}</span>
-        )}
-        {tiered.availability ? (
-          <DegradedBanner availability={tiered.availability} degraded={tiered.degraded} />
-        ) : null}
-        {tiered.serverDown ? <span role="status">Server search unavailable; showing local matches</span> : null}
-        {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
-          // ENC-ISS-513 / FND-01: this used to render inline, unconditionally
-          // visible, AND duplicated verbatim in the always-open Feed rail.
-          // It's the only copy now, and it's tucked behind a disclosure so
-          // the timing detail doesn't compete with the results themselves.
-          <details className="feed-route__telemetry">
-            <summary>Timing</summary>
-            {keystrokeP50 !== null && (
-              <div>
-                keystroke→suggest p50 {Math.round(keystrokeP50)}ms
-                {keystrokeP95 !== null ? ` / p95 ${Math.round(keystrokeP95)}ms` : ''}
-              </div>
-            )}
-            {localP50 !== null && (
-              <div>
-                request→page (local) p50 {Math.round(localP50)}ms
-                {localP95 !== null ? ` / p95 ${Math.round(localP95)}ms` : ''}
-              </div>
-            )}
-            {serverP50 !== null && (
-              <div>
-                request→page (server) p50 {Math.round(serverP50)}ms
-                {serverP95 !== null ? ` / p95 ${Math.round(serverP95)}ms` : ''}
-              </div>
-            )}
-          </details>
-        )}
-      </div>
+      <FeedMeta count={filteredHits.length} serverCorpusTotal={serverCorpusTotal} tiered={tiered} />
 
       {isHydrating && filteredHits.length === 0 && (
         <p className="feed-route__empty">Loading feed snapshot…</p>
