@@ -41,6 +41,7 @@ class ActionFeatureFlags:
     enable_lesson_primitive: bool = False
     enable_handoff_primitive: bool = False
     enable_component_proposal: bool = False
+    enable_recipe_primitive: bool = True  # appended last: emit_caps builds the all-flags set positionally
 
 
 def _minted(*names: str, description: str = "Minted server-side; never supply on input.") -> Dict[str, Any]:
@@ -252,6 +253,44 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         # the session heartbeat, so it is not read-only, but repeating it is harmless.
         coordination_actions["escalation.watch"] = _entry(
             "escalation_watch", "Poll escalation events", ADDITIVE_ONCE, flag=flag,
+        )
+
+    # DVP-TSK-968 / DVP-FTR-106: recipe primitive (tracker.recipe). Every mutating action takes
+    # dry_run (zero writes, minted ids null). Publish and retire are io gates in the hub: there
+    # is NO MCP action that approves or publishes directly.
+    if flags.enable_recipe_primitive:
+        flag = "enable_recipe_primitive"
+
+        def _out(base: Dict[str, Any], required: Any, **props: Any) -> Dict[str, Any]:
+            out = {"type": "object", "required": list(required), "properties": dict(base["properties"])}
+            out["properties"].update(props)
+            return out
+
+        execute_actions["recipe.create"] = _entry(
+            "recipe_create", "Create recipe or recipe version", CREATE, gov=True, flag=flag,
+            output=_out(_minted("recipe_id"), ["recipe_id", "version", "status", "content_hash"],
+                        version={"type": "string"}, status={"const": "draft"}, content_hash={"type": "string"}),
+        )
+        search_actions["recipe.get"] = _entry(
+            "recipe_get", "Get recipe", READ, flag=flag,
+            output={"type": "object", "properties": {"head": {"type": "object"}, "version": {"type": "object"}}},
+        )
+        search_actions["recipe.list"] = _entry(
+            "recipe_list", "List recipes", READ, flag=flag,
+            output={"type": "object", "properties": {"items": {"type": "array"}}},
+        )
+        execute_actions["recipe.validate"] = _entry(
+            "recipe_validate", "Validate recipe version", TRANSITION, gov=True, flag=flag,
+            output={"type": "object", "required": ["ok", "errors"],
+                    "properties": {"ok": {"type": "boolean"}, "errors": {"type": "array"}, "status": {"type": "string"}}},
+        )
+        execute_actions["recipe.publish_request"] = _entry(
+            "recipe_publish_request", "Request recipe publication (io gate)", CREATE, gov=True, flag=flag,
+            output=_out(_minted("escalation_id"), ["escalation_id"], status={"const": "pending"}),
+        )
+        execute_actions["recipe.deprecate"] = _entry(
+            "recipe_deprecate", "Deprecate or request retirement of a recipe version", TRANSITION, gov=True, flag=flag,
+            output=_out(_minted("escalation_id"), ["status"], status={"type": "string"}),
         )
 
     # ENC-FTR-052: Conditionally register lesson actions behind feature flag

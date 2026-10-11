@@ -11293,6 +11293,29 @@ for _legacy_subject_type in ("deploy_arc_change", "direct_state_override"):
     register_escalation_applier(_legacy_subject_type, _apply_escalation_via_tracker)
 
 
+def _apply_recipe_version_escalation(project_id: str, escalation_id: str,
+                                     escalation: Dict[str, Any], decider: str,
+                                     body: Dict[str, Any]) -> Dict[str, Any]:
+    """DVP-TSK-968 applier for subject.type recipe_version (publish / retire).
+
+    Delegates to the tracker recipe service, which re-reads the escalation and applies only
+    an approved decision that names this exact recipe version and content hash.
+    """
+    subject = _escalation_json_attr(escalation, "subject")
+    rec_id = str(subject.get("record_id") or "") if isinstance(subject, dict) else ""
+    if not rec_id:
+        return {"_status_code": 422, "status": "failed",
+                "error": "recipe_version escalation has no subject.record_id."}
+    return _invoke_tracker_mutation_api(
+        "POST", f"/api/v1/tracker/{project_id}/recipe/{rec_id}/apply",
+        body={"escalation_id": escalation_id, "decider": decider,
+              "write_source": {"provider": f"io:{decider}", "channel": "coordination_api"}},
+    )
+
+
+register_escalation_applier("recipe_version", _apply_recipe_version_escalation)
+
+
 def _append_escalation_log_entry(project_id: str, escalation_id: str,
                                  prev_entry: Dict[str, Any], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Append the post-execution entry; seq enforced by size(decision_log)."""

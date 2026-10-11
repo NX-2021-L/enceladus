@@ -239,6 +239,7 @@ ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fal
 # (DOC-5B888FCA43B8). Default ON: the request/read surface is inert unless
 # called and carries no privileged write path (the applier is io-approval-gated).
 ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag("enable_escalation_primitive", env_fallback="ENABLE_ESCALATION_PRIMITIVE", default=True)
+ENABLE_RECIPE_PRIMITIVE = _appconfig_flag("enable_recipe_primitive", env_fallback="ENABLE_RECIPE_PRIMITIVE", default=True)
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -6510,6 +6511,77 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# --- DVP-TSK-968 / DVP-FTR-106: recipe primitive (tracker.recipe) -----------------------
+# Server mints REC ids; every mutating call takes dry_run. Publish/retire are io gates in the
+# escalations hub (recipe.publish_request files the request; there is no approve action).
+
+
+def _recipe_ids(args: dict, need_id: bool = True):
+    import re as _re
+    project_id = str(args.get("project_id") or "").strip()
+    rec = str(args.get("recipe_id") or "").strip()
+    if not project_id:
+        return None, None, "Field 'project_id' is required."
+    if need_id and not rec:
+        return None, None, "Field 'recipe_id' is required."
+    if rec and not _re.fullmatch(r"[A-Za-z0-9_-]+", rec):
+        return None, None, "Field 'recipe_id' is malformed."
+    return project_id, rec, None
+
+
+async def _recipe_mutate(args: dict, tail: str, keys: tuple, need_id: bool = True, required: tuple = ()) -> list[TextContent]:
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+    project_id, rec, problem = _recipe_ids(args, need_id)
+    if problem:
+        return _result_text({"error": problem})
+    for name in required:
+        if args.get(name) in (None, "", [], {}):
+            return _result_text({"error": f"Field '{name}' is required."})
+    payload: Dict[str, Any] = {"governance_hash": args.get("governance_hash", "")}
+    for key in keys:
+        if args.get(key) is not None:
+            payload[key] = args[key]
+    if args.get("dry_run") is not None:
+        payload["dry_run"] = bool(args["dry_run"])
+    path = f"/{project_id}/recipe" + (f"/{rec}{tail}" if tail else "")
+    return _result_text(_tracker_api_request("POST", path, payload=payload))
+
+
+async def _recipe_create(args: dict) -> list[TextContent]:
+    return await _recipe_mutate(args, "", ("recipe_id", "name", "owner", "tags", "project_ids",
+                                           "related_feature_ids", "definition", "version"), need_id=False,
+                                           required=("name", "project_ids", "definition"))
+
+
+async def _recipe_validate(args: dict) -> list[TextContent]:
+    return await _recipe_mutate(args, "/validate", ("version",), required=("version",))
+
+
+async def _recipe_publish_request(args: dict) -> list[TextContent]:
+    return await _recipe_mutate(args, "/publish-request", ("version", "rationale", "content_hash"), required=("version", "rationale"))
+
+
+async def _recipe_deprecate(args: dict) -> list[TextContent]:
+    return await _recipe_mutate(args, "/deprecate", ("version", "reason", "target", "replaced_by"), required=("version", "reason"))
+
+
+async def _recipe_get(args: dict) -> list[TextContent]:
+    project_id, rec, problem = _recipe_ids(args)
+    if problem:
+        return _result_text({"error": problem})
+    return _result_text(_tracker_api_request("GET", f"/{project_id}/recipe/{rec}", query={"version": args.get("version")}))
+
+
+async def _recipe_list(args: dict) -> list[TextContent]:
+    project_id, _rec, problem = _recipe_ids(args, need_id=False)
+    if problem:
+        return _result_text({"error": problem})
+    query = {k: args.get(k) for k in ("serves_project_id", "status", "tag", "query", "limit")}
+    return _result_text(_tracker_api_request("GET", f"/{project_id}/recipe/list", query=query))
+
+
 # --- ENC-FTR-121 / ENC-TSK-J68: Escalations request/read surface ------------
 # escalation.request proposes a lifecycle-forbidden mutation for io approval.
 # The backend validates the envelope via its mutation-handler registry and
@@ -8250,6 +8322,7 @@ from mcp_server.tools.search import register_actions as register_search_actions,
 _ACTION_FLAGS = ActionFeatureFlags(
     enable_typed_relationships=ENABLE_TYPED_RELATIONSHIPS,
     enable_escalation_primitive=ENABLE_ESCALATION_PRIMITIVE,
+    enable_recipe_primitive=ENABLE_RECIPE_PRIMITIVE,
     enable_lesson_primitive=ENABLE_LESSON_PRIMITIVE,
     enable_handoff_primitive=ENABLE_HANDOFF_PRIMITIVE,
     enable_component_proposal=ENABLE_COMPONENT_PROPOSAL,
@@ -10457,6 +10530,12 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-121 / ENC-TSK-J68: Escalations request/read surface
     "escalation_request": _escalation_request,
+    "recipe_create": _recipe_create,
+    "recipe_get": _recipe_get,
+    "recipe_list": _recipe_list,
+    "recipe_validate": _recipe_validate,
+    "recipe_publish_request": _recipe_publish_request,
+    "recipe_deprecate": _recipe_deprecate,
     "escalation_get": _escalation_get,
     "escalation_list": _escalation_list,
     # ENC-FTR-121 / ENC-TSK-J71: session-scoped event polling

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-11T21:44:20Z",
+  "generatedAt": "2026-10-11T22:01:53Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -3614,6 +3614,409 @@
       },
       "requiresGovernanceHash": false,
       "via": "search"
+    },
+    {
+      "name": "recipe.create",
+      "title": "Create recipe or recipe version",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Existing recipe id (DVP-REC-001) to add a version or replace a DRAFT; omit to mint a new recipe."
+          },
+          "name": {
+            "type": "string",
+            "description": "Recipe slug ^[a-z][a-z0-9-]{2,62}$, unique per project, immutable."
+          },
+          "owner": {
+            "type": "string",
+            "description": "Owner principal id (defaults to the caller)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Free-form tags."
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Projects served; the home project is added."
+          },
+          "related_feature_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Features implemented (edge recipe-implements-feature)."
+          },
+          "definition": {
+            "type": "object",
+            "description": "Recipe definition: inputs, steps, tools, outputs, surfaces (DOC-1001EE849A72 s3)."
+          },
+          "version": {
+            "type": "string",
+            "description": "Semver; defaults to 1.0.0 for a new recipe, else the open draft or the next bump."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only: write nothing, mint nothing (recipe_id null)."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "name",
+          "project_ids",
+          "definition"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "recipe_id",
+          "version",
+          "status",
+          "content_hash"
+        ],
+        "properties": {
+          "recipe_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          },
+          "version": {
+            "type": "string"
+          },
+          "status": {
+            "const": "draft"
+          },
+          "content_hash": {
+            "type": "string"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe.deprecate",
+      "title": "Deprecate or request retirement of a recipe version",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Recipe id."
+          },
+          "version": {
+            "type": "string",
+            "description": "Semver to deprecate or retire."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why (required)."
+          },
+          "target": {
+            "type": "string",
+            "description": "deprecated (default) or retired (files an io gate)."
+          },
+          "replaced_by": {
+            "type": "string",
+            "description": "Replacement version or recipe id."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only: write nothing."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "recipe_id",
+          "version",
+          "reason"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "escalation_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe.get",
+      "title": "Get recipe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Recipe id (for example DVP-REC-001)."
+          },
+          "version": {
+            "type": "string",
+            "description": "Semver; defaults to latest_published."
+          }
+        },
+        "required": [
+          "project_id",
+          "recipe_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "head": {
+            "type": "object"
+          },
+          "version": {
+            "type": "object"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_recipe_primitive"
+    },
+    {
+      "name": "recipe.list",
+      "title": "List recipes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "serves_project_id": {
+            "type": "string",
+            "description": "Only recipes serving this project."
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by version status (draft, validated, published, deprecated, retired)."
+          },
+          "tag": {
+            "type": "string",
+            "description": "Filter by tag."
+          },
+          "query": {
+            "type": "string",
+            "description": "Substring match on name, id and tags."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum items (default 50, max 200)."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search",
+      "flag": "enable_recipe_primitive"
+    },
+    {
+      "name": "recipe.publish_request",
+      "title": "Request recipe publication (io gate)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Recipe id."
+          },
+          "version": {
+            "type": "string",
+            "description": "Validated semver to publish."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this version should be published (shown to io)."
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Optional pin check (sha256:...)."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Return the escalation that would be filed; file nothing."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "recipe_id",
+          "version",
+          "rationale"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "escalation_id"
+        ],
+        "properties": {
+          "escalation_id": {
+            "type": "string",
+            "x-io-minted": true,
+            "description": "Minted server-side; never supply on input."
+          },
+          "status": {
+            "const": "pending"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
+    },
+    {
+      "name": "recipe.validate",
+      "title": "Validate recipe version",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project id (for example 'enceladus' or 'devops')."
+          },
+          "recipe_id": {
+            "type": "string",
+            "description": "Recipe id."
+          },
+          "version": {
+            "type": "string",
+            "description": "Semver to validate."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Report errors without moving draft to validated."
+          }
+        },
+        "required": [
+          "governance_hash",
+          "project_id",
+          "recipe_id",
+          "version"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "ok",
+          "errors"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "requiresGovernanceHash": true,
+      "via": "execute",
+      "flag": "enable_recipe_primitive",
+      "dryRun": true
     },
     {
       "name": "reference.search",

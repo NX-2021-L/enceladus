@@ -273,6 +273,53 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         ["project_id"],
     ),
+    "recipe_create": _governed(
+        {
+            "project_id": _PROJECT,
+            "recipe_id": _str("Existing recipe id (DVP-REC-001) to add a version or replace a DRAFT; omit to mint a new recipe."),
+            "name": _str("Recipe slug ^[a-z][a-z0-9-]{2,62}$, unique per project, immutable."),
+            "owner": _str("Owner principal id (defaults to the caller)."),
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Free-form tags."},
+            "project_ids": {"type": "array", "items": {"type": "string"}, "description": "Projects served; the home project is added."},
+            "related_feature_ids": {"type": "array", "items": {"type": "string"}, "description": "Features implemented (edge recipe-implements-feature)."},
+            "definition": {"type": "object", "description": "Recipe definition: inputs, steps, tools, outputs, surfaces (DOC-1001EE849A72 s3)."},
+            "version": _str("Semver; defaults to 1.0.0 for a new recipe, else the open draft or the next bump."),
+            "dry_run": _bool("Validate only: write nothing, mint nothing (recipe_id null)."),
+        },
+        ["project_id", "name", "project_ids", "definition"],
+    ),
+    "recipe_get": _schema(
+        {"project_id": _PROJECT, "recipe_id": _str("Recipe id (for example DVP-REC-001)."),
+         "version": _str("Semver; defaults to latest_published.")},
+        ["project_id", "recipe_id"],
+    ),
+    "recipe_list": _schema(
+        {"project_id": _PROJECT, "serves_project_id": _str("Only recipes serving this project."),
+         "status": _str("Filter by version status (draft, validated, published, deprecated, retired)."),
+         "tag": _str("Filter by tag."), "query": _str("Substring match on name, id and tags."),
+         "limit": _int("Maximum items (default 50, max 200).")},
+        ["project_id"],
+    ),
+    "recipe_validate": _governed(
+        {"project_id": _PROJECT, "recipe_id": _str("Recipe id."), "version": _str("Semver to validate."),
+         "dry_run": _bool("Report errors without moving draft to validated.")},
+        ["project_id", "recipe_id", "version"],
+    ),
+    "recipe_publish_request": _governed(
+        {"project_id": _PROJECT, "recipe_id": _str("Recipe id."), "version": _str("Validated semver to publish."),
+         "rationale": _str("Why this version should be published (shown to io)."),
+         "content_hash": _str("Optional pin check (sha256:...)."),
+         "dry_run": _bool("Return the escalation that would be filed; file nothing.")},
+        ["project_id", "recipe_id", "version", "rationale"],
+    ),
+    "recipe_deprecate": _governed(
+        {"project_id": _PROJECT, "recipe_id": _str("Recipe id."), "version": _str("Semver to deprecate or retire."),
+         "reason": _str("Why (required)."),
+         "target": _str("deprecated (default) or retired (files an io gate)."),
+         "replaced_by": _str("Replacement version or recipe id."),
+         "dry_run": _bool("Validate only: write nothing.")},
+        ["project_id", "recipe_id", "version", "reason"],
+    ),
     "tracker_list_lessons": _schema(
         {
             "project_id": _PROJECT,
