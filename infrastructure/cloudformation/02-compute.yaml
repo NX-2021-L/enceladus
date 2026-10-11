@@ -41,6 +41,18 @@ Parameters:
       JSON allow-list of OIDC issuers whose ID tokens may be exchanged for a hub
       principal: [{"name","iss","jwks_uri","audiences":[...]}] for vagamod-keycloak,
       coach-cognito, think-iograph. Set per environment at deploy time.
+  # DVP-TSK-A17 part 2 (E4-R18): HubExchange issuer name -> producer principal for the tracker
+  # producer path, and the per-source producer allow-list (principal names, never client-claimed).
+  HubExchangeProducers:
+    Type: String
+    Default: '{"vagamod-keycloak":"vagamod","think-iograph":"think","coach-cognito":"coach"}'
+    Description: JSON map of hub exchange issuer name to the derived producer principal.
+  GateProducerPrincipals:
+    Type: String
+    Default: '{"vagamod":["vagamod"],"think":["think"],"coach":["coach"]}'
+    Description: >
+      JSON map of producer source to its allow-listed principals (GATE_PRODUCER_PRINCIPALS).
+      recipe-runner is internal-only (in-process flag) and is deliberately NOT listed.
   HubShellOrigins:
     Type: String
     Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
@@ -612,6 +624,12 @@ Resources:
           # resolves AppConfig-first with default=False, so this fallback is load-bearing
           # whenever AppConfig is unreachable.
           ENABLE_LESSON_PRIMITIVE: "true"
+          # DVP-TSK-A17 part 2 (E4-R18): HubExchange principals may create producer escalations.
+          HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
+          HUB_SHELL_ORIGINS: !Ref HubShellOrigins
+          HUB_EXCHANGE_SECRET_ARN: !Ref HubExchangeSecret
+          HUB_EXCHANGE_PRODUCERS: !Ref HubExchangeProducers
+          GATE_PRODUCER_PRINCIPALS: !Ref GateProducerPrincipals
       Tags:
         - Key: Project
           Value: enceladus
@@ -4673,6 +4691,11 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              - Sid: HubExchangeSecretRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref HubExchangeSecret
               - Sid: RecipeRunnerMcpApiKeyRead
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
