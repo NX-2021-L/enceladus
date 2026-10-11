@@ -1,7 +1,9 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { MarkdownContent, resolveIdHref } from './MarkdownContent'
+import { resolveIdHref } from './MarkdownContent'
+// Legacy-DOM assertions run against the frozen oracle; the kit's equality with it is KitMarkdownContent.parity.test.tsx.
+import { MarkdownContentLegacy as MarkdownContent } from './__parity__/MarkdownContentLegacy'
 
 /**
  * ENC-TSK-M32. No @testing-library/react in this package — react-dom/client
@@ -23,7 +25,6 @@ describe('MarkdownContent', () => {
 
   beforeEach(() => {
     // these assertions pin the legacy parser's DOM; kit parity lives in KitMarkdownContent.parity.test.tsx
-    window.localStorage.setItem('ev2.md.engine', 'legacy')
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -31,7 +32,6 @@ describe('MarkdownContent', () => {
   })
 
   afterEach(() => {
-    window.localStorage.removeItem('ev2.md.engine')
     act(() => root.unmount())
     container.remove()
   })
