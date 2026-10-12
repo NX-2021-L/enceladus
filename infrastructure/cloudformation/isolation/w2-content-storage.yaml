@@ -40,6 +40,24 @@ Resources:
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
             Action: "kms:*"
             Resource: "*"
+          # Any principal in this account may use the key, but only through S3 in this region (the
+          # aws/s3 managed-key pattern). Who can read or write content is decided by S3 grants on the
+          # bucket (02-compute.yaml), so roles need no separate KMS grants.
+          - Sid: AllowUseThroughS3ForAccountPrincipals
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
           # S3 uses the key on behalf of callers only for this account's requests through S3.
           - Sid: DenyUseOutsideS3
             Effect: Deny
