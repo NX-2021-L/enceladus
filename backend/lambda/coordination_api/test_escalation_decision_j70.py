@@ -38,7 +38,9 @@ MANAGED_CLAIMS = {"auth_mode": "managed-token"}
 # injected via ESCALATION_HUMAN_CLIENT_IDS (read per-call by the module).
 TEST_HUMAN_CLIENT_ID = "test-pwa-client-id"
 os.environ.setdefault("ESCALATION_HUMAN_CLIENT_IDS", TEST_HUMAN_CLIENT_ID)
+import time as _time_mod  # noqa: E402
 COGNITO_CLAIMS = {
+    "auth_time": int(_dt.datetime(2026, 7, 2, 4, 58, tzinfo=_dt.timezone.utc).timestamp()),   # 2 min before the pinned clock
     "auth_mode": "cognito",
     "sub": "abc-123",
     "email": "io@jreese.net",
@@ -113,8 +115,12 @@ def _fake_ddb(escalation=None, target=None, decision_raises=None):
     return fake
 
 
-def _decision_event(body=None):
-    return {"body": json.dumps(body or {}), "queryStringParameters": None}
+def _decision_event(body=None, claims=None):
+    body = dict(body or {})
+    auth_time = (claims or COGNITO_CLAIMS).get("auth_time")
+    if "stepUp" not in body and auth_time:
+        body["stepUp"] = {"method": "cognito_max_age", "auth_time": auth_time}   # DVP-TSK-980: high-risk cards need a fresh proof
+    return {"body": json.dumps(body), "queryStringParameters": None}
 
 
 class TestNonDelegableGate(unittest.TestCase):
@@ -334,7 +340,7 @@ class TestEscalationApproverAllowlist(unittest.TestCase):
              mock.patch.object(coordination_lambda, "_load_escalation_approver_allowlist",
                                 return_value=allowlist):
             resp = coordination_lambda._handle_escalation_decision(
-                "enceladus", "ENC-ESC-001", decision, _decision_event(body), claims)
+                "enceladus", "ENC-ESC-001", decision, _decision_event(body, claims), claims)
         return resp, ddb, invoke
 
 

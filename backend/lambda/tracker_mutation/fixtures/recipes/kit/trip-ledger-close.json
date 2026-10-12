@@ -1,0 +1,115 @@
+{
+  "name": "trip-ledger-close",
+  "version": "1.0.0",
+  "content_hash": "sha256:1c602318d85289a05a7dfc272a130b2755644c1078f0a478f5704838222f5fd9",
+  "definition": {
+    "description": "Look up a trip's flights, have a human pick and confirm the flight, then reconcile the trip window's statement lines. Bound to the real io-travel ids (search_flights, get_flight): the RP-0 sketch's travel.get_trip and travel.close_trip do not exist.",
+    "execution": "deterministic",
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trip_city",
+        "date_from",
+        "date_to"
+      ],
+      "properties": {
+        "trip_city": {
+          "type": "string"
+        },
+        "date_from": {
+          "type": "string"
+        },
+        "date_to": {
+          "type": "string"
+        },
+        "account_uid": {
+          "type": "string"
+        }
+      }
+    },
+    "outputs": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "flight_id"
+        ],
+        "properties": {
+          "flight_id": {
+            "type": "string"
+          }
+        }
+      },
+      "from": {
+        "flight_id": "$confirm.inputs.flight_id"
+      }
+    },
+    "steps": [
+      {
+        "id": "trip",
+        "action": "search_flights",
+        "arguments": {
+          "trip_city": "$inputs.trip_city",
+          "date_from": "$inputs.date_from",
+          "date_to": "$inputs.date_to"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "confirm",
+        "gate": "human",
+        "prompt": "Pick the flight to reconcile and confirm.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "flight_id",
+            "confirmed"
+          ],
+          "properties": {
+            "flight_id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "cancelled",
+        "on_expire": "expired"
+      },
+      {
+        "id": "flight",
+        "action": "get_flight",
+        "arguments": {
+          "flight_id": "$confirm.inputs.flight_id"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "reconcile",
+        "action": "finance_reconcile_statement_lines",
+        "arguments": {
+          "since": "$inputs.date_from",
+          "until": "$inputs.date_to",
+          "account_uid": "$inputs.account_uid",
+          "dry_run": false
+        },
+        "on_error": "abort"
+      }
+    ],
+    "surfaces": [
+      "io-finance",
+      "io-travel"
+    ],
+    "tools": [
+      "finance_reconcile_statement_lines",
+      "get_flight",
+      "search_flights"
+    ]
+  }
+}

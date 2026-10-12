@@ -22,13 +22,9 @@ vi.mock('../api/projects', async () => {
   const actual = await vi.importActual<typeof import('../api/projects')>('../api/projects')
   return { ...actual, fetchProjectsList: vi.fn().mockResolvedValue([]) }
 })
-vi.mock('../api/escalations', async () => {
-  const actual = await vi.importActual<typeof import('../api/escalations')>('../api/escalations')
-  return { ...actual, fetchEscalationsFeed: vi.fn().mockResolvedValue({ items: [], count: 0 }) }
-})
 
 import { EscalationsRoute } from './EscalationsRoute'
-import { GateInboxPanel, gateFetch, isLegacyEscalations } from './GateInboxPanel'
+import { GateInboxPanel, gateFetch } from './GateInboxPanel'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 
 const LIST = readFileSync('node_modules/@io-kit/gates/fixtures/list-star.json', 'utf8')
@@ -60,14 +56,6 @@ afterEach(() => {
   act(() => root.unmount())
   container.remove()
   window.history.replaceState(null, '', '/')
-})
-
-describe('isLegacyEscalations', () => {
-  it('is true only for ?escalations=legacy', () => {
-    expect(isLegacyEscalations('?escalations=legacy')).toBe(true)
-    expect(isLegacyEscalations('?escalations=kit')).toBe(false)
-    expect(isLegacyEscalations('')).toBe(false)
-  })
 })
 
 describe('gateFetch', () => {
@@ -104,11 +92,11 @@ describe('EscalationsRoute on the kit inbox', () => {
     expect(listCalls().some((c) => /kind=tool_call/.test(String(c[0])))).toBe(true)
   })
 
-  it('renders the legacy decide page behind ?escalations=legacy', async () => {
+  it('ignores the retired ?escalations=legacy flag: the kit inbox is the only renderer (DVP-TSK-981)', async () => {
     window.history.replaceState(null, '', '/escalations?escalations=legacy')
     await mount(<EscalationsRoute />)
-    expect(container.querySelector('[data-testid="gate-inbox-panel"]')).toBeNull()
-    expect(listCalls().length).toBe(0)
+    expect(container.querySelector('[data-testid="gate-inbox-panel"]')).not.toBeNull()
+    expect(listCalls().length).toBeGreaterThan(0)
   })
 
   it('refreshes in place when an escalation record event arrives (realtime)', async () => {

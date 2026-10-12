@@ -6,20 +6,13 @@ import { Tabs } from '../components/StripTabs'
 import { PageHeader } from '../components/PageHeader'
 import { feedCorpusByTypeQueryOptions, feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
 import { recordQueryOptions } from '../api/queryOptions'
-import { fetchEscalations } from '../api/coordination'
-import {
-  fetchAwaitingCheckoutCountAll,
-  fetchOpenP0P1Count,
-  fetchPausedApprovals,
-  fetchStaleLocks,
-} from '../api/homeQueue'
+import { fetchAwaitingCheckoutCountAll, fetchOpenP0P1Count } from '../api/homeQueue'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { GateInboxPanel, isLegacyEscalations } from './GateInboxPanel'
-import { pausedApprovalRows, pendingEscalationRows, staleLockRows, type QueueRow } from './homeQueue'
+import { GateInboxPanel } from './GateInboxPanel'
 import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedUrl'
 import {
   DASHBOARD_RECORD_TYPES,
@@ -147,58 +140,14 @@ export const OPEN_TASKS_SEARCH: FeedRouteSearch = {
   }),
 }
 
-function QueueCard({ row }: { row: QueueRow }) {
-  if (row.gap) {
-    return (
-      <div className="home-route__gap-card">
-        <span className="home-route__gap-badge">Data gap</span>
-        <p className="home-route__gap-title">{row.title}</p>
-        <p className="home-route__gap-desc">{row.description}</p>
-      </div>
-    )
-  }
-  return (
-    <RecordCard
-      recordId={row.id}
-      kindLabel={row.kindLabel}
-      title={row.title}
-      description={row.description}
-      status={row.status}
-      href={row.href}
-      variant="standard"
-    />
-  )
-}
-
 export function HomeRoute() {
   useDocumentTitle('Home')
   const [recentTabId, setRecentTabId] = useState('entry-cards')
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const projectId = projects[0]?.project_id ?? 'enceladus'
 
-  // "Requires io" queue — escalations share the exact queryKey CoordinationRoute
-  // uses for its Escalations tab, so the two pages share one cache entry.
-  const escalationsQuery = useQuery({
-    queryKey: ['coordination', 'escalations', projectId] as const,
-    queryFn: ({ signal }) => fetchEscalations(projectId, { signal }),
-  })
-  // ENC-TSK-M27: paused v3-prod Environment approvals + stale-checkout locks,
-  // replacing the M19 "Data gap" placeholder rows with live fetches.
-  const pausedApprovalsQuery = useQuery({
-    queryKey: ['home', 'queue', 'paused-approvals'] as const,
-    queryFn: ({ signal }) => fetchPausedApprovals({ signal }),
-  })
-  const staleLocksQuery = useQuery({
-    queryKey: ['home', 'queue', 'stale-locks'] as const,
-    queryFn: ({ signal }) => fetchStaleLocks({ signal }),
-  })
-  const legacyQueue = isLegacyEscalations()
-  const queueRows: QueueRow[] = [
-    ...pendingEscalationRows(escalationsQuery.data ?? []),
-    ...pausedApprovalRows(pausedApprovalsQuery.data ?? []),
-    ...staleLockRows(staleLocksQuery.data ?? []),
-  ]
+  // "Requires io" queue: DVP-TSK-981 removed the legacy ESC-only rows (escalations + paused approvals +
+  // stale locks fetched here); the kit GateInboxPanel below reads every project and every derived kind.
 
   // Actionable counts strip.
   const openP0P1Query = useQuery({
@@ -360,23 +309,9 @@ export function HomeRoute() {
       <section className="home-route__queue" aria-label="Requires io">
         <div className="home-route__section-label home-route__section-label--alert">
           Requires io
-          <span className="home-route__section-hint">
-            {legacyQueue
-              ? `${queueRows.length} item${queueRows.length === 1 ? '' : 's'} only the principal can unblock`
-              : 'all projects, every kind'}
-          </span>
+          <span className="home-route__section-hint">all projects, every kind</span>
         </div>
-        {!legacyQueue ? (
-          <GateInboxPanel compact />
-        ) : escalationsQuery.isLoading ? (
-          <p className="home-route__empty">Loading escalations…</p>
-        ) : (
-          <div className="home-route__queue-list">
-            {queueRows.map((row) => (
-              <QueueCard key={row.id} row={row} />
-            ))}
-          </div>
-        )}
+        <GateInboxPanel compact />
       </section>
 
       <section className="home-route__counts" aria-label="Actionable counts">

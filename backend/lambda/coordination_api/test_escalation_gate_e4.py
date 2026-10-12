@@ -44,9 +44,10 @@ class TestDecideFailClosedExpiry(unittest.TestCase):
              mock.patch.object(coord, "_gate_now", return_value=now), \
              mock.patch.object(coord, "_invoke_tracker_mutation_api", invoke), \
              mock.patch.object(coord, "_load_escalation_approver_allowlist", return_value={"io@jreese.net"}):
+            caller = dict(claims or COGNITO_CLAIMS, auth_time=int(now.timestamp()) - 60)
             resp = coord._handle_escalation_decision(
-                "enceladus", "ENC-ESC-001", decision, _decision_event({"guidance_note": "n"}),
-                claims or COGNITO_CLAIMS)
+                "enceladus", "ENC-ESC-001", decision, _decision_event({"guidance_note": "n"}, caller),
+                caller)
         return resp, ddb, invoke
 
     def test_expired_legacy_escalation_cannot_be_approved(self):

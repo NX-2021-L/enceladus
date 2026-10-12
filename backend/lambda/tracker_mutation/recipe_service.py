@@ -22,6 +22,7 @@ Binding grammar (whole-value only, no interpolation): a string value that starts
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -36,17 +37,20 @@ SOURCE_PRINCIPAL = "recipe-runner"
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REC_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,11}-REC-[0-9]{3,}$")
-STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
+STEP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,62}$")      # RP-0 s4 id grammar (the stricter lowercase form is a subset)
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-BINDING_RE = re.compile(r"^\$(?P<root>[A-Za-z][A-Za-z0-9_-]*)(?P<rest>(?:[./]\S*)?)$")
+BINDING_RE = re.compile(r"^\$(?P<root>[A-Za-z0-9_][A-Za-z0-9_-]*)(?P<rest>(?:[./]\S*)?)$")
 
 STATUSES = ("draft", "validated", "published", "deprecated", "retired")
 SURFACES = ("enceladus", "io-finance", "io-travel", "io-graph")
 GATE_KINDS = ("escalation", "tool_call", "stale_lock", "reconciliation", "acceptance", "limit", "security")
 JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
 DEF_KEYS = {"execution", "description", "inputs", "outputs", "steps", "tools", "surfaces"}
-STEP_KEYS = {"id", "type", "description", "action", "surface", "arguments", "compensate", "on_error", "gate"}
-GATE_KEYS = {"prompt", "inputs", "sensitive", "escalation_kind", "timeout", "on_reject", "on_expire"}
+STEP_KEYS = {"id", "type", "description", "action", "surface", "arguments", "compensate", "on_error", "gate", "idempotency"}
+# RP-0 s4 GateStep is flat: {id, gate: human, prompt, inputs, approvers?, sensitive?, timeout, on_reject, on_expire?, escalation_kind?}
+RP0_GATE_STEP_KEYS = {"id", "gate", "prompt", "inputs", "approvers", "sensitive", "timeout", "on_reject", "on_expire", "escalation_kind", "description"}
+RUN_FIELDS = ("run_id", "started_by", "project_id", "recipe_id", "version")        # $run.<field> binding root
+GATE_KEYS = {"prompt", "inputs", "sensitive", "escalation_kind", "timeout", "on_reject", "on_expire", "approvers"}
 MAX_DEFINITION_BYTES = 256 * 1024
 MAX_STEPS = 50
 HISTORY_CAP = 200
@@ -113,6 +117,31 @@ def _append_history(head: Dict[str, Any], actor: str, action: str, version: Opti
     hist = list(head.get("history") or [])
     hist.append({"actor": actor, "action": action, "version": version, "at": at})
     head["history"] = hist[-HISTORY_CAP:]
+
+
+def is_rp0_gate(step: Any) -> bool:
+    """True for the RP-0 s4 flat GateStep ({id, gate: "human", prompt, ...}); the internal form has a gate object."""
+    return isinstance(step, dict) and isinstance(step.get("gate"), str)
+
+
+def normalize_step(step: Any) -> Any:
+    """Internal form of one step, as a copy: the RP-0 s4 GateStep becomes {id, type: gate, gate: {...}}.
+    Used at validation and run time only; the stored definition (and its content_hash) is never rewritten."""
+    if not is_rp0_gate(step):
+        return copy.deepcopy(step)
+    out: Dict[str, Any] = {"id": step.get("id"), "type": "gate",
+                           "gate": {k: copy.deepcopy(step[k]) for k in GATE_KEYS if k in step}}
+    if "description" in step:
+        out["description"] = step["description"]
+    return out
+
+
+def normalize_definition(definition: Any) -> Any:
+    if not isinstance(definition, dict) or not isinstance(definition.get("steps"), list):
+        return copy.deepcopy(definition)
+    out = {k: copy.deepcopy(v) for k, v in definition.items() if k != "steps"}
+    out["steps"] = [normalize_step(st) for st in definition["steps"]]
+    return out
 
 
 def derive_tools(definition: Dict[str, Any]) -> List[str]:
@@ -256,6 +285,8 @@ def parse_binding(value: str) -> Optional[Tuple[str, List[str]]]:
 
 def iter_values(value: Any, path: str) -> Iterator[Tuple[str, Any]]:
     yield path, value
+    if isinstance(value, dict) and set(value) == {"$literal"}:
+        return                                   # escape hatch: contents are data, not bindings
     if isinstance(value, dict):
         for k, v in value.items():
             yield from iter_values(v, f"{path}/{k}")
@@ -274,7 +305,16 @@ def _check_bindings(value: Any, path: str, scope: Dict[str, Any], err: Callable[
             continue
         root, segs = parsed
         visible = scope["visible"]
-        if root == "inputs":
+        if root.isdigit():                                       # RP-0 N index alias: 0-based position in steps
+            order = scope.get("order") or []
+            if int(root) >= len(order) or not order[int(root)]:
+                err(p, "UNKNOWN_BINDING_ROOT", f"'{v}': index alias {root} is outside the {len(order)} steps.")
+                continue
+            root = order[int(root)]
+        if root == "run":
+            if not segs or segs[0] not in RUN_FIELDS:
+                err(p, "BINDING_UNRESOLVED", f"'{v}': $run exposes only {list(RUN_FIELDS)}.")
+        elif root == "inputs":
             props = scope["input_props"]
             if segs and props is not None and segs[0] not in props:
                 err(p, "UNKNOWN_INPUT", f"'{v}' references input '{segs[0]}' that inputs.properties does not declare.")
@@ -380,6 +420,7 @@ def validate_definition(definition: Any, registry: Optional[Dict[str, Set[str]]]
         err("/steps", "TOO_MANY_STEPS", f"at most {MAX_STEPS} steps.")
 
     all_ids = [s.get("id") for s in steps if isinstance(s, dict) and isinstance(s.get("id"), str)]
+    order = [st.get("id") if isinstance(st, dict) and isinstance(st.get("id"), str) else None for st in steps]
     visible: Dict[str, Dict[str, Any]] = {}
     seen: Set[str] = set()
     for i, step in enumerate(steps):
@@ -387,27 +428,32 @@ def validate_definition(definition: Any, registry: Optional[Dict[str, Set[str]]]
         if not isinstance(step, dict):
             err(path, "SHAPE", "a step must be an object.")
             continue
+        rp0 = is_rp0_gate(step)
         for key in step:
-            if key not in STEP_KEYS:
+            if key not in (RP0_GATE_STEP_KEYS if rp0 else STEP_KEYS):
                 err(f"{path}/{key}", "UNKNOWN_KEY", f"unknown step key '{key}'.")
         sid = step.get("id")
-        if not isinstance(sid, str) or not STEP_ID_RE.match(sid) or sid in ("inputs", "decision"):
+        if not isinstance(sid, str) or not STEP_ID_RE.match(sid) or sid in ("inputs", "decision", "run"):
             err(f"{path}/id", "STEP_ID_INVALID", "step id must match ^[a-z][a-z0-9_-]{0,62}$ and not be 'inputs'.")
             sid = None
         elif sid in seen:
             err(f"{path}/id", "STEP_ID_DUPLICATE", f"step id '{sid}' is used twice.")
         scope = {"visible": visible, "all_ids": set(all_ids), "input_props": input_props,
-                 "self_id": sid, "allow_self": False}
-        stype = step.get("type", "action")
+                 "self_id": sid, "allow_self": False, "order": order}
+        stype = "gate" if rp0 else step.get("type", "action")
         if stype == "action":
+            if "gate" in step:
+                err(f"{path}/gate", "SHAPE", "exactly one of action or gate.")
+            if "idempotency" in step and step["idempotency"] not in ("at_least_once", "at_most_once"):
+                err(f"{path}/idempotency", "SHAPE", "idempotency must be at_least_once or at_most_once.")
             _check_action_ref(step.get("action"), step.get("surface"), path, surfaces, registry, err)
             args = step.get("arguments", {})
             if not isinstance(args, dict):
                 err(f"{path}/arguments", "SHAPE", "arguments must be an object.")
             else:
                 _check_bindings(args, f"{path}/arguments", scope, err)
-            if step.get("on_error", "abort") != "abort":
-                err(f"{path}/on_error", "ON_ERROR_UNSUPPORTED", "only on_error 'abort' (with reverse compensate) is supported.")
+            if step.get("on_error", "abort") not in ("abort", "continue"):
+                err(f"{path}/on_error", "ON_ERROR_UNSUPPORTED", "on_error must be abort (reverse compensate) or continue.")
             comp = step.get("compensate")
             if comp is not None:
                 if not isinstance(comp, dict) or set(comp) - {"action", "surface", "arguments"}:
@@ -423,30 +469,38 @@ def validate_definition(definition: Any, registry: Optional[Dict[str, Set[str]]]
             if sid:
                 visible[sid] = {"type": "action", "gate_props": None}
         elif stype == "gate":
-            gate = step.get("gate")
+            gate = step if rp0 else step.get("gate")
+            gpath = path if rp0 else f"{path}/gate"
             gprops: Optional[Set[str]] = None
             if not isinstance(gate, dict):
-                err(f"{path}/gate", "GATE_REQUIRED", "a gate step needs a gate object.")
+                err(gpath, "GATE_REQUIRED", "a gate step needs a gate object.")
             else:
-                for key in gate:
+                if rp0 and step.get("gate") != "human":
+                    err(f"{path}/gate", "GATE_REQUIRED", "a gate step is {gate: human, prompt, ...}.")
+                for key in ([] if rp0 else gate):
                     if key not in GATE_KEYS:
-                        err(f"{path}/gate/{key}", "UNKNOWN_KEY", f"unknown gate key '{key}'.")
+                        err(f"{gpath}/{key}", "UNKNOWN_KEY", f"unknown gate key '{key}'.")
                 if not (isinstance(gate.get("prompt"), str) and gate["prompt"].strip()):
-                    err(f"{path}/gate/prompt", "GATE_PROMPT_REQUIRED", "gate.prompt must be a non-empty string.")
+                    err(f"{gpath}/prompt", "GATE_PROMPT_REQUIRED", "gate.prompt must be a non-empty string.")
                 if gate.get("escalation_kind", "acceptance") not in GATE_KINDS:
-                    err(f"{path}/gate/escalation_kind", "GATE_KIND_INVALID", f"escalation_kind must be one of {list(GATE_KINDS)}.")
+                    err(f"{gpath}/escalation_kind", "GATE_KIND_INVALID", f"escalation_kind must be one of {list(GATE_KINDS)}.")
                 if "sensitive" in gate and not isinstance(gate["sensitive"], bool):
-                    err(f"{path}/gate/sensitive", "SHAPE", "sensitive must be a boolean.")
+                    err(f"{gpath}/sensitive", "SHAPE", "sensitive must be a boolean.")
                 tmo = gate.get("timeout")
                 if tmo is not None and not (isinstance(tmo, dict) and isinstance(tmo.get("seconds"), int)
                                             and not isinstance(tmo.get("seconds"), bool) and 1 <= tmo["seconds"] <= 2592000):
-                    err(f"{path}/gate/timeout", "SHAPE", "timeout must be {seconds: 1..2592000}.")
+                    err(f"{gpath}/timeout", "SHAPE", "timeout must be {seconds: 1..2592000}.")
                 if gate.get("on_reject", "failed") not in ("failed", "cancelled"):
-                    err(f"{path}/gate/on_reject", "SHAPE", "on_reject must be failed or cancelled.")
+                    err(f"{gpath}/on_reject", "SHAPE", "on_reject must be failed or cancelled.")
                 if gate.get("on_expire", "expired") not in ("expired", "failed", "cancelled"):
-                    err(f"{path}/gate/on_expire", "SHAPE", "on_expire must be expired, failed or cancelled.")
-                gprops = _check_json_schema_object(gate.get("inputs"), f"{path}/gate/inputs", err)
-            for forbidden in ("action", "arguments", "compensate"):
+                    err(f"{gpath}/on_expire", "SHAPE", "on_expire must be expired, failed or cancelled.")
+                if rp0 and tmo is None:
+                    err(f"{gpath}/timeout", "SHAPE", "timeout {seconds} is required on a gate step.")
+                apv = gate.get("approvers")
+                if apv is not None and not (isinstance(apv, list) and all(isinstance(x, str) and x for x in apv)):
+                    err(f"{gpath}/approvers", "SHAPE", "approvers must be an array of principals.")
+                gprops = _check_json_schema_object(gate.get("inputs"), f"{gpath}/inputs", err)
+            for forbidden in ("action", "arguments", "compensate", "on_error", "idempotency"):
                 if forbidden in step:
                     err(f"{path}/{forbidden}", "SHAPE", f"a gate step cannot carry '{forbidden}'.")
             if sid:
