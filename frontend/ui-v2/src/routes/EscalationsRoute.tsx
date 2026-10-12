@@ -9,11 +9,12 @@
  * PageHeader (layout contract); the cockpit reports its pending count up.
  */
 import { useState } from 'react'
+import { useParams } from '@tanstack/react-router'
 import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { EscalationsCockpit } from './EscalationsCockpit'
 
-export function EscalationsRoute() {
+export function EscalationsRoute({ escalationId }: { escalationId?: string } = {}) {
   useDocumentTitle('Escalations')
   const [pending, setPending] = useState<number | null>(null)
   return (
@@ -23,7 +24,13 @@ export function EscalationsRoute() {
         count={pending === null ? undefined : `${pending} pending`}
         description="Every gate from every project that needs a human verdict. Approve or deny with the exact call shown; each verdict is bound to the card's version and recorded as a receipt."
       />
-      <EscalationsCockpit onPendingCount={setPending} />
+      <EscalationsCockpit focusId={escalationId} onPendingCount={setPending} />
     </div>
   )
+}
+
+/** /escalations/$escalationId: the push deep link (E4-R31). */
+export function EscalationDeepRoute() {
+  const { escalationId } = useParams({ strict: false }) as { escalationId?: string }
+  return <EscalationsRoute escalationId={escalationId} />
 }

@@ -20,13 +20,16 @@ import { useCanExecute } from '../auth/useCan'
 import { useEscalationRealtimeNonce } from './GateInboxPanel'
 import { cardNeedsStepUp, decideCard, describeError, describeReceipt, fetchCockpitFeed, type CockpitNotice } from './escalationCockpit'
 import { countByBucket, filterRows, toEscalationRows, type EscalationBucket, type EscalationRow } from './escalationRows'
+import { PushNudge } from '@io-kit/notify/react'
+import '@io-kit/notify/notify.css'
+import { notifyApi } from '../notifications/notifyApi'
 import './escalations.css'
 
 const POLL_INTERVAL_MS = 30_000
 const COMPACT_LIMIT = 8
 const FEED_KEY = 'escalation-cockpit'
 
-export function EscalationsCockpit({ compact = false, onPendingCount }: { compact?: boolean; onPendingCount?: (n: number) => void }) {
+export function EscalationsCockpit({ compact = false, onPendingCount, focusId }: { compact?: boolean; onPendingCount?: (n: number) => void; focusId?: string }) {
   const queryClient = useQueryClient()
   const [bucket, setBucket] = useState<EscalationBucket>('pending')
   const [openKey, setOpenKey] = useState<string | null>(null)
@@ -51,6 +54,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount }: { compac
   const pendingCount = counts.pending
   useEffect(() => { onPendingCount?.(pendingCount) }, [pendingCount, onPendingCount])
   const visibleRows = compact ? filterRows(rows, 'pending').slice(0, COMPACT_LIMIT) : filterRows(rows, bucket)
+  const focusRow = focusId ? (rows.find((r) => r.id === focusId) ?? null) : null
   const openRow = openKey ? (rows.find((r) => r.key === openKey) ?? null) : null
 
   function closeModal() {
@@ -124,8 +128,51 @@ export function EscalationsCockpit({ compact = false, onPendingCount }: { compac
   const canAct = Boolean(openRow?.decidable && canDecide)
   const needsCandidate = Boolean(openRow?.card.candidates) && candidateId === undefined
 
+  const focusVerdicts = focusRow ? allowedVerdicts(focusRow.card) : []
+  const focusCanAct = Boolean(focusRow?.decidable && canDecide)
+
   return (
     <>
+      {!compact && <PushNudge api={notifyApi} />}
+      {focusId && !feedQuery.isPending && !focusRow && (
+        <div className="ev2-esc__notice">
+          <Alert type="warning" header={`${focusId} was not found`}>It is not in the pending queue or the recent decisions; it may have expired or belong to a project you cannot see.</Alert>
+        </div>
+      )}
+      {focusRow && (
+        <div className="ev2-esc__focus" data-testid="escalation-focus">
+          <div className="ev2-esc__focus-head">
+            <span className="ev2-esc__mono">{focusRow.id}</span> <Badge color="teal">{focusRow.projectId}</Badge> <Badge color="amber">{focusRow.kind.replace('_', ' ')}</Badge> <span className="ev2-esc__mono">risk {focusRow.risk}</span> <StatusChip status={focusRow.status} />
+          </div>
+          <div className="ev2-esc__prose">{focusRow.title}</div>
+          {focusCanAct ? (
+            <>
+              {focusRow.card.family === 'decision' && (
+                <textarea
+                  className="ev2-esc__textarea" rows={1} value={note} disabled={deciding}
+                  placeholder="Guidance note (required to deny)" aria-label="Guidance note"
+                  onChange={(event) => setNote(event.target.value)}
+                />
+              )}
+              <div className="ev2-esc__actions">
+                {focusVerdicts.includes('deny') && (
+                  <Button variant="normal" disabled={deciding || note.trim() === ''} onClick={() => void submit(focusRow, deny(note))}>Deny</Button>
+                )}
+                {focusVerdicts.includes('approve') && (
+                  <Button variant="primary" disabled={deciding || Boolean(focusRow.card.candidates) || focusRow.driftDetected} onClick={() => void submit(focusRow, approve(undefined))}>Approve</Button>
+                )}
+                {!focusVerdicts.includes('approve') && focusVerdicts.includes('ack') && (
+                  <Button variant="primary" disabled={deciding} onClick={() => void submit(focusRow, { type: 'ack' })}>Acknowledge</Button>
+                )}
+                <Button variant="link" onClick={() => setOpenKey(focusRow.key)}>Details</Button>
+              </div>
+              {cardNeedsStepUp(focusRow.card) && <p className="ev2-esc__hint">Deciding asks you to re-authenticate first (step-up).</p>}
+            </>
+          ) : (
+            <div className="ev2-esc__actions ev2-esc__actions--closed">This escalation is {focusRow.status}: decisions are only available while it is pending. <Button variant="link" onClick={() => setOpenKey(focusRow.key)}>Details</Button></div>
+          )}
+        </div>
+      )}
       {notice && (
         <div className="ev2-esc__notice">
           <Alert type={notice.type} header={notice.header} dismissible onDismiss={() => setNotice(null)}>

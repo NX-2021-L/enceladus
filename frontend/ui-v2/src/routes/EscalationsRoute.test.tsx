@@ -194,3 +194,23 @@ describe('home requires-io slot', () => {
     expect(String(listCalls()[0][0])).toContain('project_id=*')
   })
 })
+
+describe('push deep link (DVP-TSK-A24)', () => {
+  it('/escalations/ESC-1 opens that escalation with Approve/Deny rendered first', async () => {
+    await mount(<EscalationsRoute escalationId="DVP-ESC-100" />)
+    const focus = container.querySelector('[data-testid="escalation-focus"]')
+    expect(focus).toBeTruthy()
+    expect(focus!.textContent).toContain('DVP-ESC-100')
+    expect(byText('[data-testid="escalation-focus"] button', 'Approve')).toBeTruthy()
+    expect(focus!.querySelector('textarea[aria-label="Guidance note"]')).toBeTruthy()
+    expect(byText('[data-testid="escalation-focus"] button', 'Deny')).toBeTruthy()
+    // the focus panel precedes the queue in document order, so it is above the fold on a phone
+    expect(container.querySelector('[data-testid="escalation-focus"]')!.compareDocumentPosition(container.querySelector('table, [role="tablist"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await click(byText('[data-testid="escalation-focus"] button', 'Approve'))
+    expect(posts().length).toBe(1)
+  })
+  it('an unknown id says so', async () => {
+    await mount(<EscalationsRoute escalationId="NOPE-1" />)
+    expect(container.textContent).toContain('NOPE-1 was not found')
+  })
+})
