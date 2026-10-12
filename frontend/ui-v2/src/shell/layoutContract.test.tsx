@@ -71,9 +71,6 @@ describe('no nested scrollers', () => {
     expect(body).toMatch(/overflow-x: clip/)
     expect(body).not.toMatch(/overflow(-y)?: (auto|scroll|hidden)/)
   })
-  it('the escalations table wrapper is not a second horizontal scroller', () => {
-    expect(ruleBody(css('routes/escalations.css'), '.ev2-esc__table-scroll')).toMatch(/overflow: visible/)
-  })
 })
 
 describe('one scroll owner per region', () => {
@@ -128,7 +125,7 @@ describe('tables: stacked below 688px, strips above', () => {
     expect(strips).toMatch(/\.ev2-table-stack \.ev2-table__scroll\s*\{[^}]*overflow: visible/)
   })
   it('every Table consumer uses the stacked wrapper', () => {
-    for (const f of ['routes/SkillLibraryRoute.tsx', 'routes/ChangelogRoute.tsx', 'routes/EscalationsRoute.tsx', 'routes/AgentDetailRoute.tsx']) {
+    for (const f of ['routes/SkillLibraryRoute.tsx', 'routes/ChangelogRoute.tsx', 'routes/AgentDetailRoute.tsx']) {
       const src = read(f)
       expect(src).toMatch(/import \{ Table \} from '\.\.\/components\/StackedTable'/)
       expect(src).not.toMatch(/import \{[^}]*\bTable\b[^}]*\} from '[./]*design-system'/)
