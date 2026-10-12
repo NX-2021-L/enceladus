@@ -111,6 +111,12 @@ _ENV_AUTONAME_RE = re.compile(
 )
 
 
+# A CFN-auto-named rule '<stack>-<LogicalId>-<RANDOM>' whose LogicalId now declares an
+# explicit Name is a rename CFN has not applied yet (DVP-TSK-968: RecipeRunSweepRule on
+# gamma). It is neither live-only nor cfn-only drift; it self-clears when the rename lands.
+_CFN_AUTONAME_RE = re.compile(r"-(?P<lid>[A-Z][A-Za-z0-9]*)-[A-Za-z0-9]{8,}$")
+
+
 def _is_env_sibling(name: str) -> bool:
     return any(name.endswith(suffix) for suffix in _ENV_SUFFIXES) or bool(_ENV_AUTONAME_RE.search(name))
 
@@ -340,6 +346,49 @@ def declared_eventbridge_rules(cfn_glob: str, name_prefix: str, environment: str
     return bases
 
 
+def declared_named_rule_logical_ids(cfn_glob: str, name_prefix: str, environment: str = "prod") -> Dict[str, str]:
+    """LogicalId -> declared BASE name for every in-scope EventBridge rule with an explicit Name."""
+    out: Dict[str, str] = {}
+    for path in sorted(glob.glob(cfn_glob)):
+        text = Path(path).read_text()
+        for logical_id, rtype, condition, body in _iter_resources(text):
+            if rtype != "AWS::Events::Rule" or not _condition_declared_for_environment(condition, environment):
+                continue
+            m = _RULE_NAME_RE.search(body)
+            base = _resolve_declared_name(m.group("name")) if m else None
+            if base and base.startswith(name_prefix):
+                out[logical_id] = base
+    return out
+
+
+def _compare_eventbridge(live_ev: List[str], declared_ev_bases: Set[str],
+                         named_lids: Dict[str, str]) -> Dict[str, object]:
+    live_ev_bases = {_strip_env_suffix(n) for n in live_ev}
+    exceptions = sorted(n for n in live_ev if _strip_env_suffix(n) in _EVENTBRIDGE_CLI_EXCEPTION_BASES)
+    pending: Dict[str, str] = {}
+    for n in live_ev:
+        m = _CFN_AUTONAME_RE.search(n)
+        if m and m.group("lid") in named_lids and _strip_env_suffix(n) not in declared_ev_bases:
+            pending[n] = named_lids[m.group("lid")]
+    live_only = sorted(
+        n for n in live_ev
+        if _strip_env_suffix(n) not in declared_ev_bases
+        and _strip_env_suffix(n) not in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+        and n not in pending
+    )
+    renaming = set(pending.values())
+    cfn_only = sorted(b for b in declared_ev_bases if b not in live_ev_bases and b not in renaming)
+    return {
+        "inconclusive": False,
+        "live_count": len(live_ev),
+        "declared_count": len(declared_ev_bases),
+        "live_only": live_only,
+        "cfn_only": cfn_only,
+        "pending_rename": sorted(f"{k} -> {v}" for k, v in pending.items()),
+        "documented_exceptions": exceptions,
+    }
+
+
 def _inconclusive_section(declared_count: int, reason: str, **extra: List[str]) -> Dict[str, object]:
     section: Dict[str, object] = {
         "inconclusive": True,
@@ -399,25 +448,10 @@ def audit(
             len(declared_ev_bases), str(e), documented_exceptions=[]
         )
     else:
-        live_ev_bases = {_strip_env_suffix(n) for n in live_ev}
-        exceptions = sorted(
-            n for n in live_ev
-            if _strip_env_suffix(n) in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+        eventbridge_section = _compare_eventbridge(
+            live_ev, declared_ev_bases,
+            declared_named_rule_logical_ids(cfn_glob, event_rule_prefix, environment),
         )
-        live_only = sorted(
-            n for n in live_ev
-            if _strip_env_suffix(n) not in declared_ev_bases
-            and _strip_env_suffix(n) not in _EVENTBRIDGE_CLI_EXCEPTION_BASES
-        )
-        cfn_only = sorted(b for b in declared_ev_bases if b not in live_ev_bases)
-        eventbridge_section = {
-            "inconclusive": False,
-            "live_count": len(live_ev),
-            "declared_count": len(declared_ev_bases),
-            "live_only": live_only,
-            "cfn_only": cfn_only,
-            "documented_exceptions": exceptions,
-        }
 
     return {
         "apigw_routes": apigw_section,
@@ -463,6 +497,10 @@ def _self_check() -> bool:
             "    Condition: IsProduction\n"
             "    Properties:\n"
             "      Name: !Sub \"enceladus-prod-only${EnvironmentSuffix}\"\n"
+            "  RenamedRule:\n"
+            "    Type: AWS::Events::Rule\n"
+            "    Properties:\n"
+            "      Name: !Sub \"enceladus-renamed${EnvironmentSuffix}\"\n"
         )
         glob_pattern = str(Path(tmp) / "*.yaml")
 
@@ -487,6 +525,15 @@ def _self_check() -> bool:
             "IsProduction rule excluded from gamma-declared set",
             "enceladus-prod-only" not in gamma_rules,
         )
+        lids = declared_named_rule_logical_ids(glob_pattern, "enceladus-", "gamma")
+        check("named rule LogicalId maps to its declared base", lids.get("RenamedRule") == "enceladus-renamed")
+        cmp = _compare_eventbridge(["enceladus-compute-gamma-RenamedRule-txz6LVtarSQI"], gamma_rules, lids)
+        check(
+            "auto-named live rule whose LogicalId now has an explicit Name is pending rename, not drift",
+            cmp["live_only"] == [] and "enceladus-renamed" not in cmp["cfn_only"] and len(cmp["pending_rename"]) == 1,
+        )
+        cmp = _compare_eventbridge(["enceladus-compute-gamma-UnknownRule-txz6LVtarSQI"], gamma_rules, lids)
+        check("auto-named live rule with no declared LogicalId stays live_only", cmp["live_only"] == ["enceladus-compute-gamma-UnknownRule-txz6LVtarSQI"])
 
     # ENC-ISS-467: pure-ADD cfn_only must pass --pre-deploy --fail-on-drift,
     # but still fail strict (scheduled reconcile) mode; live_only must fail
