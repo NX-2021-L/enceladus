@@ -56,6 +56,10 @@ class FakeS3:
         self.calls.append(("delete", Bucket, Key, {}))
         self.objects.pop((Bucket, Key), None)
 
+    def upload_file(self, path, Bucket, Key, ExtraArgs=None):
+        self.calls.append(("upload", Bucket, Key, ExtraArgs or {}))
+        self.objects[(Bucket, Key)] = (open(path, "rb").read(), ExtraArgs or {})
+
     def generate_presigned_url(self, op, Params, ExpiresIn):
         return f"https://{Params['Bucket']}/{Params['Key']}?e={ExpiresIn}"
 
@@ -68,9 +72,9 @@ class FakeS3:
         return P()
 
 
-def store(s3, mode):
+def store(s3, mode, read="auto"):
     return ContentStore.from_env(s3, {"CONTENT_STORE_MODE": mode, "CONTENT_BUCKET": CONTENT, "S3_BUCKET": LEGACY,
-                                      "S3_ENV_PREFIX": "gamma/"})
+                                      "S3_ENV_PREFIX": "gamma/", "CONTENT_STORE_READ": read})
 
 
 class TestModes(unittest.TestCase):
@@ -146,6 +150,41 @@ class TestModes(unittest.TestCase):
         st = store(s3, "dual")
         self.assertIn(f"{CONTENT}/d/new.md", st.presigned_get_url("gamma/d/new.md"))
         self.assertIn(f"{LEGACY}/gamma/d/old.md", st.presigned_get_url("gamma/d/old.md"))
+
+
+class TestWriterFirstPhase(unittest.TestCase):
+    """DVP-TSK-B09: dual writes with legacy reads, so a function never regenerates from a stale content snapshot."""
+
+    def test_dual_with_legacy_reads_writes_both_but_reads_legacy_only(self):
+        s3 = FakeS3()
+        s3.objects[(LEGACY, "gamma/mobile/v1/reference/p.md")] = (b"fresh", {})
+        s3.objects[(CONTENT, "mobile/v1/reference/p.md")] = (b"stale-snapshot", {})
+        st = store(s3, "dual", read="legacy")
+        self.assertEqual(st.read_bytes("gamma/mobile/v1/reference/p.md"), b"fresh")
+        st.put_object("gamma/mobile/v1/reference/p.md", b"new")
+        self.assertEqual(s3.objects[(CONTENT, "mobile/v1/reference/p.md")][0], b"new")
+        self.assertEqual(s3.objects[(LEGACY, "gamma/mobile/v1/reference/p.md")][0], b"new")
+        self.assertEqual(st.list_keys("gamma/mobile/"), ["gamma/mobile/v1/reference/p.md"])
+
+    def test_upload_file_goes_to_every_write_target_without_legacy_sse_on_content(self):
+        import tempfile
+        s3 = FakeS3()
+        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+            f.write(b"feed")
+        st = store(s3, "dual", read="legacy")
+        st.upload_file(f.name, "gamma/mobile/v1/tasks.json", {"ContentType": "application/json", "ServerSideEncryption": "AES256"})
+        ups = [(b, k, a) for op, b, k, a in s3.calls if op == "upload"]
+        self.assertEqual([(b, k) for b, k, _ in ups], [(CONTENT, "mobile/v1/tasks.json"), (LEGACY, "gamma/mobile/v1/tasks.json")])
+        self.assertNotIn("ServerSideEncryption", ups[0][2])
+        self.assertEqual(ups[1][2]["ServerSideEncryption"], "AES256")
+        os.unlink(f.name)
+
+    def test_read_override_validation(self):
+        with self.assertRaises(ContentStoreConfigError):
+            store(FakeS3(), "dual", read="sometimes")
+        with self.assertRaises(ContentStoreConfigError):
+            store(FakeS3(), "content", read="legacy")
+        self.assertEqual(store(FakeS3(), "dual").read_mode, "auto")
 
 
 if __name__ == "__main__":
