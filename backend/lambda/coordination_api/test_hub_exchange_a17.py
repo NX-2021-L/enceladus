@@ -157,12 +157,16 @@ class TestHubPrincipal(HubBase):
         now = int(time.time())
         token = self.hub_token(auth_time=now - 90)
         claims = hx.principal_claims(hx.verify_hub_token(token))
-        resp, ddb, invoke = _decide(_escalation_item(), claims=claims)
+        import datetime as _d
+        proof = {"stepUp": {"method": "cognito_max_age", "auth_time": claims["auth_time"]}}
+        at = _d.datetime.fromtimestamp(claims["auth_time"] + 90, _d.timezone.utc)
+        card = dict(_escalation_item(), expiresAt="2026-12-31T00:00:00Z")   # real-clock token; keep the card live
+        resp, ddb, invoke = _decide(card, claims=claims, body=proof, proof=False, now=at)
         self.assertEqual(200, resp["statusCode"], resp["body"])
         logged = _entries(ddb)
         self.assertTrue(logged)
         self.assertEqual("hub_exchange:vagamod-keycloak", logged[-1]["auth_method"])
-        self.assertEqual("aal1", logged[-1]["assurance"])
+        self.assertEqual("aal2", logged[-1]["assurance"])
         self.assertEqual(coord._gate_epoch_to_ts(now - 90), logged[-1]["auth_time"])
 
     def test_decide_invariants_still_refuse_non_allow_listed_and_malformed_hub_claims(self):
