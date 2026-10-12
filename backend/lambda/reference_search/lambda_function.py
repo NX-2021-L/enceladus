@@ -194,6 +194,7 @@ def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
 # ---------------------------------------------------------------------------
 
 _s3 = None
+_content_store = None
 
 
 def _get_s3():
@@ -201,6 +202,22 @@ def _get_s3():
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
+
+
+def _store():
+    """DVP-TSK-B05 (isolation W4): dual-path reads via content_store.
+
+    CONTENT_STORE_MODE (legacy | dual | content) decides whether reads come from the content bucket, the legacy
+    bucket (S3_BUCKET), or the content bucket with a legacy fallback on a miss. The module ships via .build_extras.
+    """
+    global _content_store
+    if _content_store is None:
+        try:
+            from content_store import ContentStore
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        _content_store = ContentStore.from_env(_get_s3())
+    return _content_store
 
 
 # ---------------------------------------------------------------------------
@@ -269,9 +286,8 @@ def _fetch_reference_doc(project_id: str) -> Tuple[Optional[str], Dict[str, Any]
     Returns (content, metadata) on success or (None, error_info) on failure.
     """
     s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
-    s3 = _get_s3()
     try:
-        resp = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        resp = _store().get_object(s3_key)
         content = resp["Body"].read().decode("utf-8")
         last_modified = resp.get("LastModified")
         last_modified_str = (
