@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -34,9 +37,8 @@ describe('HeaderSearch (kit SearchLauncher)', () => {
     expect(s!.subtitle).toBeUndefined()
   })
 
-  it('DVP-TSK-B11: the launcher sheet maps every row hook to the record-row design system', async () => {
-    const { readFileSync } = await import('node:fs')
-    const css = readFileSync(new URL('./headerSearch.css', import.meta.url), 'utf8')
+  it('DVP-TSK-B11: the launcher sheet maps every row hook to the record-row design system', () => {
+    const css = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'headerSearch.css'), 'utf8')
     const rule = /\.io-sheet\[data-variant="palette"\] \{([^}]*)\}/.exec(css)![1]!
     for (const [hook, value] of [
       ['--io-launcher-title-font', 'var(--font-body)'],
