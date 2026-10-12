@@ -57,6 +57,21 @@ jobs:
         with:
           node-version: 22
 
+      # DVP-TSK-976 (DVP-PLN-013 E4-W4.1): recipes parity. Replays every recorded run fixture under
+      # backend/lambda/tracker_mutation/fixtures/recipes through recipe_run_service with a fake executor
+      # and a fake hub (no network, no AWS, no agent) and fails the job on FAIL. Runs before the AWS
+      # steps so it is independent of CodeArtifact; its lines join the job summary and the artifact.
+      - name: Recipes parity (replay recorded runs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p recipes-parity
+          rc=0
+          python3 backend/lambda/tracker_mutation/recipe_replay.py backend/lambda/tracker_mutation/fixtures/recipes \
+            --md recipes-parity/recipes-parity.md || rc=$?
+          cat recipes-parity/recipes-parity.md >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::356364570033:role/io-kit-github-read
@@ -108,3 +123,4 @@ jobs:
           path: |
             parity-result.json
             parity-report
+            recipes-parity

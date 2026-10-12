@@ -38,12 +38,21 @@ def _strict_item(**extra):
     return item
 
 
-def _decide(item, decision="approve", body=None, headers=None, claims=None, target=None, subject=None):
+def _fresh_proof(claims=None):
+    return {"method": "cognito_max_age", "auth_time": (claims or CLAIMS).get("auth_time")}
+
+
+def _decide(item, decision="approve", body=None, headers=None, claims=None, target=None, subject=None,
+            proof=True, now=None):
+    body = dict(body or {})
+    if proof and not any(k in body for k in ("stepUp", "step_up", "proof")):
+        body["stepUp"] = _fresh_proof(claims)   # high-risk cards need a fresh proof (DVP-TSK-980)
     ddb = _fake_ddb(escalation=item, target=target or _target_item())
     invoke = mock.MagicMock(return_value={"success": True, "status": "applied", "_status_code": 200,
                                           "result": {"ok": True}})
-    event = {"body": json.dumps(body or {}), "headers": headers or {}, "queryStringParameters": None}
+    event = {"body": json.dumps(body), "headers": headers or {}, "queryStringParameters": None}
     with mock.patch.object(coord, "_get_ddb", return_value=ddb), \
+         mock.patch.object(coord, "_gate_now", new=(lambda: now) if now else coord._gate_now), \
          mock.patch.object(coord, "_invoke_tracker_mutation_api", invoke), \
          mock.patch.object(coord, "_load_escalation_approver_allowlist", return_value={"io@jreese.net"}):
         resp = coord._handle_escalation_decision(
@@ -251,7 +260,7 @@ class TestHashChainedLog(unittest.TestCase):
         for entry in log:
             self.assertEqual("interactive_human", entry["auth_method"])
             self.assertEqual("2026-07-02T04:58:00Z", entry["auth_time"])
-            self.assertEqual("aal1", entry["assurance"])
+            self.assertEqual("aal2", entry["assurance"])   # default kind risk is high: proof required
         self.assertEqual({"status": 200, "resultRef": "ENC-ESC-001"}, log[1]["result"])
 
     def test_chain_links_and_verifies_across_a_prior_entry(self):
@@ -296,17 +305,16 @@ class TestHashChainedLog(unittest.TestCase):
              mock.patch.object(coord, "_invoke_tracker_mutation_api", invoke), \
              mock.patch.object(coord, "_load_escalation_approver_allowlist", return_value={"io@jreese.net"}):
             coord._handle_escalation_decision("enceladus", "ENC-ESC-001", "approve",
-                                              {"body": "{}", "headers": {}}, CLAIMS)
+                                              {"body": json.dumps({"stepUp": _fresh_proof()}), "headers": {}}, CLAIMS)
         self.assertEqual(["write", "apply", "write"], order)
 
-    def test_step_up_is_recorded_as_interactive_human_degraded(self):
-        resp, ddb, _inv = _decide(_escalation_item(), body={"stepUp": {"method": "step_up"}})
-        self.assertEqual(200, resp["statusCode"])
-        for entry in _entries(ddb):
-            self.assertEqual("interactive_human", entry["auth_method"])
-            self.assertEqual("step_up", entry["proof_method"])
-            self.assertTrue(entry["degraded_mode"])
-            self.assertEqual("aal1", entry["assurance"])
+    def test_unverified_step_up_method_is_retired_everywhere(self):
+        for item in (_escalation_item(), _low_item()):
+            resp, ddb, invoke = _decide(item, body={"stepUp": {"method": "step_up"}})
+            self.assertEqual(403, resp["statusCode"])
+            self.assertEqual("step_up_unverified", json.loads(resp["body"])["reason"])
+            ddb.update_item.assert_not_called()
+            invoke.assert_not_called()
 
     def test_valid_cognito_max_age_proof_raises_assurance(self):
         proof = {"method": "cognito_max_age", "auth_time": AUTH_TIME}
@@ -326,6 +334,8 @@ class TestHashChainedLog(unittest.TestCase):
         for proof, claims in cases:
             resp, ddb, invoke = _decide(_escalation_item(), body={"stepUp": proof}, claims=claims)
             self.assertEqual(403, resp["statusCode"], proof)
+            self.assertIn(json.loads(resp["body"])["reason"],
+                          ("step_up_required", "method_not_enabled"), proof)
             ddb.update_item.assert_not_called()
             invoke.assert_not_called()
 
@@ -381,3 +391,76 @@ class TestApplierRegistry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _low_item():
+    item = _escalation_item()
+    item["risk"] = "low"            # no step-up required
+    return item
+
+
+class TestStepUpEnforcement(unittest.TestCase):
+    """DVP-TSK-980: high|critical (or requiredAuth step_up) verdicts need a fresh proof."""
+
+    def _reason(self, resp):
+        return json.loads(resp["body"]).get("reason")
+
+    def test_card_refused_without_proof_for_approve_and_deny(self):
+        for decision in ("approve", "deny"):
+            for item in (_escalation_item(), dict(_low_item(), requiredAuth="step_up"),
+                         dict(_low_item(), risk="critical")):
+                resp, ddb, invoke = _decide(item, decision=decision, proof=False)
+                self.assertEqual(403, resp["statusCode"], (decision, item.get("kind")))
+                self.assertEqual("step_up_required", self._reason(resp))
+                ddb.update_item.assert_not_called()
+                invoke.assert_not_called()
+
+    def test_stale_proof_refused(self):
+        stale = dict(CLAIMS, auth_time=AUTH_TIME - 3600)
+        resp, ddb, _inv = _decide(_escalation_item(), claims=stale, proof=False,
+                                  body={"stepUp": {"method": "cognito_max_age", "auth_time": AUTH_TIME - 3600}})
+        self.assertEqual(403, resp["statusCode"])
+        self.assertEqual("step_up_required", self._reason(resp))
+        ddb.update_item.assert_not_called()
+
+    def test_webauthn_is_a_reserved_slot(self):
+        resp, ddb, _inv = _decide(_escalation_item(), proof=False,
+                                  body={"stepUp": {"method": "webauthn", "auth_time": AUTH_TIME}})
+        self.assertEqual(403, resp["statusCode"])
+        self.assertEqual("method_not_enabled", self._reason(resp))
+        self.assertNotIn("webauthn", coord._STEP_UP_VERIFIERS)
+        ddb.update_item.assert_not_called()
+
+    def test_fresh_proof_accepted_for_cognito_and_hub_principal(self):
+        hub = coord._hub_exchange.principal_claims({
+            "sub": "hub-sub-1", "email": "io@jreese.net", "auth_time": AUTH_TIME, "src_name": "enceladus",
+            "src_iss": "https://idp.example", "iat": AUTH_TIME + 30, "exp": AUTH_TIME + 3600})
+        for claims in (CLAIMS, hub):
+            resp, ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False,
+                                      body={"stepUp": _fresh_proof(claims)})
+            self.assertEqual(200, resp["statusCode"], resp["body"])
+            entries = _entries(ddb)
+            self.assertTrue(entries)
+            for entry in entries:
+                self.assertEqual("aal2", entry["assurance"])
+                self.assertEqual("cognito_max_age", entry["proof_method"])
+                self.assertEqual(claims.get("auth_method") or "interactive_human", entry["auth_method"])
+                self.assertTrue(entry["auth_time"])
+                self.assertNotIn("degraded_mode", entry)
+
+    def test_lower_assurance_card_unaffected_and_logs_the_three_fields(self):
+        resp, ddb, _inv = _decide(_low_item(), proof=False)
+        self.assertEqual(200, resp["statusCode"], resp["body"])
+        for entry in _entries(ddb):
+            self.assertEqual("interactive_human", entry["auth_method"])
+            self.assertEqual("aal1", entry["assurance"])
+            self.assertTrue(entry["auth_time"])
+            self.assertNotIn("degraded_mode", entry)
+
+    def test_undeterminable_auth_context_refused_before_any_write(self):
+        bare = {k: v for k, v in CLAIMS.items() if k not in ("auth_time", "iat")}
+        resp, ddb, invoke = _decide(_low_item(), claims=bare, proof=False)
+        self.assertEqual(403, resp["statusCode"])
+        self.assertEqual("auth_context_incomplete", self._reason(resp))
+        ddb.update_item.assert_not_called()
+        invoke.assert_not_called()

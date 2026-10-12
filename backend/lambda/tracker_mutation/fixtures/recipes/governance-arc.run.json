@@ -1,0 +1,470 @@
+{
+  "synthetic": true,
+  "synthetic_note": "Built from the governance-arc definition with plausible results; replace with the recorded RUN-* transcript of the live io run.",
+  "recipe": {
+    "recipe_id": "DVP-REC-001",
+    "name": "governance-arc",
+    "version": "1.0.0",
+    "content_hash": "sha256:756028859fdbc03f4090bb3c9c65f781d505cf8f7591fc3409e4d0c89f21c19c",
+    "definition": {
+      "description": "Create a task, set its components, check it out, then walk code, acceptance and deploy gates to closed.",
+      "execution": "deterministic",
+      "inputs": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "title",
+          "components"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "transition_type": {
+            "type": "string",
+            "enum": [
+              "github_pr_deploy",
+              "lambda_deploy",
+              "web_deploy",
+              "code_only",
+              "no_code"
+            ],
+            "default": "code_only"
+          }
+        }
+      },
+      "outputs": {
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "record_id"
+          ],
+          "properties": {
+            "record_id": {
+              "type": "string"
+            },
+            "commit_complete_id": {
+              "type": "string"
+            }
+          }
+        },
+        "from": {
+          "record_id": "$create.record_id",
+          "commit_complete_id": "$committed.commit_complete_id"
+        }
+      },
+      "steps": [
+        {
+          "id": "create",
+          "action": "tracker.create",
+          "arguments": {
+            "project_id": "$inputs.project_id",
+            "record_type": "task",
+            "title": "$inputs.title",
+            "transition_type": "$inputs.transition_type",
+            "acceptance_criteria": "$inputs.acceptance_criteria"
+          },
+          "on_error": "abort"
+        },
+        {
+          "id": "set_components",
+          "action": "tracker.set",
+          "arguments": {
+            "record_id": "$create.record_id",
+            "field": "components",
+            "value": "$inputs.components"
+          },
+          "on_error": "abort"
+        },
+        {
+          "id": "checkout",
+          "action": "checkout.task",
+          "arguments": {
+            "record_id": "$create.record_id",
+            "active_agent_session_id": "$run.started_by"
+          },
+          "on_error": "abort"
+        },
+        {
+          "id": "code_gate",
+          "type": "gate",
+          "gate": {
+            "prompt": "Code is complete. Provide the commit sha.",
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "commit_sha"
+              ],
+              "properties": {
+                "commit_sha": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{7,40}$"
+                }
+              }
+            },
+            "timeout": {
+              "seconds": 86400
+            },
+            "on_reject": "cancelled",
+            "on_expire": "expired"
+          }
+        },
+        {
+          "id": "committed",
+          "action": "checkout.advance",
+          "arguments": {
+            "record_id": "$create.record_id",
+            "target_status": "committed",
+            "provider": "$run.started_by",
+            "transition_evidence": {
+              "commit_sha": "$code_gate.inputs.commit_sha"
+            }
+          },
+          "on_error": "abort"
+        },
+        {
+          "id": "acceptance_gate",
+          "type": "gate",
+          "gate": {
+            "prompt": "Accept the delivered work against the acceptance criteria.",
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "note": {
+                  "type": "string"
+                }
+              }
+            },
+            "timeout": {
+              "seconds": 86400
+            },
+            "on_reject": "failed",
+            "on_expire": "expired",
+            "sensitive": true
+          }
+        },
+        {
+          "id": "deploy_gate",
+          "type": "gate",
+          "gate": {
+            "prompt": "Approve the deploy.",
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "note": {
+                  "type": "string"
+                }
+              }
+            },
+            "timeout": {
+              "seconds": 86400
+            },
+            "on_reject": "failed",
+            "on_expire": "expired",
+            "sensitive": true
+          }
+        },
+        {
+          "id": "close",
+          "action": "checkout.advance",
+          "arguments": {
+            "record_id": "$create.record_id",
+            "target_status": "closed",
+            "provider": "$run.started_by"
+          },
+          "on_error": "abort"
+        }
+      ],
+      "surfaces": [
+        "enceladus"
+      ],
+      "tools": [
+        "checkout.advance",
+        "checkout.task",
+        "tracker.create",
+        "tracker.set"
+      ]
+    }
+  },
+  "project_id": "devops",
+  "run_id": "DVP-RUN-001",
+  "started_by": "agent-a",
+  "governance_hash": "gh-replay-0001",
+  "inputs": {
+    "project_id": "devops",
+    "title": "Replay: governance arc on a no_code task",
+    "components": [
+      "comp-enceladus-mcp-server"
+    ],
+    "acceptance_criteria": [
+      "Run reaches completed with every gate cleared by a human"
+    ],
+    "transition_type": "no_code"
+  },
+  "segments": [
+    {
+      "calls": [
+        {
+          "step_id": "create",
+          "surface": "enceladus",
+          "action": "tracker.create",
+          "arguments": {
+            "project_id": "devops",
+            "record_type": "task",
+            "title": "Replay: governance arc on a no_code task",
+            "transition_type": "no_code",
+            "acceptance_criteria": [
+              "Run reaches completed with every gate cleared by a human"
+            ]
+          },
+          "dry_run": false,
+          "idempotency_key": "DVP-RUN-001:create",
+          "idempotency": "at_least_once",
+          "on_error": "abort"
+        },
+        {
+          "step_id": "set_components",
+          "surface": "enceladus",
+          "action": "tracker.set",
+          "arguments": {
+            "record_id": {
+              "$ref": "create",
+              "path": [
+                "record_id"
+              ]
+            },
+            "field": "components",
+            "value": [
+              "comp-enceladus-mcp-server"
+            ]
+          },
+          "dry_run": false,
+          "idempotency_key": "DVP-RUN-001:set_components",
+          "idempotency": "at_least_once",
+          "on_error": "abort"
+        },
+        {
+          "step_id": "checkout",
+          "surface": "enceladus",
+          "action": "checkout.task",
+          "arguments": {
+            "record_id": {
+              "$ref": "create",
+              "path": [
+                "record_id"
+              ]
+            },
+            "active_agent_session_id": "agent-a"
+          },
+          "dry_run": false,
+          "idempotency_key": "DVP-RUN-001:checkout",
+          "idempotency": "at_least_once",
+          "on_error": "abort"
+        }
+      ],
+      "results": [
+        {
+          "step_id": "create",
+          "ok": true,
+          "result": {
+            "record_id": "DVP-TSK-9001",
+            "record_type": "task",
+            "status": "open"
+          }
+        },
+        {
+          "step_id": "set_components",
+          "ok": true,
+          "result": {
+            "record_id": "DVP-TSK-9001",
+            "field": "components",
+            "updated": true
+          }
+        },
+        {
+          "step_id": "checkout",
+          "ok": true,
+          "result": {
+            "record_id": "DVP-TSK-9001",
+            "checkout_id": "CHK-REPLAY-0001",
+            "status": "checked_out"
+          }
+        }
+      ]
+    },
+    {
+      "calls": [
+        {
+          "step_id": "committed",
+          "surface": "enceladus",
+          "action": "checkout.advance",
+          "arguments": {
+            "record_id": "DVP-TSK-9001",
+            "target_status": "committed",
+            "provider": "agent-a",
+            "transition_evidence": {
+              "commit_sha": "3f9c2ab41d7e"
+            }
+          },
+          "dry_run": false,
+          "idempotency_key": "DVP-RUN-001:committed",
+          "idempotency": "at_least_once",
+          "on_error": "abort"
+        }
+      ],
+      "results": [
+        {
+          "step_id": "committed",
+          "ok": true,
+          "result": {
+            "record_id": "DVP-TSK-9001",
+            "status": "committed",
+            "commit_complete_id": "CCI-9A1B2C3D4E5F"
+          }
+        }
+      ]
+    },
+    {
+      "calls": [
+        {
+          "step_id": "close",
+          "surface": "enceladus",
+          "action": "checkout.advance",
+          "arguments": {
+            "record_id": "DVP-TSK-9001",
+            "target_status": "closed",
+            "provider": "agent-a"
+          },
+          "dry_run": false,
+          "idempotency_key": "DVP-RUN-001:close",
+          "idempotency": "at_least_once",
+          "on_error": "abort"
+        }
+      ],
+      "results": [
+        {
+          "step_id": "close",
+          "ok": true,
+          "result": {
+            "record_id": "DVP-TSK-9001",
+            "status": "closed"
+          }
+        }
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "step_id": "code_gate",
+      "decision": "approve",
+      "decider": "io@example.com",
+      "inputs": {
+        "commit_sha": "3f9c2ab41d7e"
+      }
+    },
+    {
+      "step_id": "acceptance_gate",
+      "decision": "approve",
+      "decider": "io@example.com",
+      "inputs": {
+        "note": "Acceptance criteria verified."
+      },
+      "step_up": false
+    },
+    {
+      "step_id": "deploy_gate",
+      "decision": "approve",
+      "decider": "io@example.com",
+      "inputs": {
+        "note": "Deploy approved."
+      },
+      "step_up": true
+    }
+  ],
+  "expected": {
+    "final_state": "completed",
+    "step_statuses": {
+      "create": "ok",
+      "set_components": "ok",
+      "checkout": "ok",
+      "code_gate": "ok",
+      "committed": "ok",
+      "acceptance_gate": "ok",
+      "deploy_gate": "ok",
+      "close": "ok"
+    },
+    "receipts": {
+      "create": {
+        "record_id": "DVP-TSK-9001"
+      },
+      "set_components": {
+        "record_id": "DVP-TSK-9001"
+      },
+      "checkout": {
+        "record_id": "DVP-TSK-9001",
+        "checkout_id": "CHK-REPLAY-0001"
+      },
+      "committed": {
+        "record_id": "DVP-TSK-9001",
+        "commit_complete_id": "CCI-9A1B2C3D4E5F"
+      },
+      "close": {
+        "record_id": "DVP-TSK-9001"
+      }
+    },
+    "step_results": {
+      "create": {
+        "record_id": "DVP-TSK-9001",
+        "record_type": "task",
+        "status": "open"
+      },
+      "set_components": {
+        "record_id": "DVP-TSK-9001",
+        "field": "components",
+        "updated": true
+      },
+      "checkout": {
+        "record_id": "DVP-TSK-9001",
+        "checkout_id": "CHK-REPLAY-0001",
+        "status": "checked_out"
+      },
+      "committed": {
+        "record_id": "DVP-TSK-9001",
+        "status": "committed",
+        "commit_complete_id": "CCI-9A1B2C3D4E5F"
+      },
+      "close": {
+        "record_id": "DVP-TSK-9001",
+        "status": "closed"
+      }
+    },
+    "outputs": {
+      "record_id": "DVP-TSK-9001",
+      "commit_complete_id": "CCI-9A1B2C3D4E5F"
+    }
+  }
+}

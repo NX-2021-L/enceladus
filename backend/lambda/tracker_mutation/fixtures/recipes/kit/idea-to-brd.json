@@ -1,0 +1,113 @@
+{
+  "name": "idea-to-brd",
+  "version": "1.0.0",
+  "content_hash": "sha256:f7c9c75351470fcebe77935a0bb962db153a397aeac4d9d4218b3d6dfc144b53",
+  "definition": {
+    "description": "Draft a BRD note from an idea document, approve it at a gate, then open the feature that cites it.",
+    "execution": "deterministic",
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idea_doc_id",
+        "project_id",
+        "title",
+        "brd_markdown"
+      ],
+      "properties": {
+        "idea_doc_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "brd_markdown": {
+          "type": "string"
+        },
+        "user_story": {
+          "type": "string"
+        }
+      }
+    },
+    "outputs": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "brd_doc_id",
+          "feature_id"
+        ],
+        "properties": {
+          "brd_doc_id": {
+            "type": "string"
+          },
+          "feature_id": {
+            "type": "string"
+          }
+        }
+      },
+      "from": {
+        "brd_doc_id": "$draft_brd.document_id",
+        "feature_id": "$feature.record_id"
+      }
+    },
+    "steps": [
+      {
+        "id": "draft_brd",
+        "action": "document.create_note",
+        "arguments": {
+          "project_id": "$inputs.project_id",
+          "title": "$inputs.title",
+          "content": "$inputs.brd_markdown",
+          "informed_by": [
+            "$inputs.idea_doc_id"
+          ]
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "brd_gate",
+        "gate": "human",
+        "prompt": "Approve the BRD draft.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "failed",
+        "on_expire": "expired",
+        "sensitive": true
+      },
+      {
+        "id": "feature",
+        "action": "tracker.create",
+        "arguments": {
+          "project_id": "$inputs.project_id",
+          "record_type": "feature",
+          "title": "$inputs.title",
+          "user_story": "$inputs.user_story",
+          "related": "$draft_brd.document_id"
+        },
+        "on_error": "abort"
+      }
+    ],
+    "surfaces": [
+      "enceladus"
+    ],
+    "tools": [
+      "document.create_note",
+      "tracker.create"
+    ]
+  }
+}
