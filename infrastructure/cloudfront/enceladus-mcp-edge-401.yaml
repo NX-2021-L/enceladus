@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ENC-TSK-Q70 (DVP-PLN-016 E16-R2/E16-R14): Enceladus MCP Lambda@Edge origin-response handler that
+  restores WWW-Authenticate on 401 behind the enceladus-mcp-code Function URL origins of mcp.jreese.net
+  (E3IRO1VSMFENCC) and mcp-gamma.jreese.net (E2KVDHFSQ5G5VE): the Function URL remaps it to
+  x-amzn-Remapped-WWW-Authenticate and CloudFront Functions do not run on 4xx. Same code as
+  @io-kit/mcp infra/edge-401-header.mjs (travel, finance, vagamod). Deploy in us-east-1 as stack
+  enceladus-mcp-edge-401, then run associate-edge-401.sh per distribution (gamma first).
+Resources:
+  EdgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com, edgelambda.amazonaws.com]
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  EdgeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: enceladus-mcp-edge-401-header
+      Description: Restores WWW-Authenticate on 401 (E16-R2)
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt EdgeRole.Arn
+      MemorySize: 128
+      Timeout: 5
+      Code:
+        ZipFile: |
+          // Mirrors @io-kit/mcp 0.1.0 infra/edge-401-header.mjs: 401 only; every other response is untouched.
+          exports.handler = async (event) => {
+            const response = event.Records[0].cf.response;
+            if (String(response.status) !== "401") return response;
+            const remapped = response.headers["x-amzn-remapped-www-authenticate"];
+            if (remapped && remapped.length > 0 && !response.headers["www-authenticate"]) {
+              response.headers["www-authenticate"] = [{ key: "WWW-Authenticate", value: remapped[0].value }];
+            }
+            return response;
+          };
+  EdgeVersion1:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref EdgeFunction
+      Description: edge-401-header v1 (@io-kit/mcp 0.1.0)
+Outputs:
+  VersionArn:
+    Description: Qualified version ARN to associate as origin-response on the Enceladus MCP distributions
+    Value: !Ref EdgeVersion1
