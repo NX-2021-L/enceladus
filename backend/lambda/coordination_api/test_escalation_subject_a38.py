@@ -40,6 +40,13 @@ class SubjectBackfillTests(unittest.TestCase):
         card = _view({"item_id": "DVP-ESC-030", "project_id": "devops", "status": "requested", "subject": "not json"})
         self.assertEqual("DVP-ESC-030", card["subject"]["record_id"])
 
+    def test_card_carries_id_equal_to_item_id_and_etag_unchanged(self):
+        # DVP-TSK-B03: the cockpit only renders Approve/Deny (and decideCard only posts) when card.id is set.
+        base = {"item_id": "DVP-ESC-016", "project_id": "devops", "status": "requested", "updated_at": "2026-10-12T14:34:34Z"}
+        card = _view(dict(base))
+        self.assertEqual("DVP-ESC-016", card["id"])
+        self.assertEqual(lf._escalation_etag(dict(base)), card["etag"])
+
     def test_complete_subject_is_untouched(self):
         subject = {"record_id": "DVP-REC-001", "project": "devops", "version": "3", "type": "recipe"}
         card = _view({"item_id": "DVP-ESC-011", "project_id": "devops", "status": "requested",
