@@ -40,7 +40,7 @@ const mount = async (node: React.ReactNode) => {
   await act(async () => { root.render(<QueryClientProvider client={qc}>{node}</QueryClientProvider>) })
   await flush()
 }
-const listCalls = () => authFetch.mock.calls.filter((c) => String(c[0]).includes('/api/v1/coordination/escalations?'))
+const listCalls = () => authFetch.mock.calls.filter((c) => String(c[0]).includes('/coordination/escalations?'))
 
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -66,8 +66,18 @@ describe('gateFetch', () => {
     })
     const [url, init] = authFetch.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('include_derived=true')
+    // authFetch adds its own '/api/v1' base: the kit prefix must be stripped (prod 404 2026-10-12)
+    expect(url.startsWith('/coordination/escalations?')).toBe(true)
     expect(new Headers(init.headers).has('Authorization')).toBe(false)
     expect(init.credentials).toBe('include')
+  })
+})
+
+describe('gateFetch path base', () => {
+  it('strips the kit /api/v1 prefix on decide POSTs too', async () => {
+    await gateFetch('/api/v1/coordination/escalations/devops/DVP-ESC-011/approve', { method: 'POST', body: '{}' })
+    const [url] = authFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/coordination/escalations/devops/DVP-ESC-011/approve')
   })
 })
 
