@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -1272,6 +1273,26 @@ def generate_reference_docs_from_s3(
 # ---------------------------------------------------------------------------
 
 
+def _feed_content_store(s3_client: Any, legacy_bucket: str) -> Any:
+    """DVP-TSK-B09 (isolation W4): the store that decides which bucket(s) feed uploads land in.
+
+    CONTENT_STORE_MODE=legacy (default) uploads to ``legacy_bucket`` exactly as before; dual also uploads to
+    CONTENT_BUCKET (S3_ENV_PREFIX stripped). CONTENT_STORE_READ=legacy keeps every read on the legacy bucket.
+    """
+    try:
+        from content_store import ContentStore  # shipped to the function root by .build_extras
+    except ImportError:  # local tests: the canonical shared-layer copy
+        from enceladus_shared.content_store import ContentStore
+    return ContentStore(
+        s3_client,
+        mode=(os.environ.get("CONTENT_STORE_MODE") or "legacy").strip().lower(),
+        content_bucket=(os.environ.get("CONTENT_BUCKET") or "").strip(),
+        legacy_bucket=legacy_bucket,
+        legacy_key_prefix=os.environ.get("S3_ENV_PREFIX", ""),
+        read_mode=(os.environ.get("CONTENT_STORE_READ") or "auto").strip().lower(),
+    )
+
+
 def publish_mobile_feeds_to_s3(
     feed_dir: Path,
     bucket: str = DEFAULT_MOBILE_S3_BUCKET,
@@ -1287,6 +1308,7 @@ def publish_mobile_feeds_to_s3(
     """
     require_boto3()
     s3_client = boto3.client("s3", region_name="us-east-1")
+    store = _feed_content_store(s3_client, bucket)
 
     uploaded: List[str] = []
     # Walk the feed directory recursively to catch reference/*.md too
@@ -1310,11 +1332,10 @@ def publish_mobile_feeds_to_s3(
             uploaded.append(s3_key)
             continue
 
-        s3_client.upload_file(
+        store.upload_file(
             str(local_path),
-            bucket,
             s3_key,
-            ExtraArgs={
+            {
                 "CacheControl": _MOBILE_FEED_CACHE_CONTROL,
                 "ContentType": content_type,
             },
