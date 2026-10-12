@@ -58,6 +58,10 @@ export async function gateFetch(input: RequestInfo | URL, init?: RequestInit): P
   if ((init?.method ?? 'GET') === 'GET' && url.includes(LIST_PATH) && !url.includes('include_derived')) {
     url += '&include_derived=true'
   }
+  // auth.authFetch resolves paths against its own '/api/v1' base, and the kit already sends
+  // '/api/v1/coordination/...': strip the kit prefix so prod does not request
+  // '/api/v1/api/v1/coordination/escalations' (404, found on prod 2026-10-12).
+  url = url.replace(/^(https?:\/\/[^/]+)?\/api\/v1(?=\/)/, '')
   return auth.authFetch(url, { ...init, headers, credentials: 'include' })
 }
 
