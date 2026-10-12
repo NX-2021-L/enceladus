@@ -32,15 +32,12 @@ ISSUERS = [
     {"name": "vagamod-keycloak", "iss": "https://auth.vagamod.example/realms/vagamod",
      "jwks_uri": "https://auth.vagamod.example/realms/vagamod/protocol/openid-connect/certs",
      "audiences": ["vagamod-shell"]},
-    {"name": "coach-cognito", "iss": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_COACH",
-     "jwks_uri": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_COACH/.well-known/jwks.json",
-     "audiences": ["coach-client"]},
     {"name": "think-iograph", "iss": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_THINK",
      "jwks_uri": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_THINK/.well-known/jwks.json",
      "audiences": ["think-client"]},
 ]
 ENV = {"HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "COORDINATION_INTERNAL_API_KEY": "k" * 64,
-       "HUB_SHELL_ORIGINS": "https://coach.thepup.io,https://think.example.io,https://vagamod.com",
+       "HUB_SHELL_ORIGINS": "https://think.example.io,https://vagamod.com",
        "ESCALATION_MACHINE_EMAIL_DOMAINS": "enceladus.internal"}
 ALLOW = {"io@jreese.net"}
 
@@ -241,12 +238,12 @@ class TestCors(HubBase):
         paths = ("/api/v1/coordination/hub/exchange", "/api/v1/coordination/escalations",
                  "/api/v1/coordination/escalations/enceladus/ENC-ESC-001/approve")
         for path in paths:
-            for origin in ("https://coach.thepup.io", "https://think.example.io", "https://vagamod.com"):
+            for origin in ("https://think.example.io", "https://vagamod.com"):
                 with self.subTest(path=path, origin=origin):
                     resp = coord.lambda_handler(api_event("OPTIONS", path, {"origin": origin}), None)
                     self.assertEqual(origin, resp["headers"]["Access-Control-Allow-Origin"])
                     self.assertEqual("Origin", resp["headers"]["Vary"])
-            for origin in ("https://evil.example", "https://vagamod.com.evil.example", "http://vagamod.com"):
+            for origin in ("https://coach.thepup.io", "https://evil.example", "https://vagamod.com.evil.example", "http://vagamod.com"):
                 with self.subTest(path=path, denied=origin):
                     resp = coord.lambda_handler(api_event("OPTIONS", path, {"origin": origin}), None)
                     self.assertEqual(coord.CORS_ORIGIN, resp["headers"]["Access-Control-Allow-Origin"])
@@ -257,11 +254,18 @@ class TestCors(HubBase):
         self.assertEqual(coord.CORS_ORIGIN, resp["headers"]["Access-Control-Allow-Origin"])
 
     def test_exchange_response_carries_the_shell_origin(self):
-        resp = self.exchange(src_token(), origin="https://coach.thepup.io")
-        self.assertEqual("https://coach.thepup.io", resp["headers"]["Access-Control-Allow-Origin"])
-        self.assertEqual("https://coach.thepup.io",
-                         self.exchange(src_token(email="no@example.com"), origin="https://coach.thepup.io")
+        resp = self.exchange(src_token(), origin="https://think.example.io")
+        self.assertEqual("https://think.example.io", resp["headers"]["Access-Control-Allow-Origin"])
+        self.assertEqual("https://think.example.io",
+                         self.exchange(src_token(email="no@example.com"), origin="https://think.example.io")
                          ["headers"]["Access-Control-Allow-Origin"])
+
+    def test_coach_origin_gets_no_cors_echo_and_coach_pool_token_is_refused(self):
+        resp = self.exchange(src_token(), origin="https://coach.thepup.io")
+        self.assertNotEqual("https://coach.thepup.io", resp["headers"].get("Access-Control-Allow-Origin"))
+        coach = {"iss": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_COACH", "aud": "coach-client"}
+        refused = self.exchange(src_token(**coach))
+        self.assertIn(refused["statusCode"], (401, 403))
 
 
 class TestHubKeyDerivation(unittest.TestCase):
