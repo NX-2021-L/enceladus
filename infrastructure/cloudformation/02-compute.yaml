@@ -72,6 +72,13 @@ Parameters:
   S3Bucket:
     Type: String
     Default: jreese-net
+  # ENC-TSK-Q61 / ENC-ISS-847: the Neo4j snapshot no longer lands in the PUBLIC
+  # site bucket (S3Bucket). It writes to this private, versioned, encrypted
+  # bucket under neo4j-backups/<env>/.
+  Neo4jBackupBucket:
+    Type: String
+    Default: enceladus-356364570033-us-west-2-an
+    Description: Private bucket that receives the nightly Neo4j graph export.
   CognitoUserPoolId:
     Type: String
     Default: us-east-1_b2D0V3E1k
@@ -2350,8 +2357,15 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 512
-      Timeout: 300
+      # ENC-TSK-Q61 / ENC-ISS-847: 512 MB OOMed nightly from 2026-08-17 (510-511 MB
+      # used) when the export held the whole graph in memory. The export now
+      # streams keyset pages through gzip into a /tmp spool and an S3 multipart
+      # upload, so memory is bounded by page size; 2048 MB / 2 GB of /tmp are
+      # headroom (embedding-bearing nodes) and the timeout covers a slow AuraDB.
+      MemorySize: 2048
+      Timeout: 900
+      EphemeralStorage:
+        Size: 2048
       Architectures:
         - arm64
       SnapStart: !If
@@ -2368,8 +2382,11 @@ Resources:
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
-          S3_BUCKET: !Ref S3Bucket
-          S3_PREFIX: !Sub "${S3EnvPrefix}neo4j-backups/"
+          # ENC-TSK-Q61: gamma and prod share the bucket and are separated by the
+          # <env> path segment (neo4j-backups/<env>/...), not by S3EnvPrefix.
+          BACKUP_BUCKET: !Ref Neo4jBackupBucket
+          BACKUP_PREFIX: neo4j-backups/
+          BACKUP_ENV: !If [IsGamma, gamma, prod]
           SECRETS_REGION: !Ref "AWS::Region"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -3936,7 +3953,13 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "enceladus-neo4j-backup-daily${EnvironmentSuffix}"
-      ScheduleExpression: "cron(0 3 * * ? *)"
+      # ENC-TSK-Q61: gamma runs 20 minutes after prod so the two exports never
+      # overlap on the shared AuraDB tier. The freshness alarm (05-monitoring.yaml)
+      # allows 26 h from the last prod success, so prod stays at 03:00.
+      ScheduleExpression: !If
+        - IsGamma
+        - "cron(20 3 * * ? *)"
+        - "cron(0 3 * * ? *)"
       State: ENABLED
       Targets:
         - Arn: !GetAtt Neo4jBackupFunction.Arn
@@ -6772,11 +6795,25 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              # ENC-TSK-Q61: write-only to the private backup bucket, neo4j-backups/
+              # only. PutObject covers Create/Upload/CompleteMultipartUpload; abort
+              # and list-parts are separate verbs. The old jreese-net grant (the
+              # PUBLIC site bucket) is removed: no other resource uses this role.
               - Sid: S3BackupWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub "arn:aws:s3:::${Neo4jBackupBucket}/neo4j-backups/*"
+              - Sid: BackupMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: EnceladusBackup
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

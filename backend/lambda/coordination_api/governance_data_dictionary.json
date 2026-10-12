@@ -1,6 +1,6 @@
 {
-  "version": "2026-10-12.04",
-  "updated_at": "2026-10-12T03:58:05Z",
+  "version": "2026-10-12.05",
+  "updated_at": "2026-10-12T03:59:51Z",
   "last_change_summary": "DVP-TSK-A21: remove coach from hub token exchange issuers, shell origins and producer mappings (io ruling 2026-10-12)",
   "owners": [
     "enceladus-platform"
@@ -5150,19 +5150,39 @@
       }
     },
     "neo4j.backup_runtime": {
-      "description": "Operational contract for the scheduled Neo4j-to-S3 backup worker introduced for gamma validation and disaster-readiness (ENC-TSK-B85). The Lambda exports graph state to S3 on a daily EventBridge schedule; DynamoDB remains the authoritative restore source and backfill_graph.py is the primary rebuild path.",
+      "description": "Operational contract for the scheduled Neo4j-to-S3 backup worker (ENC-TSK-B85; streamed bridge exporter ENC-TSK-Q61 / ENC-ISS-847). The Lambda streams graph state to a private S3 bucket on a daily EventBridge schedule and commits each run with a manifest; DynamoDB remains the authoritative restore source and backfill_graph.py is the primary rebuild path. The snapshot is also the migration-rehearsal input for the FalkorDB v6 production graph (DOC-834B78B9DEED).",
       "fields": {
         "schedule_expression": {
           "type": "string",
-          "definition": "EventBridge schedule expression that invokes the backup worker. Current contract: cron(0 3 * * ? *) for daily execution at 03:00 UTC."
+          "definition": "EventBridge schedule expression that invokes the backup worker. Current contract: prod cron(0 3 * * ? *) (03:00 UTC); gamma cron(20 3 * * ? *) (03:20 UTC, staggered so both environments never read AuraDB at once)."
         },
         "artifact_s3_prefix": {
           "type": "string",
-          "definition": "S3 prefix where backup artifacts are written. Current contract: s3://jreese-net/neo4j-backups/<YYYY>/<MM>/<DD>/..."
+          "definition": "S3 prefix where backup artifacts are written. Current contract: s3://enceladus-356364570033-us-west-2-an/neo4j-backups/<env>/<YYYY>/<MM>/<DD>/<run-ts>/ with env in {prod, gamma} (BACKUP_BUCKET / BACKUP_PREFIX / BACKUP_ENV); private, versioned, encrypted. The former public s3://jreese-net/neo4j-backups/ path is retired."
         },
         "restore_strategy": {
           "type": "string",
           "definition": "Primary restore path for Enceladus graph recovery. Backup artifacts serve as audit/reference snapshots; governed recovery uses DynamoDB re-projection via tools/backfill_graph.py with a target rebuild window of under 15 minutes for the current corpus."
+        },
+        "artifact_layout": {
+          "type": "object",
+          "definition": "Files in one run prefix: nodes.ndjson.gz (one JSON object per line: element id, labels, properties), relationships.ndjson.gz (one per line: type, start/end node ids, properties), schema.json (labels, relationship types, indexes, constraints, server version), manifest.json (written LAST). Keyset-paged export (page_size 5000) on a stable app key in the order record_id, doc_id, id, item_id, project_id, so memory stays flat as the graph grows."
+        },
+        "manifest_contract": {
+          "type": "object",
+          "definition": "manifest.json is the commit marker: a run prefix without it is incomplete and restore tooling must ignore it. Fields: export_version, env, started_at, finished_at, duration_s, node_count, rel_count, per_label_counts, per_type_counts, files{nodes, relationships, schema: {key, bytes, sha256}}, source{database, host, scheme, server_version}, page_size, stable_key_order, bucket, prefix."
+        },
+        "latest_pointer": {
+          "type": "object",
+          "definition": "neo4j-backups/<env>/latest.json is rewritten only after a manifest lands and points at the newest complete run (manifest_key, manifest_sha256, finished_at, counts). Readers resolve the newest snapshot through it rather than by listing."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "definition": "Invocation payload {\"dry_run\": true} reads one page of nodes and one of relationships and writes nothing (no S3 objects, no metrics); returns {ok, dry_run, nodes_sampled, relationships_sampled}. Used by the _deploy.yml post-deploy canary in place of a CodeDeploy alarm on the function's Errors metric."
+        },
+        "health_metrics": {
+          "type": "object",
+          "definition": "CloudWatch namespace EnceladusBackup, dimension Environment: Neo4jSnapshotSucceeded (1 per committed run), SnapshotBytes, NodeCount, RelCount. Neo4jSnapshotFreshnessAlarm (prod) fires when Sum(Neo4jSnapshotSucceeded) < 1 over 26 h, missing data breaching, to SNS enceladus-deploy-alerts."
         }
       }
     },
@@ -9518,9 +9538,14 @@
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
     {
-      "version": "2026-10-12.04",
+      "version": "2026-10-12.05",
       "date": "2026-10-12",
       "summary": "DVP-TSK-A21: remove coach from hub token exchange issuers, shell origins and producer mappings (io ruling 2026-10-12)"
+    },
+    {
+      "version": "2026-10-12.04",
+      "date": "2026-10-12",
+      "summary": "ENC-TSK-Q61 (ENC-ISS-847): neo4j.backup_runtime contract updated for the streamed bridge exporter -- gzip NDJSON nodes/relationships + schema.json + manifest.json (commit marker, written last) + latest.json pointer, landing in the private enceladus bucket under neo4j-backups/<env>/ (jreese-net retired); gamma schedule 03:20Z; dry_run canary payload; EnceladusBackup metrics + 26 h freshness alarm."
     },
     {
       "version": "2026-10-12.03",

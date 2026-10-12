@@ -1225,6 +1225,88 @@ jobs:
             --region "${{ env.AWS_REGION }}" \
             --environment-suffix="${ENVIRONMENT_SUFFIX}"
 
+      # ENC-TSK-Q61 / ENC-ISS-847: deploy health for enceladus-neo4j-backup is proven
+      # HERE, not by a CloudWatch alarm on the function's Errors metric. That alarm
+      # (enc-codedeploy-neo4j-backup-errors) measured the nightly job, which failed
+      # every night from 2026-08-17, and rolled back an unrelated Gen2 deploy; it has
+      # been removed from 07-codedeploy.yaml. The repo has no CodeDeploy lifecycle-hook
+      # pattern (no BeforeAllowTraffic Lambdas), so the canary is a post-deploy invoke
+      # of the new code with {"dry_run": true}: one page of nodes and one of
+      # relationships are read and discarded, nothing is written to S3 or CloudWatch,
+      # and the freshness metric is untouched. Runs only when this deploy shipped the
+      # function. AccessDenied on invoke is a loud ::warning:: (the deploy role needs
+      # lambda:InvokeFunction -- see 04-github-roles.yaml V4GammaNeo4jBackupCanary);
+      # any real failure (FunctionError, ok != true, AuraDB unreachable after retries)
+      # fails the run.
+      - name: Neo4j backup dry-run canary (ENC-TSK-Q61)
+        if: success()
+        env:
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile, time
+
+          region = os.environ.get('AWS_REGION', 'us-west-2')
+          versions = json.loads(os.environ.get('VERSION_IDS_JSON') or '{}')
+          fn_map = json.loads(os.environ.get('FUNCTION_NAME_MAP_JSON') or '{}')
+          if 'neo4j_backup' not in versions:
+              print('[skip] neo4j_backup was not part of this deploy')
+              sys.exit(0)
+          names = [n.strip() for n in (fn_map.get('neo4j_backup') or '').split(',') if n.strip()]
+          if not names:
+              print('[skip] neo4j_backup has no function mapping in this environment')
+              sys.exit(0)
+
+          failed = False
+          for name in names:
+              out = tempfile.NamedTemporaryFile(suffix='.json', delete=False).name
+              ok = False
+              for attempt in range(1, 4):
+                  r = subprocess.run(
+                      ['aws', 'lambda', 'invoke', '--function-name', name, '--region', region,
+                       '--cli-binary-format', 'raw-in-base64-out',
+                       '--cli-read-timeout', '300',
+                       '--payload', '{"dry_run": true}', '--output', 'json', out],
+                      capture_output=True, text=True)
+                  if r.returncode != 0:
+                      err = (r.stderr or '').strip()
+                      if 'AccessDenied' in err:
+                          print(f'::warning::{name}: dry-run canary SKIPPED, deploy role cannot invoke it '
+                                f'(grant lambda:InvokeFunction): {err.splitlines()[-1] if err else err}')
+                          ok = True
+                          break
+                      if 'ResourceNotFound' in err:
+                          print(f'[skip] {name}: not provisioned in this environment yet')
+                          ok = True
+                          break
+                      print(f'  [attempt {attempt}/3] {name}: invoke failed: {err}')
+                  else:
+                      meta = json.loads(r.stdout or '{}')
+                      body = open(out).read()
+                      if meta.get('FunctionError'):
+                          print(f'  [attempt {attempt}/3] {name}: FunctionError={meta["FunctionError"]}: {body[:600]}')
+                      else:
+                          try:
+                              payload = json.loads(body)
+                          except ValueError:
+                              payload = {}
+                          if payload.get('ok') is True and payload.get('dry_run') is True:
+                              print(f'  + {name}: dry-run canary ok '
+                                    f'(nodes_sampled={payload.get("nodes_sampled")}, '
+                                    f'relationships_sampled={payload.get("relationships_sampled")})')
+                              ok = True
+                              break
+                          print(f'  [attempt {attempt}/3] {name}: unexpected payload: {body[:600]}')
+                  time.sleep(20)
+              if not ok:
+                  print(f'::error::{name}: dry-run canary failed after 3 attempts -- the new code cannot read AuraDB',
+                        file=sys.stderr)
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
       # ENC-TSK-Q42 AC-3 (ENC-ISS-835): the Lambda smoke above probes per-function
       # health endpoints; none exercised the coordination MCP gateway, which sat
       # dead (JSON-RPC -32603 on every method) behind a green deploy. Probe it
