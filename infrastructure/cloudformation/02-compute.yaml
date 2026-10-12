@@ -1319,6 +1319,10 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           S3_BUCKET: !Ref S3Bucket
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
+          # DVP-TSK-B05 (isolation W4): content bucket first, legacy fallback on a miss.
+          CONTENT_STORE_MODE: dual
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
