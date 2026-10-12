@@ -1,12 +1,20 @@
 {
-  "version": "2026-10-12.14",
-  "updated_at": "2026-10-12T15:38:00Z",
-  "last_change_summary": "DVP-TSK-B03: escalations feed cards carry id = item_id (cockpit decidable/decide key; etag unchanged)",
+  "version": "2026-10-12.15",
+  "updated_at": "2026-10-12T16:06:01Z",
+  "last_change_summary": "DVP-TSK-B05: content_store.mode contract (isolation W4); reference_search reads via content_store in dual mode",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
+    "content_store.mode": {
+      "description": "DVP-TSK-A78/B04/B05 (isolation W4, DOC-EF4BC758CCC9): Lambdas reach the Enceladus S3 prefixes through enceladus_shared.content_store, configured per function by environment. CONTENT_STORE_MODE=legacy (default; legacy bucket only) | dual (writes to the content bucket then the legacy bucket; reads try the content bucket and fall back to legacy only on NoSuchKey/404) | content (content bucket only). Keys stay in legacy form; S3_ENV_PREFIX (gamma: 'gamma/') is dropped for the per-environment content bucket enceladus-content${EnvironmentSuffix}-<acct>-<region>. First adopter: reference_search (dual).",
+      "fields": {
+        "CONTENT_STORE_MODE": {"type": "string", "enum": ["legacy", "dual", "content"], "definition": "Which bucket(s) a function reads and writes for the Enceladus prefixes."},
+        "CONTENT_BUCKET": {"type": "string", "definition": "The per-environment content bucket; required unless the mode is legacy."},
+        "S3_ENV_PREFIX": {"type": "string", "definition": "Legacy-only key prefix (gamma: gamma/), stripped for the content bucket."}
+      }
+    },
     "tracker_mutation.get_record_project_sentinel": {
       "description": "ENC-TSK-Q10 (ENC-ISS-791): GET /api/v1/tracker/_/{type}/{id} -- the reserved project segment '_' (PROJECT_SENTINEL in tracker_mutation) asks the handler to derive the owning project from the record id's leading prefix via the projects table, then serve the unchanged single-record GET (_handle_get_record). Consumer: the Enceladus Local Runner (tools/elr elr_batch_get, ENC-TSK-Q11), which holds zero client-side prefix or project knowledge. Reads only: any non-GET method on '_' falls through to _validate_project_exists and its existing 404 (\"Project '_' is not registered.\"), which is also how a client detects a plane that predates this route.",
       "fields": {
@@ -9558,6 +9566,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.15",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-B05: content_store.mode contract (isolation W4); reference_search reads via content_store in dual mode"
+    },
     {
       "version": "2026-10-12.14",
       "date": "2026-10-12",
