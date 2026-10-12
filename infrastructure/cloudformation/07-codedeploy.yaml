@@ -1427,8 +1427,15 @@ Resources:
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
         DeploymentOption: WITH_TRAFFIC_CONTROL
-      # ENC-TSK-Q61: no AlarmConfiguration. See the neo4j-backup note in the
+      # ENC-TSK-Q61: no alarms gate this group. See the neo4j-backup note in the
       # alarms section: the nightly job's Errors alarm must not gate deploys.
+      # ENC-TSK-Q63: the "disabled" state must be DECLARED. Q61 only removed the
+      # AlarmConfiguration property, and CloudFormation treats a removed optional
+      # property as unchanged. After the 2026-10-12 prod apply, the live group still
+      # had alarms enabled, pointing at the two alarms Q61 deleted, which leaves the
+      # next neo4j-backup CodeDeploy deployment polling alarms that no longer exist.
+      AlarmConfiguration:
+        Enabled: false
       AutoRollbackConfiguration:
         Enabled: true
         Events: [DEPLOYMENT_FAILURE]
