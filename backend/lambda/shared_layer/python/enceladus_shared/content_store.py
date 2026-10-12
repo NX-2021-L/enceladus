@@ -1,0 +1,170 @@
+"""enceladus_shared.content_store — dual-path S3 access for the Enceladus content move (isolation W4).
+
+DOC-EF4BC758CCC9 (io approved D1-D7, 2026-10-12) moves every Enceladus prefix out of the shared public bucket
+(s3://jreese-net, gamma under ``gamma/``) into the per-environment content bucket
+(``enceladus-content${suffix}-<account>-<region>``, SSE-KMS, private). This module is the single code path every
+Lambda uses for those prefixes, so a function moves by flipping one environment variable, never by editing its
+call sites again:
+
+    CONTENT_STORE_MODE = legacy   read/write the legacy bucket only (today's behaviour; the default)
+                       = dual     write BOTH (content first, then legacy); read content, fall back to legacy on a miss
+                       = content  read/write the content bucket only
+
+Keys are the legacy keys. In gamma the legacy key carries the ``gamma/`` prefix (S3_ENV_PREFIX); the content bucket
+is per environment, so that prefix is dropped there. ``ContentStore.from_env`` reads:
+
+    CONTENT_STORE_MODE        legacy | dual | content (default legacy)
+    CONTENT_BUCKET            enceladus-content${suffix}-<account>-<region>
+    LEGACY_BUCKET             default: S3_BUCKET, else jreese-net
+    S3_ENV_PREFIX             legacy-only key prefix (gamma: "gamma/"), stripped for the content bucket
+
+Shipping: canonical copy here (digest-pinned in MODULE_DIGESTS.json). A migrating function vendors an identical
+copy next to its handler (tools/isolation/sync_content_store.py), and a CI guard asserts every copy matches, so
+there is no layer republish or fleet-wide layer pin change.
+
+Part of DVP-TSK-A78 (isolation W4).
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional
+
+MODES = ("legacy", "dual", "content")
+DEFAULT_LEGACY_BUCKET = "jreese-net"
+
+
+class ContentStoreConfigError(ValueError):
+    pass
+
+
+def _is_missing(exc: Exception) -> bool:
+    code = ""
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        code = str((resp.get("Error") or {}).get("Code", ""))
+    name = type(exc).__name__
+    return code in ("NoSuchKey", "404", "NotFound") or name in ("NoSuchKey",)
+
+
+class ContentStore:
+    """Mode-aware wrapper over one boto3 S3 client for the Enceladus content prefixes."""
+
+    def __init__(self, s3_client: Any, *, mode: str = "legacy", content_bucket: str = "",
+                 legacy_bucket: str = DEFAULT_LEGACY_BUCKET, legacy_key_prefix: str = "") -> None:
+        if mode not in MODES:
+            raise ContentStoreConfigError(f"CONTENT_STORE_MODE must be one of {MODES}, got {mode!r}")
+        if mode != "legacy" and not content_bucket:
+            raise ContentStoreConfigError(f"CONTENT_STORE_MODE={mode} needs CONTENT_BUCKET")
+        self.s3 = s3_client
+        self.mode = mode
+        self.content_bucket = content_bucket
+        self.legacy_bucket = legacy_bucket or DEFAULT_LEGACY_BUCKET
+        self.legacy_key_prefix = legacy_key_prefix or ""
+
+    @classmethod
+    def from_env(cls, s3_client: Any, env: Optional[Dict[str, str]] = None) -> "ContentStore":
+        e = os.environ if env is None else env
+        return cls(
+            s3_client,
+            mode=(e.get("CONTENT_STORE_MODE") or "legacy").strip().lower(),
+            content_bucket=(e.get("CONTENT_BUCKET") or "").strip(),
+            legacy_bucket=(e.get("LEGACY_BUCKET") or e.get("S3_BUCKET") or DEFAULT_LEGACY_BUCKET).strip(),
+            legacy_key_prefix=e.get("S3_ENV_PREFIX", ""),
+        )
+
+    # -- key mapping -------------------------------------------------------------------------------------------
+    def content_key(self, legacy_key: str) -> str:
+        """The content-bucket key for a legacy key (drops the legacy-only env prefix)."""
+        p = self.legacy_key_prefix
+        return legacy_key[len(p):] if p and legacy_key.startswith(p) else legacy_key
+
+    def _targets_for_write(self, key: str) -> List[tuple]:
+        if self.mode == "legacy":
+            return [(self.legacy_bucket, key)]
+        if self.mode == "content":
+            return [(self.content_bucket, self.content_key(key))]
+        return [(self.content_bucket, self.content_key(key)), (self.legacy_bucket, key)]
+
+    def _read_order(self, key: str) -> List[tuple]:
+        if self.mode == "legacy":
+            return [(self.legacy_bucket, key)]
+        if self.mode == "content":
+            return [(self.content_bucket, self.content_key(key))]
+        return [(self.content_bucket, self.content_key(key)), (self.legacy_bucket, key)]
+
+    # -- reads -------------------------------------------------------------------------------------------------
+    def get_object(self, key: str, **kwargs: Any) -> Dict[str, Any]:
+        order = self._read_order(key)
+        last: Optional[Exception] = None
+        for i, (bucket, k) in enumerate(order):
+            try:
+                return self.s3.get_object(Bucket=bucket, Key=k, **kwargs)
+            except Exception as exc:  # fall back only on a miss, and only in dual mode
+                if i + 1 < len(order) and _is_missing(exc):
+                    last = exc
+                    continue
+                raise
+        raise last  # pragma: no cover (loop always returns or raises)
+
+    def head_object(self, key: str, **kwargs: Any) -> Dict[str, Any]:
+        order = self._read_order(key)
+        for i, (bucket, k) in enumerate(order):
+            try:
+                return self.s3.head_object(Bucket=bucket, Key=k, **kwargs)
+            except Exception as exc:
+                if i + 1 < len(order) and _is_missing(exc):
+                    continue
+                raise
+        raise ContentStoreConfigError("unreachable")  # pragma: no cover
+
+    def read_bytes(self, key: str) -> bytes:
+        return self.get_object(key)["Body"].read()
+
+    def list_keys(self, prefix: str, max_keys: Optional[int] = None) -> List[str]:
+        """Legacy-form keys under ``prefix`` (a legacy-form prefix). Dual mode merges both buckets."""
+        seen: Dict[str, None] = {}
+        for bucket, p, to_legacy in self._list_sources(prefix):
+            pag = self.s3.get_paginator("list_objects_v2")
+            for page in pag.paginate(Bucket=bucket, Prefix=p):
+                for o in page.get("Contents", []):
+                    seen.setdefault(to_legacy(o["Key"]), None)
+                    if max_keys and len(seen) >= max_keys:
+                        return list(seen)[:max_keys]
+        return list(seen)
+
+    def _list_sources(self, prefix: str):
+        legacy = (self.legacy_bucket, prefix, lambda k: k)
+        content = (self.content_bucket, self.content_key(prefix), lambda k: self.legacy_key_prefix + k)
+        return {"legacy": [legacy], "content": [content], "dual": [content, legacy]}[self.mode]
+
+    # -- writes ------------------------------------------------------------------------------------------------
+    def put_object(self, key: str, body: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Write to every target for the mode; the FIRST target's response is returned (content in dual)."""
+        responses = []
+        for bucket, k in self._targets_for_write(key):
+            kw = dict(kwargs)
+            if bucket == self.content_bucket:
+                # The content bucket encrypts with its own key by default and denies other keys / SSE-S3.
+                kw.pop("ServerSideEncryption", None)
+                kw.pop("SSEKMSKeyId", None)
+                kw.pop("ACL", None)
+            responses.append(self.s3.put_object(Bucket=bucket, Key=k, Body=body, **kw))
+        return responses[0]
+
+    def delete_object(self, key: str) -> None:
+        for bucket, k in self._targets_for_write(key):
+            self.s3.delete_object(Bucket=bucket, Key=k)
+
+    def presigned_get_url(self, key: str, expires_in: int = 3600) -> str:
+        """Presigned GET from the bucket that holds the object (dual: content if present, else legacy)."""
+        order = self._read_order(key)
+        bucket, k = order[0]
+        if len(order) > 1:
+            try:
+                self.s3.head_object(Bucket=bucket, Key=k)
+            except Exception as exc:
+                if not _is_missing(exc):
+                    raise
+                bucket, k = order[1]
+        return self.s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": k}, ExpiresIn=expires_in)
