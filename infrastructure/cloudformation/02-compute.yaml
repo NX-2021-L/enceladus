@@ -5976,6 +5976,18 @@ Resources:
                   Action: sns:Publish
                   Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
                 - !Ref AWS::NoValue
+        # DVP-TSK-A83: the publisher stamps projects.last_activity_at (a monotonic max of the
+        # tracker records' updated_at) so project_service needs no tracker Query to compute
+        # days_since_active. One action on the one table; no index/*, and the stamp is
+        # best-effort in code, so a missing grant only logs a warning.
+        - PolicyName: ProjectsLastActivityWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProjectsLastActivityUpdate
+                Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

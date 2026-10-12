@@ -175,6 +175,13 @@ def _env_float(name: str, default: float) -> float:
 # updated_at timestamp, NOT the day count, so the count is recomputed against "now" on every
 # read; the only staleness is a write landing inside the TTL window, and the value is a
 # whole-day integer. Set PROJECT_ACTIVITY_CACHE_TTL_SECONDS=0 to disable.
+#
+# DVP-TSK-A83: the primary source is now a stored value. The feed_publisher stream consumer keeps
+# projects.last_activity_at as a monotonic max of the tracker records' updated_at, so a project
+# row that carries it needs no tracker Query at all (cold or warm). The Query + cache above is
+# only the fallback for rows that do not carry the attribute yet (never touched since the
+# consumer shipped, and not yet backfilled by tools/backfill_project_last_activity.py).
+_ACTIVITY_ATTR = "last_activity_at"
 _ACTIVITY_TTL = _env_float("PROJECT_ACTIVITY_CACHE_TTL_SECONDS", 300.0)
 _ACTIVITY_MAX_WORKERS = 8
 # project_id -> (monotonic expiry, newest updated_at ISO string or None)
@@ -507,6 +514,17 @@ def _days_since_active_many(project_ids: List[str]) -> Dict[str, Optional[int]]:
 _UNSET: Any = object()
 
 
+def _stored_days_since_active(item: Dict[str, Any]) -> Any:
+    """days_since_active from the project row's stored last_activity_at (DVP-TSK-A83), or _UNSET
+    when the row does not carry a usable value, in which case the caller falls back to the
+    tracker-Query path. Does not mutate item."""
+    stored = item.get(_ACTIVITY_ATTR)
+    if not isinstance(stored, str):
+        return _UNSET
+    days = _days_since(stored)
+    return _UNSET if days is None else days
+
+
 def _enrich_project(item: Dict[str, Any], days: Any = _UNSET) -> Dict[str, Any]:
     """Add days_since_active to a project dict and normalize deploy_policy.
 
@@ -516,8 +534,14 @@ def _enrich_project(item: Dict[str, Any], days: Any = _UNSET) -> Dict[str, Any]:
     the lifecycle_service deploy-init gate consistent even before the physical backfill
     (tools/seed_deploy_policy.py) materializes the attribute on the DynamoDB record.
 
-    days: a precomputed days_since_active (the list path computes all projects concurrently)."""
+    days: a precomputed days_since_active (the list path computes all projects concurrently).
+
+    DVP-TSK-A83: a stored last_activity_at wins over the tracker Query. It is an internal
+    attribute, so it is removed from the item to keep the response shape unchanged."""
     pid = item.get("project_id", "")
+    if days is _UNSET:
+        days = _stored_days_since_active(item)
+    item.pop(_ACTIVITY_ATTR, None)
     item["days_since_active"] = _compute_days_since_active(pid) if days is _UNSET else days
     policy = str(item.get("deploy_policy") or "").strip().lower()
     item["deploy_policy"] = policy if policy in _VALID_DEPLOY_POLICIES else _DEFAULT_DEPLOY_POLICY
@@ -822,8 +846,19 @@ def _handle_list(query_params: Dict) -> Dict:
     elif active_filter and active_filter.lower() == "true":
         projects = [p for p in projects if p.get("status") not in ("closed", "archived")]
 
-    # Enrich with days_since_active (cached per project; misses are looked up concurrently)
-    days_by_project = _days_since_active_many([p.get("project_id", "") for p in projects])
+    # Enrich with days_since_active. A stored last_activity_at needs no tracker query (A83);
+    # only rows without it fall back to the cached lookup, whose misses run concurrently.
+    days_by_project: Dict[str, Optional[int]] = {}
+    fallback_ids: List[str] = []
+    for p in projects:
+        pid = p.get("project_id", "")
+        stored = _stored_days_since_active(p)
+        if stored is _UNSET:
+            fallback_ids.append(pid)
+        else:
+            days_by_project[pid] = stored
+    if fallback_ids:
+        days_by_project.update(_days_since_active_many(fallback_ids))
     for p in projects:
         _enrich_project(p, days=days_by_project.get(p.get("project_id", "")))
 
