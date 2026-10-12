@@ -964,6 +964,17 @@ Resources:
       RouteKey: GET /api/v1/auth/callback
       Target: !Sub integrations/${AuthRefreshIntegration}
 
+  # ENC/DVP-TSK-B07: public step-up re-login entry. The @io-kit/auth
+  # cognitoAdapter navigates here (prompt=login&max_age=0); auth_refresh 302s to
+  # the Cognito Hosted-UI authorize endpoint and the callback above returns the
+  # user. No authorizer: it only redirects and holds no session.
+  RouteAuthLogin:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/login
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
   RouteAuthGitHubToken:
     Type: AWS::ApiGatewayV2::Route
     Properties:

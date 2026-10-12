@@ -34,11 +34,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, Optional
-from urllib.parse import unquote, urlencode
+from urllib.parse import unquote, urlencode, urlparse
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -269,6 +270,30 @@ def _handle_github_token(event: Dict) -> Dict:
 
 import base64  # noqa: E402  (grouped with the callback feature)
 
+_AUTH_LOOP_PATHS = ("/api/v1/auth/callback", "/api/v1/auth/login")
+_MAX_AGE_RE = re.compile(r"[0-9]{1,10}")
+
+
+def _safe_return_path(path: str) -> str:
+    """Return `path` if it is a same-site absolute path, else '/'.
+
+    Shared by the callback (decoded `state`) and the step-up login route
+    (`returnTo`) so both apply one rule: starts with '/', not protocol-relative
+    '//host', no scheme/host, no backslash (browsers treat '/\\host' as
+    '//host'), no control characters, and never the callback or login routes
+    (a redirect loop).
+    """
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return "/"
+    if "\\" in path or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return "/"
+    parsed = urlparse(path)
+    if parsed.scheme or parsed.netloc:
+        return "/"
+    if path.startswith(_AUTH_LOOP_PATHS):
+        return "/"
+    return path
+
 
 def _b64url_decode_path(state: str) -> str:
     """Decode the base64url `state` param (the pre-login path) set by the SPA.
@@ -283,13 +308,7 @@ def _b64url_decode_path(state: str) -> str:
         decoded = base64.urlsafe_b64decode(state + pad).decode("utf-8")
     except Exception:  # noqa: BLE001
         return "/"
-    # Only same-origin absolute paths are allowed (no scheme/host, no protocol-
-    # relative //host), and never bounce back into the callback.
-    if not decoded.startswith("/") or decoded.startswith("//"):
-        return "/"
-    if decoded.startswith("/api/v1/auth/callback"):
-        return "/"
-    return decoded
+    return _safe_return_path(decoded)
 
 
 def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
@@ -375,6 +394,39 @@ def _handle_oauth_callback(event: Dict) -> Dict:
         "cookies": cookies,
         "body": "",
     }
+
+
+def _handle_login(event: Dict) -> Dict:
+    """GET /api/v1/auth/login — step-up / re-login entry (DVP-TSK-B07).
+
+    The @io-kit/auth cognitoAdapter navigates here with
+    ?returnTo=<path>&prompt=login&max_age=0 for high/critical actions. We only
+    force a real Cognito re-login and bring the user back: 302 to the Hosted-UI
+    /oauth2/authorize with `state` = base64url(returnTo), exactly what the SPA's
+    buildLoginUrl sends, so the existing callback decodes it unchanged and sets
+    the fresh session cookies. Public route; no cookie needed.
+    """
+    params = event.get("queryStringParameters") or {}
+    return_to = _safe_return_path(params.get("returnTo") or "")
+    state = base64.urlsafe_b64encode(return_to.encode("utf-8")).decode("ascii").rstrip("=")
+
+    query: Dict[str, str] = {
+        "response_type": "code",
+        "client_id": COGNITO_CLIENT_ID,
+        "redirect_uri": WEBUI_OAUTH_REDIRECT_URI,
+        "scope": "openid email profile",
+        "state": state,
+    }
+    if params.get("prompt") == "login":
+        query["prompt"] = "login"
+    max_age = params.get("max_age")
+    if max_age is not None and _MAX_AGE_RE.fullmatch(max_age):
+        query["max_age"] = max_age
+
+    location = f"{COGNITO_HOSTED_UI_DOMAIN.rstrip('/')}/oauth2/authorize?{urlencode(query)}"
+    logger.info("login redirect; returnTo=%s prompt=%s max_age=%s",
+                return_to, query.get("prompt"), query.get("max_age"))
+    return {"statusCode": 302, "headers": {"Location": location, "Cache-Control": "no-store"}, "body": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +599,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     # cockpit (same-origin login, no Lambda@Edge).
     if method == "GET" and path.rstrip("/").endswith("/auth/callback"):
         return _handle_oauth_callback(event)
+
+    # DVP-TSK-B07: step-up re-login entry (prompt=login&max_age=0 round trip).
+    if method == "GET" and path.rstrip("/").endswith("/auth/login"):
+        return _handle_login(event)
 
     if method == "GET" and path.rstrip("/").endswith("/auth/manifest"):
         return _handle_manifest(event)
