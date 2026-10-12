@@ -382,6 +382,24 @@ def _get_ddb():
     return _ddb
 
 
+_CONTENT_STORE = None
+
+
+def _content_store():
+    """DVP-TSK-B09 (isolation W4): reference-template writes go through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket and S3_BUCKET; legacy (default) is unchanged.
+    """
+    global _CONTENT_STORE
+    if _CONTENT_STORE is None:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        _CONTENT_STORE = ContentStore.from_env(_get_s3())
+    return _CONTENT_STORE
+
+
 def _get_s3():
     global _s3
     if _s3 is None:
@@ -755,10 +773,9 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     # Step 8: Upload reference doc template to S3
     try:
         template_content = _fetch_reference_template(name)
-        _get_s3().put_object(
-            Bucket=S3_BUCKET,
-            Key=s3_key,
-            Body=template_content.encode("utf-8"),
+        _content_store().put_object(
+            s3_key,
+            template_content.encode("utf-8"),
             ContentType="text/markdown; charset=utf-8",
             CacheControl="max-age=0, s-maxage=300, must-revalidate",
         )

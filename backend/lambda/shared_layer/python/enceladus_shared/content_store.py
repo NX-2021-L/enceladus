@@ -14,6 +14,9 @@ Keys are the legacy keys. In gamma the legacy key carries the ``gamma/`` prefix 
 is per environment, so that prefix is dropped there. ``ContentStore.from_env`` reads:
 
     CONTENT_STORE_MODE        legacy | dual | content (default legacy)
+    CONTENT_STORE_READ        auto (default) | legacy. In dual mode, legacy keeps reads on the legacy bucket while writes go
+                              to both: the writer-first phase, so a function that rewrites what it reads never regenerates
+                              from a stale content snapshot (DVP-TSK-B09).
     CONTENT_BUCKET            enceladus-content${suffix}-<account>-<region>
     LEGACY_BUCKET             default: S3_BUCKET, else jreese-net
     S3_ENV_PREFIX             legacy-only key prefix (gamma: "gamma/"), stripped for the content bucket
@@ -31,6 +34,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 MODES = ("legacy", "dual", "content")
+READ_MODES = ("auto", "legacy")
 DEFAULT_LEGACY_BUCKET = "jreese-net"
 
 
@@ -51,9 +55,13 @@ class ContentStore:
     """Mode-aware wrapper over one boto3 S3 client for the Enceladus content prefixes."""
 
     def __init__(self, s3_client: Any, *, mode: str = "legacy", content_bucket: str = "",
-                 legacy_bucket: str = DEFAULT_LEGACY_BUCKET, legacy_key_prefix: str = "") -> None:
+                 legacy_bucket: str = DEFAULT_LEGACY_BUCKET, legacy_key_prefix: str = "", read_mode: str = "auto") -> None:
         if mode not in MODES:
             raise ContentStoreConfigError(f"CONTENT_STORE_MODE must be one of {MODES}, got {mode!r}")
+        if read_mode not in READ_MODES:
+            raise ContentStoreConfigError(f"CONTENT_STORE_READ must be one of {READ_MODES}, got {read_mode!r}")
+        if read_mode == "legacy" and mode == "content":
+            raise ContentStoreConfigError("CONTENT_STORE_READ=legacy contradicts CONTENT_STORE_MODE=content")
         if mode != "legacy" and not content_bucket:
             raise ContentStoreConfigError(f"CONTENT_STORE_MODE={mode} needs CONTENT_BUCKET")
         self.s3 = s3_client
@@ -61,6 +69,7 @@ class ContentStore:
         self.content_bucket = content_bucket
         self.legacy_bucket = legacy_bucket or DEFAULT_LEGACY_BUCKET
         self.legacy_key_prefix = legacy_key_prefix or ""
+        self.read_mode = read_mode
 
     @classmethod
     def from_env(cls, s3_client: Any, env: Optional[Dict[str, str]] = None) -> "ContentStore":
@@ -71,6 +80,7 @@ class ContentStore:
             content_bucket=(e.get("CONTENT_BUCKET") or "").strip(),
             legacy_bucket=(e.get("LEGACY_BUCKET") or e.get("S3_BUCKET") or DEFAULT_LEGACY_BUCKET).strip(),
             legacy_key_prefix=e.get("S3_ENV_PREFIX", ""),
+            read_mode=(e.get("CONTENT_STORE_READ") or "auto").strip().lower(),
         )
 
     # -- key mapping -------------------------------------------------------------------------------------------
@@ -87,7 +97,7 @@ class ContentStore:
         return [(self.content_bucket, self.content_key(key)), (self.legacy_bucket, key)]
 
     def _read_order(self, key: str) -> List[tuple]:
-        if self.mode == "legacy":
+        if self.mode == "legacy" or self.read_mode == "legacy":
             return [(self.legacy_bucket, key)]
         if self.mode == "content":
             return [(self.content_bucket, self.content_key(key))]
@@ -136,6 +146,8 @@ class ContentStore:
     def _list_sources(self, prefix: str):
         legacy = (self.legacy_bucket, prefix, lambda k: k)
         content = (self.content_bucket, self.content_key(prefix), lambda k: self.legacy_key_prefix + k)
+        if self.read_mode == "legacy":
+            return [legacy]
         return {"legacy": [legacy], "content": [content], "dual": [content, legacy]}[self.mode]
 
     # -- writes ------------------------------------------------------------------------------------------------
@@ -151,6 +163,15 @@ class ContentStore:
                 kw.pop("ACL", None)
             responses.append(self.s3.put_object(Bucket=bucket, Key=k, Body=body, **kw))
         return responses[0]
+
+    def upload_file(self, local_path: str, key: str, extra_args: Optional[Dict[str, Any]] = None) -> None:
+        """boto3 managed upload (multipart for large files) to every write target for the mode."""
+        for bucket, k in self._targets_for_write(key):
+            args = dict(extra_args or {})
+            if bucket == self.content_bucket:
+                for drop in ("ServerSideEncryption", "SSEKMSKeyId", "ACL"):
+                    args.pop(drop, None)
+            self.s3.upload_file(local_path, bucket, k, ExtraArgs=args or None)
 
     def delete_object(self, key: str) -> None:
         for bucket, k in self._targets_for_write(key):
