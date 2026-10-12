@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +29,28 @@ describe('HeaderSearch (kit SearchLauncher)', () => {
   it('suggests from the local corpus index', () => {
     const s = buildHeaderSuggestions('pager', rows, [])
     expect(s).toEqual([expect.objectContaining({ id: 'ENC-TSK-12', title: 'Pager fix', href: '/enceladus/task/ENC-TSK-12' })])
+  })
+
+  it('DVP-TSK-B11: rows carry structured record meta (id + type), not an "ID · type" string', () => {
+    const [s] = buildHeaderSuggestions('pager', rows, [])
+    expect(s).toEqual(expect.objectContaining({ recordId: 'ENC-TSK-12', kind: 'task' }))
+    expect(s!.subtitle).toBeUndefined()
+  })
+
+  it('DVP-TSK-B11: the launcher sheet maps every row hook to the record-row design system', () => {
+    const css = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'headerSearch.css'), 'utf8')
+    const rule = /\.io-sheet\[data-variant="palette"\] \{([^}]*)\}/.exec(css)![1]!
+    for (const [hook, value] of [
+      ['--io-launcher-title-font', 'var(--font-body)'],
+      ['--io-launcher-title-size', '13.5px'],
+      ['--io-launcher-title-weight', 'var(--fw-medium)'],
+      ['--io-launcher-meta-font', 'var(--font-mono)'],
+      ['--io-launcher-id-accent', '100%'],
+      ['--io-launcher-kind-muted', '100%'],
+    ]) {
+      expect(rule).toContain(`${hook}: ${value};`)
+    }
+    expect(css).not.toMatch(/\.io-search__(title|id|kind|meta)\s*\{/)
   })
 
   it('opens from the magnifier and Enter routes to /feed?q=', async () => {
