@@ -38,5 +38,28 @@ class SubjectBackfillTests(unittest.TestCase):
         self.assertEqual(a["etag"], lf._escalation_etag(b))
 
 
+class LegacyCardInvariantTests(unittest.TestCase):
+    """Mirror of @io-kit/gates parseGateCard rules for a pre-gate escalation.request record."""
+
+    TS = __import__("re").compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+
+    def test_legacy_record_satisfies_the_kit_card_rules(self):
+        card = _view({"item_id": "ENC-ESC-007", "project_id": "enceladus", "status": "requested",
+                      "target_record_id": "ENC-TSK-Q01", "created_at": "2026-10-11T10:00:00.123456+00:00",
+                      "requiredAuth": "cognito_max_age"})
+        self.assertRegex(card["createdAt"], self.TS)
+        self.assertRegex(card["expiresAt"], self.TS)
+        self.assertLess(card["createdAt"], card["expiresAt"])
+        self.assertTrue(card["evidence"] and all(isinstance(e["label"], str) and isinstance(e["ref"], str) for e in card["evidence"]))
+        self.assertEqual("ENC-TSK-Q01", card["evidence"][0]["ref"])
+        self.assertIn(card["requiredAuth"], ("session", "interactive_human", "step_up"))
+        self.assertTrue(card["subject"]["record_id"])
+        self.assertIsInstance(card["subject"]["version"], str)
+
+    def test_existing_evidence_is_kept(self):
+        card = _view({"item_id": "X", "status": "requested", "evidence": [{"label": "run", "ref": "R1"}]})
+        self.assertEqual([{"label": "run", "ref": "R1"}], card["evidence"])
+
+
 if __name__ == "__main__":
     unittest.main()
