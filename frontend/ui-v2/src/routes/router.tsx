@@ -137,6 +137,17 @@ const escalationsRoute = createRoute({
   // stays as the read-only monitor view; this is the decision surface.
   component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationsRoute'),
 })
+// DVP-TSK-A24 (E4-R31): push deep link; opens that escalation with Approve/Deny above the fold.
+const escalationDeepRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/escalations/$escalationId',
+  component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationDeepRoute'),
+})
+const notificationSettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings/notifications',
+  component: lazyRouteComponent(() => import('./NotificationSettingsRoute'), 'NotificationSettingsRoute'),
+})
 // DVP-TSK-974: recipes over the primitive (lazy chunks; the kits stay out of the initial bundle).
 const recipesRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -214,6 +225,8 @@ const routeTree = rootRoute.addChildren([
   coordinationRoute,
   skillLibraryRoute,
   escalationsRoute,
+  escalationDeepRoute,
+  notificationSettingsRoute,
   sessionRoute,
   agentDetailRoute,
   ...placeholderRoutes,

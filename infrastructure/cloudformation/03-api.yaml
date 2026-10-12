@@ -3009,6 +3009,43 @@ Resources:
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref EscalationDecisionAuthorizer
 
+  # DVP-TSK-A23 (E4-R29): escalation web push. Same integration and in-Lambda auth as the
+  # escalations feed; coordination_api additionally requires the approver allow-list (403).
+  RouteNotificationsVapidKey:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/notifications/vapid-public-key"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsSubscribe:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/notifications/subscribe"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsUnsubscribe:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/notifications/subscribe"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsPrefsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/notifications/preferences"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsPrefsPut:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/coordination/notifications/preferences"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # DVP-TSK-A17 (E4-R14): public hub token exchange. The credential is an allow-listed
   # issuer's ID token in the body (verified in coordination_api), so no gateway authorizer.
   RouteHubExchange:
