@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-12.09",
-  "updated_at": "2026-10-12T06:22:08Z",
-  "last_change_summary": "DVP-TSK-A38: escalations feed normalizes legacy cards (createdAt, evidence, requiredAuth) to the gates card invariants",
+  "version": "2026-10-12.10",
+  "updated_at": "2026-10-12T10:15:39Z",
+  "last_change_summary": "DVP-TSK-A01: GET /api/v1/projects (project_service) caches each project's newest tracker updated_at per Lambda container (PROJECT_ACTIVITY_CACHE_TTL_SECONDS, default 300; 0 disables) and fetches misses concurrently; days_since_active may lag a tracker write by up to the TTL; response shape unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1945,6 +1945,17 @@
             "projection_note": "Every Scan/API read that backs a resolver's prefix map must explicitly project alias_prefixes (not just prefix), or that resolver will silently never see the field. coordination_api/project_utils.py's Scan and the deploy_finalize/deploy_orchestrator Scans were extended accordingly in the same change that added this field."
           },
           "usage_guidance": "Set on a project's projects-table record when repointing its MINT `prefix` to a new value while pre-existing records under the old prefix must remain resolvable (ENC-TSK-O45 gamma repoint is the motivating case). Not required for a project that has never changed its prefix. Optional; omitted/empty is equivalent to no aliases."
+        }
+      }
+    },
+    "project_service.list_activity_cache": {
+      "description": "DVP-TSK-A01: GET /api/v1/projects derives days_since_active from the newest updated_at across a project's tracker records (project-type-index Query). That newest timestamp is cached per Lambda container; project rows themselves are always read fresh.",
+      "fields": {
+        "PROJECT_ACTIVITY_CACHE_TTL_SECONDS": {
+          "type": "number",
+          "default": 300,
+          "definition": "Seconds a container keeps a project's newest tracker updated_at before re-querying. 0 disables the cache. The day count is recomputed against the current time on every read, so only a tracker write inside the window can lag.",
+          "usage_guidance": "Failed lookups are never cached; on a refresh failure a stale entry is served. Misses are fetched concurrently (at most 8 threads). ui-v2 does not read days_since_active."
         }
       }
     },
@@ -9537,6 +9548,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.10",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-A01: GET /api/v1/projects (project_service) caches each project's newest tracker updated_at per Lambda container (PROJECT_ACTIVITY_CACHE_TTL_SECONDS, default 300; 0 disables) and fetches misses concurrently; days_since_active may lag a tracker write by up to the TTL; response shape unchanged."
+    },
     {
       "version": "2026-10-12.09",
       "date": "2026-10-12",
