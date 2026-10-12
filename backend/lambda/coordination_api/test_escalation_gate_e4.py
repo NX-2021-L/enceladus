@@ -178,3 +178,13 @@ class TestCrossProjectFeed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAllProjectsFlatList(unittest.TestCase):
+    """DVP-PLN-013 (2026-10-12): all-projects feed carries 'escalations' for the @io-kit/gates client."""
+
+    def test_flat_list_only_in_all_projects_mode(self):
+        import inspect
+        src = inspect.getsource(coord._handle_escalations_feed)
+        self.assertIn('feed_payload["escalations"] = pending + terminal', src)
+        self.assertLess(src.index('if cross_project:'), src.index('feed_payload["escalations"]'))

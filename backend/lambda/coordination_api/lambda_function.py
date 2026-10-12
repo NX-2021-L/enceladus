@@ -11037,6 +11037,10 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
         feed_payload["derived_errors"] = derived_errors
     if cross_project:
         feed_payload["scope"] = "all_projects"
+        # DVP-PLN-013 (E4, 2026-10-12): the all-projects mode is new in E4, so it can carry the
+        # flat list the @io-kit/gates client (every shell's GateInbox) reads; the default
+        # single-project shape stays exactly as before (D9).
+        feed_payload["escalations"] = pending + terminal
         feed_payload["projects_scanned"] = len(scan_projects)
     return _response(200, feed_payload)
 
