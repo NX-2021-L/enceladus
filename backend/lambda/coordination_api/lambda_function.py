@@ -10632,6 +10632,20 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     escalation["decision_log"] = log
     escalation["decision_log_head"] = log[-1].get("hash") if log else None
     escalation["decision_log_valid"] = _verify_decision_chain(log)[0]
+    # DVP-TSK-A38: every card carries subject {record_id, project, version} (gates.schema).
+    # Records written before the gate shape (ENC-FTR-121 escalation.request) have no
+    # subject; without one the kit rejects the card and the whole queue fails to load.
+    # View-only: etag and callHash do not read subject, so decide is unaffected.
+    subject = escalation.get("subject")
+    base = subject if isinstance(subject, dict) else {}
+    if not str(base.get("record_id") or "").strip() or not isinstance(base.get("version"), str):
+        escalation["subject"] = {
+            **base,
+            "record_id": str(base.get("record_id") or escalation.get("target_record_id")
+                             or escalation.get("item_id") or "unknown"),
+            "project": str(base.get("project") or escalation.get("project_id") or ""),
+            "version": str(base.get("version") or escalation.get("expected_version") or ""),
+        }
 
 
 def _gate_list_project_ids() -> List[str]:
