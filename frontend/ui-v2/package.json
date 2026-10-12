@@ -18,7 +18,7 @@
   "dependencies": {
     "@io-kit/auth": "1.1.0",
     "@io-kit/feed": "1.1.1",
-    "@io-kit/gates": "0.1.1",
+    "@io-kit/gates": "0.1.2",
     "@io-kit/md": "1.2.0",
     "@io-kit/notify": "0.3.1",
     "@io-kit/recipes": "0.1.0",
