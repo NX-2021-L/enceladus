@@ -113,6 +113,28 @@ jobs:
         with:
           python-version: ${{ matrix.py_version }}
 
+      # ENC-TSK-Q70 (DVP-PLN-016 W4): mcp_streamable depends on io-kit-mcp-edge,
+      # served from the private io-kit CodeArtifact repo. Assume the read-only role,
+      # mint a short-lived token and expose it to pip as an EXTRA index (PyPI stays
+      # primary for every other dependency). The GitHubActions-Build-Role assume that
+      # follows replaces these credentials; the token is masked and only ever lives in
+      # PIP_EXTRA_INDEX_URL. Trust already covers repo:NX-2021-L/enceladus:*.
+      - name: Configure AWS credentials for io-kit CodeArtifact (read-only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/io-kit-github-read
+          aws-region: us-west-2
+
+      - name: Export io-kit CodeArtifact pip index
+        shell: bash
+        run: |
+          set -euo pipefail
+          T=$(aws codeartifact get-authorization-token \
+            --domain io --domain-owner 356364570033 \
+            --query authorizationToken --output text)
+          echo "::add-mask::${T}"
+          echo "PIP_EXTRA_INDEX_URL=https://aws:${T}@io-356364570033.d.codeartifact.us-west-2.amazonaws.com/pypi/io-kit/simple/" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -425,6 +447,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # ENC-TSK-Q70 (DVP-PLN-016 W4): mcp_streamable depends on io-kit-mcp-edge,
+      # served from the private io-kit CodeArtifact repo. Assume the read-only role,
+      # mint a short-lived token and expose it to pip as an EXTRA index (PyPI stays
+      # primary for every other dependency). The GitHubActions-Build-Role assume that
+      # follows replaces these credentials; the token is masked and only ever lives in
+      # PIP_EXTRA_INDEX_URL. Trust already covers repo:NX-2021-L/enceladus:*.
+      - name: Configure AWS credentials for io-kit CodeArtifact (read-only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/io-kit-github-read
+          aws-region: us-west-2
+
+      - name: Export io-kit CodeArtifact pip index
+        shell: bash
+        run: |
+          set -euo pipefail
+          T=$(aws codeartifact get-authorization-token \
+            --domain io --domain-owner 356364570033 \
+            --query authorizationToken --output text)
+          echo "::add-mask::${T}"
+          echo "PIP_EXTRA_INDEX_URL=https://aws:${T}@io-356364570033.d.codeartifact.us-west-2.amazonaws.com/pypi/io-kit/simple/" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
