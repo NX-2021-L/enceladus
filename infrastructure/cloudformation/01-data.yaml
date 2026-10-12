@@ -864,6 +864,30 @@ Resources:
         - Key: Component
           Value: scoring
 
+  # DVP-TSK-A23 (DVP-PLN-013 E4-R29): web push subscriptions + per-approver
+  # notification preferences. pk PUSHSUB#<email> / sk sha256(endpoint); pk PUSHPREF#<email> / sk prefs.
+  PushSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-push-subscriptions${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
   # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
   AgentSessionsTable:
     Type: AWS::DynamoDB::Table
@@ -1182,6 +1206,14 @@ Outputs:
     Value: !Ref LessonScoringTopic
     Export:
       Name: !Sub ${AWS::StackName}-LessonScoringTopicArn
+  PushSubscriptionsTableName:
+    Value: !Ref PushSubscriptionsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-PushSubscriptionsTable
+  PushSubscriptionsTableArn:
+    Value: !GetAtt PushSubscriptionsTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-PushSubscriptionsTableArn
   # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
   AgentSessionsTableName:
     Value: !Ref AgentSessionsTable

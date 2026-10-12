@@ -61,6 +61,11 @@ class TestRequestNotification(_NotifyBase):
         self.assertIn("Arc misclassified at create", message)
         self.assertEqual(kwargs["TopicArn"],
                          "arn:aws:sns:us-west-2:1:devops-feed-alerts-test")
+        # DVP-TSK-A23: attributes the escalation push sender filters on.
+        attrs = {k: v["StringValue"] for k, v in kwargs["MessageAttributes"].items()}
+        self.assertEqual({"category": "escalation", "escalation_event": "requested",
+                          "escalation_id": escalation_id, "project_id": "enceladus"}, attrs)
+        self.assertTrue(all(v["DataType"] == "String" for v in kwargs["MessageAttributes"].values()))
 
     def test_publish_happens_after_write_and_failure_never_fails_request(self):
         self.sns.publish.side_effect = RuntimeError("SNS down")

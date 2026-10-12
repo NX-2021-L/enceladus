@@ -56,6 +56,11 @@ try:  # DVP-TSK-A17 (E4-R14): hub token exchange lives in the shared layer; abse
 except Exception:  # noqa: BLE001
     _hub_exchange = None  # type: ignore[assignment]
 
+try:  # DVP-TSK-A23 (E4-R29): web push primitives; absent -> notification routes 503, sender no-ops
+    import webpush as _webpush
+except Exception:  # noqa: BLE001
+    _webpush = None  # type: ignore[assignment]
+
 try:
     from mcp_client import CoordinationMcpClient
 except ModuleNotFoundError:
@@ -18375,7 +18380,319 @@ def _handle_intent_classifier_training_rollback(event: Dict[str, Any]) -> Dict[s
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-A23 (DVP-PLN-013 E4-W3.9, E4-R28..R32): escalation web push.
+#
+# Routes (/api/v1/coordination/notifications/...): vapid-public-key, subscribe
+# (POST/DELETE) and preferences (GET/PUT), all restricted to a human Cognito
+# principal on the escalation approver allow-list. The SNS-fed sender renders
+# one push per approver subscription per NEW escalation, honoring preferences.
+# Publish/send failures never fail the escalation request (J72 s5.8): the
+# whole SNS handler swallows and logs.
+# ---------------------------------------------------------------------------
+PUSH_SUBSCRIPTIONS_TABLE = os.environ.get("PUSH_SUBSCRIPTIONS_TABLE", "enceladus-push-subscriptions")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "https://jreese.net/")
+PUSH_TTL_SECONDS = 24 * 3600
+_NOTIFY_RISKS = ("low", "medium", "high", "critical")
+_NOTIFY_KIND_RE = re.compile(r"^[a-z0-9_\-]{1,40}$")
+_NOTIFY_MAX_KINDS = 32
+_NOTIFY_PATHS = {
+    "/api/v1/coordination/notifications/vapid-public-key",
+    "/api/v1/coordination/notifications/subscribe",
+    "/api/v1/coordination/notifications/preferences",
+}
+
+
+def _notify_default_prefs() -> Dict[str, Any]:
+    return {"enabled": True, "types": {}, "extra": {"min_risk": "low"}}
+
+
+def _notify_normalize_prefs(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Validate a preferences body; returns (prefs, '') or (None, reason)."""
+    if isinstance(raw, dict) and isinstance(raw.get("preferences"), dict):
+        raw = raw["preferences"]
+    if not isinstance(raw, dict):
+        return None, "A JSON object body is required."
+    prefs = _notify_default_prefs()
+    if "enabled" in raw:
+        if not isinstance(raw["enabled"], bool):
+            return None, "enabled must be a boolean."
+        prefs["enabled"] = raw["enabled"]
+    types = raw.get("types", {})
+    if not isinstance(types, dict) or len(types) > _NOTIFY_MAX_KINDS:
+        return None, "types must be an object of at most 32 kinds."
+    for kind, cfg in types.items():
+        if not isinstance(kind, str) or not _NOTIFY_KIND_RE.match(kind) or not isinstance(cfg, dict):
+            return None, f"Invalid type entry {kind!r}."
+        entry: Dict[str, Any] = {"enabled": True, "level": 1}
+        if "enabled" in cfg:
+            if not isinstance(cfg["enabled"], bool):
+                return None, f"types.{kind}.enabled must be a boolean."
+            entry["enabled"] = cfg["enabled"]
+        if "level" in cfg:
+            if isinstance(cfg["level"], bool) or cfg["level"] not in (0, 1):
+                return None, f"types.{kind}.level must be 0 or 1."
+            entry["level"] = int(cfg["level"])
+        prefs["types"][kind] = entry
+    extra = raw.get("extra", {})
+    if not isinstance(extra, dict):
+        return None, "extra must be an object."
+    if "min_risk" in extra:
+        if extra["min_risk"] not in _NOTIFY_RISKS:
+            return None, f"extra.min_risk must be one of {list(_NOTIFY_RISKS)}."
+        prefs["extra"]["min_risk"] = extra["min_risk"]
+    return prefs, ""
+
+
+def _notify_vapid() -> Dict[str, str]:
+    key = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+    if not key:
+        key = next(iter(sorted(COORDINATION_INTERNAL_API_KEYS)), "") if COORDINATION_INTERNAL_API_KEYS else ""
+    return _webpush.derive_vapid(key, os.environ.get("VAPID_SUBJECT") or "https://jreese.net")
+
+
+def _notify_load_prefs(email: str) -> Dict[str, Any]:
+    item = _get_ddb().get_item(
+        TableName=PUSH_SUBSCRIPTIONS_TABLE,
+        Key={"pk": {"S": f"PUSHPREF#{email}"}, "sk": {"S": "prefs"}},
+    ).get("Item")
+    if item and "doc" in item:
+        try:
+            prefs, _why = _notify_normalize_prefs(json.loads(item["doc"]["S"]))
+            if prefs is not None:
+                return prefs
+        except (ValueError, TypeError, KeyError):
+            pass
+    return _notify_default_prefs()
+
+
+def _notify_subscription_from_body(body: Any) -> Tuple[Optional[Dict[str, Any]], str]:
+    sub = body.get("subscription") if isinstance(body, dict) and isinstance(body.get("subscription"), dict) else body
+    if not isinstance(sub, dict):
+        return None, "A JSON push subscription is required."
+    endpoint = sub.get("endpoint")
+    keys = sub.get("keys") if isinstance(sub.get("keys"), dict) else {}
+    if _webpush is None or not _webpush.endpoint_allowed(endpoint):
+        return None, "endpoint must be an https URL on a known push service."
+    p256dh, auth = keys.get("p256dh"), keys.get("auth")
+    try:
+        if (not isinstance(p256dh, str) or not isinstance(auth, str)
+                or len(_webpush.b64u_decode(p256dh)) != 65 or not _webpush.b64u_decode(auth)):
+            raise ValueError("bad keys")
+    except Exception:  # noqa: BLE001
+        return None, "keys.p256dh and keys.auth are required (base64url)."
+    return {"endpoint": endpoint, "p256dh": p256dh, "auth": auth}, ""
+
+
+def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """The five notification routes. Approver allow-list only; fails closed."""
+    if _webpush is None:
+        return _error(503, "Web push is unavailable.")
+    if (not _is_cognito_session(claims) or not _is_human_cognito_principal(claims)
+            or not _is_allowlisted_escalation_decider(claims)):
+        return _error(403, "Notifications require an allow-listed escalation approver.")
+    email = str(claims.get("email") or "").strip().lower()
+    if path.endswith("/vapid-public-key"):
+        if method != "GET":
+            return _error(405, "Method not allowed.")
+        try:
+            public_key = _notify_vapid()["public"]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("vapid derivation failed: %s", exc)
+            return _error(503, "Web push key unavailable.")
+        return _response(200, {"success": True, "public_key": public_key, "publicKey": public_key})
+    ddb = _get_ddb()
+    if path.endswith("/preferences"):
+        if method == "GET":
+            try:
+                prefs = _notify_load_prefs(email)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("notification preferences read failed: %s", exc)
+                return _error(500, "Failed to read preferences.")
+            return _response(200, {"success": True, **prefs, "preferences": prefs})
+        if method == "PUT":
+            try:
+                body = _json_body(event)
+            except Exception:  # noqa: BLE001
+                body = None
+            prefs, why = _notify_normalize_prefs(body)
+            if prefs is None:
+                return _error(400, why)
+            try:
+                ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item={
+                    "pk": {"S": f"PUSHPREF#{email}"}, "sk": {"S": "prefs"},
+                    "doc": {"S": json.dumps(prefs, separators=(",", ":"))},
+                    "updated_at": {"S": _gate_fmt(_gate_now())}})
+            except Exception as exc:  # noqa: BLE001
+                logger.error("notification preferences write failed: %s", exc)
+                return _error(500, "Failed to save preferences.")
+            return _response(200, {"success": True, **prefs, "preferences": prefs})
+        return _error(405, "Method not allowed.")
+    # /subscribe
+    try:
+        body = _json_body(event)
+    except Exception:  # noqa: BLE001
+        body = None
+    if method == "POST":
+        sub, why = _notify_subscription_from_body(body)
+        if sub is None:
+            return _error(400, why)
+        sk = hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()
+        try:
+            ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item={
+                "pk": {"S": f"PUSHSUB#{email}"}, "sk": {"S": sk},
+                "endpoint": {"S": sub["endpoint"]}, "p256dh": {"S": sub["p256dh"]},
+                "auth": {"S": sub["auth"]}, "created_at": {"S": _gate_fmt(_gate_now())}})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("push subscription write failed: %s", exc)
+            return _error(500, "Failed to save subscription.")
+        return _response(200, {"success": True, "subscribed": True, "id": sk})
+    if method == "DELETE":
+        endpoint = None
+        if isinstance(body, dict):
+            nested = body.get("subscription") if isinstance(body.get("subscription"), dict) else body
+            endpoint = nested.get("endpoint")
+        endpoint = endpoint or (event.get("queryStringParameters") or {}).get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 2048:
+            return _error(400, "endpoint is required.")
+        try:
+            ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={
+                "pk": {"S": f"PUSHSUB#{email}"},
+                "sk": {"S": hashlib.sha256(endpoint.encode("utf-8")).hexdigest()}})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("push subscription delete failed: %s", exc)
+            return _error(500, "Failed to remove subscription.")
+        return _response(200, {"success": True, "subscribed": False})
+    return _error(405, "Method not allowed.")
+
+
+def _notify_pending_count(project_id: str) -> Optional[int]:
+    """Pending (requested) escalation count for the badge; None when not cheap."""
+    try:
+        out = _get_ddb().query(
+            TableName=TRACKER_TABLE,
+            KeyConditionExpression="project_id = :pid AND begins_with(record_id, :prefix)",
+            FilterExpression="#st = :st",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={":pid": _serialize(project_id), ":prefix": _serialize("escalation#"),
+                                       ":st": _serialize("requested")},
+            Select="COUNT")
+        return int(out.get("Count", 0))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("push badge count unavailable: %s", exc)
+        return None
+
+
+def _notify_render(escalation: Dict[str, Any], escalation_id: str, level: int,
+                   badge: Optional[int]) -> Dict[str, Any]:
+    risk = str(escalation.get("risk") or "medium")
+    kind = str(escalation.get("kind") or "escalation")
+    if level == 0:
+        body = "A decision is waiting in Enceladus"
+    else:
+        payload = escalation.get("payload") if isinstance(escalation.get("payload"), dict) else {}
+        summary = str(escalation.get("justification") or escalation.get("title")
+                      or payload.get("justification") or payload.get("title")
+                      or escalation.get("mutation_type") or "").strip()
+        summary = " ".join(summary.split())
+        if len(summary) > 120:
+            summary = summary[:119].rstrip() + "…"
+        body = f"{escalation.get('project_id') or ''}: {kind} — {summary}".strip()
+    notification: Dict[str, Any] = {
+        "title": f"Escalation · {risk}", "body": body,
+        "navigate": f"{APP_BASE_URL.rstrip('/')}/escalations/{escalation_id}",
+        "tag": escalation_id,
+    }
+    if badge is not None:
+        notification["app_badge"] = badge
+    return {"web_push": 8030, "notification": notification}
+
+
+def _notify_push_one(escalation_id: str, project_id: str) -> int:
+    """Send the push for one new escalation. Returns the number accepted."""
+    escalation = _read_escalation_item(project_id, escalation_id)
+    if not escalation or str(escalation.get("status") or "requested") != "requested":
+        return 0
+    _escalation_gate_view(escalation)
+    escalation.setdefault("project_id", project_id)
+    kind, risk = str(escalation.get("kind") or "escalation"), str(escalation.get("risk") or "medium")
+    risk_rank = _NOTIFY_RISKS.index(risk) if risk in _NOTIFY_RISKS else 1
+    ddb, vapid = _get_ddb(), _notify_vapid()
+    badge = _notify_pending_count(project_id)
+    sent = 0
+    for email in sorted(_load_escalation_approver_allowlist()):
+        try:
+            prefs = _notify_load_prefs(email)
+            if not prefs["enabled"]:
+                continue
+            cfg = prefs["types"].get(kind, {"enabled": True, "level": 1})
+            if not cfg.get("enabled", True):
+                continue
+            if risk_rank < _NOTIFY_RISKS.index(prefs["extra"].get("min_risk", "low")):
+                continue
+            subs = ddb.query(
+                TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                ExpressionAttributeValues={":pk": {"S": f"PUSHSUB#{email}"}}).get("Items", [])
+            if not subs:
+                continue
+            data = json.dumps(_notify_render(escalation, escalation_id, int(cfg.get("level", 1)), badge),
+                              separators=(",", ":")).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001 -- one approver never stops the rest
+            logger.warning("push prepare failed approver-hash=%s: %s",
+                           hashlib.sha256(email.encode()).hexdigest()[:8], exc)
+            continue
+        for item in subs:
+            try:
+                endpoint = item["endpoint"]["S"]
+                body = _webpush.encrypt_aes128gcm(data, item["p256dh"]["S"], item["auth"]["S"])
+                headers = {**_webpush.vapid_headers(endpoint, vapid),
+                           "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+                           "TTL": str(PUSH_TTL_SECONDS), "Urgency": "high", "Topic": escalation_id[:32]}
+                status = _webpush.http_send(endpoint, body, headers)
+                if status in (404, 410):
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
+                                    Key={"pk": item["pk"], "sk": item["sk"]})
+                elif 200 <= int(status) < 300:
+                    sent += 1
+                else:
+                    logger.warning("push rejected status=%s", status)
+            except Exception as exc:  # noqa: BLE001 -- one subscription never stops the rest
+                logger.warning("push send failed: %s", exc)
+    return sent
+
+
+def _handle_escalation_push_sns(event: Dict[str, Any]) -> Dict[str, Any]:
+    """SNS entry (devops-feed-alerts, filter category=escalation): only 'requested' sends."""
+    sent = 0
+    try:
+        for record in event.get("Records") or []:
+            try:
+                attrs = (record.get("Sns") or {}).get("MessageAttributes") or {}
+
+                def _attr(name: str) -> str:
+                    return str((attrs.get(name) or {}).get("Value") or "").strip()
+
+                if _attr("escalation_event") != "requested":
+                    continue
+                escalation_id, project_id = _attr("escalation_id"), _attr("project_id")
+                if not escalation_id or not project_id:
+                    logger.warning("escalation push skipped: missing id/project attributes")
+                    continue
+                sent += _notify_push_one(escalation_id, project_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("escalation push record failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 -- the handler never raises (J72 s5.8)
+        logger.error("escalation push handler failed: %s", exc)
+    return {"success": True, "sent": sent}
+
+
 def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
+    # --- DVP-TSK-A23: SNS-fed escalation push sender (never raises, J72 s5.8) ---
+    _records = event.get("Records") if isinstance(event, dict) else None
+    if isinstance(_records, list) and _records and isinstance(_records[0], dict) \
+            and _records[0].get("EventSource") == "aws:sns":
+        return _handle_escalation_push_sns(event)
+
     # --- v0.3: EventBridge callback ingestion ---
     # EventBridge events have 'source' and 'detail-type' at top level.
     event_source = event.get("source") or ""
@@ -18556,6 +18873,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # the AGENT side of the loop (approval stays Cognito-only).
     if method == "GET" and path == "/api/v1/coordination/escalations/watch":
         return _handle_escalation_watch(event, claims or {})
+
+    # DVP-TSK-A23 (E4-R29..R32): escalation web push — approver-only notification routes.
+    if path in _NOTIFY_PATHS:
+        return _handle_notifications(method, path, event, claims or {})
 
     # ENC-FTR-121 Ph3 (ENC-TSK-J70): Escalations — io approval queue + decisions
     # (DOC-5B888FCA43B8 §5.7). Cognito-gated inside the handlers; no agent path.
