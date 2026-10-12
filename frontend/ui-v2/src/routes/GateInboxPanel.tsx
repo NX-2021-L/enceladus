@@ -1,5 +1,8 @@
 /**
  * DVP-TSK-970 (DVP-PLN-013 E4-W2.3): the all-projects inbox on @io-kit/gates.
+ * DVP-TSK-A20: the chip-row card view is retired; this module keeps the shared kit plumbing
+ * (gateFetch, humanSession, stepUpProvider, realtime nonce) the restored cockpit
+ * (EscalationsCockpit.tsx) reads through.
  *
  * ONE inbox (ruling F-04): /escalations stays the only inbox route and the home
  * "Requires io" slot renders this same panel in compact form. Both read the
@@ -26,25 +29,12 @@
  * GateCardView (it re-renders the fresh card) and then refreshes the list.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { createGateSource, type GateKind, type HumanSession } from '@io-kit/gates'
-import { GateInbox, type StepUpProviderLike } from '@io-kit/gates/react'
+import type { HumanSession } from '@io-kit/gates'
+import type { StepUpProviderLike } from '@io-kit/gates/react'
 import { COGNITO_MAX_AGE_METHOD } from '@io-kit/auth'
 import { auth } from '../auth/authClient'
 import { useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { useFeedBufferStore } from '../store/feedBufferStore'
-import './gateInbox.css'
-
-export const GATE_KINDS: readonly GateKind[] = [
-  'escalation',
-  'tool_call',
-  'stale_lock',
-  'reconciliation',
-  'acceptance',
-  'limit',
-  'security',
-  'drift',
-  'notice',
-] as GateKind[]
 
 const SESSION_PLACEHOLDER = 'session-held-by-auth-client'
 const LIST_PATH = '/api/v1/coordination/escalations?'
@@ -65,12 +55,12 @@ export async function gateFetch(input: RequestInfo | URL, init?: RequestInit): P
   return auth.authFetch(url, { ...init, headers, credentials: 'include' })
 }
 
-const humanSession = (): HumanSession | null =>
+export const humanSession = (): HumanSession | null =>
   auth.getSession().status === 'authenticated'
     ? { idToken: SESSION_PLACEHOLDER, tokenUse: 'id', interactive: true }
     : null
 
-const stepUpProvider: StepUpProviderLike = {
+export const stepUpProvider: StepUpProviderLike = {
   method: COGNITO_MAX_AGE_METHOD,
   stepUp: (opts) => auth.stepUp(COGNITO_MAX_AGE_METHOD, opts),
 }
@@ -96,41 +86,4 @@ export function useEscalationRealtimeNonce(): number {
     }
   }, [latest])
   return nonce
-}
-
-export function GateInboxPanel({ compact = false }: { compact?: boolean }) {
-  const [kinds, setKinds] = useState<GateKind[]>([])
-  const [manualNonce, setManualNonce] = useState(0)
-  const realtimeNonce = useEscalationRealtimeNonce()
-  const nonce = realtimeNonce + manualNonce
-  // A new source identity makes useGateInbox refetch in place; id stays stable so card keys do.
-  const sources = useMemo(
-    () => [createGateSource({ baseUrl: '', fetch: gateFetch, getHumanSession: humanSession })],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nonce],
-  )
-  const filter = useMemo(() => (kinds.length ? { projects: 'all' as const, kinds } : { projects: 'all' as const }), [kinds])
-  const toggle = (k: GateKind) => setKinds((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]))
-
-  return (
-    <div className={compact ? 'ev2-gates ev2-gates--compact' : 'ev2-gates'} data-testid="gate-inbox-panel">
-      <div className="ev2-gates__filters" role="group" aria-label="Filter by kind">
-        {GATE_KINDS.map((k) => (
-          <button
-            key={k}
-            type="button"
-            className="ev2-gates__chip"
-            aria-pressed={kinds.includes(k)}
-            onClick={() => toggle(k)}
-          >
-            {k.replace('_', ' ')}
-          </button>
-        ))}
-        <button type="button" className="ev2-gates__chip ev2-gates__chip--refresh" onClick={() => setManualNonce((n) => n + 1)}>
-          Refresh
-        </button>
-      </div>
-      <GateInbox sources={sources} filter={filter} stepUp={stepUpProvider} />
-    </div>
-  )
 }

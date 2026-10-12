@@ -9150,7 +9150,7 @@ def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] 
 # issuer) may CREATE producer escalations. The source principal is DERIVED from the token's
 # issuer name; it is never taken from the client. It is accepted ONLY on POST /{project}/escalation.
 _HUB_PRODUCER_KINDS = frozenset({"tool_call", "reconciliation", "drift", "notice"})
-_HUB_DEFAULT_PRODUCERS = {"vagamod-keycloak": "vagamod", "think-iograph": "think", "coach-cognito": "coach"}
+_HUB_DEFAULT_PRODUCERS = {"vagamod-keycloak": "vagamod", "think-iograph": "think"}
 
 
 def _hub_exchange_mod():

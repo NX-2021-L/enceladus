@@ -514,6 +514,10 @@ jobs:
               AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
               SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:15" \
+              HubExchangeIssuers='[{"name":"vagamod-keycloak","iss":"https://auth.vagamod.io/realms/mod-one-line-library","jwks_uri":"https://auth.vagamod.io/realms/mod-one-line-library/protocol/openid-connect/certs","audiences":["mod-web-app"]},{"name":"think-iograph","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["6eh4u69l1mqk1m4hfjspeibla8","2mvnpft2mhqa2rjer8179bca8c"]}]' \
+              HubShellOrigins='https://think.thepup.io,https://vagamod.com' \
+              HubExchangeProducers='{"vagamod-keycloak":"vagamod","think-iograph":"think"}' \
+              GateProducerPrincipals='{"vagamod":["vagamod"],"think":["think"]}' \
               RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
               RhythmAbsorbLegacy="${RHYTHM_ABSORB_LEGACY}" \
               RhythmBeatsEnabled="${RHYTHM_BEATS_ENABLED}" \

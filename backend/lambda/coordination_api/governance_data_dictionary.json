@@ -1,6 +1,6 @@
 {
   "version": "2026-10-12.06",
-  "updated_at": "2026-10-12T04:15:34Z",
+  "updated_at": "2026-10-12T04:17:40Z",
   "last_change_summary": "DVP-TSK-A23: escalation web push routes, push subscriptions table and SNS-fed sender",
   "owners": [
     "enceladus-platform"
@@ -9541,6 +9541,11 @@
       "version": "2026-10-12.06",
       "date": "2026-10-12",
       "summary": "DVP-TSK-A23: escalation web push routes, push subscriptions table and SNS-fed sender"
+    },
+    {
+      "version": "2026-10-12.05",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-A21: remove coach from hub token exchange issuers, shell origins and producer mappings (io ruling 2026-10-12)"
     },
     {
       "version": "2026-10-12.04",
