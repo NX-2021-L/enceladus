@@ -202,6 +202,14 @@ Resources:
         Enabled: true
         Comment: !Sub "Enceladus ui-v2 PWA CDN (${Environment})"
         DefaultRootObject: index.html
+        # DVP-TSK-A96 (isolation W1, DOC-EF4BC758CCC9): standard logging to the Enceladus-owned
+        # observation bucket (isolation/w1-observe-logs.yaml, stack enceladus-isolation-observe,
+        # us-west-1; 90-day expiry). That bucket grants this stack's deploy role the ACL actions
+        # CloudFront needs to enable logging.
+        Logging:
+          Bucket: !Sub "enceladus-observe-logs-${AWS::AccountId}-us-west-1.s3.amazonaws.com"
+          IncludeCookies: false
+          Prefix: !Sub "cf/enceladus${EnvironmentSuffix}/"
         HttpVersion: http2and3
         IPV6Enabled: true
         # Aliases attached ONLY when a CustomDomain is supplied (gamma: none).
