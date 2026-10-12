@@ -1,0 +1,129 @@
+{
+  "name": "statement-ingest",
+  "version": "1.0.0",
+  "content_hash": "sha256:15a2f012eaaa563af0646e40c453fc6006db3d0cf51d23651558f82980f00dae",
+  "definition": {
+    "description": "Register a statement, have a human pick the lines to promote, then promote them through the F-08 id-array argument.",
+    "execution": "deterministic",
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "statement_id",
+        "account",
+        "institution",
+        "statement_type",
+        "period_start",
+        "period_end"
+      ],
+      "properties": {
+        "statement_id": {
+          "type": "string"
+        },
+        "account": {
+          "type": "string"
+        },
+        "institution": {
+          "type": "string"
+        },
+        "statement_type": {
+          "type": "string"
+        },
+        "period_start": {
+          "type": "string"
+        },
+        "period_end": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "outputs": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "statement_id",
+          "promoted"
+        ],
+        "properties": {
+          "statement_id": {
+            "type": "string"
+          },
+          "promoted": {
+            "type": "integer"
+          }
+        }
+      },
+      "from": {
+        "statement_id": "$ingest.statement.statement_id",
+        "promoted": "$promote.promoted"
+      }
+    },
+    "steps": [
+      {
+        "id": "ingest",
+        "action": "finance_ingest_statement",
+        "arguments": {
+          "statement_id": "$inputs.statement_id",
+          "account": "$inputs.account",
+          "institution": "$inputs.institution",
+          "statement_type": "$inputs.statement_type",
+          "period_start": "$inputs.period_start",
+          "period_end": "$inputs.period_end",
+          "lines": "$inputs.lines"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "review",
+        "gate": "human",
+        "prompt": "Select the statement lines to promote to the ledger.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "statement_line_ids"
+          ],
+          "properties": {
+            "statement_line_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 604800
+        },
+        "on_reject": "cancelled",
+        "on_expire": "expired"
+      },
+      {
+        "id": "promote",
+        "action": "finance_promote_statement_line",
+        "arguments": {
+          "statement_line_ids": "$review.inputs.statement_line_ids"
+        },
+        "on_error": "abort",
+        "idempotency": "at_most_once"
+      }
+    ],
+    "surfaces": [
+      "io-finance"
+    ],
+    "tools": [
+      "finance_ingest_statement",
+      "finance_promote_statement_line"
+    ]
+  }
+}

@@ -1,0 +1,202 @@
+{
+  "name": "governance-arc",
+  "version": "1.0.0",
+  "content_hash": "sha256:9f1571efbd7e88c1ea8bd30e27c2a19ed2fff78b98d2cf5f0778805c707efb7c",
+  "definition": {
+    "description": "Create a task, set its components, check it out, then walk code, acceptance and deploy gates to closed.",
+    "execution": "deterministic",
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "title",
+        "components"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "transition_type": {
+          "type": "string",
+          "enum": [
+            "github_pr_deploy",
+            "lambda_deploy",
+            "web_deploy",
+            "code_only",
+            "no_code"
+          ],
+          "default": "code_only"
+        }
+      }
+    },
+    "outputs": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record_id"
+        ],
+        "properties": {
+          "record_id": {
+            "type": "string"
+          },
+          "commit_complete_id": {
+            "type": "string"
+          }
+        }
+      },
+      "from": {
+        "record_id": "$create.record_id",
+        "commit_complete_id": "$committed.commit_complete_id"
+      }
+    },
+    "steps": [
+      {
+        "id": "create",
+        "action": "tracker.create",
+        "arguments": {
+          "project_id": "$inputs.project_id",
+          "record_type": "task",
+          "title": "$inputs.title",
+          "transition_type": "$inputs.transition_type",
+          "acceptance_criteria": "$inputs.acceptance_criteria"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "set_components",
+        "action": "tracker.set",
+        "arguments": {
+          "record_id": "$create.record_id",
+          "field": "components",
+          "value": "$inputs.components"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "checkout",
+        "action": "checkout.task",
+        "arguments": {
+          "record_id": "$create.record_id",
+          "active_agent_session_id": "$run.started_by"
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "code_gate",
+        "gate": "human",
+        "prompt": "Code is complete. Provide the commit sha.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit_sha"
+          ],
+          "properties": {
+            "commit_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "cancelled",
+        "on_expire": "expired"
+      },
+      {
+        "id": "committed",
+        "action": "checkout.advance",
+        "arguments": {
+          "record_id": "$create.record_id",
+          "target_status": "committed",
+          "provider": "$run.started_by",
+          "transition_evidence": {
+            "commit_sha": "$code_gate.inputs.commit_sha"
+          }
+        },
+        "on_error": "abort"
+      },
+      {
+        "id": "acceptance_gate",
+        "gate": "human",
+        "prompt": "Accept the delivered work against the acceptance criteria.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "failed",
+        "on_expire": "expired",
+        "sensitive": true
+      },
+      {
+        "id": "deploy_gate",
+        "gate": "human",
+        "prompt": "Approve the deploy.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "failed",
+        "on_expire": "expired",
+        "sensitive": true
+      },
+      {
+        "id": "close",
+        "action": "checkout.advance",
+        "arguments": {
+          "record_id": "$create.record_id",
+          "target_status": "closed",
+          "provider": "$run.started_by"
+        },
+        "on_error": "abort"
+      }
+    ],
+    "surfaces": [
+      "enceladus"
+    ],
+    "tools": [
+      "checkout.advance",
+      "checkout.task",
+      "tracker.create",
+      "tracker.set"
+    ]
+  }
+}
