@@ -10637,7 +10637,16 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     # subject; without one the kit rejects the card and the whole queue fails to load.
     # View-only: etag and callHash do not read subject, so decide is unaffected.
     subject = escalation.get("subject")
+    if isinstance(subject, str):
+        # Gate records (e.g. recipe.publish, DVP-ESC-011..015) store subject as a JSON string;
+        # read it, or the card falls back to its own escalation id as the target record.
+        try:
+            subject = json.loads(subject)
+        except (ValueError, TypeError):
+            subject = None
     base = subject if isinstance(subject, dict) else {}
+    if isinstance(subject, dict):
+        escalation["subject"] = {**base, "project": str(base.get("project") or escalation.get("project_id") or "")}
     if not str(base.get("record_id") or "").strip() or not isinstance(base.get("version"), str):
         escalation["subject"] = {
             **base,
