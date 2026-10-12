@@ -26,7 +26,9 @@ or a missing JWT library means nothing can be exchanged or accepted.
 
 Environment (never hand-created; declared in 02-compute.yaml):
     HUB_EXCHANGE_ISSUERS     JSON [{"name","iss","jwks_uri","audiences":[...]}]
-    HUB_EXCHANGE_SECRET_ARN  Secrets Manager ARN of the HMAC signing key
+    COORDINATION_INTERNAL_API_KEY           HMAC key source (derived: HMAC-SHA256(key, b"enceladus-hub-exchange-v1"))
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS  optional rotation-window key (verify only)
+    HUB_EXCHANGE_SECRET_ARN  OPTIONAL override: Secrets Manager ARN of an explicit HMAC key
     HUB_SHELL_ORIGINS        comma list of allowed shell origins (CORS)
     HUB_EXCHANGE_TTL_SECONDS optional, clamped to [60, 900]
     ESCALATION_MACHINE_EMAIL_DOMAINS  shared with the Cognito human gate
@@ -174,13 +176,26 @@ def _header(headers: Optional[Mapping[str, Any]], name: str) -> str:
 
 _secret_cache: Dict[str, Any] = {"value": None, "fetched_at": 0.0}
 
+# E4-R20: the signing key is DERIVED from the coordination internal API key (no Secrets Manager
+# resource to create): HMAC-SHA256(key=COORDINATION_INTERNAL_API_KEY, msg=_KEY_CONTEXT).
+_KEY_CONTEXT = b"enceladus-hub-exchange-v1"
+
+
+def _unavailable(reason: str) -> HubExchangeError:
+    return HubExchangeError(503, "Hub exchange is unavailable.", reason)
+
+
+def _derive_key(raw: str) -> bytes:
+    return hmac.new(raw.encode("utf-8"), _KEY_CONTEXT, hashlib.sha256).digest()
+
 
 def _fetch_secret() -> str:
+    """Optional override (HUB_EXCHANGE_SECRET_ARN): an explicit HMAC key from Secrets Manager."""
     import boto3  # local import: keeps module import cheap and test-patchable
 
     arn = os.environ.get("HUB_EXCHANGE_SECRET_ARN", "").strip()
     if not arn:
-        raise HubExchangeError(503, "Hub exchange is unavailable.", "HUB_EXCHANGE_SECRET_ARN unset")
+        raise _unavailable("HUB_EXCHANGE_SECRET_ARN unset")
     client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION"))
     text = client.get_secret_value(SecretId=arn).get("SecretString") or ""
     try:  # CFN GenerateSecretString template form: {"hmac_key": "..."}
@@ -192,7 +207,9 @@ def _fetch_secret() -> str:
     return text
 
 
-def _signing_key() -> bytes:
+def _override_key() -> Optional[bytes]:
+    if not os.environ.get("HUB_EXCHANGE_SECRET_ARN", "").strip():
+        return None
     now = time.time()
     cached = _secret_cache.get("value")
     if cached and (now - float(_secret_cache.get("fetched_at") or 0.0)) < _SECRET_TTL_SECONDS:
@@ -202,12 +219,31 @@ def _signing_key() -> bytes:
     except HubExchangeError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed on any secret error
-        raise HubExchangeError(503, "Hub exchange is unavailable.", f"secret fetch failed: {exc}") from exc
+        raise _unavailable(f"secret fetch failed: {exc}") from exc
     if len(secret) < 32:
-        raise HubExchangeError(503, "Hub exchange is unavailable.", "signing secret missing or too short")
+        raise _unavailable("signing secret missing or too short")
     key = secret.encode("utf-8")
     _secret_cache.update({"value": key, "fetched_at": now})
     return key
+
+
+def _signing_keys() -> List[bytes]:
+    """[current, previous?]: sign with the first, verify against all. Fails CLOSED (503) without a key."""
+    override = _override_key()
+    if override is not None:
+        return [override]
+    current = (os.environ.get("COORDINATION_INTERNAL_API_KEY") or "").strip()
+    if not current:
+        raise _unavailable("COORDINATION_INTERNAL_API_KEY unset")
+    keys = [_derive_key(current)]
+    previous = (os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS") or "").strip()
+    if previous and previous != current:
+        keys.append(_derive_key(previous))
+    return keys
+
+
+def _signing_key() -> bytes:
+    return _signing_keys()[0]
 
 
 def _b64e(raw: bytes) -> str:
@@ -221,8 +257,8 @@ def _b64d(text: str) -> bytes:
 _HUB_HEADER = _b64e(json.dumps({"alg": "HS256", "typ": "HUBX"}, separators=(",", ":"), sort_keys=True).encode())
 
 
-def _sign(signing_input: str) -> str:
-    return _b64e(hmac.new(_signing_key(), signing_input.encode("ascii"), hashlib.sha256).digest())
+def _sign(signing_input: str, key: Optional[bytes] = None) -> str:
+    return _b64e(hmac.new(key or _signing_key(), signing_input.encode("ascii"), hashlib.sha256).digest())
 
 
 def mint_hub_token(*, sub: str, email: str, src_iss: str, src_name: str, auth_time: int,
@@ -249,8 +285,9 @@ def verify_hub_token(token: str, now: Optional[int] = None) -> Dict[str, Any]:
     header_b64, payload_b64, sig = parts
     if header_b64 != _HUB_HEADER:  # exact alg pin: no alg=none / alg confusion
         raise _deny_auth("hub token header mismatch")
-    expected = _sign(f"{header_b64}.{payload_b64}")
-    if not hmac.compare_digest(expected, sig):
+    signing_input = f"{header_b64}.{payload_b64}"
+    # current key first, then the rotation-window previous key (E4-R20); missing key -> 503 deny
+    if not any([hmac.compare_digest(_sign(signing_input, key), sig) for key in _signing_keys()]):
         raise _deny_auth("hub token signature mismatch")
     try:
         claims = json.loads(_b64d(payload_b64))

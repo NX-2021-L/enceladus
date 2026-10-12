@@ -1,7 +1,7 @@
 {
   "version": "2026-10-12.02",
-  "updated_at": "2026-10-12T02:34:51Z",
-  "last_change_summary": "DVP-TSK-980 / E4-R25: producer_delegated escalation applier -- approving a producer-created tool_call/reconciliation/drift/notice card (source_principal, no mutation_type) records the verdict and delegates execution to the producer (executes once keyed by escalation id); previously refused 422 unsupported_subject_type.",
+  "updated_at": "2026-10-12T02:39:15Z",
+  "last_change_summary": "DVP-TSK-980: hub step-up enforcement (method-tagged proofs, mandatory auth fields, degraded mode retired) + producer_delegated applier (E4-R25).",
   "owners": [
     "enceladus-platform"
   ],
@@ -9520,12 +9520,22 @@
     {
       "version": "2026-10-12.02",
       "date": "2026-10-12",
-      "summary": "DVP-TSK-980 / E4-R25: producer_delegated escalation applier -- approving a producer-created tool_call/reconciliation/drift/notice card (source_principal, no mutation_type) records the verdict and delegates execution to the producer (executes once keyed by escalation id); previously refused 422 unsupported_subject_type."
+      "summary": "DVP-TSK-980: hub step-up enforcement (method-tagged proofs, mandatory auth fields, degraded mode retired) + producer_delegated applier (E4-R25)."
     },
     {
-      "version": "2026-10-11.06",
+      "version": "2026-10-12.01",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-968 follow-up (E4-R24): recipe validator and runner accept the RP-0 s4 flat GateStep, the run and index-alias binding roots, idempotency, and optional-input defaults"
+    },
+    {
+      "version": "2026-10-11.08",
       "date": "2026-10-11",
-      "summary": "DVP-TSK-980: hub decide enforces method-tagged step-up proofs for high/critical escalations, mandatory auth_method/auth_time/assurance, degraded interactive_human mode retired"
+      "summary": "DVP-TSK-A17 (E4-R20): hub exchange HMAC key derived from COORDINATION_INTERNAL_API_KEY (+_PREVIOUS rotation window); HubExchangeSecret resource and secretsmanager reads removed; HUB_EXCHANGE_SECRET_ARN is an optional override only"
+    },
+    {
+      "version": "2026-10-11.07",
+      "date": "2026-10-11",
+      "summary": "DVP-TSK-A17 part 2 (E4-R18): tracker producer escalation.request accepts Authorization: HubExchange; source principal derived from the issuer via HUB_EXCHANGE_PRODUCERS, kinds confined to tool_call/reconciliation/drift/notice, initiated_by and auth_time/acr evidence recorded"
     },
     {
       "version": "2026-10-11.05",

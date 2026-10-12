@@ -8972,7 +8972,7 @@ def _escalation_public(item: Dict) -> Dict:
     return record
 
 
-def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
+def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] = None) -> Dict:
     """POST /{project}/escalation — governed escalation.request (§5.4).
 
     Validates the §11.1 envelope via the mutation-handler registry, mints an
@@ -8983,6 +8983,11 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     if not ENABLE_ESCALATION_PRIMITIVE:
         return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
 
+    if hub is not None:  # DVP-TSK-A17 part 2: derived principal, confined kinds, producer path only
+        body, hub_err = _hub_prepare_producer_body(body, hub)
+        if hub_err:
+            return hub_err
+        return _handle_escalation_produce(project_id, body, hub=hub)
     if _gate_is_producer_request(body):
         return _handle_escalation_produce(project_id, body)  # ENC-TSK-967 phase 2b
     if _gate_pick(body, "proposedCalls", "proposed_calls") is not None:
@@ -9131,7 +9136,105 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
     })
 
 
-def _handle_escalation_produce(project_id: str, body: Dict) -> Dict:
+# DVP-TSK-A17 part 2 (E4-R18): a HubExchange principal (Authorization: HubExchange <token>,
+# minted by coordination_api POST /hub/exchange for an allow-listed human at an allow-listed
+# issuer) may CREATE producer escalations. The source principal is DERIVED from the token's
+# issuer name; it is never taken from the client. It is accepted ONLY on POST /{project}/escalation.
+_HUB_PRODUCER_KINDS = frozenset({"tool_call", "reconciliation", "drift", "notice"})
+_HUB_DEFAULT_PRODUCERS = {"vagamod-keycloak": "vagamod", "think-iograph": "think", "coach-cognito": "coach"}
+
+
+def _hub_exchange_mod():
+    try:
+        from enceladus_shared import hub_exchange as hx
+        return hx
+    except Exception:  # noqa: BLE001 - layer without the module: hub path stays closed
+        return None
+
+
+def _hub_exchange_producers() -> Dict[str, str]:
+    """HUB_EXCHANGE_PRODUCERS: {issuer name: producer principal}. Unset -> defaults; malformed -> {} (closed)."""
+    raw = os.environ.get("HUB_EXCHANGE_PRODUCERS")
+    if raw is None or not raw.strip():
+        return dict(_HUB_DEFAULT_PRODUCERS)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in parsed.items() if isinstance(v, str) and v.strip()}
+
+
+def _hub_token_from_event(event: Dict) -> Optional[str]:
+    """The HubExchange token of the request, "" when the scheme has no token, None when absent."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        auth = str((event.get("headers") or {}).get("authorization")
+                   or (event.get("headers") or {}).get("Authorization") or "").strip()
+        return "" if auth.lower().startswith("hubexchange") else None
+    return hx.extract_hub_token(event.get("headers"))
+
+
+def _authenticate_hub_exchange(token: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Verify the hub token exactly as coordination_api does (HMAC, exp, issuer allow-list; human only)."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        return None, _error(503, "Hub exchange is unavailable.")
+    try:
+        hub_claims = hx.verify_hub_token(token)
+    except hx.HubExchangeError as exc:
+        logger.warning("hub exchange rejected: %s", exc.reason)
+        return None, _error(exc.status, exc.public_message)
+    claims = hx.principal_claims(hub_claims)
+    if not hx.is_human_hub_principal(claims):
+        return None, _error(403, "Identity is not permitted.")
+    return claims, None
+
+
+def _hub_cors_override(event: Dict, resp: Dict) -> Dict:
+    """Echo an allow-listed shell origin (and admit Authorization) on a hub-exchange response."""
+    hx = _hub_exchange_mod()
+    if hx is None:
+        return resp
+    origin = hx.cors_origin(event.get("headers"), {CORS_ORIGIN})
+    if origin and origin != CORS_ORIGIN:
+        headers = dict(resp.get("headers") or {})
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        headers["Vary"] = "Origin"
+        resp = dict(resp, headers=headers)
+    return resp
+
+
+def _hub_prepare_producer_body(body: Dict, hub: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """(body, error): derive the source principal, confine the kinds, stamp the assurance evidence."""
+    if not isinstance(body, dict):
+        return None, _error(400, "Invalid JSON body.")
+    derived = _hub_exchange_producers().get(str(hub.get("hub_source_name") or ""))
+    if not derived:
+        return None, _error(403, "The hub exchange issuer is not allow-listed as a producer.")
+    claimed = str(_gate_pick(body, "sourcePrincipal", "source_principal") or "").strip()
+    if claimed and claimed != derived:
+        return None, _error(403, "source_principal does not match the exchanged identity's producer.")
+    if str(body.get("mutation_type") or "").strip() or str(body.get("kind") or "").strip() not in _HUB_PRODUCER_KINDS:
+        return None, _error(403, "A hub exchange principal may only create kinds "
+                                 f"{sorted(_HUB_PRODUCER_KINDS)} (no escalation / mutation_type requests).")
+    prepared = {k: v for k, v in body.items() if k not in ("sourcePrincipal", "source_principal")}
+    prepared["source_principal"] = derived
+    evidence = prepared.get("evidence")
+    kept = [e for e in evidence if not (isinstance(e, dict) and str(e.get("label") or "").startswith("hub_exchange_"))] \
+        if isinstance(evidence, list) else []
+    kept.extend([
+        {"label": "hub_exchange_issuer", "ref": str(hub.get("hub_source_name") or "")},
+        {"label": "hub_exchange_auth_time", "ref": str(hub.get("auth_time"))},
+        {"label": "hub_exchange_acr", "ref": str(hub.get("acr") or "none")},
+    ])
+    prepared["evidence"] = kept
+    return prepared, None
+
+
+def _handle_escalation_produce(project_id: str, body: Dict, hub: Optional[Dict] = None) -> Dict:
     """Producer API (ENC-TSK-967 phase 2b): escalation.request for external sources.
 
     think and vagamod post gate cards of any kind under a per-source principal
@@ -9188,12 +9291,17 @@ def _handle_escalation_produce(project_id: str, body: Dict) -> Dict:
         "status": _ser_s("requested"),
         "events": {"L": [_escalation_event(
             "requested", principal,
-            detail={"kind": kind, "source": source, "source_principal": principal},
+            detail=dict({"kind": kind, "source": source, "source_principal": principal},
+                        **({"initiated_by": str(hub.get("email") or ""),
+                            "hub_source": str(hub.get("hub_source_name") or "")} if hub else {})),
         )]},
         "created_at": _ser_s(now),
         "updated_at": _ser_s(now),
         "write_source": _build_write_source(body),
     }
+    if hub:
+        item["initiated_by"] = _ser_s(str(hub.get("email") or ""))
+        item["hub_source"] = _ser_s(str(hub.get("hub_source_name") or ""))
     justification = str(body.get("justification") or "").strip()
     if justification:
         item["justification"] = _ser_s(justification)
@@ -10286,7 +10394,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     # CORS preflight
     if method == "OPTIONS":
-        return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
+        preflight = {"statusCode": 204, "headers": _cors_headers(), "body": ""}
+        if _RE_ESCALATION.match(path):
+            preflight = _hub_cors_override(event, preflight)
+        return preflight
 
     # --- Route: GET /pending-updates ---
     if method == "GET" and _RE_PENDING_UPDATES.match(path):
@@ -10333,10 +10444,19 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         project_id = m_escalation.group("project")
         escalation_id = m_escalation.group("id")
         escalation_sub = m_escalation.group("sub")
-        claims, auth_err = _authenticate(
-            event,
-            ["tracker:read"] if method == "GET" else ["tracker:write"],
-        )
+        hub_token = _hub_token_from_event(event)
+        if hub_token is not None:
+            # DVP-TSK-A17 part 2: HubExchange is accepted ONLY on POST /{project}/escalation.
+            if not (method == "POST" and not escalation_id and not escalation_sub):
+                return _hub_cors_override(event, _error(403, "The hub exchange principal is not accepted on this route."))
+            claims, auth_err = _authenticate_hub_exchange(hub_token)
+            if auth_err:
+                return _hub_cors_override(event, auth_err)
+        else:
+            claims, auth_err = _authenticate(
+                event,
+                ["tracker:read"] if method == "GET" else ["tracker:write"],
+            )
         if auth_err:
             return auth_err
         # ENC-ISS-773: '*' / '_' = all projects, valid only for the list read
@@ -10372,6 +10492,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
+            if hub_token is not None:
+                return _hub_cors_override(event, _handle_escalation_request(project_id, body, hub=claims))
             return _handle_escalation_request(project_id, body)
         elif method == "GET" and escalation_id == "list":
             # Pseudo-id alias: gamma APIGW registers {recordType}/{recordId}

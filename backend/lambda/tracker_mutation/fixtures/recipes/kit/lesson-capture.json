@@ -1,0 +1,94 @@
+{
+  "name": "lesson-capture",
+  "version": "1.0.0",
+  "content_hash": "sha256:e52bfa4216b806f6515ff7b71bdb4037e3ecccc5e0127ce447458ab3024033c6",
+  "definition": {
+    "description": "A human states the lesson, then it is recorded against its source record.",
+    "execution": "deterministic",
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_record_id",
+        "project_id"
+      ],
+      "properties": {
+        "source_record_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        }
+      }
+    },
+    "outputs": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "lesson_id"
+        ],
+        "properties": {
+          "lesson_id": {
+            "type": "string"
+          }
+        }
+      },
+      "from": {
+        "lesson_id": "$lesson.record_id"
+      }
+    },
+    "steps": [
+      {
+        "id": "confirm",
+        "gate": "human",
+        "prompt": "State the lesson: a title, what was observed and what it means.",
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "observation",
+            "insight"
+          ],
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "observation": {
+              "type": "string"
+            },
+            "insight": {
+              "type": "string"
+            }
+          }
+        },
+        "timeout": {
+          "seconds": 86400
+        },
+        "on_reject": "cancelled",
+        "on_expire": "expired"
+      },
+      {
+        "id": "lesson",
+        "action": "tracker.create_lesson",
+        "arguments": {
+          "project_id": "$inputs.project_id",
+          "title": "$confirm.inputs.title",
+          "observation": "$confirm.inputs.observation",
+          "insight": "$confirm.inputs.insight",
+          "evidence_chain": [
+            "$inputs.source_record_id"
+          ]
+        },
+        "on_error": "abort"
+      }
+    ],
+    "surfaces": [
+      "enceladus"
+    ],
+    "tools": [
+      "tracker.create_lesson"
+    ]
+  }
+}
