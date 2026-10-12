@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-12.15",
-  "updated_at": "2026-10-12T16:06:01Z",
-  "last_change_summary": "DVP-TSK-B05: content_store.mode contract (isolation W4); reference_search reads via content_store in dual mode",
+  "version": "2026-10-12.16",
+  "updated_at": "2026-10-12T16:40:00Z",
+  "last_change_summary": "DVP-TSK-B07: auth_refresh serves public GET /api/v1/auth/login (step-up re-login: 302 to the Cognito Hosted-UI authorize with state=base64url(returnTo), prompt=login and max_age passed through only when valid); the same-site return-path rule is shared with the callback and now also rejects backslash, control characters and the login route.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9566,6 +9566,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.16",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-B07: auth_refresh serves public GET /api/v1/auth/login (step-up re-login: 302 to the Cognito Hosted-UI authorize with state=base64url(returnTo), prompt=login and max_age passed through only when valid); the same-site return-path rule is shared with the callback and now also rejects backslash, control characters and the login route."
+    },
     {
       "version": "2026-10-12.15",
       "date": "2026-10-12",
