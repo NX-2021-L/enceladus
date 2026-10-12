@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-11.06",
-  "updated_at": "2026-10-11T22:46:21Z",
-  "last_change_summary": "DVP-TSK-980: hub decide enforces method-tagged step-up proofs for high/critical escalations, mandatory auth_method/auth_time/assurance, degraded interactive_human mode retired",
+  "version": "2026-10-12.02",
+  "updated_at": "2026-10-12T02:34:51Z",
+  "last_change_summary": "DVP-TSK-980 / E4-R25: producer_delegated escalation applier -- approving a producer-created tool_call/reconciliation/drift/notice card (source_principal, no mutation_type) records the verdict and delegates execution to the producer (executes once keyed by escalation id); previously refused 422 unsupported_subject_type.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.02",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-980 / E4-R25: producer_delegated escalation applier -- approving a producer-created tool_call/reconciliation/drift/notice card (source_principal, no mutation_type) records the verdict and delegates execution to the producer (executes once keyed by escalation id); previously refused 422 unsupported_subject_type."
+    },
     {
       "version": "2026-10-11.06",
       "date": "2026-10-11",

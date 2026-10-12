@@ -11384,13 +11384,28 @@ def _escalation_is_strict(escalation: Dict[str, Any]) -> bool:
                 or escalation.get("proposedCalls") or escalation.get("candidates"))
 
 
+# DVP-PLN-013 ruling E4-R25: producer-executes. A tool_call / reconciliation / drift / notice
+# card created by a producer (think, vagamod, coach: source_principal set, no mutation_type)
+# carries no hub-side action; approving it records the verdict and the producer executes the
+# chosen call ONCE keyed by the escalation id. Without this, approve was refused 422
+# unsupported_subject_type (fail-closed lookup) and producer cards could never be cleared.
+_PRODUCER_DELEGATED_SUBJECT = "producer_delegated"
+_PRODUCER_DELEGATED_KINDS = frozenset({"tool_call", "reconciliation", "drift", "notice"})
+
+
 def _escalation_subject_type(escalation: Dict[str, Any]) -> str:
     subject = _escalation_json_attr(escalation, "subject")
-    return str(
+    subject_type = str(
         escalation.get("subject_type")
         or (subject.get("type") if isinstance(subject, dict) else "")
         or escalation.get("mutation_type") or ""
     ).strip()
+    if (subject_type in ("", _PRODUCER_DELEGATED_SUBJECT)
+            and str(escalation.get("kind") or "").strip() in _PRODUCER_DELEGATED_KINDS
+            and not escalation.get("mutation_type")
+            and (escalation.get("source_principal") or escalation.get("sourcePrincipal"))):
+        return _PRODUCER_DELEGATED_SUBJECT
+    return subject_type
 
 
 def _escalation_call_basis(escalation: Dict[str, Any], chosen: Optional[Dict[str, Any]]) -> Tuple[Any, str]:
@@ -11483,6 +11498,18 @@ def _apply_recipe_run_step_escalation(project_id: str, escalation_id: str,
 
 
 register_escalation_applier("recipe_run_step", _apply_recipe_run_step_escalation)
+
+
+def _apply_producer_delegated_escalation(project_id: str, escalation_id: str,
+                                         escalation: Dict[str, Any], decider: str,
+                                         body: Dict[str, Any]) -> Dict[str, Any]:
+    """E4-R25 applier: the hub runs nothing; execution is delegated to the producer."""
+    source = str(escalation.get("source_principal") or escalation.get("sourcePrincipal") or "producer")
+    return {"_status_code": 200, "status": "delegated",
+            "result": {"executed": False, "delegated_to": source, "idempotency_key": escalation_id}}
+
+
+register_escalation_applier(_PRODUCER_DELEGATED_SUBJECT, _apply_producer_delegated_escalation)
 
 
 def _append_escalation_log_entry(project_id: str, escalation_id: str,
