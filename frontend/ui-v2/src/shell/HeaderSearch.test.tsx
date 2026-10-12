@@ -28,6 +28,29 @@ describe('HeaderSearch (kit SearchLauncher)', () => {
     expect(s).toEqual([expect.objectContaining({ id: 'ENC-TSK-12', title: 'Pager fix', href: '/enceladus/task/ENC-TSK-12' })])
   })
 
+  it('DVP-TSK-B11: rows carry structured record meta (id + type), not an "ID · type" string', () => {
+    const [s] = buildHeaderSuggestions('pager', rows, [])
+    expect(s).toEqual(expect.objectContaining({ recordId: 'ENC-TSK-12', kind: 'task' }))
+    expect(s!.subtitle).toBeUndefined()
+  })
+
+  it('DVP-TSK-B11: the launcher sheet maps every row hook to the record-row design system', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync(new URL('./headerSearch.css', import.meta.url), 'utf8')
+    const rule = /\.io-sheet\[data-variant="palette"\] \{([^}]*)\}/.exec(css)![1]!
+    for (const [hook, value] of [
+      ['--io-launcher-title-font', 'var(--font-body)'],
+      ['--io-launcher-title-size', '13.5px'],
+      ['--io-launcher-title-weight', 'var(--fw-medium)'],
+      ['--io-launcher-meta-font', 'var(--font-mono)'],
+      ['--io-launcher-id-accent', '100%'],
+      ['--io-launcher-kind-muted', '100%'],
+    ]) {
+      expect(rule).toContain(`${hook}: ${value};`)
+    }
+    expect(css).not.toMatch(/\.io-search__(title|id|kind|meta)\s*\{/)
+  })
+
   it('opens from the magnifier and Enter routes to /feed?q=', async () => {
     const onNavigate = vi.fn()
     await act(async () => {
