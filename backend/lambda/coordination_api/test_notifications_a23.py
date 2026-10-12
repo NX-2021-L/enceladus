@@ -183,7 +183,7 @@ class SenderTests(unittest.TestCase):
             mock.patch.object(lf, "_read_escalation_item", side_effect=lambda p, e: dict(self.escalation)),
             mock.patch.object(lf, "_load_escalation_approver_allowlist", return_value={APPROVER, "two@example.com"}),
             mock.patch.object(lf, "_notify_pending_count", return_value=3),
-            mock.patch.object(lf, "APP_BASE_URL", "https://jreese.net/"),
+            mock.patch.object(lf, "APP_BASE_URL", "https://enceladus.jreese.net/"),
             mock.patch.object(lf._webpush, "http_send", side_effect=self._http_send),
             mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "sender-key"}),
         ]
@@ -232,7 +232,7 @@ class SenderTests(unittest.TestCase):
         for p in self.payloads():
             n = p["notification"]
             self.assertEqual(8030, p["web_push"])
-            self.assertEqual("https://jreese.net/escalations/ESC-1", n["navigate"])
+            self.assertEqual("https://enceladus.jreese.net/escalations/ESC-1", n["navigate"])
             self.assertEqual("ESC-1", n["tag"])
             self.assertEqual(3, n["app_badge"])
             self.assertEqual("Escalation · high", n["title"])

@@ -18391,7 +18391,7 @@ def _handle_intent_classifier_training_rollback(event: Dict[str, Any]) -> Dict[s
 # whole SNS handler swallows and logs.
 # ---------------------------------------------------------------------------
 PUSH_SUBSCRIPTIONS_TABLE = os.environ.get("PUSH_SUBSCRIPTIONS_TABLE", "enceladus-push-subscriptions")
-APP_BASE_URL = os.environ.get("APP_BASE_URL", "https://jreese.net/")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "https://enceladus.jreese.net/")
 PUSH_TTL_SECONDS = 24 * 3600
 _NOTIFY_RISKS = ("low", "medium", "high", "critical")
 _NOTIFY_KIND_RE = re.compile(r"^[a-z0-9_\-]{1,40}$")
