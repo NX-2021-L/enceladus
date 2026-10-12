@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { notifySw } from '@io-kit/notify/vite'
 import { RUNTIME_CACHING, SW_FEED_CACHE_CLEANUP_SCRIPT } from './src/offline/runtimeCaching'
 
 const uiRoot = path.dirname(fileURLToPath(import.meta.url))
@@ -78,6 +79,7 @@ export default defineConfig({
       },
     }),
     tailwindcss(),
+    notifySw(),
     // ENC-TSK-K25 · B67 AC-17/18/19 offline layer (DOC-E470AC8CE9A8 §7)
     VitePWA({
       registerType: 'prompt',
@@ -89,7 +91,7 @@ export default defineConfig({
         // ENC-TSK-Q33: the route table lives in src/offline/runtimeCaching.ts so
         // its first-match resolution is unit-tested; the imported script
         // deletes the legacy StaleWhileRevalidate 'feed-api' cache on activate.
-        importScripts: [SW_FEED_CACHE_CLEANUP_SCRIPT],
+        importScripts: [SW_FEED_CACHE_CLEANUP_SCRIPT, 'notify-sw.js'],
         runtimeCaching: RUNTIME_CACHING,
       },
       manifest: {

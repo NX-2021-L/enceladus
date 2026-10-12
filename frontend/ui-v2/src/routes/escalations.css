@@ -189,3 +189,7 @@
 .ev2-esc__candidate { display: block; margin: 4px 0; }
 .ev2-esc__receipt { margin: 4px 0 0; font-size: 12px; }
 .ev2-esc__expiry { white-space: nowrap; }
+
+/* DVP-TSK-A24: push deep-link decide panel, first in the page so Approve/Deny sit above the fold at 375x812. */
+.ev2-esc__focus { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid var(--border, #444); border-radius: 8px; }
+.ev2-esc__focus .ev2-esc__actions { position: static; }

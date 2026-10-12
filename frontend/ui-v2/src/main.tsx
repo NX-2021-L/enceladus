@@ -1,5 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { ensureNotifySubscription } from './notifications/notifyApi'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { registerSW } from 'virtual:pwa-register'
@@ -51,6 +52,7 @@ if ('serviceWorker' in navigator) {
   setUpdateSW(updateSW)
 }
 
+ensureNotifySubscription()
 createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
