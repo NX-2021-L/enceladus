@@ -25,39 +25,30 @@ import { gateFetch } from './GateInboxPanel'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 
 const FX = JSON.parse(readFileSync('node_modules/@io-kit/gates/fixtures/list-star.json', 'utf8')) as Record<string, unknown>
-const locate = (o: unknown, path: (string | number)[] = []): (string | number)[] | null => {
-  if (Array.isArray(o)) return o.length && typeof o[0] === 'object' && o[0] && 'kind' in (o[0] as object) ? path : null
-  if (o && typeof o === 'object' && path.length < 4) for (const [k, v] of Object.entries(o)) { const r = locate(v, [...path, k]); if (r) return r }
-  return null
-}
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const at = (o: any, p: (string | number)[]) => p.reduce((a, k) => a?.[k], o)
-const PATH = locate(FX) ?? ['escalations']
-const TPL = (at(FX, PATH) as Record<string, unknown>[])[0]!
+// The kit fixture wraps the hub body: { note, provenance, response: { escalations: [...], ... } }
+const RESP = (FX as { response: Record<string, unknown> }).response
+const TPL = (RESP.escalations as Record<string, unknown>[])[0]!
+const EV = [{ label: 'Target record', ref: 'DVP-TSK-1' }]
 const NOW = Date.now()
-const iso = (ms: number) => new Date(ms).toISOString()
+const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const base = (o: Record<string, unknown>) => {
-  const c: Record<string, unknown> = { ...TPL, ...o }
+  const c: Record<string, unknown> = { ...TPL }
   for (const k of ['candidates', 'proposedCalls', 'decision', 'diff', 'decision_log', 'decision_log_head', 'decision_log_valid', 'snoozedUntil']) c[k] = undefined
-  return c
+  return Object.assign(c, o)
 }
 const decision = (d: string) => ({ decision: d, decider: 'io', decidedAt: iso(NOW - 3600_000), auth_method: 'interactive_human', auth_time: iso(NOW - 3600_000), assurance: 'interactive_human' })
 const PENDING = [
-  base({ id: 'DVP-ESC-100', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'medium', state: 'pending', title: 'Apply status change', subject: { record_id: 'DVP-TSK-1', project: 'devops', version: '3' }, etag: '"e100"', createdAt: iso(NOW - 7200_000), expiresAt: iso(NOW + 5 * 3600_000), requiredAuth: 'interactive_human', evidence: [] }),
-  base({ id: 'TC-200', project_id: 'enceladus', kind: 'tool_call', family: 'decision', risk: 'low', state: 'pending', title: 'Deploy lambda', subject: { record_id: 'ENC-TSK-2', project: 'enceladus', version: '1' }, etag: '"e200"', createdAt: iso(NOW - 600_000), expiresAt: iso(NOW + 9 * 3600_000), requiredAuth: 'interactive_human', evidence: [] }),
-  base({ id: 'DVP-ESC-300', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'high', state: 'pending', title: 'Rotate key', subject: { record_id: 'DVP-TSK-3', project: 'devops', version: '2' }, etag: '"e300"', createdAt: iso(NOW - 1800_000), expiresAt: iso(NOW + 8 * 3600_000), requiredAuth: 'step_up', evidence: [] }),
+  base({ id: 'DVP-ESC-100', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'medium', state: 'pending', title: 'Apply status change', subject: { record_id: 'DVP-TSK-1', project: 'devops', version: '3' }, etag: '"e100"', createdAt: iso(NOW - 7200_000), expiresAt: iso(NOW + 5 * 3600_000), requiredAuth: 'interactive_human', evidence: EV }),
+  base({ id: 'TC-200', project_id: 'enceladus', kind: 'tool_call', family: 'decision', risk: 'low', state: 'pending', title: 'Deploy lambda', subject: { record_id: 'ENC-TSK-2', project: 'enceladus', version: '1' }, etag: '"e200"', createdAt: iso(NOW - 600_000), expiresAt: iso(NOW + 9 * 3600_000), requiredAuth: 'interactive_human', evidence: EV }),
+  base({ id: 'DVP-ESC-300', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'high', state: 'pending', title: 'Rotate key', subject: { record_id: 'DVP-TSK-3', project: 'devops', version: '2' }, etag: '"e300"', createdAt: iso(NOW - 1800_000), expiresAt: iso(NOW + 8 * 3600_000), requiredAuth: 'step_up', evidence: EV }),
 ]
 const TERMINAL = [
-  base({ id: 'DVP-ESC-001', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old approved', subject: { record_id: 'DVP-TSK-9', project: 'devops', version: '1' }, etag: '"e1"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('approve'), evidence: [] }),
-  base({ id: 'DVP-ESC-002', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old denied', subject: { record_id: 'DVP-TSK-8', project: 'devops', version: '1' }, etag: '"e2"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('deny'), evidence: [] }),
+  base({ id: 'DVP-ESC-001', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old approved', subject: { record_id: 'DVP-TSK-9', project: 'devops', version: '1' }, etag: '"e1"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('approve'), evidence: EV }),
+  base({ id: 'DVP-ESC-002', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old denied', subject: { record_id: 'DVP-TSK-8', project: 'devops', version: '1' }, etag: '"e2"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('deny'), evidence: EV }),
 ]
 const listBody = (cards: unknown[]) => {
-  if (PATH.length === 0) return JSON.stringify(cards)
-  const b = JSON.parse(JSON.stringify(FX))
-  at(b, PATH.slice(0, -1))[PATH[PATH.length - 1]!] = cards
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const strip = (o: any) => { if (o && typeof o === 'object' && !Array.isArray(o)) for (const k of Object.keys(o)) { if (/cursor/i.test(k)) delete o[k]; else strip(o[k]) } }
-  strip(b)
+  const b: Record<string, unknown> = { ...RESP, escalations: cards }
+  for (const k of Object.keys(b)) if (/cursor/i.test(k)) delete b[k]
   return JSON.stringify(b)
 }
 const json = (body: string, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/json' } })

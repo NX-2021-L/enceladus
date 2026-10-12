@@ -13,7 +13,6 @@ import { DiffView, ProposedCallPreview } from '@io-kit/gates/react'
 import { Alert, Button, Container, FormField, Header, KeyValuePairs, Modal } from '../design-system'
 import { Table } from '../components/StackedTable'
 import { Tabs } from '../components/StripTabs'
-import { PageHeader } from '../components/PageHeader'
 import { Badge } from '../components/Badge'
 import { StatusChip } from '../components/StatusChip'
 import { RecordLink } from '../components/RecordLink'
@@ -27,7 +26,7 @@ const POLL_INTERVAL_MS = 30_000
 const COMPACT_LIMIT = 8
 const FEED_KEY = 'escalation-cockpit'
 
-export function EscalationsCockpit({ compact = false }: { compact?: boolean }) {
+export function EscalationsCockpit({ compact = false, onPendingCount }: { compact?: boolean; onPendingCount?: (n: number) => void }) {
   const queryClient = useQueryClient()
   const [bucket, setBucket] = useState<EscalationBucket>('pending')
   const [openKey, setOpenKey] = useState<string | null>(null)
@@ -49,6 +48,8 @@ export function EscalationsCockpit({ compact = false }: { compact?: boolean }) {
 
   const rows = toEscalationRows(feedQuery.data?.cards ?? [])
   const counts = countByBucket(rows)
+  const pendingCount = counts.pending
+  useEffect(() => { onPendingCount?.(pendingCount) }, [pendingCount, onPendingCount])
   const visibleRows = compact ? filterRows(rows, 'pending').slice(0, COMPACT_LIMIT) : filterRows(rows, bucket)
   const openRow = openKey ? (rows.find((r) => r.key === openKey) ?? null) : null
 
@@ -125,14 +126,6 @@ export function EscalationsCockpit({ compact = false }: { compact?: boolean }) {
 
   return (
     <>
-      {!compact && (
-        <PageHeader
-          title="Escalations"
-          count={`${counts.pending} pending`}
-          description="Every gate from every project that needs a human verdict. Approve or deny with the exact call shown; each verdict is bound to the card's version and recorded as a receipt."
-        />
-      )}
-
       {notice && (
         <div className="ev2-esc__notice">
           <Alert type={notice.type} header={notice.header} dismissible onDismiss={() => setNotice(null)}>
