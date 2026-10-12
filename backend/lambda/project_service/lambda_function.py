@@ -35,6 +35,7 @@ import os
 import re
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote
 
@@ -159,6 +160,25 @@ _jwks_fetched_at: float = 0.0
 _JWKS_TTL = 3600.0
 
 _deserializer = TypeDeserializer()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+# DVP-TSK-A01: days_since_active is derived from the newest updated_at across a project's
+# tracker records, which costs a full paginated GSI Query per project. Only that one derived
+# value is cached (project rows themselves are always read fresh). The cache holds the max
+# updated_at timestamp, NOT the day count, so the count is recomputed against "now" on every
+# read; the only staleness is a write landing inside the TTL window, and the value is a
+# whole-day integer. Set PROJECT_ACTIVITY_CACHE_TTL_SECONDS=0 to disable.
+_ACTIVITY_TTL = _env_float("PROJECT_ACTIVITY_CACHE_TTL_SECONDS", 300.0)
+_ACTIVITY_MAX_WORKERS = 8
+# project_id -> (monotonic expiry, newest updated_at ISO string or None)
+_activity_cache: Dict[str, Tuple[float, Optional[str]]] = {}
 
 
 def _parse_internal_scope_map(raw: str) -> Dict[str, Set[str]]:
@@ -346,7 +366,11 @@ def _get_ddb():
     if _ddb is None:
         _ddb = boto3.client(
             "dynamodb", region_name=DYNAMODB_REGION,
-            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+            config=Config(
+                retries={"max_attempts": 3, "mode": "standard"},
+                # DVP-TSK-A01: list requests fan out one GSI Query per project in threads.
+                max_pool_connections=16,
+            ),
         )
     return _ddb
 
@@ -399,45 +423,7 @@ def _error(status_code: int, message: str, **extra) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _compute_days_since_active(project_id: str) -> Optional[int]:
-    """Query devops-project-tracker for the max updated_at across all records."""
-    ddb = _get_ddb()
-    try:
-        resp = ddb.query(
-            TableName=TRACKER_TABLE,
-            IndexName=TRACKER_GSI,
-            KeyConditionExpression="project_id = :pid",
-            ExpressionAttributeValues={":pid": {"S": project_id}},
-            ProjectionExpression="updated_at",
-            ScanIndexForward=False,
-        )
-    except (BotoCoreError, ClientError):
-        return None
-
-    max_ts: Optional[str] = None
-    for item in resp.get("Items", []):
-        ts = item.get("updated_at", {}).get("S")
-        if ts and (max_ts is None or ts > max_ts):
-            max_ts = ts
-    # Handle pagination
-    while resp.get("LastEvaluatedKey"):
-        try:
-            resp = ddb.query(
-                TableName=TRACKER_TABLE,
-                IndexName=TRACKER_GSI,
-                KeyConditionExpression="project_id = :pid",
-                ExpressionAttributeValues={":pid": {"S": project_id}},
-                ProjectionExpression="updated_at",
-                ScanIndexForward=False,
-                ExclusiveStartKey=resp["LastEvaluatedKey"],
-            )
-        except (BotoCoreError, ClientError):
-            break
-        for item in resp.get("Items", []):
-            ts = item.get("updated_at", {}).get("S")
-            if ts and (max_ts is None or ts > max_ts):
-                max_ts = ts
-
+def _days_since(max_ts: Optional[str]) -> Optional[int]:
     if not max_ts:
         return None
     try:
@@ -448,17 +434,91 @@ def _compute_days_since_active(project_id: str) -> Optional[int]:
         return None
 
 
-def _enrich_project(item: Dict[str, Any]) -> Dict[str, Any]:
+def _query_latest_activity(project_id: str) -> Tuple[Optional[str], bool]:
+    """Page through the project's tracker records (project-type-index) for the newest updated_at.
+
+    Returns (max_ts, complete). complete is False when a page failed, in which case max_ts is
+    whatever was read before the failure (None when the first page failed)."""
+    ddb = _get_ddb()
+    kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "IndexName": TRACKER_GSI,
+        "KeyConditionExpression": "project_id = :pid",
+        "ExpressionAttributeValues": {":pid": {"S": project_id}},
+        "ProjectionExpression": "updated_at",
+        "ScanIndexForward": False,
+    }
+    max_ts: Optional[str] = None
+    while True:
+        try:
+            resp = ddb.query(**kwargs)
+        except (BotoCoreError, ClientError):
+            return max_ts, False
+        for item in resp.get("Items", []):
+            ts = item.get("updated_at", {}).get("S")
+            if ts and (max_ts is None or ts > max_ts):
+                max_ts = ts
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return max_ts, True
+        kwargs["ExclusiveStartKey"] = last_key
+
+
+def _compute_days_since_active(project_id: str) -> Optional[int]:
+    """Whole days since the newest updated_at across the project's tracker records.
+
+    DVP-TSK-A01: the newest-timestamp lookup is cached per container for _ACTIVITY_TTL seconds;
+    a failed lookup is never cached and falls back to a stale entry when one exists."""
+    if not project_id:
+        return None  # DynamoDB rejects an empty-string key; the old per-project Query returned None.
+    now = time.monotonic()
+    cached = _activity_cache.get(project_id)
+    if cached is not None and cached[0] > now:
+        return _days_since(cached[1])
+    max_ts, complete = _query_latest_activity(project_id)
+    if complete:
+        _activity_cache[project_id] = (now + _ACTIVITY_TTL, max_ts)
+    elif cached is not None:
+        max_ts = max((t for t in (max_ts, cached[1]) if t), default=None)
+    return _days_since(max_ts)
+
+
+def _days_since_active_many(project_ids: List[str]) -> Dict[str, Optional[int]]:
+    """days_since_active for many projects; cache misses are looked up concurrently."""
+    unique = list(dict.fromkeys(project_ids))
+    now = time.monotonic()
+    out: Dict[str, Optional[int]] = {}
+    missing: List[str] = []
+    for pid in unique:
+        cached = _activity_cache.get(pid)
+        if cached is not None and cached[0] > now:
+            out[pid] = _days_since(cached[1])
+        else:
+            missing.append(pid)
+    if len(missing) > 1:
+        with ThreadPoolExecutor(max_workers=min(_ACTIVITY_MAX_WORKERS, len(missing))) as pool:
+            out.update(zip(missing, pool.map(_compute_days_since_active, missing)))
+    else:
+        for pid in missing:
+            out[pid] = _compute_days_since_active(pid)
+    return out
+
+
+_UNSET: Any = object()
+
+
+def _enrich_project(item: Dict[str, Any], days: Any = _UNSET) -> Dict[str, Any]:
     """Add days_since_active to a project dict and normalize deploy_policy.
 
     ENC-TSK-H84 / ENC-FTR-111: read-time defaulting seeds the effective deploy_policy for every
     existing/legacy project that predates the field (including enceladus) to ci_triggered, and
     coerces any unrecognized stored value back to the default. This keeps GET/LIST consumers and
     the lifecycle_service deploy-init gate consistent even before the physical backfill
-    (tools/seed_deploy_policy.py) materializes the attribute on the DynamoDB record."""
+    (tools/seed_deploy_policy.py) materializes the attribute on the DynamoDB record.
+
+    days: a precomputed days_since_active (the list path computes all projects concurrently)."""
     pid = item.get("project_id", "")
-    days = _compute_days_since_active(pid)
-    item["days_since_active"] = days
+    item["days_since_active"] = _compute_days_since_active(pid) if days is _UNSET else days
     policy = str(item.get("deploy_policy") or "").strip().lower()
     item["deploy_policy"] = policy if policy in _VALID_DEPLOY_POLICIES else _DEFAULT_DEPLOY_POLICY
     return item
@@ -762,9 +822,10 @@ def _handle_list(query_params: Dict) -> Dict:
     elif active_filter and active_filter.lower() == "true":
         projects = [p for p in projects if p.get("status") not in ("closed", "archived")]
 
-    # Enrich with days_since_active
+    # Enrich with days_since_active (cached per project; misses are looked up concurrently)
+    days_by_project = _days_since_active_many([p.get("project_id", "") for p in projects])
     for p in projects:
-        _enrich_project(p)
+        _enrich_project(p, days=days_by_project.get(p.get("project_id", "")))
 
     projects.sort(key=lambda p: p.get("project_id", ""))
 
@@ -881,3 +942,25 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     else:
         return _error(405, "Method not allowed.")
+
+
+# ---------------------------------------------------------------------------
+# Init-phase warm-up (DVP-TSK-A01)
+# ---------------------------------------------------------------------------
+
+
+def _warm_container() -> None:
+    """Pay client construction and the first JWKS fetch during Lambda INIT instead of inside the
+    first request. Best-effort: any failure is logged and the request path retries lazily."""
+    try:
+        _get_ddb()
+    except Exception:  # noqa: BLE001
+        logger.warning("init warm-up: dynamodb client creation failed", exc_info=True)
+    try:
+        _get_jwks()
+    except Exception:  # noqa: BLE001
+        logger.warning("init warm-up: JWKS prefetch failed", exc_info=True)
+
+
+if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    _warm_container()
