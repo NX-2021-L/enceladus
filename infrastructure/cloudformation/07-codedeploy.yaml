@@ -1024,33 +1024,14 @@ Resources:
       TreatMissingData: notBreaching
 
   # --- neo4j-backup ---
-  Neo4jBackupErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "enc-codedeploy-neo4j-backup-errors${EnvironmentSuffix}"
-      Namespace: AWS/Lambda
-      MetricName: Errors
-      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"}]
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-
-  Neo4jBackupLatencyAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "enc-codedeploy-neo4j-backup-duration${EnvironmentSuffix}"
-      Namespace: AWS/Lambda
-      MetricName: Duration
-      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"}]
-      ExtendedStatistic: p99
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 290000
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
+  # ENC-TSK-Q61 / ENC-ISS-847: the neo4j-backup alarms (Lambda Errors and p99
+  # Duration on the function) were REMOVED from this stack. They measure the
+  # NIGHTLY JOB, not the deployment, and the job failed every night from
+  # 2026-08-17: the Errors alarm sat in ALARM and rolled back an unrelated Gen2
+  # deploy (DEPLOYMENT_STOP_ON_ALARM). The deployment group below now rolls back
+  # only on DEPLOYMENT_FAILURE; deploy health is proven by the {"dry_run": true}
+  # canary step in .github/workflows/_deploy.yml, and backup health by the
+  # Neo4jSnapshotFreshnessAlarm in 05-monitoring.yaml.
 
   # --- env-drift-auditor ---
   EnvDriftAuditorErrorAlarm:
@@ -1446,14 +1427,11 @@ Resources:
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
         DeploymentOption: WITH_TRAFFIC_CONTROL
-      AlarmConfiguration:
-        Enabled: true
-        Alarms:
-          - Name: !Ref Neo4jBackupErrorAlarm
-          - Name: !Ref Neo4jBackupLatencyAlarm
+      # ENC-TSK-Q61: no AlarmConfiguration. See the neo4j-backup note in the
+      # alarms section: the nightly job's Errors alarm must not gate deploys.
       AutoRollbackConfiguration:
         Enabled: true
-        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+        Events: [DEPLOYMENT_FAILURE]
 
   EnvDriftAuditorDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup

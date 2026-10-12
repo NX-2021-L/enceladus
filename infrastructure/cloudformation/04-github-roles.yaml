@@ -1665,6 +1665,15 @@ Resources:
                 Action:
                   - lambda:UpdateFunctionConfiguration
                 Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-gamma"
+              # ENC-TSK-Q61 / ENC-ISS-847: _deploy.yml's "Neo4j backup dry-run canary"
+              # step invokes the freshly deployed gamma function with
+              # {"dry_run": true} (reads one graph page, writes nothing). Exactly
+              # that one function; without this the step degrades to a warning.
+              - Sid: V4GammaNeo4jBackupCanary
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-neo4j-backup-gamma"
               - Sid: V4GammaLambdaVersionPrune
                 Effect: Allow
                 Action:
