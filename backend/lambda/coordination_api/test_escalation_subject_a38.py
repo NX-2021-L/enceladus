@@ -26,6 +26,20 @@ class SubjectBackfillTests(unittest.TestCase):
         self.assertEqual("producer_delegated", card["subject"]["type"])
         self.assertEqual("", card["subject"]["version"])
 
+    def test_json_string_subject_is_read_not_replaced(self):
+        # recipe.publish gates (DVP-ESC-011..015) store subject as a JSON string; the card must name
+        # the recipe, not fall back to its own escalation id.
+        card = _view({"item_id": "DVP-ESC-011", "project_id": "devops", "status": "requested", "kind": "acceptance",
+                      "subject": '{"type": "recipe_version", "record_id": "DVP-REC-001", "version": "1.0.0", "target": "published"}'})
+        self.assertEqual("DVP-REC-001", card["subject"]["record_id"])
+        self.assertEqual("1.0.0", card["subject"]["version"])
+        self.assertEqual("devops", card["subject"]["project"])
+        self.assertEqual("recipe_version", card["subject"]["type"])
+
+    def test_unparseable_string_subject_still_backfills(self):
+        card = _view({"item_id": "DVP-ESC-030", "project_id": "devops", "status": "requested", "subject": "not json"})
+        self.assertEqual("DVP-ESC-030", card["subject"]["record_id"])
+
     def test_complete_subject_is_untouched(self):
         subject = {"record_id": "DVP-REC-001", "project": "devops", "version": "3", "type": "recipe"}
         card = _view({"item_id": "DVP-ESC-011", "project_id": "devops", "status": "requested",
