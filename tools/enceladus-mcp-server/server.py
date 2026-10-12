@@ -11541,10 +11541,134 @@ def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
-    import base64
-    import anyio
+# ---------------------------------------------------------------------------
+# io_kit_mcp_edge adoption (ENC-TSK-Q70, DVP-PLN-016 W4, E16-R14)
+#
+# In Cognito mode the kit edge serves RFC 9728 PRM, RFC 8414 ASM, POST /register,
+# OPTIONS, the 401 challenge and the bearer gate. The host keeps the four legs the
+# kit does not own: /authorize (strips RFC 8707 resource, wraps the client redirect
+# in state), /callback, /oauth/token (injects the server-side secret) and
+# /oauth/register (legacy DCR alias). server.py is packaged into four Lambdas; the kit
+# is a dependency of mcp_code (mcp.jreese.net and mcp-gamma.jreese.net via their
+# Function URLs) and mcp_streamable only, so the import is lazy and any failure falls
+# back to the original gate (host PRM/ASM + _verify_cognito_jwt) -- never a 500.
+# ---------------------------------------------------------------------------
 
+_KIT_API: Any = None  # (EdgeConfig, wrap) once imported
+_KIT_IMPORT_FAILED = False
+_KIT_EDGES: Dict[str, Tuple[Any, Any]] = {}  # base URL -> (EdgeConfig, wrapped handler)
+_ASM_PATH = "/.well-known/oauth-authorization-server"
+
+
+def _get_kit_edge_api() -> Optional[Tuple[Any, Any]]:
+    """Lazily import io_kit_mcp_edge; None (logged once per process) when unavailable."""
+    global _KIT_API, _KIT_IMPORT_FAILED
+    if _KIT_API is not None:
+        return _KIT_API
+    if _KIT_IMPORT_FAILED:
+        return None
+    try:
+        from io_kit_mcp_edge import EdgeConfig, wrap
+    except Exception as exc:  # ImportError, or a broken transitive dependency
+        _KIT_IMPORT_FAILED = True
+        logger.error(
+            "io_kit_mcp_edge unavailable (%s: %s); Cognito mode keeps the legacy bearer gate",
+            type(exc).__name__, exc,
+        )
+        return None
+    _KIT_API = (EdgeConfig, wrap)
+    return _KIT_API
+
+
+def _kit_edge_config(edge_config_cls: Any, base: str) -> Any:
+    """EdgeConfig for the Cognito pool. mount_path "/" keeps the PRM resource equal to the
+    base URL clients registered; /authorize is a host route, so no authorize_redirect."""
+    cognito_domain = COGNITO_DOMAIN.rstrip("/")
+    region = COGNITO_REGION or COGNITO_USER_POOL_ID.split("_", 1)[0]
+    issuer = f"https://cognito-idp.{region}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    return edge_config_cls(
+        base_url=base,
+        mount_path="/",
+        issuer=issuer,
+        client_id=COGNITO_CLIENT_ID_CODE,
+        authorization_server={
+            "authorization_endpoint": f"{base}/authorize",
+            "token_endpoint": f"{base}/oauth/token",
+            "revocation_endpoint": f"{cognito_domain}/oauth2/revoke",
+            "userinfo_endpoint": f"{cognito_domain}/oauth2/userInfo",
+        },
+        jwks_uri=f"{issuer}/.well-known/jwks.json",
+        registration_facade={"client_id": COGNITO_CLIENT_ID_CODE},  # echoes redirect_uris; never a secret
+        scopes=["openid", "email", "profile"],
+        logger=logger,
+    )
+
+
+def _get_kit_edge(base: str) -> Optional[Tuple[Any, Any]]:
+    """(EdgeConfig, wrapped handler) for this base URL, built once and cached; None on failure."""
+    cached = _KIT_EDGES.get(base)
+    if cached is not None:
+        return cached
+    api = _get_kit_edge_api()
+    if api is None:
+        return None
+    edge_config_cls, wrap = api
+    try:
+        config = _kit_edge_config(edge_config_cls, base)
+        edge = wrap(lambda event, context=None: asyncio.run(_handle_mcp_request(event)), config)
+    except Exception as exc:
+        logger.error("io_kit_mcp_edge config rejected for base=%s (%s: %s); using legacy gate",
+                     base, type(exc).__name__, exc)
+        return None
+    _KIT_EDGES[base] = (config, edge)
+    return _KIT_EDGES[base]
+
+
+def _handle_cognito_host_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The Cognito-mode legs the host owns (not the kit): /authorize, /callback,
+    /oauth/token, /oauth/register. Behaviour is unchanged from _handle_oauth_route."""
+    req_ctx = (event.get("requestContext") or {}).get("http", {})
+    path = req_ctx.get("path", "")
+    method = req_ctx.get("method", "GET").upper()
+    if path == "/authorize" and method == "GET":
+        return _handle_cognito_authorize(event)
+    if path == "/callback" and method == "GET":
+        return _handle_cognito_callback(event)
+    if path == "/oauth/token" and method == "POST":
+        return _handle_cognito_token(event)
+    if path == "/oauth/register" and method == "POST":
+        return _handle_cognito_register(event)
+    return None
+
+
+def _alias_discovery_suffix(event: Dict[str, Any]) -> Dict[str, Any]:
+    """The path-suffixed ASM (/.well-known/oauth-authorization-server/mcp) is the bare document;
+    the host has always answered it and the kit only serves the bare path. The kit already
+    serves both PRM paths."""
+    http = (event.get("requestContext") or {}).get("http") or {}
+    path = str(event.get("rawPath") or http.get("path") or "")
+    if path != f"{_ASM_PATH}/mcp":
+        return event
+    return {**event, "rawPath": _ASM_PATH,
+            "requestContext": {**(event.get("requestContext") or {}), "http": {**http, "path": _ASM_PATH}}}
+
+
+def _serve_via_kit_edge(event: Dict[str, Any], context: Any) -> Optional[Dict[str, Any]]:
+    """Cognito mode: host routes first, then the kit edge. None means the kit is unavailable
+    and the caller must use the legacy path (which serves the same host routes itself)."""
+    host_response = _handle_cognito_host_route(event)
+    if host_response is not None:
+        return host_response
+    base = _get_server_base_url(event)
+    if not base:
+        return None
+    entry = _get_kit_edge(base)
+    if entry is None:
+        return None
+    return entry[1](_alias_discovery_suffix(event), context)
+
+
+async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
     # 0. Handle OAuth routes (unauthenticated — they ARE the auth endpoints)
     oauth_response = _handle_oauth_route(event)
     if oauth_response is not None:
@@ -11595,6 +11719,14 @@ async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
                 "body": json.dumps({"error": "Unauthorized"}),
                 "isBase64Encoded": False,
             }
+
+    return await _handle_mcp_request(event)
+
+
+async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
+    """The post-auth MCP path: the bearer gate (legacy or kit edge) has already run."""
+    import base64
+    import anyio
 
     # 2. Decode body
     body_raw = event.get("body") or ""
@@ -11671,4 +11803,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             ),
             "isBase64Encoded": False,
         }
+    if _cognito_mode_active():
+        edge_response = _serve_via_kit_edge(event, context)
+        if edge_response is not None:
+            return edge_response
     return asyncio.run(_handle_lambda_event(event))
