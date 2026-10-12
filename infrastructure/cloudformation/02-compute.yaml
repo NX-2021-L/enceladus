@@ -90,7 +90,7 @@ Parameters:
     Default: https://jreese.net
   AppBaseUrl:
     Type: String
-    Default: "https://jreese.net/"
+    Default: "https://enceladus.jreese.net/"
     Description: >
       DVP-TSK-A23: PWA origin + base path; escalation push notifications deep-link to
       <AppBaseUrl>escalations/<ESC-ID>. Must end with a slash.
