@@ -10646,6 +10646,22 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
             "project": str(base.get("project") or escalation.get("project_id") or ""),
             "version": str(base.get("version") or escalation.get("expected_version") or ""),
         }
+    # DVP-TSK-A38 (2): the rest of the client card invariants for legacy records:
+    # createdAt in the kit's second-precision UTC form (expiry bounds are checked
+    # against it), non-empty {label, ref} evidence, and an assurance-level requiredAuth.
+    created = _gate_parse_ts(escalation.get("createdAt") or escalation.get("created_at"))
+    if created is not None:
+        escalation["createdAt"] = _gate_fmt(created)
+    evidence = escalation.get("evidence")
+    items = [e for e in evidence if isinstance(e, dict)] if isinstance(evidence, list) else []
+    items = [{**e, "label": str(e.get("label") or "evidence"), "ref": str(e.get("ref") or "")} for e in items]
+    if not items:
+        ref = str(escalation.get("target_record_id") or escalation.get("item_id") or "")
+        items = [{"label": "requested change", "ref": ref}]
+    escalation["evidence"] = items
+    if escalation.get("requiredAuth") not in (None, "session", "interactive_human", "step_up"):
+        escalation["requiredAuth"] = ("step_up" if str(escalation.get("risk")) in ("high", "critical")
+                                      else "interactive_human")
 
 
 def _gate_list_project_ids() -> List[str]:
