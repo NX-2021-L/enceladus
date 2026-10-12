@@ -19,16 +19,16 @@ import test_escalation_gate_e4 as gate  # noqa: E402
 ISSUERS = [
     {"name": "vagamod-keycloak", "iss": "https://auth.vagamod.example/realms/vagamod",
      "jwks_uri": "https://auth.vagamod.example/certs", "audiences": ["vagamod-shell"]},
-    {"name": "coach-cognito", "iss": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_COACH",
-     "jwks_uri": "https://cognito-idp.example/coach.json", "audiences": ["coach-client"]},
+    {"name": "think-iograph", "iss": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_THINK",
+     "jwks_uri": "https://cognito-idp.example/think.json", "audiences": ["think-client"]},
     {"name": "rogue-idp", "iss": "https://rogue.example", "jwks_uri": "https://rogue.example/jwks",
      "audiences": ["x"]},
 ]
 ENV = {
     "HUB_EXCHANGE_ISSUERS": json.dumps(ISSUERS), "COORDINATION_INTERNAL_API_KEY": "k" * 64,
-    "HUB_SHELL_ORIGINS": "https://coach.thepup.io,https://think.example.io,https://vagamod.com",
+    "HUB_SHELL_ORIGINS": "https://think.example.io,https://vagamod.com",
     "ESCALATION_MACHINE_EMAIL_DOMAINS": "enceladus.internal",
-    "GATE_PRODUCER_PRINCIPALS": json.dumps({"vagamod": ["vagamod"], "think": ["think"], "coach": ["coach"]}),
+    "GATE_PRODUCER_PRINCIPALS": json.dumps({"vagamod": ["vagamod"], "think": ["think"]}),
 }
 CALL = {
     "capability": "tracker.set", "method": "POST", "path": "/enceladus/task/ENC-TSK-J10",
@@ -104,7 +104,7 @@ class TestHubProducerCreate(_HubBase):
         resp, ddb = self._post({"kind": "notice", "title": "FYI"}, self.claims(issuer=1))
         self.assertEqual(201, resp["statusCode"], resp["body"])
         item = ddb.put_item.call_args.kwargs["Item"]
-        self.assertEqual(("coach", "coach"), (item["requested_by"]["M"]["session_id"]["S"], item["source"]["S"]))
+        self.assertEqual(("think", "think"), (item["requested_by"]["M"]["session_id"]["S"], item["source"]["S"]))
 
     def test_matching_claimed_principal_is_accepted_mismatch_is_403(self):
         ok, _ = self._post(_body(source_principal="vagamod"), self.claims())
@@ -125,7 +125,7 @@ class TestHubProducerCreate(_HubBase):
             ddb.put_item.assert_not_called()
 
     def test_unmapped_issuer_is_403_and_malformed_map_fails_closed(self):
-        with mock.patch.dict(os.environ, {"HUB_EXCHANGE_PRODUCERS": json.dumps({"coach-cognito": "coach"})}):
+        with mock.patch.dict(os.environ, {"HUB_EXCHANGE_PRODUCERS": json.dumps({"think-iograph": "think"})}):
             self.assertEqual(403, self._post(_body(), self.claims())[0]["statusCode"])
             self.assertEqual(201, self._post(_body(), self.claims(issuer=1))[0]["statusCode"])
         with mock.patch.dict(os.environ, {"HUB_EXCHANGE_PRODUCERS": "not json"}):
