@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Enceladus isolation W2 (DVP-TSK-A76 / DVP-TSK-A98, plan DOC-EF4BC758CCC9 decision D2): the
+  Enceladus-owned content bucket and its customer-managed KMS key, one stack per environment
+  (enceladus-content in production, enceladus-content-gamma in gamma), us-west-2 next to the Lambdas.
+  Replaces the Enceladus prefixes in s3://jreese-net (W3 copies, W4/W5 repoint, W8 cleans up).
+  Role grants live with the roles (02-compute.yaml), never here: grants before code.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: Empty for production, -gamma for gamma.
+  NoncurrentVersionDays:
+    Type: Number
+    Default: 90
+    MinValue: 30
+    Description: Days to keep noncurrent object versions (rollback window).
+
+Conditions:
+  IsProduction: !Equals [!Ref EnvironmentSuffix, ""]
+
+Resources:
+  ContentKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Enceladus content bucket key (enceladus-content${EnvironmentSuffix})"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Account root administers the key; use is granted by IAM policies on the consuming roles
+          # (02-compute.yaml), so access stays reviewable where the roles are defined.
+          - Sid: AccountAdministersAndDelegatesToIam
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          # Any principal in this account may use the key, but only through S3 in this region (the
+          # aws/s3 managed-key pattern). Who can read or write content is decided by S3 grants on the
+          # bucket (02-compute.yaml), so roles need no separate KMS grants.
+          - Sid: AllowUseThroughS3ForAccountPrincipals
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+          # S3 uses the key on behalf of callers only for this account's requests through S3.
+          - Sid: DenyUseOutsideS3
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+              "Null":
+                aws:PrincipalServiceName: "true"
+      Tags:
+        - Key: project
+          Value: enceladus
+        - Key: record
+          Value: DVP-TSK-A98
+
+  ContentKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/enceladus-content${EnvironmentSuffix}"
+      TargetKeyId: !Ref ContentKey
+
+  ContentBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt ContentKey.Arn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: noncurrent-rollback-window
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref NoncurrentVersionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: expired-delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+      Tags:
+        - Key: project
+          Value: enceladus
+        - Key: environment
+          Value: !If [IsProduction, production, gamma]
+        - Key: record
+          Value: DVP-TSK-A98
+
+  ContentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ContentBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ContentBucket.Arn
+              - !Sub "${ContentBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          # Uploads without encryption headers get the default (the content key). An upload that names
+          # a different KMS key, or a non-KMS algorithm, is refused.
+          - Sid: DenyExplicitOtherKmsKey
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${ContentBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt ContentKey.Arn
+              "Null":
+                s3:x-amz-server-side-encryption-aws-kms-key-id: "false"
+          - Sid: DenyExplicitNonKmsEncryption
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${ContentBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+              "Null":
+                s3:x-amz-server-side-encryption: "false"
+
+Outputs:
+  ContentBucketName:
+    Value: !Ref ContentBucket
+    Export:
+      Name: !Sub "enceladus-content${EnvironmentSuffix}-bucket"
+  ContentBucketArn:
+    Value: !GetAtt ContentBucket.Arn
+    Export:
+      Name: !Sub "enceladus-content${EnvironmentSuffix}-bucket-arn"
+  ContentKeyArn:
+    Value: !GetAtt ContentKey.Arn
+    Export:
+      Name: !Sub "enceladus-content${EnvironmentSuffix}-kms-key-arn"

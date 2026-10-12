@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Enceladus isolation W1 (DVP-TSK-A75 / DVP-TSK-A96, plan DOC-EF4BC758CCC9): the Enceladus-owned
+  access-log bucket that observes who still reaches Enceladus through jreese.net before anything is
+  removed (W7 gate: 7 days of logs). Stack enceladus-isolation-observe, us-west-1 (S3 server access
+  logs must land in the source bucket's region; s3://jreese-net is us-west-1). Applied out of band
+  under product-lead; not part of the relay-deployed stacks.
+
+Parameters:
+  RetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 14
+    Description: Days to keep access-log objects.
+  CloudFormationDeployRoleName:
+    Type: String
+    Default: enceladus-cloudformation-deploy-github-role
+    Description: >-
+      Role that deploys 07-ui-cdn.yaml. Enabling CloudFront standard logging makes the caller read and
+      update the target bucket ACL, so this bucket grants that role s3:GetBucketAcl/PutBucketAcl.
+
+Resources:
+  ObserveLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "enceladus-observe-logs-${AWS::AccountId}-${AWS::Region}"
+      # CloudFront standard (legacy) logging writes with ACLs (awslogsdelivery grant), so ACLs stay
+      # enabled with the bucket owner preferred. Public access stays fully blocked.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # CloudFront standard logging does not support SSE-KMS targets.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-access-logs
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: project
+          Value: enceladus
+        - Key: purpose
+          Value: isolation-w1-observe
+        - Key: record
+          Value: DVP-TSK-A96
+
+  ObserveLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ObserveLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3ServerAccessLogsFromJreeseNet
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${ObserveLogsBucket.Arn}/s3/jreese-net/*"
+            Condition:
+              ArnLike:
+                aws:SourceArn: arn:aws:s3:::jreese-net
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: CloudFrontLoggingAclForUiCdnDeploys
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/${CloudFormationDeployRoleName}"
+            Action:
+              - s3:GetBucketAcl
+              - s3:PutBucketAcl
+            Resource: !GetAtt ObserveLogsBucket.Arn
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ObserveLogsBucket.Arn
+              - !Sub "${ObserveLogsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+Outputs:
+  ObserveLogsBucketName:
+    Value: !Ref ObserveLogsBucket
+  ObserveLogsBucketDomain:
+    Description: CloudFront standard-logging target (Logging.Bucket).
+    Value: !GetAtt ObserveLogsBucket.DomainName

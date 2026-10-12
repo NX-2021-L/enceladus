@@ -2880,7 +2880,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:HeadBucket
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               - Sid: SqsHealthCheck
                 Effect: Allow
                 Action:
@@ -4560,35 +4562,46 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: "arn:aws:s3:::jreese-net"
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               - Sid: GovernanceAndReferenceS3Get
                 Effect: Allow
                 Action:
                   - s3:GetObject
                 Resource:
                   - "arn:aws:s3:::jreese-net/governance/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/*"
                   - "arn:aws:s3:::jreese-net/projects/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/projects/*"
                   - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
               - Sid: GovernanceS3Write
                 Effect: Allow
                 Action:
                   - s3:PutObject
                 Resource:
                   - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
                   - "arn:aws:s3:::jreese-net/governance/history/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/history/*"
               # ENC-TSK-K02 / FTR-084 Ph2: versioned intent-training weight snapshots + labels.
               - Sid: IntentTrainingS3ReadWrite
                 Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}intent-training/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}intent-training/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/intent-training/*"
               - Sid: S3HeadBucket
                 Effect: Allow
                 Action:
                   - s3:HeadBucket
                   - s3:GetBucketLocation
-                Resource: "arn:aws:s3:::jreese-net"
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               # ENC-TSK-L92 / ENC-ISS-501: escalation approver allowlist -- READ ONLY.
               # Deliberately no s3:PutObject/DeleteObject grant here or anywhere else
               # in this role; the allowlist document is Console-edit-only by design.
@@ -5134,7 +5147,9 @@ Resources:
                   - s3:PutObject
                   - s3:GetObject
                   - s3:DeleteObject
-                Resource: !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
               # ENC-TSK-P94 / ENC-ISS-766: document_api emits the Enceladus/Docstore
               # metrics (ENC-TSK-P70 LegacyWriteUnguarded, ENC-TSK-P84 patch_section
               # outcomes) fire-and-forget; without this grant every datapoint was
@@ -5158,7 +5173,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: "arn:aws:s3:::jreese-net/agent-documents/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
               # ENC-TSK-I70 / ENC-TSK-I62: env-prefix-aware so the gamma stack can read its
               # own gamma/governance/live + gamma/mobile/v1/reference objects. Was hardcoded to
               # the unprefixed prod paths, so the gamma governance sync 500'd on s3:GetObject
@@ -5169,12 +5186,16 @@ Resources:
                   - s3:GetObject
                 Resource:
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}governance/live/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
               - Sid: S3ListPrefixes
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: "arn:aws:s3:::jreese-net"
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               # ENC-TSK-I72 / ENC-TSK-I62: the governance sync path propagates a
               # governance_data_dictionary.json change into the governance-policies record
               # (discrete version + updated_at + dictionary_json blob), so the document-api
@@ -5245,7 +5266,9 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:DeleteObject
-                Resource: "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -5470,7 +5493,9 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/deploy-config/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*"
               - Sid: SQSSendMessage
                 Effect: Allow
                 Action:
@@ -5545,7 +5570,9 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/deploy-config/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*"
               - Sid: S3SourceRead
                 Effect: Allow
                 Action:
@@ -5553,7 +5580,9 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                   - "arn:aws:s3:::jreese-net/deploy-sources/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-sources/*"
               - Sid: CodeBuildStart
                 Effect: Allow
                 Action:
@@ -5646,7 +5675,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: "arn:aws:s3:::jreese-net/deploy-config/*/current-version.json"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/deploy-config/*/current-version.json"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*/current-version.json"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -5850,7 +5881,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -5936,7 +5969,8 @@ Resources:
                 Resource: !If
                   - IsGamma
                   - !Sub "arn:aws:s3:::enceladus-ui-v2${EnvironmentSuffix}/mobile/v1/*"
-                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+                  - - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+                    - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/*"
               - Sid: EventBridgePut
                 Effect: Allow
                 Action: events:PutEvents
@@ -6101,7 +6135,9 @@ Resources:
                   - s3:GetObject
                 Resource:
                   - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6205,8 +6241,11 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
                   - "arn:aws:s3:::jreese-net/reference/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/reference/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6338,7 +6377,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/deploy-config/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6794,7 +6835,9 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}pathway-telemetry/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}pathway-telemetry/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/pathway-telemetry/*"
               - Sid: PathwayTelemetryListBucket
                 Effect: Allow
                 Action:
@@ -6804,6 +6847,16 @@ Resources:
                   StringLike:
                     s3:prefix:
                       - !Sub "${S3EnvPrefix}pathway-telemetry/*"
+              # DVP-TSK-A99: the content bucket is per environment, so no gamma/ prefix there.
+              - Sid: PathwayTelemetryListContentBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - "pathway-telemetry/*"
         # ENC-TSK-K43 (B66 Ph5): publish the Fiedler lambda2 GraphHealth metric.
         # PutMetricData has no resource-level restriction in the CloudWatch API
         # (metric namespaces are not ARN-addressable), matching the identical
@@ -6925,14 +6978,18 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
               # ENC-TSK-N23: rhythm heavy-beat tenant completion stanza
               # (tenant_invoker.py contract) — write-only, tenant-results scoped.
               - Sid: RhythmStanzaWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6994,7 +7051,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7074,8 +7133,11 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}unlearning-tombstones/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/unlearning-tombstones/*"
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}unlearning-state/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/unlearning-state/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7148,7 +7210,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7210,7 +7274,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7270,7 +7336,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7324,6 +7392,7 @@ Resources:
                   - s3:PutObject
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}gdmp-remediation-state/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/gdmp-remediation-state/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -8059,12 +8128,16 @@ Resources:
                   - s3:GetObject
                   - s3:HeadObject
                   - s3:GetObjectAttributes
-                Resource: "arn:aws:s3:::jreese-net/governance/live/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
               - Sid: ListGovernanceLivePrefix
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: "arn:aws:s3:::jreese-net"
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                 Condition:
                   StringLike:
                     "s3:prefix": "governance/live/*"
@@ -8159,12 +8232,16 @@ Resources:
                   - s3:GetObject
                   - s3:HeadObject
                   - s3:GetObjectAttributes
-                Resource: "arn:aws:s3:::jreese-net/governance/live/*"
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
               - Sid: ListGovernanceLivePrefix
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: "arn:aws:s3:::jreese-net"
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                 Condition:
                   StringLike:
                     "s3:prefix": "governance/live/*"
@@ -8442,7 +8519,9 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*"
               - Sid: TrackerRead
                 Effect: Allow
                 Action:
