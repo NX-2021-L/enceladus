@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-12.03",
-  "updated_at": "2026-10-12T03:44:42Z",
-  "last_change_summary": "DVP-TSK-980 follow-up: the all-projects escalations feed (project_id=*) adds an 'escalations' flat list (pending + terminal) for the @io-kit/gates client; the default single-project shape is unchanged (D9).",
+  "version": "2026-10-12.04",
+  "updated_at": "2026-10-12T03:58:05Z",
+  "last_change_summary": "DVP-TSK-A21: remove coach from hub token exchange issuers, shell origins and producer mappings (io ruling 2026-10-12)",
   "owners": [
     "enceladus-platform"
   ],
@@ -9517,6 +9517,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.04",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-A21: remove coach from hub token exchange issuers, shell origins and producer mappings (io ruling 2026-10-12)"
+    },
     {
       "version": "2026-10-12.03",
       "date": "2026-10-12",
