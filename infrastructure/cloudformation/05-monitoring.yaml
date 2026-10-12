@@ -77,6 +77,62 @@ Resources:
         - !Ref "AWS::NoValue"
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-Q61 / ENC-ISS-847: Neo4j snapshot FRESHNESS alarm.
+  # The nightly enceladus-neo4j-backup OOMed every night from 2026-08-17 and
+  # nothing noticed, because nothing alerted on a MISSING backup (an Errors alarm
+  # cannot see a function that never ran or never reported). The Lambda emits
+  # EnceladusBackup/Neo4jSnapshotSucceeded=1 (dimension Env) only after the
+  # manifest and latest.json are committed; this alarm fires when no success has
+  # landed for 26 hours.
+  #
+  # Configuration: 26 hourly periods, all 26 must breach. The metric is published
+  # once a day, so exactly one hourly bucket carries Sum=1; that bucket is not
+  # breaching and keeps the alarm OK for the 26 hours that follow it (24 h cadence
+  # + 2 h margin for a slow run). Empty buckets are missing data, treated as
+  # breaching, so a run that never reports is caught. 3600 x 26 = 93600 s is
+  # inside CloudWatch's 7-day evaluation limit for periods of an hour or more.
+  #
+  # Expect ALARM from first deploy until the first post-deploy successful run:
+  # missing data is breaching by design. Deploy compute (so the function can emit)
+  # first, then invoke the function or wait for 03:00 UTC.
+  #
+  # Prod only: gamma publishes Env=gamma and is intentionally not paged on.
+  # AlarmActions falls back to the enceladus-deploy-alerts topic by well-known
+  # ARN when SnsTopicArn is empty (cloudformation-monitoring-stack-deploy.yml
+  # passes only EnvironmentSuffix, so an empty param is the normal case there). A
+  # freshness alarm with no action would reproduce the silent failure it exists for.
+  # ---------------------------------------------------------------------------
+  Neo4jSnapshotFreshnessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub "enceladus-neo4j-snapshot-freshness${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-ISS-847: no successful Neo4j graph snapshot (EnceladusBackup/
+        Neo4jSnapshotSucceeded, Env=prod) in the last 26 hours. Check the
+        /aws/lambda/enceladus-neo4j-backup log group for the [ERROR] stage=...
+        line, then invoke the function with {"dry_run": true} to isolate whether
+        AuraDB, the credentials or the S3 write path is failing. Snapshots live in
+        s3://enceladus-356364570033-us-west-2-an/neo4j-backups/prod/ (latest.json
+        points at the newest committed manifest).
+      Namespace: EnceladusBackup
+      MetricName: Neo4jSnapshotSucceeded
+      Dimensions:
+        - Name: Env
+          Value: prod
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 26
+      DatapointsToAlarm: 26
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - [!Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"]
+
+  # ---------------------------------------------------------------------------
   # Health Probe Lambda — ENC-TSK-K44 / ENC-FTR-071: the Lambda function
   # (AWS::Lambda::Function) + its execution role now live in
   # infrastructure/cloudformation/02-compute.yaml so the Lambda Workflow
