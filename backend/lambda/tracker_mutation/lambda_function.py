@@ -1172,7 +1172,8 @@ def _get_sns():
 
 
 def _notify_escalation_event(kind: str, escalation_id: str, target_record_id: str,
-                             mutation_type: str, session_id: str, note: str = "") -> None:
+                             mutation_type: str, session_id: str, note: str = "",
+                             project_id: str = "") -> None:
     """§5.8 io notification: best-effort SNS publish, failure-isolated by contract.
 
     An SNS error (or an unset topic ARN) is logged and swallowed — notification
@@ -1198,6 +1199,14 @@ def _notify_escalation_event(kind: str, escalation_id: str, target_record_id: st
             TopicArn=ESCALATION_ALERTS_TOPIC_ARN,
             Subject=f"[ESCALATION] {kind}: {escalation_id} ({mutation_type})"[:100],
             Message="\n".join(lines),
+            # DVP-TSK-A23: the coordination_api push sender filters on these; the
+            # email subscription ignores attributes, so Subject/Message are unchanged.
+            MessageAttributes={
+                "category": {"DataType": "String", "StringValue": "escalation"},
+                "escalation_event": {"DataType": "String", "StringValue": str(kind)},
+                "escalation_id": {"DataType": "String", "StringValue": str(escalation_id)},
+                "project_id": {"DataType": "String", "StringValue": str(project_id or "")},
+            },
         )
     except Exception as exc:  # noqa: BLE001 — §5.8 failure isolation
         logger.error("escalation notify failed (%s %s): %s", kind, escalation_id, exc)
@@ -9115,7 +9124,7 @@ def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] 
     # ENC-TSK-J72 (§5.8): push io's email AFTER the durable write; never fails it.
     _notify_escalation_event(
         "requested", escalation_id, target_record_id, mutation_type,
-        session_id, note=justification,
+        session_id, note=justification, project_id=project_id,
     )
 
     return _response(201, {
@@ -9325,7 +9334,8 @@ def _handle_escalation_produce(project_id: str, body: Dict, hub: Optional[Dict] 
         return _error(500, "Database write failed while creating escalation.")
     _notify_escalation_event("requested", escalation_id,
                              (subject or {}).get("record_id", f"{source}:{kind}"), kind,
-                             principal, note=justification or gate_fields["title"])
+                             principal, note=justification or gate_fields["title"],
+                             project_id=project_id)
     return _response(201, {
         "success": True, "escalation_id": escalation_id, "status": "requested",
         "created_at": now, "kind": kind, "family": gate_fields["family"],
@@ -9697,6 +9707,7 @@ def _handle_escalation_sweep(project_id: str, body: Dict) -> Dict:
                             to_status, esc_id, str(esc.get("target_record_id") or ""),
                             str(esc.get("mutation_type") or ""), actor,
                             note=f"expired {expiry['expiresAt']} (onExpire={expiry['onExpire']})",
+                            project_id=pid,
                         )
                 pages += 1
                 last = resp.get("LastEvaluatedKey")
@@ -9953,6 +9964,7 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             str(escalation.get("mutation_type") or ""),
             str((escalation.get("requested_by") or {}).get("session_id") or ""),
             note=failure,
+            project_id=project_id,
         )
         return _error(409, f"Escalation application failed (no partial write): {failure}")
 
@@ -9974,6 +9986,7 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
         str(escalation.get("mutation_type") or ""),
         str((escalation.get("requested_by") or {}).get("session_id") or ""),
         note=json.dumps(result_detail or {}, default=str)[:300],
+        project_id=project_id,
     )
     return _response(200, {
         "success": True,

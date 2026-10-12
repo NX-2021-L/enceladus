@@ -88,6 +88,12 @@ Parameters:
   CorsOrigin:
     Type: String
     Default: https://jreese.net
+  AppBaseUrl:
+    Type: String
+    Default: "https://jreese.net/"
+    Description: >
+      DVP-TSK-A23: PWA origin + base path; escalation push notifications deep-link to
+      <AppBaseUrl>escalations/<ESC-ID>. Must end with a slash.
   SharedLayerArn:
     Type: String
     # ENC-TSK-H05: bumped :7 -> :10 to match the live/working prod layer. The F65 hotfix
@@ -490,6 +496,11 @@ Resources:
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
           AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
           AGENT_CREDENTIALS_TABLE: !Sub "agent-credentials${EnvironmentSuffix}"
+          # DVP-TSK-A23 (E4-R29/R30): escalation web push. The VAPID key is derived from
+          # COORDINATION_INTERNAL_API_KEY above (no new secret).
+          PUSH_SUBSCRIPTIONS_TABLE: !Sub "enceladus-push-subscriptions${EnvironmentSuffix}"
+          APP_BASE_URL: !Ref AppBaseUrl
+          VAPID_SUBJECT: "https://jreese.net"
           # ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91: idle-sweep
           # backstop config. Enable flag read by lambda_function; threshold read by
           # config.py / agent_id_alloc.sweep_idle_sessions. ENC-ISS-441 / ENC-TSK-J94:
@@ -3752,6 +3763,29 @@ Resources:
           Id: coordination-batch-poll
           Input: '{"action": "coordination_batch_poll"}'
 
+  # DVP-TSK-A23 (E4-R29): the SNS-fed escalation push sender is the coordination_api
+  # function itself, subscribed to the J72 escalation topic with a filter on
+  # category=escalation / escalation_event=requested (one push per NEW escalation).
+  CoordinationEscalationPushSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
+      Protocol: lambda
+      Endpoint: !GetAtt CoordinationApiFunction.Arn
+      FilterPolicy:
+        category:
+          - escalation
+        escalation_event:
+          - requested
+
+  CoordinationEscalationPushPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
+
   CoordinationBatchPollerPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -4378,6 +4412,15 @@ Resources:
                   - xray:PutTraceSegments
                   - xray:PutTelemetryRecords
                 Resource: "*"
+              - Sid: PushSubscriptionsTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-push-subscriptions${EnvironmentSuffix}"
               - Sid: CoordinationTableAccess
                 Effect: Allow
                 Action:
