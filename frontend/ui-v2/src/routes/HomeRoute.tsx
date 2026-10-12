@@ -12,7 +12,7 @@ import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { GateInboxPanel } from './GateInboxPanel'
+import { EscalationsCockpit } from './EscalationsCockpit'
 import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedUrl'
 import {
   DASHBOARD_RECORD_TYPES,
@@ -311,7 +311,7 @@ export function HomeRoute() {
           Requires io
           <span className="home-route__section-hint">all projects, every kind</span>
         </div>
-        <GateInboxPanel compact />
+        <EscalationsCockpit compact />
       </section>
 
       <section className="home-route__counts" aria-label="Actionable counts">
