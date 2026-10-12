@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-12.11",
-  "updated_at": "2026-10-12T10:15:39Z",
-  "last_change_summary": "DVP-TSK-A01: GET /api/v1/projects (project_service) caches each project's newest tracker updated_at per Lambda container (PROJECT_ACTIVITY_CACHE_TTL_SECONDS, default 300; 0 disables) and fetches misses concurrently; days_since_active may lag a tracker write by up to the TTL; response shape unchanged.",
+  "version": "2026-10-12.12",
+  "updated_at": "2026-10-12T12:27:36Z",
+  "last_change_summary": "DVP-TSK-A83: projects table gains last_activity_at (newest tracker updated_at, canonical UTC), stamped by feed_publisher with a monotonic conditional UpdateItem; project_service derives days_since_active from it and falls back to the A01 cached query when absent; response shape unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1945,6 +1945,16 @@
             "projection_note": "Every Scan/API read that backs a resolver's prefix map must explicitly project alias_prefixes (not just prefix), or that resolver will silently never see the field. coordination_api/project_utils.py's Scan and the deploy_finalize/deploy_orchestrator Scans were extended accordingly in the same change that added this field."
           },
           "usage_guidance": "Set on a project's projects-table record when repointing its MINT `prefix` to a new value while pre-existing records under the old prefix must remain resolvable (ENC-TSK-O45 gamma repoint is the motivating case). Not required for a project that has never changed its prefix. Optional; omitted/empty is equivalent to no aliases."
+        }
+      }
+    },
+    "project_service.last_activity_at": {
+      "description": "DVP-TSK-A83: projects.last_activity_at (newest tracker updated_at, canonical UTC ISO) is maintained by feed_publisher (one conditional UpdateItem per project per batch: attribute_exists(project_id) AND (attribute_not_exists(last_activity_at) OR last_activity_at < :ts)). project_service reads it to compute days_since_active and strips it from responses.",
+      "fields": {
+        "last_activity_at": {
+          "type": "string",
+          "definition": "ISO-8601 UTC timestamp of the newest tracker record write for the project. Monotonic (never moves backwards); absent on rows not yet stamped or backfilled.",
+          "usage_guidance": "When absent or unparseable, project_service falls back to the A01 per-container cached tracker query (PROJECT_ACTIVITY_CACHE_TTL_SECONDS). Backfill: tools/backfill_project_last_activity.py (dry run by default, --apply to write)."
         }
       }
     },
@@ -9548,6 +9558,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-12.12",
+      "date": "2026-10-12",
+      "summary": "DVP-TSK-A83: projects table gains last_activity_at (newest tracker updated_at, canonical UTC), stamped by feed_publisher with a monotonic conditional UpdateItem; project_service derives days_since_active from it and falls back to the A01 cached query when absent; response shape unchanged."
+    },
     {
       "version": "2026-10-12.11",
       "date": "2026-10-12",

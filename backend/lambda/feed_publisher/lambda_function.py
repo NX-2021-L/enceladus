@@ -268,6 +268,99 @@ def _extract_project_ids_from_sqs_event(event: Dict[str, Any]) -> Set[str]:
     return affected
 
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-A83: project activity stamp (projects.last_activity_at)
+# ---------------------------------------------------------------------------
+#
+# project_service derives days_since_active from the newest updated_at across a project's
+# tracker records. Computing that at read time costs a paginated project-type-index Query per
+# project on every cold container. Instead this consumer, which already sees every tracker
+# write via the stream -> pipe -> SQS path, keeps a monotonic max on the project row.
+#
+# Only TRACKER records count: the same queue also carries documents-table events (Keys has
+# document_id, no record_id) and the pipe filter already drops record_type=reference rows.
+
+ACTIVITY_ATTR = "last_activity_at"
+_ACTIVITY_CONDITION = (
+    "attribute_exists(project_id) AND "
+    "(attribute_not_exists(last_activity_at) OR last_activity_at < :ts)"
+)
+
+
+def _normalize_activity_ts(value: Any) -> Optional[str]:
+    """Canonical UTC 'YYYY-MM-DDTHH:MM:SSZ' form, so string comparison in the DynamoDB
+    condition expression orders timestamps correctly. None when unparseable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _extract_project_activity_from_sqs_event(event: Dict[str, Any]) -> Dict[str, str]:
+    """project_id -> newest tracker updated_at (canonical form) across the batch.
+
+    Unparseable bodies, documents events, reference rows and records without a usable
+    updated_at are skipped; this never raises."""
+    newest: Dict[str, str] = {}
+    for record in event.get("Records", []):
+        try:
+            body = json.loads(record.get("body", "{}"))
+            ddb_record = body.get("dynamodb", body)
+            if "record_id" not in (ddb_record.get("Keys") or {}):
+                continue  # documents-table event (keyed by document_id)
+            image = ddb_record.get("NewImage") or {}
+            record_type = (image.get("record_type") or {}).get("S")
+            if not record_type or record_type == "reference":
+                continue
+            project_id = (image.get("project_id") or {}).get("S")
+            ts = _normalize_activity_ts((image.get("updated_at") or {}).get("S"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not project_id or not ts:
+            continue
+        if project_id not in newest or ts > newest[project_id]:
+            newest[project_id] = ts
+    return newest
+
+
+def _record_project_activity(activity: Dict[str, str], ddb: Any = None) -> int:
+    """One conditional UpdateItem per project: SET last_activity_at to the batch max, only when
+    it is newer than the stored value (monotonic) and the project row exists (UpdateItem would
+    otherwise upsert a stub row for an unregistered project_id).
+
+    Best effort and never raises: a failed condition just means a newer value is already stored,
+    and any other error is logged and left for the next write to repair. Returns the number of
+    writes that landed."""
+    if not activity or DRY_RUN:
+        return 0
+    client = ddb if ddb is not None else _ddb_client(PROJECTS_REGION)
+    written = 0
+    for project_id, ts in sorted(activity.items()):
+        try:
+            client.update_item(
+                TableName=PROJECTS_TABLE,
+                Key={"project_id": {"S": project_id}},
+                UpdateExpression="SET last_activity_at = :ts",
+                ConditionExpression=_ACTIVITY_CONDITION,
+                ExpressionAttributeValues={":ts": {"S": ts}},
+            )
+            written += 1
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                logger.debug("last_activity_at: project=%s already >= %s (or not registered)", project_id, ts)
+            else:
+                logger.warning("last_activity_at: update failed project=%s code=%s", project_id, code)
+        except Exception as exc:  # noqa: BLE001 - activity stamping must never fail the batch
+            logger.warning("last_activity_at: update failed project=%s: %s", project_id, exc)
+    return written
+
+
 def _batch_failure_response(message_ids: List[str]) -> Dict[str, Any]:
     """Return the Lambda partial-batch failure contract for SQS triggers."""
     failures = []
@@ -381,6 +474,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     affected_projects, failed_message_ids = _extract_project_ids_and_failures_from_sqs_event(event)
     if not affected_projects:
         logger.warning("feed_publisher: no affected project IDs found in event; proceeding with full regeneration")
+
+    # 1b. DVP-TSK-A83: stamp projects.last_activity_at before the (long) regeneration so a
+    # slow or failing publish cannot delay it. Best effort; _record_project_activity never raises.
+    try:
+        _record_project_activity(_extract_project_activity_from_sqs_event(event))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: last_activity_at stamping skipped: %s", exc)
 
     try:
         # 2. Fetch all project data from DynamoDB
