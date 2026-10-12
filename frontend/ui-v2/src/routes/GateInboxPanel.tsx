@@ -62,7 +62,13 @@ export const humanSession = (): HumanSession | null =>
 
 export const stepUpProvider: StepUpProviderLike = {
   method: COGNITO_MAX_AGE_METHOD,
-  stepUp: (opts) => auth.stepUp(COGNITO_MAX_AGE_METHOD, opts),
+  // DVP-TSK-B07: the edge round trip (GET /api/v1/auth/login) must bring the
+  // user back to the escalation, so default returnTo to the current location.
+  stepUp: (opts) =>
+    auth.stepUp(COGNITO_MAX_AGE_METHOD, {
+      ...opts,
+      returnTo: opts?.returnTo ?? window.location.pathname + window.location.search,
+    }),
 }
 
 const isEscalationEvent = (e: { record_type: string; recordId: string }) =>
