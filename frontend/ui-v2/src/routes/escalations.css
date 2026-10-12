@@ -84,8 +84,7 @@
 
 .ev2-esc__payload {
   margin: 0;
-  max-height: 280px;
-  overflow: auto;
+  overflow-x: auto;
   padding: 12px;
   border-radius: var(--v2-control-radius, 6px);
   background: var(--v2-field-bg, #0d1220);
@@ -150,7 +149,6 @@
   }
 
   .ev2-esc__payload {
-    max-height: 200px;
   }
 
   /* KeyValuePairs sets grid-template-columns as an INLINE style, so a plain
@@ -186,3 +184,8 @@
 .ev2-esc__table-scroll .ev2-esc__mono {
   overflow-wrap: anywhere;
 }
+
+/* DVP-TSK-A20: kit-card additions on the restored cockpit */
+.ev2-esc__candidate { display: block; margin: 4px 0; }
+.ev2-esc__receipt { margin: 4px 0 0; font-size: 12px; }
+.ev2-esc__expiry { white-space: nowrap; }

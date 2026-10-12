@@ -36,26 +36,26 @@ Parameters:
   # an empty issuer list means nothing can be exchanged or accepted.
   HubExchangeIssuers:
     Type: String
-    Default: '[{"name":"vagamod-keycloak","iss":"https://auth.vagamod.io/realms/mod-one-line-library","jwks_uri":"https://auth.vagamod.io/realms/mod-one-line-library/protocol/openid-connect/certs","audiences":["mod-web-app"]},{"name":"coach-cognito","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["7eo7qrnnsrumsook1v2vttm7gu"]},{"name":"think-iograph","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["6eh4u69l1mqk1m4hfjspeibla8","2mvnpft2mhqa2rjer8179bca8c"]}]'
+    Default: '[{"name":"vagamod-keycloak","iss":"https://auth.vagamod.io/realms/mod-one-line-library","jwks_uri":"https://auth.vagamod.io/realms/mod-one-line-library/protocol/openid-connect/certs","audiences":["mod-web-app"]},{"name":"think-iograph","iss":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN","jwks_uri":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_y6bHKpNZN/.well-known/jwks.json","audiences":["6eh4u69l1mqk1m4hfjspeibla8","2mvnpft2mhqa2rjer8179bca8c"]}]'
     Description: >
       JSON allow-list of OIDC issuers whose ID tokens may be exchanged for a hub
       principal: [{"name","iss","jwks_uri","audiences":[...]}] for vagamod-keycloak,
-      coach-cognito, think-iograph. Set per environment at deploy time.
+      think-iograph. Set per environment at deploy time.
   # DVP-TSK-A17 part 2 (E4-R18): HubExchange issuer name -> producer principal for the tracker
   # producer path, and the per-source producer allow-list (principal names, never client-claimed).
   HubExchangeProducers:
     Type: String
-    Default: '{"vagamod-keycloak":"vagamod","think-iograph":"think","coach-cognito":"coach"}'
+    Default: '{"vagamod-keycloak":"vagamod","think-iograph":"think"}'
     Description: JSON map of hub exchange issuer name to the derived producer principal.
   GateProducerPrincipals:
     Type: String
-    Default: '{"vagamod":["vagamod"],"think":["think"],"coach":["coach"]}'
+    Default: '{"vagamod":["vagamod"],"think":["think"]}'
     Description: >
       JSON map of producer source to its allow-listed principals (GATE_PRODUCER_PRINCIPALS).
       recipe-runner is internal-only (in-process flag) and is deliberately NOT listed.
   HubShellOrigins:
     Type: String
-    Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
+    Default: "https://think.thepup.io,https://vagamod.com"
     Description: >
       Comma list of shell origins allowed (CORS) on the hub exchange / list / decide
       routes. Append the think origin at deploy time.
@@ -72,6 +72,13 @@ Parameters:
   S3Bucket:
     Type: String
     Default: jreese-net
+  # ENC-TSK-Q61 / ENC-ISS-847: the Neo4j snapshot no longer lands in the PUBLIC
+  # site bucket (S3Bucket). It writes to this private, versioned, encrypted
+  # bucket under neo4j-backups/<env>/.
+  Neo4jBackupBucket:
+    Type: String
+    Default: enceladus-356364570033-us-west-2-an
+    Description: Private bucket that receives the nightly Neo4j graph export.
   CognitoUserPoolId:
     Type: String
     Default: us-east-1_b2D0V3E1k
@@ -2350,8 +2357,15 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 512
-      Timeout: 300
+      # ENC-TSK-Q61 / ENC-ISS-847: 512 MB OOMed nightly from 2026-08-17 (510-511 MB
+      # used) when the export held the whole graph in memory. The export now
+      # streams keyset pages through gzip into a /tmp spool and an S3 multipart
+      # upload, so memory is bounded by page size; 2048 MB / 2 GB of /tmp are
+      # headroom (embedding-bearing nodes) and the timeout covers a slow AuraDB.
+      MemorySize: 2048
+      Timeout: 900
+      EphemeralStorage:
+        Size: 2048
       Architectures:
         - arm64
       SnapStart: !If
@@ -2368,8 +2382,11 @@ Resources:
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
-          S3_BUCKET: !Ref S3Bucket
-          S3_PREFIX: !Sub "${S3EnvPrefix}neo4j-backups/"
+          # ENC-TSK-Q61: gamma and prod share the bucket and are separated by the
+          # <env> path segment (neo4j-backups/<env>/...), not by S3EnvPrefix.
+          BACKUP_BUCKET: !Ref Neo4jBackupBucket
+          BACKUP_PREFIX: neo4j-backups/
+          BACKUP_ENV: !If [IsGamma, gamma, prod]
           SECRETS_REGION: !Ref "AWS::Region"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -3936,7 +3953,13 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "enceladus-neo4j-backup-daily${EnvironmentSuffix}"
-      ScheduleExpression: "cron(0 3 * * ? *)"
+      # ENC-TSK-Q61: gamma runs 20 minutes after prod so the two exports never
+      # overlap on the shared AuraDB tier. The freshness alarm (05-monitoring.yaml)
+      # allows 26 h from the last prod success, so prod stays at 03:00.
+      ScheduleExpression: !If
+        - IsGamma
+        - "cron(20 3 * * ? *)"
+        - "cron(0 3 * * ? *)"
       State: ENABLED
       Targets:
         - Arn: !GetAtt Neo4jBackupFunction.Arn
@@ -6772,11 +6795,25 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              # ENC-TSK-Q61: write-only to the private backup bucket, neo4j-backups/
+              # only. PutObject covers Create/Upload/CompleteMultipartUpload; abort
+              # and list-parts are separate verbs. The old jreese-net grant (the
+              # PUBLIC site bucket) is removed: no other resource uses this role.
               - Sid: S3BackupWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub "arn:aws:s3:::${Neo4jBackupBucket}/neo4j-backups/*"
+              - Sid: BackupMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: EnceladusBackup
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

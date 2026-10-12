@@ -1,243 +1,196 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { EscalationItem, EscalationsFeed } from '../api/escalations'
-import type { ProjectSummary } from '../api/projects'
 
-/**
- * ENC-TSK-P98 (ENC-ISS-773). No @testing-library/react in this package —
- * createRoot + act, matching src/components/DocumentSectionsView.test.tsx /
- * src/hooks/useRecordMutation.test.tsx (the established pattern for routes
- * backed by TanStack Query).
- *
- * RecordLink is mocked to a plain span: it renders a @tanstack/react-router
- * `Link` whenever an id resolves to a route (every session id does, via the
- * SES prefix, regardless of the project registry), and no test in this
- * package builds a live RouterProvider tree — see
- * src/components/MarkdownContent.test.tsx's note on the same constraint.
- */
-
-// DVP-TSK-861: the decide controls are gated on the PermissionManifest; grant it here.
+/** DVP-TSK-A20: the restored cockpit on a mocked kit source (authFetch records the hub requests). */
+const { authFetch, stepUp } = vi.hoisted(() => ({ authFetch: vi.fn(), stepUp: vi.fn() }))
+vi.mock('../auth/authClient', () => ({
+  auth: {
+    authFetch: (...a: unknown[]) => authFetch(...a),
+    getSession: () => ({ status: 'authenticated' }),
+    stepUp: (...a: unknown[]) => stepUp(...a),
+  },
+}))
 vi.mock('../auth/useCan', () => ({ useCanExecute: () => true, useAuthSession: () => ({}) }))
 vi.mock('../api/projects', async () => {
   const actual = await vi.importActual<typeof import('../api/projects')>('../api/projects')
-  return { ...actual, fetchProjectsList: vi.fn() }
+  return { ...actual, fetchProjectsList: vi.fn().mockResolvedValue([]) }
 })
 
-vi.mock('../api/escalations', async () => {
-  const actual = await vi.importActual<typeof import('../api/escalations')>('../api/escalations')
-  return {
-    ...actual,
-    fetchEscalationsFeed: vi.fn(),
-    approveEscalation: vi.fn(),
-    denyEscalation: vi.fn(),
-  }
-})
-
-vi.mock('../components/RecordLink', () => ({
-  RecordLink: ({ id }: { id: string }) => <span>{id}</span>,
-}))
-
-import { fetchProjectsList } from '../api/projects'
-import { approveEscalation, denyEscalation, fetchEscalationsFeed } from '../api/escalations'
 import { EscalationsRoute } from './EscalationsRoute'
+import { EscalationsCockpit } from './EscalationsCockpit'
+import { gateFetch } from './GateInboxPanel'
+import { useFeedBufferStore } from '../store/feedBufferStore'
 
-const PROJECTS: ProjectSummary[] = [
-  { project_id: 'enceladus', prefix: 'ENC' },
-  { project_id: 'devops', prefix: 'DVP' },
+const FX = JSON.parse(readFileSync('node_modules/@io-kit/gates/fixtures/list-star.json', 'utf8')) as Record<string, unknown>
+// The kit fixture wraps the hub body: { note, provenance, response: { escalations: [...], ... } }
+const RESP = (FX as { response: Record<string, unknown> }).response
+const TPL = (RESP.escalations as Record<string, unknown>[])[0]!
+const EV = [{ label: 'Target record', ref: 'DVP-TSK-1' }]
+const NOW = Date.now()
+const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+const base = (o: Record<string, unknown>) => {
+  const c: Record<string, unknown> = { ...TPL }
+  for (const k of ['candidates', 'proposedCalls', 'decision', 'diff', 'decision_log', 'decision_log_head', 'decision_log_valid', 'snoozedUntil']) c[k] = undefined
+  return Object.assign(c, o)
+}
+const decision = (d: string) => ({ decision: d, decider: 'io', decidedAt: iso(NOW - 3600_000), auth_method: 'interactive_human', auth_time: iso(NOW - 3600_000), assurance: 'interactive_human' })
+const PENDING = [
+  base({ id: 'DVP-ESC-100', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'medium', state: 'pending', title: 'Apply status change', subject: { record_id: 'DVP-TSK-1', project: 'devops', version: '3' }, etag: '"e100"', createdAt: iso(NOW - 7200_000), expiresAt: iso(NOW + 5 * 3600_000), requiredAuth: 'interactive_human', evidence: EV }),
+  base({ id: 'TC-200', project_id: 'enceladus', kind: 'tool_call', family: 'decision', risk: 'low', state: 'pending', title: 'Deploy lambda', subject: { record_id: 'ENC-TSK-2', project: 'enceladus', version: '1' }, etag: '"e200"', createdAt: iso(NOW - 600_000), expiresAt: iso(NOW + 9 * 3600_000), requiredAuth: 'interactive_human', evidence: EV }),
+  base({ id: 'DVP-ESC-300', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'high', state: 'pending', title: 'Rotate key', subject: { record_id: 'DVP-TSK-3', project: 'devops', version: '2' }, etag: '"e300"', createdAt: iso(NOW - 1800_000), expiresAt: iso(NOW + 8 * 3600_000), requiredAuth: 'step_up', evidence: EV }),
 ]
-
-function item(overrides: Partial<EscalationItem> = {}): EscalationItem {
-  return {
-    item_id: 'ENC-ESC-090',
-    project_id: 'enceladus',
-    status: 'requested',
-    mutation_type: 'deploy_arc_change',
-    target_record_id: 'ENC-TSK-O12',
-    justification: 'Arc is structurally unsatisfiable',
-    payload: { target_status: 'closed' },
-    requested_by: { session_id: 'ENC-SES-0EV', agent_type_id: 'ENC-AGT-006' },
-    created_at: '2026-09-16T11:30:00Z',
-    ...overrides,
-  }
+const TERMINAL = [
+  base({ id: 'DVP-ESC-001', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old approved', subject: { record_id: 'DVP-TSK-9', project: 'devops', version: '1' }, etag: '"e1"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('approve'), evidence: EV }),
+  base({ id: 'DVP-ESC-002', project_id: 'devops', kind: 'escalation', family: 'decision', risk: 'low', state: 'decided', title: 'Old denied', subject: { record_id: 'DVP-TSK-8', project: 'devops', version: '1' }, etag: '"e2"', createdAt: iso(NOW - 86400_000), expiresAt: iso(NOW + 3600_000), decision: decision('deny'), evidence: EV }),
+]
+const listBody = (cards: unknown[]) => {
+  const b: Record<string, unknown> = { ...RESP, escalations: cards }
+  for (const k of Object.keys(b)) if (/cursor/i.test(k)) delete b[k]
+  return JSON.stringify(b)
+}
+const json = (body: string, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/json' } })
+const defaultImpl = async (url: unknown, init?: RequestInit) => {
+  if ((init?.method ?? 'GET') === 'POST') return json(JSON.stringify({ success: true, decision: { decision: 'approve', hash: 'abc123' } }))
+  return json(listBody(String(url).includes('pending') ? PENDING : TERMINAL))
 }
 
-function feed(overrides: Partial<EscalationsFeed> = {}): EscalationsFeed {
-  return {
-    success: true,
-    project_id: 'enceladus',
-    pending: [],
-    terminal: [],
-    count: 0,
-    ...overrides,
-  }
+let container: HTMLDivElement
+let root: Root
+// react-query notifies on a macrotask, so the flush must yield to real timers (not only microtasks)
+const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)) }) }
+const mount = async (node: React.ReactNode) => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  await act(async () => { root.render(<QueryClientProvider client={qc}>{node}</QueryClientProvider>) })
+  await flush()
+}
+const listCalls = () => authFetch.mock.calls.filter((c) => (c[1]?.method ?? 'GET') === 'GET' && String(c[0]).includes('/coordination/escalations?'))
+const posts = () => authFetch.mock.calls.filter((c) => c[1]?.method === 'POST')
+const click = async (el: Element | undefined) => { expect(el).toBeTruthy(); await act(async () => { (el as HTMLElement).click() }); await flush() }
+const byText = (sel: string, text: string) => [...document.body.querySelectorAll(sel)].find((b) => b.textContent?.trim() === text)
+const tab = (t: string) => [...document.body.querySelectorAll('[role="tab"], button, a')].find((b) => b.textContent?.trim().startsWith(t))
+const openRow = (id: string) => click(byText('button.ev2-esc__idlink', id))
+const typeNote = async (v: string) => {
+  const ta = document.body.querySelector('textarea[aria-label="Guidance note"]') as HTMLTextAreaElement
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(ta, v); ta.dispatchEvent(new Event('input', { bubbles: true })) })
 }
 
-/** Devops has one pending, decidable escalation (DVP-ESC-002 -> DVP-TSK-766).
- *  Enceladus has none pending — only terminal rows — the exact shape ISS-773
- *  describes: 0 in the header while a real approval sat waiting on devops. */
-function mockTwoProjectFeeds() {
-  vi.mocked(fetchProjectsList).mockResolvedValue(PROJECTS)
-  vi.mocked(fetchEscalationsFeed).mockImplementation(async (projectId: string) => {
-    if (projectId === 'enceladus') {
-      return feed({
-        project_id: 'enceladus',
-        terminal: [
-          item({ item_id: 'ENC-ESC-091', status: 'applied', created_at: '2026-09-15T00:00:00Z' }),
-          item({
-            item_id: 'ENC-ESC-092',
-            status: 'denied',
-            created_at: '2026-09-14T00:00:00Z',
-          }),
-        ],
-        count: 2,
-      })
-    }
-    if (projectId === 'devops') {
-      return feed({
-        project_id: 'devops',
-        pending: [
-          item({
-            item_id: 'DVP-ESC-002',
-            project_id: 'devops',
-            target_record_id: 'DVP-TSK-766',
-            status: 'requested',
-            created_at: '2026-09-16T12:00:00Z',
-          }),
-        ],
-        count: 1,
-      })
-    }
-    throw new Error(`unexpected project_id ${projectId}`)
+beforeEach(() => {
+  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  authFetch.mockReset(); stepUp.mockReset()
+  authFetch.mockImplementation(defaultImpl)
+  stepUp.mockResolvedValue({ method: 'cognito_max_age', auth_time: 1760000000 })
+  window.history.replaceState(null, '', '/escalations')
+  useFeedBufferStore.getState().clear()
+  container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container)
+})
+afterEach(() => { act(() => root.unmount()); container.remove(); window.history.replaceState(null, '', '/') })
+
+describe('gateFetch', () => {
+  it('asks the hub for derived kinds, strips the kit prefix and drops the placeholder bearer', async () => {
+    await gateFetch('/api/v1/coordination/escalations?project_id=*', { method: 'GET', headers: { Authorization: 'Bearer session-held-by-auth-client' } })
+    const [url, init] = authFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('include_derived=true')
+    expect(url.startsWith('/coordination/escalations?')).toBe(true)
+    expect(new Headers(init.headers).has('Authorization')).toBe(false)
+    expect(init.credentials).toBe('include')
+    await gateFetch('/api/v1/coordination/escalations/devops/DVP-ESC-011/approve', { method: 'POST', body: '{}' })
+    expect(authFetch.mock.calls[1][0]).toBe('/coordination/escalations/devops/DVP-ESC-011/approve')
   })
-}
+})
 
-describe('EscalationsRoute — cross-project aggregation (ENC-ISS-773)', () => {
-  let qc: QueryClient
-  let container: HTMLDivElement
-  let root: Root
-
-  beforeEach(() => {
-    // DVP-TSK-970: this suite covers the pre-kit decide page, reachable behind the flag.
-    window.history.replaceState(null, '', '/escalations?escalations=legacy')
-    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-    qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-    vi.clearAllMocks()
+describe('restored cockpit layout on the hub data', () => {
+  it('renders PageHeader, tabs, StackedTable rows with a kind badge, for every project, from ONE all-projects feed', async () => {
+    await mount(<EscalationsRoute />)
+    expect(container.querySelectorAll('h1').length).toBe(1)
+    expect(container.textContent).toContain('Escalations')
+    expect(container.textContent).toContain('3 pending')
+    for (const label of ['Pending', 'Approved', 'Denied', 'All']) expect(container.textContent).toContain(label)
+    expect(container.textContent).toContain('DVP-ESC-100')
+    expect(container.textContent).toContain('TC-200')
+    expect(container.textContent).toContain('tool call')
+    expect(container.textContent).toContain('enceladus')
+    expect(container.textContent).toContain('devops')
+    const calls = listCalls()
+    expect(calls.length).toBe(2) // pending+snoozed, and the terminal block: no per-project fan-out
+    for (const c of calls) expect(String(c[0])).toContain('project_id=*')
+    expect(container.querySelector('[data-testid="gate-inbox-panel"]')).toBeNull()
   })
 
-  afterEach(() => {
-    act(() => root.unmount())
-    container.remove()
-    qc.clear()
+  it('shows terminal rows under the Approved and Denied tabs', async () => {
+    await mount(<EscalationsRoute />)
+    await click(tab('Approved'))
+    expect(container.textContent).toContain('DVP-ESC-001')
+    expect(container.textContent).not.toContain('DVP-ESC-002')
+    await click(tab('Denied'))
+    expect(container.textContent).toContain('DVP-ESC-002')
+  })
+})
+
+describe('decide through the kit path', () => {
+  it('approve sends If-Match, Idempotency-Key and shows the receipt inline', async () => {
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-100')
+    await click(byText('button', 'Approve & apply'))
+    const p = posts()
+    expect(p.length).toBe(1)
+    expect(String(p[0][0])).toBe('/coordination/escalations/devops/DVP-ESC-100/approve')
+    const h = new Headers((p[0][1] as RequestInit).headers)
+    expect(h.get('If-Match')).toBeTruthy()
+    expect(h.get('Idempotency-Key')).toBeTruthy()
+    expect(stepUp).not.toHaveBeenCalled()
+    expect(document.body.querySelector('[data-testid="decide-receipt"]')?.textContent).toContain('abc123')
   })
 
-  // TanStack Query's observer notification needs at least one real macrotask
-  // tick to flush in this jsdom/vitest setup (see DocumentSectionsView.test.tsx);
-  // two sequential queries here (project registry, then the per-project feeds
-  // it gates) need a couple of rounds.
-  async function flush(times = 4) {
-    for (let i = 0; i < times; i++) {
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0))
-      })
-    }
-  }
+  it('deny needs a note and posts to the deny route', async () => {
+    await mount(<EscalationsRoute />)
+    await openRow('TC-200')
+    expect((byText('button', 'Deny') as HTMLButtonElement).disabled).toBe(true)
+    await typeNote('not now')
+    await click(byText('button', 'Deny with guidance'))
+    expect(String(posts()[0][0])).toBe('/coordination/escalations/enceladus/TC-200/deny')
+    expect(String((posts()[0][1] as RequestInit).body)).toContain('not now')
+  })
 
-  async function renderRoute() {
+  it('a step_up / high-risk card prompts through the provider and carries the proof', async () => {
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-300')
+    expect(document.body.querySelector('[data-testid="step-up-required"]')).not.toBeNull()
+    await click(byText('button', 'Approve & apply'))
+    expect(stepUp).toHaveBeenCalledTimes(1)
+    expect(String((posts()[0][1] as RequestInit).body)).toContain('cognito_max_age')
+  })
+
+  it('a 412 card_changed refreshes the queue and tells io', async () => {
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'POST' ? json(JSON.stringify({ error: 'card_changed', reason: 'card_changed' }), 412) : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    const before = listCalls().length
+    await openRow('DVP-ESC-100')
+    await click(byText('button', 'Approve & apply'))
+    expect(listCalls().length).toBeGreaterThan(before)
+    expect(container.textContent).toMatch(/Card changed|Decision was not recorded/)
+  })
+
+  it('refreshes in place when an escalation record event arrives (realtime)', async () => {
+    await mount(<EscalationsRoute />)
+    const before = listCalls().length
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={qc}>
-          <EscalationsRoute />
-        </QueryClientProvider>,
-      )
+      useFeedBufferStore.getState().bufferEvent({ eventId: 'e1', recordId: 'DVP-ESC-009', record_type: 'escalation', action: 'created', actorType: 'agent', actorId: 'a', summary: 'new', cursor: 77, channels: [] })
     })
     await flush()
-  }
-
-  it('merges every project into one queue: DVP-ESC-002 shows on the Pending tab and the header counts it', async () => {
-    mockTwoProjectFeeds()
-    await renderRoute()
-
-    expect(fetchEscalationsFeed).toHaveBeenCalledWith('enceladus', expect.anything())
-    expect(fetchEscalationsFeed).toHaveBeenCalledWith('devops', expect.anything())
-
-    expect(container.textContent).toContain('(1 pending)')
-    expect(container.textContent).toContain('DVP-ESC-002')
-    // The project badge column identifies which project filed it.
-    expect(container.textContent).toContain('devops')
+    expect(listCalls().length).toBeGreaterThan(before)
   })
+})
 
-  it('the project filter hides devops rows when set to enceladus', async () => {
-    mockTwoProjectFeeds()
-    await renderRoute()
-    expect(container.textContent).toContain('DVP-ESC-002')
-
-    const trigger = container.querySelector('.ev2-select__trigger') as HTMLButtonElement
-    expect(trigger).toBeTruthy()
-    await act(async () => {
-      trigger.click()
-    })
-
-    const enceladusOption = Array.from(container.querySelectorAll('[role="option"]')).find(
-      (el) => el.textContent === 'enceladus',
-    ) as HTMLElement
-    expect(enceladusOption).toBeTruthy()
-    await act(async () => {
-      enceladusOption.click()
-    })
-    await flush(1)
-
-    expect(container.textContent).not.toContain('DVP-ESC-002')
-  })
-
-  it('approving a devops row decides it against the devops route, not enceladus', async () => {
-    mockTwoProjectFeeds()
-    vi.mocked(approveEscalation).mockResolvedValue({
-      success: true,
-      escalation_id: 'DVP-ESC-002',
-      status: 'approved',
-      applied: true,
-    })
-    await renderRoute()
-
-    const idButton = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent === 'DVP-ESC-002',
-    ) as HTMLButtonElement
-    await act(async () => {
-      idButton.click()
-    })
-    const approveButton = Array.from(container.querySelectorAll('button')).find((b) =>
-      (b.textContent ?? '').includes('Approve & apply'),
-    ) as HTMLButtonElement
-    await act(async () => {
-      approveButton.click()
-    })
-    await flush(1)
-
-    expect(approveEscalation).toHaveBeenCalledWith('devops', 'DVP-ESC-002')
-  })
-
-  it('does not blank the page when one project feed fails — the others still render', async () => {
-    vi.mocked(fetchProjectsList).mockResolvedValue(PROJECTS)
-    vi.mocked(fetchEscalationsFeed).mockImplementation(async (projectId: string) => {
-      if (projectId === 'enceladus') {
-        return feed({
-          project_id: 'enceladus',
-          pending: [item({ item_id: 'ENC-ESC-500', status: 'requested' })],
-          count: 1,
-        })
-      }
-      throw new Error('devops feed unavailable (500)')
-    })
-
-    await renderRoute()
-
-    expect(container.textContent).toContain('ENC-ESC-500')
-    expect(container.textContent).toContain('Some projects did not load')
-    expect(container.textContent).toContain('devops')
+describe('home requires-io slot', () => {
+  it('renders the same rows, pending only, without a second PageHeader', async () => {
+    await mount(<EscalationsCockpit compact />)
+    expect(container.querySelectorAll('h1').length).toBe(0)
+    expect(container.textContent).toContain('DVP-ESC-100')
+    expect(listCalls().length).toBe(1)
+    expect(String(listCalls()[0][0])).toContain('project_id=*')
   })
 })

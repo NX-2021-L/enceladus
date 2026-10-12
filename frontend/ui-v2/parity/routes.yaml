@@ -6,9 +6,6 @@ routes:
   - path: "/"
     component: "frontend/ui-v2/src/routes/HomeRoute.tsx"
     handlers:
-      - "GET /api/v1/coordination/escalations"
-      - "GET /api/v1/coordination/queue/paused-approvals"
-      - "GET /api/v1/coordination/queue/stale-locks"
       - "GET /api/v1/documents/{id}"
       - "GET /api/v1/feed/corpus"
       - "GET /api/v1/feed/delta"
@@ -120,13 +117,10 @@ routes:
   - path: "/escalations"
     component: "frontend/ui-v2/src/routes/EscalationsRoute.tsx"
     handlers:
-      - "GET /api/v1/coordination/escalations"
       - "GET /api/v1/feed/corpus"
       - "GET /api/v1/feed/delta"
       - "GET /api/v1/feed/{path}"
       - "GET /api/v1/projects"
-      - "POST /api/v1/coordination/escalations/{project}/{id}/approve"
-      - "POST /api/v1/coordination/escalations/{project}/{id}/deny"
     auth: "session + server-side human-principal + S3 allowlist (3 gates)"
     surface: "enceladus"
   - path: "/session/$id"

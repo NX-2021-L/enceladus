@@ -20,7 +20,7 @@ Parameters:
       CORS AllowOrigins value. Override for gamma environment.
   HubShellOrigins:
     Type: String
-    Default: "https://coach.thepup.io,https://think.thepup.io,https://vagamod.com"
+    Default: "https://think.thepup.io,https://vagamod.com"
     Description: >
       DVP-TSK-A17 (E4-R14): comma list of shell origins added to the API CORS allow-list
       for the hub exchange / list / decide routes. Empty disables. Must match the

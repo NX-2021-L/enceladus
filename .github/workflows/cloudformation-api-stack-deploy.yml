@@ -207,6 +207,7 @@ jobs:
             --s3-prefix 03-api/ \
             --parameter-overrides \
               ComputeStackName="${{ steps.params.outputs.compute_stack_name }}" \
+              HubShellOrigins='https://think.thepup.io,https://vagamod.com' \
               ApiName="${{ steps.params.outputs.api_name }}" 2>&1 | tee /tmp/plan.log
 
           if grep -q "No changes to deploy" /tmp/plan.log; then
