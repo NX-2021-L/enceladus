@@ -34,11 +34,6 @@ import { useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 import './gateInbox.css'
 
-/** Legacy renderer flag: ?escalations=legacy keeps the pre-kit decide page for one release. */
-export function isLegacyEscalations(search: string = typeof window === 'undefined' ? '' : window.location.search): boolean {
-  return new URLSearchParams(search).get('escalations') === 'legacy'
-}
-
 export const GATE_KINDS: readonly GateKind[] = [
   'escalation',
   'tool_call',
