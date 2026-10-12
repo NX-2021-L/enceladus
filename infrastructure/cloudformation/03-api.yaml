@@ -2000,6 +2000,63 @@ Resources:
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
       Target: !Sub integrations/${TrackerMutationIntegration}
 
+  # DVP-TSK-968 (DVP-PLN-013): recipe primitive sub-actions (validate, publish-request, deprecate,
+  # resume, cancel) and 3-segment POSTs (new recipe version, recipe-run/escalation sweep). Literal
+  # 4-segment routes (log, checkout, extend, acceptance-evidence, apply) still win over {action}.
+  RouteTrackerRecordPost:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteTrackerRecordAction:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/{action}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerRecordAction:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/{action}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteTrackerRecordPostGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerRecordActionGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/{action}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteOptTrackerRecordActionGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/{action}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsProduction
