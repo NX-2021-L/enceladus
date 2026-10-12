@@ -10629,6 +10629,11 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     # ENC-TSK-967 phase 2a: decide preconditions + the hash-chained log (additive).
     log = _escalation_decision_log(escalation)
     escalation.setdefault("etag", _escalation_etag(escalation))
+    # DVP-TSK-B03: the ui-v2 cockpit (decidable, decideCard) and @io-kit/gates consumers key a
+    # card by `id`; hub records carry only item_id. Set after the etag (which hashes item_id),
+    # so etag and callHash are unchanged. View-only.
+    if escalation.get("item_id") and not escalation.get("id"):
+        escalation["id"] = str(escalation["item_id"])
     escalation["decision_log"] = log
     escalation["decision_log_head"] = log[-1].get("hash") if log else None
     escalation["decision_log_valid"] = _verify_decision_chain(log)[0]
