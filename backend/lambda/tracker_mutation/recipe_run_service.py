@@ -20,6 +20,7 @@ Runner v1 (architect ruling E4-R15, RP-0 s4):
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -99,6 +100,19 @@ def _is_action(step: Dict[str, Any]) -> bool:
     return step.get("type", "action") == "action"
 
 
+_ABSENT = object()                       # an optional input the caller did not supply: the argument is omitted
+
+
+def with_defaults(inputs: Dict[str, Any], schema: Any) -> Dict[str, Any]:
+    """Fill declared top-level input defaults (JSON Schema `default`) so bindings see them; never overrides a supplied value."""
+    out = dict(inputs)
+    props = (schema or {}).get("properties") if isinstance(schema, dict) else None
+    for name, sub in (props or {}).items():
+        if name not in out and isinstance(sub, dict) and "default" in sub:
+            out[name] = copy.deepcopy(sub["default"])
+    return out
+
+
 class Unresolved(Exception):
     def __init__(self, pointer: str):
         super().__init__(pointer)
@@ -136,6 +150,8 @@ def resolve(value: Any, scope: Dict[str, Any], pending: Tuple[str, ...] = (), le
             root, segs = parsed
             if root in pending:
                 return {"$ref": root, "path": list(segs)}
+            if root == "inputs" and len(segs) == 1 and segs[0] not in (scope.get("inputs") or {}):
+                return _ABSENT                       # statically valid, so a declared optional input that was not supplied
             if root in scope:
                 try:
                     return _walk(scope[root], segs)
@@ -147,9 +163,10 @@ def resolve(value: Any, scope: Dict[str, Any], pending: Tuple[str, ...] = (), le
     if isinstance(value, dict):
         if set(value) == {"$literal"}:
             return value["$literal"]
-        return {k: resolve(v, scope, pending, lenient) for k, v in value.items()}
+        out = {k: resolve(v, scope, pending, lenient) for k, v in value.items()}
+        return {k: v for k, v in out.items() if v is not _ABSENT}
     if isinstance(value, list):
-        return [resolve(v, scope, pending, lenient) for v in value]
+        return [v for v in (resolve(v, scope, pending, lenient) for v in value) if v is not _ABSENT]
     return value
 
 
@@ -342,15 +359,18 @@ def _load_def(ctx: RunContext, project_id: str, run: Dict[str, Any]) -> Tuple[Op
         return None, _err(404, "NOT_FOUND", f"Pinned recipe version not found: {ref.get('recipe_id')}@{ref.get('version')}")
     if item.get("content_hash") != ref.get("content_hash") or not rs._hash_ok(item):
         return None, _err(409, "PIN_MISMATCH", "The pinned recipe version no longer matches its content_hash; the run is blocked.")
-    return item["definition"], None
+    return rs.normalize_definition(item["definition"]), None
 
 
 def _scope(run: Dict[str, Any]) -> Dict[str, Any]:
     scope: Dict[str, Any] = {"inputs": run.get("inputs") or {},
-                             "run": {"run_id": run.get("run_id"), "started_by": run.get("started_by"), "project_id": run.get("project_id")}}
-    for rec in run.get("steps") or []:
+                             "run": {"run_id": run.get("run_id"), "started_by": run.get("started_by"), "project_id": run.get("project_id"),
+                                    "recipe_id": (run.get("recipe_ref") or {}).get("recipe_id"),
+                                    "version": (run.get("recipe_ref") or {}).get("version")}}
+    for i, rec in enumerate(run.get("steps") or []):
         if rec.get("status") == "ok":
             scope[rec["id"]] = rec.get("result")
+            scope[str(i)] = rec.get("result")                       # RP-0 N index alias (0-based)
     return scope
 
 
@@ -455,6 +475,8 @@ def _file_escalation(ctx: RunContext, project_id: str, run: Dict[str, Any], step
         "idempotency_key": f"{rid}:{sid}:{gate['attempt']}", "proposedCalls": [call]}
     if g.get("sensitive"):
         request["distinct_from"] = [run.get("started_by")]
+    if g.get("approvers"):
+        request["approvers"] = list(g["approvers"])                    # recorded on the escalation (RP-0 s4 GateStep.approvers)
     code, resp = ctx.escalate(project_id, request)
     esc_id = (resp or {}).get("escalation_id")
     if code >= 300 or not esc_id:
@@ -693,13 +715,14 @@ def start(ctx: RunContext, project_id: str, body: Dict[str, Any], actor: str, dr
     served = head.get("project_ids") or item.get("project_ids") or []
     if served and project_id not in served:
         return _err(422, "PROJECT_NOT_SERVED", f"{project_id} is not in the recipe project_ids {served}.")
-    definition = item["definition"]
+    definition = rs.normalize_definition(item["definition"])           # RP-0 s4 forms -> internal; the stored definition is untouched
+    inputs = with_defaults(inputs, definition.get("inputs"))
     problems = validate_schema(inputs, definition.get("inputs") or {})
     if problems:
         return _err(422, "INPUTS_INVALID", "inputs do not match the recipe inputs schema.", errors=problems[:20])
     ref = {"recipe_id": rec, "version": version, "content_hash": item["content_hash"]}
     if plan_only:                                    # dry_run_all: nothing is minted, stored, filed or executed
-        planned = plan(definition, inputs, {"project_id": project_id, "started_by": actor})
+        planned = plan(definition, inputs, {"project_id": project_id, "started_by": actor, "recipe_id": rec, "version": version})
         fixture = any(_is_action(s) and not ctx.surface_ready(s.get("surface") or "enceladus") for s in definition.get("steps") or [])
         return _ok({"mode": "dry_run", "dry_run": True, "run_id": None, "recipe_ref": ref, "planned": planned,
                     "fixture_mode": fixture, "unresolved": any(p.get("status") == "planned (unresolved)" for p in planned),
