@@ -26,7 +26,8 @@ import concurrent.futures as cf
 import hashlib
 import json
 import sys
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 SOURCE_BUCKET = "jreese-net"
 SOURCE_REGION = "us-west-1"
@@ -40,19 +41,19 @@ PREFIXES = (
 )
 
 
-def plan_pairs(s3_src, account: str) -> List[Tuple[str, str, str, int]]:
-    """[(source_key, dest_bucket, dest_key, size)] for production prefixes and gamma/<prefix> mirrors."""
+def plan_pairs(s3_src, account: str) -> List[Tuple[str, str, str, int, Any]]:
+    """[(source_key, dest_bucket, dest_key, size, source_last_modified)] for production prefixes and gamma/<prefix> mirrors."""
     prod = f"enceladus-content-{account}-{DEST_REGION}"
     gamma = f"enceladus-content-gamma-{account}-{DEST_REGION}"
-    pairs: List[Tuple[str, str, str, int]] = []
+    pairs: List[Tuple[str, str, str, int, Any]] = []
     pag = s3_src.get_paginator("list_objects_v2")
     for p in PREFIXES:
         for page in pag.paginate(Bucket=SOURCE_BUCKET, Prefix=p):
             for o in page.get("Contents", []):
-                pairs.append((o["Key"], prod, o["Key"], o["Size"]))
+                pairs.append((o["Key"], prod, o["Key"], o["Size"], o.get("LastModified")))
         for page in pag.paginate(Bucket=SOURCE_BUCKET, Prefix="gamma/" + p):
             for o in page.get("Contents", []):
-                pairs.append((o["Key"], gamma, o["Key"][len("gamma/"):], o["Size"]))
+                pairs.append((o["Key"], gamma, o["Key"][len("gamma/"):], o["Size"], o.get("LastModified")))
     return pairs
 
 
@@ -64,6 +65,29 @@ def sha256_b64_of_source(s3_src, key: str) -> str:
     return base64.b64encode(h.digest()).decode()
 
 
+def sha256_b64_of_dest(s3_dst, bucket: str, key: str) -> str:
+    """Stream the destination object (S3 decrypts with the content key) and hash it: used when the object was written
+    by a dual-mode Lambda (boto3 upload_file stores CRC32, not SHA-256), so there is no stored checksum to compare."""
+    h = hashlib.sha256()
+    body = s3_dst.get_object(Bucket=bucket, Key=key)["Body"]
+    for chunk in iter(lambda: body.read(1 << 20), b""):
+        h.update(chunk)
+    return base64.b64encode(h.digest()).decode()
+
+
+def compare(s3_src, s3_dst, src: str, bucket: str, key: str, size: int) -> Dict:
+    """Byte-level comparison of one source object and its copy (DVP-TSK-B12)."""
+    have = dest_attrs(s3_dst, bucket, key)
+    if not have:
+        return {"src": src, "status": "missing"}
+    if have["size"] != size:
+        return {"src": src, "status": "size_mismatch", "src_size": size, "dst_size": have["size"]}
+    dst_sha = have["sha256"] or sha256_b64_of_dest(s3_dst, bucket, key)
+    if dst_sha != sha256_b64_of_source(s3_src, src):
+        return {"src": src, "status": "sha256_mismatch"}
+    return {"src": src, "status": "ok"}
+
+
 def dest_attrs(s3_dst, bucket: str, key: str) -> Optional[Dict]:
     try:
         a = s3_dst.get_object_attributes(Bucket=bucket, Key=key, ObjectAttributes=["Checksum", "ObjectSize"])
@@ -73,7 +97,20 @@ def dest_attrs(s3_dst, bucket: str, key: str) -> Optional[Dict]:
         if "NoSuchKey" in str(exc) or "404" in str(exc) or "Not Found" in str(exc):
             return None
         raise
-    return {"size": a.get("ObjectSize"), "sha256": (a.get("Checksum") or {}).get("ChecksumSHA256")}
+    return {"size": a.get("ObjectSize"), "sha256": (a.get("Checksum") or {}).get("ChecksumSHA256"),
+            "last_modified": a.get("LastModified")}
+
+
+def needs_copy(have: Optional[Dict], size: int, source_last_modified: Any) -> bool:
+    """DVP-TSK-B12: copy unless the destination already holds this exact source revision.
+
+    Size + a stored checksum is not enough: a source rewritten with a same-length body (deploy-config's
+    current-version.json) keeps its size. A source modified after the destination was written is recopied.
+    """
+    if not have or not have.get("sha256") or have.get("size") != size:
+        return True
+    dst_lm = have.get("last_modified")
+    return bool(source_last_modified and dst_lm and source_last_modified > dst_lm)
 
 
 def copy_one(s3_dst, src_key: str, bucket: str, key: str) -> None:
@@ -91,6 +128,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--verify", action="store_true", help="byte-level parity report")
     ap.add_argument("--report", default=None, help="write the parity report JSON here")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--recheck-after", type=float, default=90.0, help="seconds before re-checking mismatches once")
     args = ap.parse_args(argv)
     import boto3
 
@@ -100,7 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s3_dst = session.client("s3", region_name=DEST_REGION)
     pairs = plan_pairs(s3_src, account)
     by_prefix: Dict[str, List[int]] = {}
-    for src, bucket, key, size in pairs:
+    for src, bucket, key, size, _lm in pairs:
         fam = ("gamma/" if src.startswith("gamma/") else "") + key.split("/", 1)[0] + "/"
         n_b = by_prefix.setdefault(fam, [0, 0])
         n_b[0] += 1
@@ -111,9 +149,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.apply:
         def do(pair):
-            src, bucket, key, size = pair
+            src, bucket, key, size, src_lm = pair
             have = dest_attrs(s3_dst, bucket, key)
-            if have and have["size"] == size and have["sha256"]:
+            if not needs_copy(have, size, src_lm):
                 return "skipped"
             copy_one(s3_dst, src, bucket, key)
             return "copied"
@@ -123,17 +161,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.verify:
         def check(pair):
-            src, bucket, key, size = pair
-            have = dest_attrs(s3_dst, bucket, key)
-            if not have:
-                return {"src": src, "status": "missing"}
-            if have["size"] != size:
-                return {"src": src, "status": "size_mismatch", "src_size": size, "dst_size": have["size"]}
-            if have["sha256"] != sha256_b64_of_source(s3_src, src):
-                return {"src": src, "status": "sha256_mismatch"}
-            return {"src": src, "status": "ok"}
+            src, bucket, key, size, _lm = pair
+            return compare(s3_src, s3_dst, src, bucket, key, size)
         with cf.ThreadPoolExecutor(args.workers) as ex:
             results = list(ex.map(check, pairs))
+        # A live dual-mode writer (feed_publisher, every few minutes) can land between reading the source and the copy.
+        # Re-list and re-check each mismatch once after a pause; a real divergence is still reported.
+        retry = [r["src"] for r in results if r["status"] != "ok"]
+        if retry:
+            time.sleep(args.recheck_after)
+            fresh = {p[0]: p for p in plan_pairs(s3_src, account) if p[0] in set(retry)}
+            rechecked = {src: (compare(s3_src, s3_dst, *fresh[src][:4]) if src in fresh
+                               else {"src": src, "status": "source_deleted"}) for src in retry}
+            results = [rechecked.get(r["src"], r) if r["status"] != "ok" else r for r in results]
         bad = [r for r in results if r["status"] != "ok"]
         summary = {
             "objects": len(pairs), "bytes": sum(p[3] for p in pairs), "ok": len(results) - len(bad),
