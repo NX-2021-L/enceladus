@@ -19,6 +19,17 @@ Flow:
          /records/{recordId}      (per-record subscription)
          /projects/{projectId}    (per-project subscription)
 
+Cognito namespace (DVP-TSK-928, dual-publish):
+  When APPSYNC_EVENTS_AUTHED_NAMESPACE is set, every event is ALSO published to the
+  same channel tails under that namespace (/authed/feed/updates,
+  /authed/records/{recordId}, /authed/projects/{projectId}), always SigV4-signed
+  with the execution role (the namespace's publish mode is AWS_IAM; browsers
+  subscribe to it with a Cognito token). The legacy API-key channels are
+  published first and are unaffected. During this parallel phase a failure on the
+  authed channels never fails the record (it would re-publish the legacy channels
+  on retry and could poison the shard): it is logged and counted in the
+  AuthedPublishFailed metric. The retirement phase flips this to fail-closed.
+
 Partial-batch failure:
   Returns the ReportBatchItemFailures contract
   {"batchItemFailures": [{"itemIdentifier": <sequenceNumber>}]} so only the
@@ -51,6 +62,10 @@ Environment variables:
   APPSYNC_EVENTS_API_KEY         AppSync API key for X-Api-Key auth (optional;
                                  if unset, SigV4 is used).
   APPSYNC_EVENTS_REGION          Region for SigV4 signing (default: us-west-2).
+  APPSYNC_EVENTS_AUTHED_NAMESPACE
+                                 Cognito-authenticated channel namespace to mirror
+                                 every event into (e.g. "authed"). Unset/empty =
+                                 legacy API-key channels only.
   APPSYNC_EVENTS_TIMEOUT         HTTP timeout seconds (default: 5).
   DEFAULT_PROJECT_ID             Fallback project id if a record lacks one
                                  (default: enceladus).
@@ -87,6 +102,8 @@ logger.setLevel(logging.INFO)
 APPSYNC_EVENTS_HTTP_ENDPOINT = os.environ.get("APPSYNC_EVENTS_HTTP_ENDPOINT", "").strip()
 APPSYNC_EVENTS_API_KEY = os.environ.get("APPSYNC_EVENTS_API_KEY", "").strip()
 APPSYNC_EVENTS_REGION = os.environ.get("APPSYNC_EVENTS_REGION", "us-west-2").strip()
+# DVP-TSK-928: AuthedNamespace in 06-appsync-events.yaml. Empty disables the Cognito-namespace dual-publish.
+APPSYNC_EVENTS_AUTHED_NAMESPACE = os.environ.get("APPSYNC_EVENTS_AUTHED_NAMESPACE", "").strip().strip("/")
 APPSYNC_EVENTS_TIMEOUT = float(os.environ.get("APPSYNC_EVENTS_TIMEOUT", "5") or "5")
 DEFAULT_PROJECT_ID = os.environ.get("DEFAULT_PROJECT_ID", "enceladus").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in {"1", "true", "yes"}
@@ -487,43 +504,80 @@ def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, An
 
     for channel in channel_targets(payload):
         is_record_channel = channel.startswith("/records/")
-        body_obj = {
-            "channel": channel,
-            "events": [detail_event_json if is_record_channel else event_json],
-        }
-        body = json.dumps(body_obj, separators=(",", ":"), default=_json_default).encode("utf-8")
+        _post_event(url, host, channel, detail_event_json if is_record_channel else event_json)
 
-        headers = {"Content-Type": "application/json", "host": host}
-        if APPSYNC_EVENTS_API_KEY:
-            headers["X-Api-Key"] = APPSYNC_EVENTS_API_KEY
-        else:
-            # No API key => IAM/SigV4 auth path.
-            headers = _sigv4_headers(body, host)
-            headers["Content-Type"] = "application/json"
+    _publish_authed_mirror(url, host, payload, event_json, detail_event_json)
 
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+def authed_channel(channel: str) -> str:
+    """Map a legacy channel ("/feed/updates") into the Cognito namespace ("/authed/feed/updates")."""
+    return f"/{APPSYNC_EVENTS_AUTHED_NAMESPACE}{channel}"
+
+
+def _post_event(url: str, host: str, channel: str, event_json: str, *, force_sigv4: bool = False) -> None:
+    """POST one event to one channel. The legacy path uses the API key when configured (SigV4 otherwise);
+    ``force_sigv4`` is the Cognito namespace's publish mode (AWS_IAM only), regardless of any API key."""
+    body_obj = {"channel": channel, "events": [event_json]}
+    body = json.dumps(body_obj, separators=(",", ":"), default=_json_default).encode("utf-8")
+
+    headers = {"Content-Type": "application/json", "host": host}
+    if APPSYNC_EVENTS_API_KEY and not force_sigv4:
+        headers["X-Api-Key"] = APPSYNC_EVENTS_API_KEY
+    else:
+        # No API key (or the authed namespace) => IAM/SigV4 auth path.
+        headers = _sigv4_headers(body, host)
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=APPSYNC_EVENTS_TIMEOUT) as resp:
+            status = getattr(resp, "status", resp.getcode())
+            if status >= 300:
+                raise RuntimeError(f"AppSync publish to {channel} returned HTTP {status}")
+    except urllib.error.HTTPError as exc:
+        # ENC-ISS-531: the bare "HTTP Error 400" exception message hides
+        # AppSync's actual rejection reason. Read+log the response body
+        # (once, here, before it's consumed) so poison records are
+        # diagnosable without a synthetic-invoke workaround.
         try:
-            with urllib.request.urlopen(req, timeout=APPSYNC_EVENTS_TIMEOUT) as resp:
-                status = getattr(resp, "status", resp.getcode())
-                if status >= 300:
-                    raise RuntimeError(f"AppSync publish to {channel} returned HTTP {status}")
-        except urllib.error.HTTPError as exc:
-            # ENC-ISS-531: the bare "HTTP Error 400" exception message hides
-            # AppSync's actual rejection reason. Read+log the response body
-            # (once, here, before it's consumed) so poison records are
-            # diagnosable without a synthetic-invoke workaround.
-            try:
-                resp_body = exc.read().decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001 — body read is best-effort
-                resp_body = "<unreadable>"
-            logger.error(
-                "appsync_feed_publisher: AppSync rejected publish to %s: HTTP %d %s body=%s",
-                channel,
-                exc.code,
-                exc.reason,
-                resp_body[:1000],
+            resp_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — body read is best-effort
+            resp_body = "<unreadable>"
+        logger.error(
+            "appsync_feed_publisher: AppSync rejected publish to %s: HTTP %d %s body=%s",
+            channel,
+            exc.code,
+            exc.reason,
+            resp_body[:1000],
+        )
+        raise
+
+
+def _publish_authed_mirror(
+    url: str, host: str, payload: Dict[str, Any], event_json: str, detail_event_json: str
+) -> None:
+    """DVP-TSK-928: mirror the event into the Cognito namespace (SigV4). Never raises: the legacy channels have
+    already been published, so a failure here is logged + counted, not retried (see the module docstring)."""
+    if not APPSYNC_EVENTS_AUTHED_NAMESPACE:
+        return
+    for channel in channel_targets(payload):
+        target = authed_channel(channel)
+        try:
+            _post_event(
+                url,
+                host,
+                target,
+                detail_event_json if channel.startswith("/records/") else event_json,
+                force_sigv4=True,
             )
-            raise
+        except Exception as exc:  # noqa: BLE001 — isolated from the legacy publish by design
+            logger.error(
+                "appsync_feed_publisher: authed-namespace publish to %s failed (legacy channels already published): %s",
+                target,
+                exc,
+                exc_info=True,
+            )
+            _emit_authed_failure_metric(target)
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +619,20 @@ def _emit_poison_metric(seq: str, http_status: int) -> None:
         logger.warning(
             "appsync_feed_publisher: failed to emit PoisonRecordSkipped metric for seq=%s",
             seq,
+            exc_info=True,
+        )
+
+
+def _emit_authed_failure_metric(channel: str) -> None:
+    try:
+        _cloudwatch.put_metric_data(
+            Namespace=POISON_METRIC_NAMESPACE,
+            MetricData=[{"MetricName": "AuthedPublishFailed", "Value": 1, "Unit": "Count"}],
+        )
+    except Exception:  # noqa: BLE001 — metrics emission must never break the publish path
+        logger.warning(
+            "appsync_feed_publisher: failed to emit AuthedPublishFailed metric for channel=%s",
+            channel,
             exc_info=True,
         )
 

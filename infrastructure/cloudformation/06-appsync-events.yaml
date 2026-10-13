@@ -40,6 +40,25 @@ Parameters:
     Type: String
     Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
     Description: Shared enceladus_shared layer ARN (mirrors 02-compute.yaml pin).
+  # DVP-TSK-928: Cognito user-pool auth for the PWA subscriber. NEW parameters: a deploy that does not pass them
+  # takes these Defaults (an existing parameter keeps its previous value via UsePreviousValue, a new one does not),
+  # so the Defaults ARE the deployed values -- the workflow deliberately does not override them. The pool is the
+  # Enceladus user pool the PWA signs in against (frontend/ui-v2/src/auth/authClient.ts, 02-compute.yaml
+  # CognitoUserPoolId); it lives in us-east-1 while this API is in us-west-2, hence the explicit region.
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_b2D0V3E1k
+    Description: Cognito user pool whose ID/access tokens may subscribe to the authed namespace.
+  CognitoUserPoolRegion:
+    Type: String
+    Default: us-east-1
+    Description: Region of CognitoUserPoolId (AppSync Events accepts a pool in a different region than the API).
+  CognitoAppClientIdRegex:
+    Type: String
+    Default: "^6q607dk3liirhtecgps7hifmlk$"
+    Description: >
+      Regex the token's app client id (aud on an ID token, client_id on an access token) must match. Pinned to the
+      PWA client so the dynamically-registered MCP/DCR clients in the same pool cannot subscribe.
   ApiKeyExpiresEpoch:
     Type: Number
     Description: >
@@ -75,9 +94,17 @@ Resources:
         AuthProviders:
           - AuthType: API_KEY
           - AuthType: AWS_IAM
+          # DVP-TSK-928: signed-in PWA users authenticate with their Cognito token. Added alongside API_KEY, not
+          # instead of it: the API-key namespaces keep working until the retirement phase.
+          - AuthType: AMAZON_COGNITO_USER_POOLS
+            CognitoConfig:
+              UserPoolId: !Ref CognitoUserPoolId
+              AwsRegion: !Ref CognitoUserPoolRegion
+              AppIdClientRegex: !Ref CognitoAppClientIdRegex
         ConnectionAuthModes:
           - AuthType: API_KEY
           - AuthType: AWS_IAM
+          - AuthType: AMAZON_COGNITO_USER_POOLS
         DefaultPublishAuthModes:
           - AuthType: API_KEY
           - AuthType: AWS_IAM
@@ -148,6 +175,22 @@ Resources:
       SubscribeAuthModes:
         - AuthType: API_KEY
         - AuthType: AWS_IAM
+
+  # DVP-TSK-928: Cognito-authenticated mirror of the three namespaces above, as ONE namespace carrying the same
+  # channel tails: /authed/feed/updates, /authed/records/{recordId}, /authed/projects/{projectId}. Subscribe is
+  # Cognito only (no API key, no IAM for browsers); publish is IAM only, which the publisher Lambda already holds
+  # via appsync:EventPublish on this API's ARN (AppSyncEventPublish policy below covers apis/<id>/*).
+  # The API-key namespaces stay untouched and live in parallel.
+  AuthedNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !GetAtt FeedEventsApi.ApiId
+      Name: authed
+      PublishAuthModes:
+        - AuthType: AWS_IAM
+      SubscribeAuthModes:
+        - AuthType: AMAZON_COGNITO_USER_POOLS
 
   # ---------------------------------------------------------------------------
   # Publisher Lambda execution role.
@@ -231,6 +274,8 @@ Resources:
   AppSyncFeedPublisherFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
+    # DVP-TSK-928: the dual-publish env var below must not go live before the namespace exists.
+    DependsOn: AuthedNamespace
     Properties:
       # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
       LoggingConfig: !If
@@ -266,6 +311,9 @@ Resources:
           # the key id IS the key value, so the rendered env var is unchanged.
           APPSYNC_EVENTS_API_KEY: !Select [3, !Split ["/", !Ref FeedEventsApiKey]]
           APPSYNC_EVENTS_REGION: !Ref AWS::Region
+          # DVP-TSK-928: name of AuthedNamespace; the publisher mirrors every event to /authed<channel> with SigV4.
+          # Unset => legacy API-key channels only.
+          APPSYNC_EVENTS_AUTHED_NAMESPACE: authed
           APPSYNC_EVENTS_TIMEOUT: "5"
           DEFAULT_PROJECT_ID: enceladus
       Tags:
@@ -379,4 +427,6 @@ Metadata:
       #     --query 'Table.StreamSpecification'
       # and, if absent, enable NEW_AND_OLD_IMAGES via a controlled data-stack
       # update before this EventSourceMapping can bind.
+      # ESCALATED-4 (DVP-TSK-928): the PWA opts in to the Cognito namespace per build.
+      - "ESCALATED-4: After this stack applies, set GitHub repo variable VITE_APPSYNC_AUTHED_NAMESPACE=authed so _ui_deploy.yml builds ui-v2 with the Cognito namespace. Unset keeps the API-key transport."
       - "ESCALATED-3: Verify devops-project-tracker-gamma stream is live (NEW_AND_OLD_IMAGES) and exported as enceladus-data-gamma-TrackerStreamArn before the EventSourceMapping binds."

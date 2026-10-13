@@ -156,6 +156,11 @@ jobs:
           VITE_APPSYNC_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST }}
           VITE_APPSYNC_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST }}
           VITE_APPSYNC_API_KEY: ${{ vars.VITE_APPSYNC_API_KEY }}
+          # DVP-TSK-928: Cognito-authenticated namespace (06-appsync-events.yaml AuthedNamespace, "authed"). Opt-in:
+          # `gh variable set VITE_APPSYNC_AUTHED_NAMESPACE --body authed` once that stack change has applied. A
+          # signed-in session then subscribes with its Cognito token; the API key serves only the no-session case.
+          # Empty/unset => API-key transport only (unchanged).
+          VITE_APPSYNC_AUTHED_NAMESPACE: ${{ vars.VITE_APPSYNC_AUTHED_NAMESPACE }}
           VITE_APPSYNC_REGION: us-west-2
           # ENC-TSK-P51: OAuth redirect baked per resolved plane. The callback
           # must be same-origin with the viewer (auth_refresh sets the session

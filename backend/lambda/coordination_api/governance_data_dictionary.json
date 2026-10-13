@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.18",
-  "updated_at": "2026-10-13T23:00:00Z",
-  "last_change_summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. DVP-TSK-B45 (DVP-ISS-149): flow_weight_refresh lists pathway-telemetry with a trailing slash (prefix.rstrip('/') + '/') on both the raw and content_store paths, so the list matches the IAM prefix/* grant. No schema or contract change",
+  "version": "2026-10-13.19",
+  "updated_at": "2026-10-13T23:56:05Z",
+  "last_change_summary": "DVP-TSK-928 phase 1: Cognito-authenticated realtime. devops-appsync-feed-publisher gains the optional APPSYNC_EVENTS_AUTHED_NAMESPACE env var; when set it ALSO publishes every event to /<namespace><channel> (SigV4/AWS_IAM) after the unchanged API-key channels, isolating authed failures (logged + AuthedPublishFailed metric, never a batch failure). 06-appsync-events.yaml adds the AMAZON_COGNITO_USER_POOLS auth provider and the AuthedNamespace channel namespace; ui-v2 subscribes to it with the signed-in user's Cognito token when VITE_APPSYNC_AUTHED_NAMESPACE is set. No schema or contract change; the API-key namespaces are untouched",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.19",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-928 phase 1: Cognito-authenticated realtime. devops-appsync-feed-publisher gains the optional APPSYNC_EVENTS_AUTHED_NAMESPACE env var; when set it ALSO publishes every event to /<namespace><channel> (SigV4/AWS_IAM) after the unchanged API-key channels, isolating authed failures (logged + AuthedPublishFailed metric, never a batch failure). 06-appsync-events.yaml adds the AMAZON_COGNITO_USER_POOLS auth provider and the AuthedNamespace channel namespace; ui-v2 subscribes to it with the signed-in user's Cognito token when VITE_APPSYNC_AUTHED_NAMESPACE is set. No schema or contract change; the API-key namespaces are untouched"
+    },
     {
       "version": "2026-10-13.18",
       "date": "2026-10-13",
