@@ -3644,7 +3644,7 @@ def _iter_wave_pathway_telemetry_records(wave_id: str) -> tuple[List[Dict[str, A
     wid = str(wave_id or "unassigned").replace("/", "_") or "unassigned"
     prefix = f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
     try:
-        store = _content_store(_get_s3())  # DVP-TSK-B20: legacy-form keys; legacy-pinned until the delta
+        store = _content_store(_get_s3())  # DVP-TSK-B20: legacy-form keys; B31: content first, legacy on a miss
         keys: List[str] = [key for key in store.list_keys(prefix) if key]
     except Exception:
         logger.exception("[ERROR] close_wave list_objects_v2 failed (degrading to empty)")

@@ -2311,11 +2311,13 @@ Resources:
           # env_drift_registry.json so the env-parity gate protects them.
           PATHWAY_TELEMETRY_BUCKET: !Ref S3Bucket
           PATHWAY_TELEMETRY_PREFIX: !Sub "${S3EnvPrefix}pathway-telemetry"
-          # DVP-TSK-B20 (isolation W4g): writer-first phase -- pathway-telemetry/ writes go to the content bucket AND the
-          # legacy bucket; reads (close_wave, flow_weight_refresh) stay on legacy until every writer of the prefix is
-          # dual (DOC-EF4BC758CCC9). PATHWAY_TELEMETRY_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          # DVP-TSK-B20 (isolation W4g): pathway-telemetry/ writes go to the content bucket AND the legacy bucket
+          # (DOC-EF4BC758CCC9). PATHWAY_TELEMETRY_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          # DVP-TSK-B31 (W4g read flip): CONTENT_STORE_READ=legacy is gone -- close_wave and flow_weight_refresh list both
+          # buckets and read content first, legacy on a miss. Precondition: the W3 delta for pathway-telemetry/ ran after
+          # the B20 writers went dual, so every listed key is in the content bucket. A content miss may answer 403 rather
+          # than 404 (the content ListBucket grant stays prefix-conditioned, DVP-ISS-149), and 403 skips the legacy fallback.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           # ENC-TSK-L43 (B67 Search2.0): OpenSearch keyword arm + within-search facets.
