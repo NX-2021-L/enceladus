@@ -126,6 +126,30 @@ def _get_s3():
     return _s3_client
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B17 (isolation W4e): docstore_integrity's agent-documents/ reads go through content_store.
+
+    CONTENT_STORE_MODE=dual reads the content bucket (CONTENT_BUCKET) first and DOCSTORE_S3_BUCKET (legacy) on a
+    miss; legacy (default) is byte-identical to a raw get_object. S3_ENV_PREFIX (gamma: "gamma/") is the legacy-only
+    key prefix the store drops for the content bucket. Bound to the given client (default _get_s3()); rebuilt if the
+    client changes.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = DOCSTORE_S3_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 # ---------------------------------------------------------------------------
 # Governed HTTP reads (tracker API / document API / graph_query_api) --
 # mirrors env_drift_auditor.py and percolation_monitor/lambda_function.py.
@@ -258,7 +282,7 @@ def _fetch_s3_text(key: str) -> Optional[str]:
     the finding, so it must never raise."""
     s3 = _get_s3()
     try:
-        resp = s3.get_object(Bucket=DOCSTORE_S3_BUCKET, Key=key)
+        resp = _content_store(s3).get_object(key)  # DVP-TSK-B17: content bucket first, legacy on a miss
         return resp["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None

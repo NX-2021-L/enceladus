@@ -1,14 +1,14 @@
 {
-  "version": "2026-10-13.02",
-  "updated_at": "2026-10-13T00:05:00Z",
-  "last_change_summary": "DVP-TSK-B15: isolation W5a; Enceladus self-call defaults (MCP server API bases, ELR, checkout_service/coordination_api/deploy_capability_auditor bases, PWA deep links, deploy health probes) move from https://jreese.net to https://enceladus.jreese.net; CORS/VAPID/Cognito/OAuth unchanged (W6)",
+  "version": "2026-10-13.03",
+  "updated_at": "2026-10-13T00:10:00Z",
+  "last_change_summary": "DVP-TSK-B17: isolation W4e; document_api reads agent-documents/ content-first (legacy fallback); corpus_entropy_engine reads through content_store, DOCSTORE_S3_PREFIX env-prefixed (gamma read prod's prefix)",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
     "content_store.mode": {
-      "description": "DVP-TSK-A78/B04/B05 (isolation W4, DOC-EF4BC758CCC9): Lambdas reach the Enceladus S3 prefixes through enceladus_shared.content_store, configured per function by environment. CONTENT_STORE_MODE=legacy (default; legacy bucket only) | dual (writes to the content bucket then the legacy bucket; reads try the content bucket and fall back to legacy only on NoSuchKey/404) | content (content bucket only). Keys stay in legacy form; S3_ENV_PREFIX (gamma: 'gamma/') is dropped for the per-environment content bucket enceladus-content${EnvironmentSuffix}-<acct>-<region>. First adopter: reference_search (dual). DVP-TSK-B14: in dual mode a conditional put (IfNoneMatch/IfMatch) writes the legacy bucket first and a legacy error stops the write before the content bucket; a content-side PreconditionFailed is swallowed (the W3 snapshot already holds the immutable object). copy_object copies per write target and, in dual mode, retries a content-source miss from the legacy source. Writer-first adopters (dual writes, CONTENT_STORE_READ=legacy): feed_publisher, project_service, document_api, memory_consolidation.",
+      "description": "DVP-TSK-A78/B04/B05 (isolation W4, DOC-EF4BC758CCC9): Lambdas reach the Enceladus S3 prefixes through enceladus_shared.content_store, configured per function by environment. CONTENT_STORE_MODE=legacy (default; legacy bucket only) | dual (writes to the content bucket then the legacy bucket; reads try the content bucket and fall back to legacy only on NoSuchKey/404) | content (content bucket only). Keys stay in legacy form; S3_ENV_PREFIX (gamma: 'gamma/') is dropped for the per-environment content bucket enceladus-content${EnvironmentSuffix}-<acct>-<region>. First adopter: reference_search (dual). DVP-TSK-B14: in dual mode a conditional put (IfNoneMatch/IfMatch) writes the legacy bucket first and a legacy error stops the write before the content bucket; a content-side PreconditionFailed is swallowed (the W3 snapshot already holds the immutable object). copy_object copies per write target and, in dual mode, retries a content-source miss from the legacy source. Writer-first adopters (dual writes, CONTENT_STORE_READ=legacy): feed_publisher, project_service, memory_consolidation (its only agent-documents/ store call is a write). DVP-TSK-B17 (W4e): readers of agent-documents/ go content-first -- document_api (dual, no CONTENT_STORE_READ; content bucket first, legacy on a miss) and corpus_entropy_engine (new adopter; docstore_integrity reads dual via content_store, DOCSTORE_S3_PREFIX now env-prefixed so gamma no longer reads prod's prefix).",
       "fields": {
         "CONTENT_STORE_MODE": {"type": "string", "enum": ["legacy", "dual", "content"], "definition": "Which bucket(s) a function reads and writes for the Enceladus prefixes."},
         "CONTENT_BUCKET": {"type": "string", "definition": "The per-environment content bucket; required unless the mode is legacy."},
@@ -9567,6 +9567,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.03",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B17: isolation W4e; document_api reads agent-documents/ content-first (legacy fallback); corpus_entropy_engine reads through content_store, DOCSTORE_S3_PREFIX env-prefixed (gamma read prod's prefix)"
+    },
     {
       "version": "2026-10-13.02",
       "date": "2026-10-13",
