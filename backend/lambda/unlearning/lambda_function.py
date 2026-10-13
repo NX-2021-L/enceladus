@@ -54,6 +54,29 @@ UNLEARNING_PREFIX = os.environ.get("UNLEARNING_PREFIX", "unlearning-tombstones")
 STATE_PREFIX = os.environ.get("UNLEARNING_STATE_PREFIX", "unlearning-state")
 DEFAULT_PROJECT_ID = os.environ.get("DEFAULT_PROJECT_ID", "enceladus")
 
+_CONTENT_STORE = None
+
+
+def _content_store():
+    """DVP-TSK-B32 (isolation W4j): every unlearning-tombstones/ and unlearning-state/ access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes (and deletes) the per-environment content bucket AND UNLEARNING_BUCKET (legacy);
+    CONTENT_STORE_READ=legacy keeps the run counter read and the expired-tombstone list/get on UNLEARNING_BUCKET until
+    the W3 delta. legacy (default) is byte-identical to a raw s3 call. Bound to _get_s3(); rebuilt if the client or the
+    legacy bucket changes. Callers must only use it when UNLEARNING_BUCKET is set.
+    """
+    global _CONTENT_STORE
+    client = _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client or _CONTENT_STORE.legacy_bucket != UNLEARNING_BUCKET:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = UNLEARNING_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
 
 def _iso_cutoff(hours: int) -> str:
     when = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -65,7 +88,7 @@ def _load_run_counter() -> int:
         return 0
     key = f"{STATE_PREFIX.strip().strip('/')}/run_counter.json"
     try:
-        resp = _get_s3().get_object(Bucket=UNLEARNING_BUCKET, Key=key)
+        resp = _content_store().get_object(key)  # DVP-TSK-B32: legacy-pinned until the delta
         payload = json.loads(resp["Body"].read().decode("utf-8"))
         return int(payload.get("run_count") or 0)
     except Exception:
@@ -76,10 +99,9 @@ def _save_run_counter(run_count: int) -> None:
     if not UNLEARNING_BUCKET:
         return
     key = f"{STATE_PREFIX.strip().strip('/')}/run_counter.json"
-    _get_s3().put_object(
-        Bucket=UNLEARNING_BUCKET,
-        Key=key,
-        Body=json.dumps({"run_count": run_count}).encode("utf-8"),
+    _content_store().put_object(  # DVP-TSK-B32: dual mode writes the content bucket, then UNLEARNING_BUCKET
+        key,
+        json.dumps({"run_count": run_count}).encode("utf-8"),
         ContentType="application/json",
     )
 
@@ -159,10 +181,9 @@ def _archive_reference_record(record_id: str) -> bool:
 def _write_tombstone(record_id: str, snapshot: Dict[str, Any]) -> str:
     tomb = build_tombstone(record_id, snapshot)
     key = tombstone_s3_key(UNLEARNING_PREFIX, record_id, tomb["created_at"])
-    _get_s3().put_object(
-        Bucket=UNLEARNING_BUCKET,
-        Key=key,
-        Body=json.dumps(tomb, default=str).encode("utf-8"),
+    _content_store().put_object(  # DVP-TSK-B32: dual mode writes the content bucket, then UNLEARNING_BUCKET
+        key,
+        json.dumps(tomb, default=str).encode("utf-8"),
         ContentType="application/json",
     )
     return key
@@ -200,29 +221,19 @@ def _hard_delete_expired_tombstones(dry_run: bool) -> List[str]:
     if not UNLEARNING_BUCKET:
         return []
 
+    store = _content_store()  # DVP-TSK-B32: legacy-form keys; list/get legacy-pinned until the delta
+
     def _list(prefix: str):
-        token = None
-        while True:
-            kwargs: Dict[str, Any] = {"Bucket": UNLEARNING_BUCKET, "Prefix": prefix}
-            if token:
-                kwargs["ContinuationToken"] = token
-            resp = _get_s3().list_objects_v2(**kwargs)
-            for obj in resp.get("Contents") or []:
-                yield obj["Key"]
-            if not resp.get("IsTruncated"):
-                break
-            token = resp.get("NextContinuationToken")
+        yield from store.list_keys(prefix)
 
     def _get(key: str) -> str:
-        return _get_s3().get_object(Bucket=UNLEARNING_BUCKET, Key=key)["Body"].read().decode(
-            "utf-8"
-        )
+        return store.get_object(key)["Body"].read().decode("utf-8")
 
     expired = list_expired_tombstone_keys(_list, UNLEARNING_PREFIX, get_object=_get)
     if dry_run:
         return expired
     for key in expired:
-        _get_s3().delete_object(Bucket=UNLEARNING_BUCKET, Key=key)
+        store.delete_object(key)  # dual mode deletes the content copy too
     return expired
 
 
