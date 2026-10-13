@@ -16535,9 +16535,9 @@ def _handle_governance_get(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
-    s3 = _get_s3()
+    s3 = _get_s3()  # raw: kept for the NoSuchKey exception class
     try:
-        resp = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
+        resp = _governance_store(s3).get_object(live_key)  # DVP-TSK-B40: the B22 store; reads stay legacy until the flip
         content = resp["Body"].read().decode("utf-8")
         return _response(200, {"success": True, "uri": uri, "file_name": file_name, "content": content})
     except s3.exceptions.NoSuchKey:

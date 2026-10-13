@@ -8294,6 +8294,24 @@ Resources:
                 Condition:
                   StringLike:
                     "s3:prefix": "governance/live/*"
+              # DVP-TSK-B40 (isolation W4i): governance/ is ONE shared corpus held only in the PROD content bucket on both
+              # planes (unprefixed keys); the ${EnvironmentSuffix} grants above resolve to the gamma bucket on gamma, so name
+              # the prod bucket (no suffix) explicitly. On prod this repeats them. ListBucket is unconditional so that, once
+              # reads leave legacy, a content miss answers 404 (legacy fallback) instead of 403 (which would drop the file
+              # from the canonical set and change the bundle hash).
+              - Sid: ReadGovernanceLiveSharedProdContent
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/live/*"
+              - Sid: ListGovernanceSharedProdContent
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
         - PolicyName: GovernanceVersionDDBWrite
           PolicyDocument:
             Version: '2012-10-17'
@@ -8398,6 +8416,24 @@ Resources:
                 Condition:
                   StringLike:
                     "s3:prefix": "governance/live/*"
+              # DVP-TSK-B40 (isolation W4i): governance/ is ONE shared corpus held only in the PROD content bucket on both
+              # planes (unprefixed keys); the ${EnvironmentSuffix} grants above resolve to the gamma bucket on gamma, so name
+              # the prod bucket (no suffix) explicitly. On prod this repeats them. ListBucket is unconditional so that, once
+              # reads leave legacy, a content miss answers 404 (legacy fallback) instead of 403 (which would drop the file
+              # from the canonical set and change the bundle hash).
+              - Sid: ReadGovernanceLiveSharedProdContent
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/live/*"
+              - Sid: ListGovernanceSharedProdContent
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
         - PolicyName: GovernanceVersionDDBRead
           PolicyDocument:
             Version: '2012-10-17'

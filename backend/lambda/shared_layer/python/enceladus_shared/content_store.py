@@ -98,6 +98,20 @@ class ContentStore:
             read_mode=(e.get("CONTENT_STORE_READ") or "auto").strip().lower(),
         )
 
+    @classmethod
+    def governance_from_env(cls, s3_client: Any, legacy_bucket: str, env: Optional[Dict[str, str]] = None) -> "ContentStore":
+        """The governance/ store (DVP-TSK-B40). governance/ is ONE shared corpus held only in the PROD content bucket on
+        both planes, with unprefixed keys (io, DOC-EF4BC758CCC9, 2026-10-13; writers since DVP-TSK-B22). So the content
+        bucket is GOVERNANCE_CONTENT_BUCKET -- never the per-environment CONTENT_BUCKET -- and S3_ENV_PREFIX is ignored.
+        No GOVERNANCE_CONTENT_BUCKET means legacy (raw calls on ``legacy_bucket``), not a config error, so a function
+        without the variable behaves exactly as before. CONTENT_STORE_MODE / CONTENT_STORE_READ apply as usual."""
+        e = os.environ if env is None else env
+        content_bucket = (e.get("GOVERNANCE_CONTENT_BUCKET") or "").strip()
+        mode = (e.get("CONTENT_STORE_MODE") or "legacy").strip().lower() if content_bucket else "legacy"
+        read_mode = (e.get("CONTENT_STORE_READ") or "auto").strip().lower()
+        return cls(s3_client, mode=mode, content_bucket=content_bucket, legacy_bucket=legacy_bucket,
+                   legacy_key_prefix="", read_mode=read_mode)
+
     # -- key mapping -------------------------------------------------------------------------------------------
     def content_key(self, legacy_key: str) -> str:
         """The content-bucket key for a legacy key (drops the legacy-only env prefix)."""
@@ -137,6 +151,20 @@ class ContentStore:
         for i, (bucket, k) in enumerate(order):
             try:
                 return self.s3.head_object(Bucket=bucket, Key=k, **kwargs)
+            except Exception as exc:
+                if i + 1 < len(order) and _is_missing(exc):
+                    continue
+                raise
+        raise ContentStoreConfigError("unreachable")  # pragma: no cover
+
+    def get_object_attributes(self, key: str, **kwargs: Any) -> Dict[str, Any]:
+        """GetObjectAttributes from the bucket that holds the object (DVP-TSK-B40: the governance hash reads each live
+        file's stored ChecksumSHA256 this way). Dual mode falls back to legacy on a miss; the VersionId in the response
+        belongs to whichever bucket answered."""
+        order = self._read_order(key)
+        for i, (bucket, k) in enumerate(order):
+            try:
+                return self.s3.get_object_attributes(Bucket=bucket, Key=k, **kwargs)
             except Exception as exc:
                 if i + 1 < len(order) and _is_missing(exc):
                     continue

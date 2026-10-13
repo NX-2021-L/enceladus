@@ -324,3 +324,74 @@ class TestCopyAndConditionalPuts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _AttrS3(FakeS3):
+    """FakeS3 plus GetObjectAttributes (DVP-TSK-B40): the stored ChecksumSHA256 and a per-bucket VersionId."""
+
+    def get_object_attributes(self, Bucket, Key, **kw):
+        self.calls.append(("attrs", Bucket, Key, kw))
+        if (Bucket, Key) not in self.objects:
+            raise NoSuchKey()
+        import base64
+        import hashlib
+        body = self.objects[(Bucket, Key)][0]
+        return {"Checksum": {"ChecksumSHA256": base64.b64encode(hashlib.sha256(body).digest()).decode()},
+                "VersionId": f"v-{Bucket}"}
+
+
+PROD_CONTENT = "enceladus-content-1-us-west-2"
+
+
+class TestGovernanceStore(unittest.TestCase):
+    """DVP-TSK-B40: governance/ is ONE shared corpus in the PROD content bucket, unprefixed, on both planes."""
+
+    def test_takes_governance_bucket_never_the_per_environment_one_and_ignores_the_env_prefix(self):
+        env = {"CONTENT_STORE_MODE": "dual", "GOVERNANCE_CONTENT_BUCKET": PROD_CONTENT, "CONTENT_BUCKET": CONTENT,
+               "S3_ENV_PREFIX": "gamma/"}
+        st = ContentStore.governance_from_env(FakeS3(), LEGACY, env)
+        self.assertEqual((st.mode, st.content_bucket, st.legacy_bucket, st.legacy_key_prefix),
+                         ("dual", PROD_CONTENT, LEGACY, ""))
+        self.assertEqual(st.content_key("governance/live/agents.md"), "governance/live/agents.md")
+
+    def test_no_governance_bucket_is_legacy_even_in_a_dual_function(self):
+        s3 = FakeS3()
+        st = ContentStore.governance_from_env(s3, LEGACY, {"CONTENT_STORE_MODE": "dual", "CONTENT_BUCKET": CONTENT})
+        self.assertEqual(st.mode, "legacy")
+        s3.objects[(LEGACY, "governance/live/agents.md")] = (b"x", {})
+        st.get_object("governance/live/agents.md")
+        self.assertEqual([c[1] for c in s3.calls], [LEGACY])
+
+    def test_read_pin_keeps_dual_reads_on_legacy(self):
+        s3 = _AttrS3()
+        s3.objects[(LEGACY, "governance/live/agents.md")] = (b"legacy", {})
+        s3.objects[(PROD_CONTENT, "governance/live/agents.md")] = (b"content", {})
+        env = {"CONTENT_STORE_MODE": "dual", "CONTENT_STORE_READ": "legacy", "GOVERNANCE_CONTENT_BUCKET": PROD_CONTENT}
+        st = ContentStore.governance_from_env(s3, LEGACY, env)
+        self.assertEqual(st.read_bytes("governance/live/agents.md"), b"legacy")
+        self.assertEqual(st.get_object_attributes("governance/live/agents.md", ObjectAttributes=["Checksum"])["VersionId"],
+                         f"v-{LEGACY}")
+
+
+class TestGetObjectAttributes(unittest.TestCase):
+    def test_dual_reads_content_first_and_falls_back_on_a_miss(self):
+        s3 = _AttrS3()
+        s3.objects[(CONTENT, "governance/live/a.md")] = (b"a", {})
+        s3.objects[(LEGACY, "gamma/governance/live/b.md")] = (b"b", {})
+        st = store(s3, "dual")
+        self.assertEqual(st.get_object_attributes("gamma/governance/live/a.md", ObjectAttributes=["Checksum"])["VersionId"],
+                         f"v-{CONTENT}")
+        self.assertEqual(st.get_object_attributes("gamma/governance/live/b.md", ObjectAttributes=["Checksum"])["VersionId"],
+                         f"v-{LEGACY}")
+        self.assertEqual([c[3] for c in s3.calls], [{"ObjectAttributes": ["Checksum"]}] * 3)
+
+    def test_access_denied_is_not_a_miss(self):
+        s3 = _AttrS3()
+        s3.deny.add((CONTENT, "governance/live/a.md"))
+
+        def attrs(Bucket, Key, **kw):
+            s3._check(Bucket, Key)
+            raise NoSuchKey()
+        s3.get_object_attributes = attrs
+        with self.assertRaises(AccessDenied):
+            store(s3, "dual").get_object_attributes("gamma/governance/live/a.md")

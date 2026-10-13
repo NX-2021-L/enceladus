@@ -47,6 +47,14 @@ class _ListingS3:
         ]
         return {"Contents": contents, "IsTruncated": False}
 
+    def get_paginator(self, name):
+        # DVP-TSK-B40: the governance store lists through the list_objects_v2 paginator.
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, **kwargs):
+        yield self.list_objects_v2(**kwargs)
+
     def get_object(self, **kwargs):
         key = kwargs["Key"]
         self.get_calls.append(key)
