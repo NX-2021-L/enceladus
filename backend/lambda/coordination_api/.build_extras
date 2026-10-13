@@ -12,3 +12,7 @@
 tools/enceladus-mcp-server/dispatch_plan_generator.py
 tools/enceladus-mcp-server/handoff_mandate.py
 tools/enceladus-mcp-server/telemetry_rank.py
+
+# DVP-TSK-B22 (isolation W4h, DOC-EF4BC758CCC9): the dual-path S3 helper, copied to the function root by
+# .github/workflows/_build.yml so `import content_store` resolves. Canonical copy lives in the shared layer.
+backend/lambda/shared_layer/python/enceladus_shared/content_store.py

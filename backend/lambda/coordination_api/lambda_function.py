@@ -902,6 +902,44 @@ def _get_s3():
     return _s3
 
 
+_GOVERNANCE_STORE = None
+_GOVERNANCE_STORE_KEY = None
+
+
+def _governance_store(s3: Any = None):
+    """DVP-TSK-B22 (isolation W4h): governance/ object access goes through content_store.
+
+    governance/ is ONE shared corpus held only in the PROD content bucket on BOTH planes (io, DOC-EF4BC758CCC9,
+    2026-10-13), so this store takes GOVERNANCE_CONTENT_BUCKET (no environment suffix) and unprefixed keys instead of
+    ContentStore.from_env, whose CONTENT_BUCKET / S3_ENV_PREFIX are per-environment. CONTENT_STORE_MODE=dual writes that
+    bucket AND S3_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every read on S3_BUCKET. Mode legacy, or no
+    GOVERNANCE_CONTENT_BUCKET, behaves exactly like a raw s3 call on S3_BUCKET. Rebuilt when the client or config changes.
+    """
+    global _GOVERNANCE_STORE, _GOVERNANCE_STORE_KEY
+    client = s3 if s3 is not None else _get_s3()
+    mode = (os.environ.get("CONTENT_STORE_MODE") or "legacy").strip().lower()
+    content_bucket = (os.environ.get("GOVERNANCE_CONTENT_BUCKET") or "").strip()
+    read_mode = (os.environ.get("CONTENT_STORE_READ") or "auto").strip().lower()
+    if not content_bucket:
+        mode = "legacy"  # no shared bucket configured: stay on the legacy bucket rather than raise
+    cfg = (mode, content_bucket, read_mode, S3_BUCKET)
+    if _GOVERNANCE_STORE is None or _GOVERNANCE_STORE.s3 is not client or _GOVERNANCE_STORE_KEY != cfg:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        _GOVERNANCE_STORE = ContentStore(
+            client,
+            mode=mode,
+            content_bucket=content_bucket,
+            legacy_bucket=S3_BUCKET,
+            legacy_key_prefix="",
+            read_mode=read_mode,
+        )
+        _GOVERNANCE_STORE_KEY = cfg
+    return _GOVERNANCE_STORE
+
+
 def _get_eb():
     global _eb
     if _eb is None:
@@ -16543,13 +16581,14 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(400, f"file_name '{file_name}' does not map to a valid governance:// URI. Must be 'agents.md' or start with 'agents/'.")
 
     live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
-    s3 = _get_s3()
+    s3 = _get_s3()  # raw: kept for the NoSuchKey exception class
+    store = _governance_store(s3)  # DVP-TSK-B22: dual writes (shared prod content bucket + legacy), reads stay legacy
 
     # Archive current version if present
     archive_key = None
     existing_content: Optional[bytes] = None
     try:
-        existing = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
+        existing = store.get_object(live_key)
         existing_content = existing["Body"].read()
     except s3.exceptions.NoSuchKey:
         logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
@@ -16568,10 +16607,9 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
         ext = pathlib.Path(file_name).suffix or ".md"
         archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}{ext}"
         try:
-            s3.put_object(
-                Bucket=S3_BUCKET,
-                Key=archive_key,
-                Body=existing_content,
+            store.put_object(
+                archive_key,
+                existing_content,
                 ContentType="text/markdown; charset=utf-8",
                 # ENC-TSK-Q26 (ENC-ISS-799): devops-recompute-governance derives the bundle
                 # root from each object's SHA256 additional checksum and raises if one is
@@ -16592,10 +16630,9 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     content_bytes = content.encode("utf-8")
     new_hash = hashlib.sha256(content_bytes).hexdigest()
     try:
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=live_key,
-            Body=content_bytes,
+        store.put_object(
+            live_key,
+            content_bytes,
             ContentType="text/markdown; charset=utf-8",
             # ENC-TSK-Q26 (ENC-ISS-799): required by devops-recompute-governance; omitting it
             # freezes the canonical governance-version record for the WHOLE bundle.
