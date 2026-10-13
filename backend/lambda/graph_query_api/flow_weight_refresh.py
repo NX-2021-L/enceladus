@@ -169,25 +169,38 @@ def _list_new_telemetry_objects(
     prefix: str,
     since_epoch_ms: int,
     max_objects: int,
+    store=None,
 ) -> List[Tuple[str, int]]:
     """Return [(key, last_modified_epoch_ms), ...] for objects strictly newer
     than since_epoch_ms, oldest-first, capped at max_objects. If the cap is
     hit, callers MUST advance the watermark only to the last object actually
     processed (not "now") so the remainder is picked up on the next cycle --
     see run_refresh().
+
+    DVP-TSK-B20 (isolation W4g): when ``store`` (a content_store.ContentStore whose
+    legacy bucket is ``bucket``) is given, the listing goes through it. Keys stay
+    legacy-form; with CONTENT_STORE_READ=legacy it is the same single legacy
+    list_objects_v2 as the raw path.
     """
     out: List[Tuple[str, int]] = []
     try:
-        paginator = s3_client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []) or []:
-                key = obj.get("Key")
-                lm = obj.get("LastModified")
-                if not key or lm is None:
-                    continue
-                lm_ms = int(lm.timestamp() * 1000)
-                if lm_ms > since_epoch_ms:
-                    out.append((key, lm_ms))
+        if store is not None:
+            entries = store.list_objects(prefix)
+        else:
+            paginator = s3_client.get_paginator("list_objects_v2")
+            entries = [
+                obj
+                for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+                for obj in page.get("Contents", []) or []
+            ]
+        for obj in entries:
+            key = obj.get("Key")
+            lm = obj.get("LastModified")
+            if not key or lm is None:
+                continue
+            lm_ms = int(lm.timestamp() * 1000)
+            if lm_ms > since_epoch_ms:
+                out.append((key, lm_ms))
     except Exception:
         logger.exception("[ERROR] flow_weight telemetry listing failed")
         return []
@@ -206,6 +219,7 @@ def _aggregate_hit_flow(
     s3_client,
     bucket: str,
     objects: List[Tuple[str, int]],
+    store=None,
 ) -> Dict[str, int]:
     """Sum traversal_count for retrieval_outcome=='hit' edge_participation
     entries across the given telemetry objects. Malformed/unreadable objects
@@ -213,7 +227,10 @@ def _aggregate_hit_flow(
     flow: Dict[str, int] = {}
     for key, _lm_ms in objects:
         try:
-            body = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+            if store is not None:  # DVP-TSK-B20: legacy-form key; content first / legacy on a miss unless pinned legacy
+                body = store.get_object(key)["Body"].read()
+            else:
+                body = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
             record = json.loads(body)
         except Exception as exc:
             logger.warning("[WARNING] flow_weight telemetry object unreadable, skipping: %s (%s)", key, exc)
@@ -329,8 +346,12 @@ def run_refresh(driver, s3_client, event: Optional[Dict[str, Any]] = None) -> Di
         logger.info("[INFO] flow_weight refresh skipped: no PATHWAY_TELEMETRY_BUCKET configured")
         return {"ok": True, "applied": False, "reason": "PATHWAY_TELEMETRY_BUCKET unset"}
 
+    # DVP-TSK-B20 (isolation W4g): the configured telemetry bucket is read through content_store (legacy-pinned until the
+    # delta). An explicit event["bucket"] that differs from it is some other bucket -- keep the raw legacy read for it.
+    store = lf._content_store(s3_client) if bucket == (lf.PATHWAY_TELEMETRY_BUCKET or "").strip() else None
+
     watermark = _get_watermark(driver)
-    objects = _list_new_telemetry_objects(s3_client, bucket, prefix, watermark, max_objects)
+    objects = _list_new_telemetry_objects(s3_client, bucket, prefix, watermark, max_objects, store=store)
     if not objects:
         logger.info("[INFO] flow_weight refresh: no new telemetry since watermark=%d — no-op cycle", watermark)
         return {
@@ -339,7 +360,7 @@ def run_refresh(driver, s3_client, event: Optional[Dict[str, Any]] = None) -> Di
             "watermark_epoch_ms": watermark,
         }
 
-    flow_by_edge = _aggregate_hit_flow(s3_client, bucket, objects)
+    flow_by_edge = _aggregate_hit_flow(s3_client, bucket, objects, store=store)
     touched = _apply_reinforcement(driver, flow_by_edge, delta, mu) if flow_by_edge else []
     edge_types = sorted(lf.GRAPH_EDGE_WEIGHTS.keys())
     _apply_decay(driver, touched, mu, edge_types)

@@ -297,6 +297,30 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B20 (isolation W4g): every pathway-telemetry/ object access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND PATHWAY_TELEMETRY_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps
+    every read (close_wave, flow_weight_refresh) on the legacy bucket until all writers are dual. legacy (default) is
+    byte-identical to a raw s3 call. Bound to the given client (default _get_s3()); rebuilt if the client or the legacy
+    bucket changes. Callers must only use it when PATHWAY_TELEMETRY_BUCKET is set.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client or _CONTENT_STORE.legacy_bucket != PATHWAY_TELEMETRY_BUCKET:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = PATHWAY_TELEMETRY_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 def _get_dynamodb():
     """Lazy low-level DynamoDB client for the ENC-FTR-087 wave-close drift sink."""
     global _dynamodb
@@ -2198,10 +2222,9 @@ def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
                     f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
                     f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex}.jsonl"
                 )
-                _get_s3().put_object(
-                    Bucket=PATHWAY_TELEMETRY_BUCKET,
-                    Key=key,
-                    Body=line.encode("utf-8"),
+                _content_store().put_object(  # DVP-TSK-B20: dual mode writes the content bucket, then PATHWAY_TELEMETRY_BUCKET
+                    key,
+                    line.encode("utf-8"),
                     ContentType="application/x-ndjson",
                 )
                 return
@@ -3621,14 +3644,8 @@ def _iter_wave_pathway_telemetry_records(wave_id: str) -> tuple[List[Dict[str, A
     wid = str(wave_id or "unassigned").replace("/", "_") or "unassigned"
     prefix = f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
     try:
-        s3 = _get_s3()
-        paginator = s3.get_paginator("list_objects_v2")
-        keys: List[str] = []
-        for page in paginator.paginate(Bucket=PATHWAY_TELEMETRY_BUCKET, Prefix=prefix):
-            for obj in page.get("Contents", []) or []:
-                key = obj.get("Key")
-                if key:
-                    keys.append(key)
+        store = _content_store(_get_s3())  # DVP-TSK-B20: legacy-form keys; legacy-pinned until the delta
+        keys: List[str] = [key for key in store.list_keys(prefix) if key]
     except Exception:
         logger.exception("[ERROR] close_wave list_objects_v2 failed (degrading to empty)")
         return records, objects_seen, objects_failed
@@ -3636,7 +3653,7 @@ def _iter_wave_pathway_telemetry_records(wave_id: str) -> tuple[List[Dict[str, A
     for key in keys:
         objects_seen += 1
         try:
-            resp = s3.get_object(Bucket=PATHWAY_TELEMETRY_BUCKET, Key=key)
+            resp = store.get_object(key)
             body = resp["Body"].read()
             if isinstance(body, bytes):
                 body = body.decode("utf-8")
