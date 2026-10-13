@@ -564,6 +564,14 @@ Resources:
           # DVP-TSK-A17 (E4-R14): hub token exchange (fail closed when issuers are empty).
           HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
           HUB_SHELL_ORIGINS: !Ref HubShellOrigins
+          # DVP-TSK-B22 (isolation W4h): governance_update writes governance/live + governance/history to the legacy bucket
+          # AND the content bucket; reads stay legacy. governance/ is ONE shared corpus held only in the PROD content bucket
+          # on BOTH planes (io decision DOC-EF4BC758CCC9, 2026-10-13): the bucket name deliberately carries NO
+          # ${EnvironmentSuffix} and the keys are unprefixed, so gamma must never point this at enceladus-content-gamma-*.
+          # The governance store takes its own bucket, so CONTENT_BUCKET / S3_ENV_PREFIX are not set here.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -4633,6 +4641,28 @@ Resources:
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
                   - "arn:aws:s3:::jreese-net/governance/history/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/history/*"
+              # DVP-TSK-B22 (isolation W4h): governance/ is ONE shared corpus held only in the PROD content bucket on BOTH
+              # planes (io, DOC-EF4BC758CCC9, 2026-10-13). The ${EnvironmentSuffix} grants above resolve to the gamma content
+              # bucket on gamma, which is the wrong bucket for governance/, so name the prod bucket explicitly (no suffix).
+              # On prod this repeats the grants above, which is harmless.
+              - Sid: GovernanceSharedProdContentList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
+              - Sid: GovernanceSharedProdContentGet
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/*"
+              - Sid: GovernanceSharedProdContentWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/*"
               # ENC-TSK-K02 / FTR-084 Ph2: versioned intent-training weight snapshots + labels.
               - Sid: IntentTrainingS3ReadWrite
                 Effect: Allow
