@@ -476,7 +476,9 @@ class TestGatesSchemaContract(_Base):
     def test_decision_entry_requires_auth_method_auth_time_assurance(self):
         dec = self._sub("Decision")
         ok = {"decision": "approve", "decider": "io", "decidedAt": "2026-10-11T12:00:00Z",
-              "auth_method": "step_up", "auth_time": "2026-10-11T11:59:00Z", "assurance": "step_up_degraded"}
+              "auth_method": "step_up", "auth_time": "2026-10-11T11:59:00Z", "assurance": "aal2"}
         self.assertTrue(dec.is_valid(ok))
+        # DVP-TSK-B34: the retired degraded-mode label is no longer a valid assurance.
+        self.assertFalse(dec.is_valid(dict(ok, assurance="step_up_degraded")))
         for missing in ("auth_method", "auth_time", "assurance"):
             self.assertFalse(dec.is_valid({k: v for k, v in ok.items() if k != missing}))
