@@ -256,6 +256,7 @@ def _refresh_tokens(refresh_token: str) -> Dict[str, str]:
     id_token = result.get("IdToken")
     if not id_token:
         raise ValueError("No id_token in Cognito response")
+    _log_auth_claims("refresh", id_token)
 
     return {
         "id_token": id_token,
@@ -454,6 +455,7 @@ def _handle_oauth_callback(event: Dict) -> Dict:
         # re-prompt sign-in if still unauthenticated.
         return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
 
+    _log_auth_claims("callback", tokens["id_token"])
     target = _b64url_decode_path(state)
     now_ms = str(int(time.time() * 1000))
 
@@ -579,6 +581,41 @@ def _jwt_claims(token: str) -> Dict[str, Any]:
         return json.loads(base64.urlsafe_b64decode(payload))
     except Exception:  # noqa: BLE001 - any malformed token is "no claims"
         return {}
+
+
+def _log_auth_claims(path: str, id_token: str) -> None:
+    """DVP-TSK-983: log which amr/acr Cognito emitted for this sign-in.
+
+    One JSON line, exactly these keys: event, path ("callback" | "refresh"),
+    amr (list of short strings or null), acr (str or null), auth_time (int or
+    null), token_use (str). The token was just received from Cognito over TLS,
+    so its payload is decoded WITHOUT re-verifying (this is a diagnostic, never
+    an authorization input). Nothing identifying is logged -- no token, sub,
+    email, username or cookie value -- and a failure here can never break auth.
+    """
+    try:
+        claims = _jwt_claims(id_token)
+        amr = claims.get("amr")
+        if isinstance(amr, list):
+            amr = [a[:32] for a in amr[:8] if isinstance(a, str)]
+        else:
+            amr = None
+        acr = claims.get("acr")
+        auth_time = claims.get("auth_time")
+        token_use = claims.get("token_use")
+        logger.info(json.dumps(
+            {
+                "event": "auth_claims",
+                "path": path,
+                "amr": amr,
+                "acr": acr[:64] if isinstance(acr, str) else None,
+                "auth_time": int(auth_time) if isinstance(auth_time, (int, float)) and not isinstance(auth_time, bool) else None,
+                "token_use": token_use[:16] if isinstance(token_use, str) else "unknown",
+            },
+            separators=(",", ":"),
+        ))
+    except Exception:  # noqa: BLE001 - a diagnostic must never fail a login
+        logger.warning("auth_claims diagnostic failed")
 
 
 def _handle_kit_refresh(event: Dict) -> Dict:
