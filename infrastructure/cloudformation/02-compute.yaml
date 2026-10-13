@@ -4858,6 +4858,28 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt RecipeRunSweepRule.Arn
 
+  # DVP-TSK-B33: escalation expiry sweeper (POST /_/escalation/sweep equivalent, all projects): moves requested escalations past their expiry to expired.
+  EscalationExpirySweepRule:
+    Type: AWS::Events::Rule
+    Properties:
+      # Explicit suffixed name, as RecipeRunSweepRule (ENC-ISS-455 / ENC-TSK-J12 drift gate).
+      Name: !Sub "enceladus-escalation-expiry-sweep${EnvironmentSuffix}"
+      Description: Escalation expiry sweeper for TrackerMutationFunction (DVP-TSK-B33)
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Id: escalation-expiry-sweep
+          Arn: !GetAtt TrackerMutationFunction.Arn
+          Input: '{"enceladus_task": "escalation_sweep"}'
+
+  EscalationExpirySweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TrackerMutationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EscalationExpirySweepRule.Arn
+
   TrackerMutationRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
