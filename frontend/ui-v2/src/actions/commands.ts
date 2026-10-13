@@ -1,6 +1,6 @@
-/** DVP-TSK-895: palette commands, one per flags-off action without a bespoke route. Light index (no schemas). */
+/** DVP-TSK-895: palette commands, one per live (flags-off or default-on flag, DVP-TSK-B35) action without a bespoke route. Light index (no schemas). */
 import capsSnapshot from '../shell/capsSnapshot.json'
-import { BESPOKE_ACTIONS, FLAGGED_ACTIONS } from './registry'
+import { BESPOKE_ACTIONS, DEFAULT_ON_ACTIONS, FLAGGED_ACTIONS } from './registry'
 
 export interface ActionCommand { name: string; title: string; readOnly: boolean }
 
@@ -10,7 +10,7 @@ export const RECIPE_START_COMMAND: ActionCommand = { name: 'recipe_run.start', t
 type SnapAction = { name: string; title: string; flag?: string; annotations?: { readOnlyHint?: boolean } }
 
 export const ACTION_COMMANDS: ActionCommand[] = (capsSnapshot.actions as SnapAction[])
-  .filter((a) => !FLAGGED_ACTIONS.has(a.name) && !BESPOKE_ACTIONS.has(a.name))
+  .filter((a) => (!FLAGGED_ACTIONS.has(a.name) || DEFAULT_ON_ACTIONS.has(a.name)) && !BESPOKE_ACTIONS.has(a.name))
   .map((a) => ({ name: a.name, title: a.title, readOnly: a.annotations?.readOnlyHint === true }))
   .concat([RECIPE_START_COMMAND])
   .sort((a, b) => a.name.localeCompare(b.name))
