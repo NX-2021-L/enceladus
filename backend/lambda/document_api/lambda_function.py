@@ -823,7 +823,8 @@ def _content_store(s3: Any = None):
 
     CONTENT_STORE_MODE=dual writes the content bucket AND S3_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
     read on S3_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
-    given client (default _get_s3()); rebuilt if the client changes. governance/ and mobile/v1/reference stay raw.
+    given client (default _get_s3()); rebuilt if the client changes. mobile/v1/reference stays raw; governance/ has its
+    own store (_governance_store).
     """
     global _CONTENT_STORE
     client = s3 if s3 is not None else _get_s3()
@@ -836,6 +837,22 @@ def _content_store(s3: Any = None):
         env["LEGACY_BUCKET"] = S3_BUCKET
         _CONTENT_STORE = ContentStore.from_env(client, env)
     return _CONTENT_STORE
+
+
+def _governance_store():
+    """DVP-TSK-B44 (isolation W4i-2): every governance/live read goes through content_store's governance store.
+
+    governance/ is ONE shared corpus held in the PROD content bucket on both planes, with UNPREFIXED keys (io,
+    DOC-EF4BC758CCC9), so the store takes GOVERNANCE_CONTENT_BUCKET -- never the per-environment CONTENT_BUCKET -- and
+    S3_GOVERNANCE_PREFIX is unprefixed on gamma too. This function runs CONTENT_STORE_MODE=dual with CONTENT_STORE_READ
+    unset (agent-documents reads are content-first since B17), so the governance reads are pinned independently with
+    GOVERNANCE_STORE_READ=legacy: they stay raw calls on S3_BUCKET until the governance flip. Built per call.
+    """
+    try:
+        from content_store import ContentStore  # shipped to the function root by .build_extras
+    except ImportError:  # local tests: the canonical shared-layer copy
+        from enceladus_shared.content_store import ContentStore
+    return ContentStore.governance_from_env(_get_s3(), S3_BUCKET)
 
 
 def _get_cloudwatch():
@@ -1776,19 +1793,16 @@ def _sync_project_reference_document(project_id: str) -> None:
 
 
 def _list_governance_live_files() -> List[str]:
-    s3 = _get_s3()
     prefix = S3_GOVERNANCE_PREFIX.rstrip("/") + "/"
-    paginator = s3.get_paginator("list_objects_v2")
     files: List[str] = []
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = str(obj.get("Key") or "")
-            if not key.startswith(prefix):
-                continue
-            rel = key[len(prefix):]
-            if not rel or rel.endswith("/"):
-                continue
-            files.append(rel)
+    for key in _governance_store().list_keys(prefix):
+        key = str(key or "")
+        if not key.startswith(prefix):
+            continue
+        rel = key[len(prefix):]
+        if not rel or rel.endswith("/"):
+            continue
+        files.append(rel)
     return sorted(set(files))
 
 
@@ -1811,7 +1825,7 @@ def _sync_governance_documents() -> None:
         # Fast path: compare metadata hash when available.
         metadata_hash = ""
         try:
-            head = _get_s3().head_object(Bucket=S3_BUCKET, Key=key)
+            head = _governance_store().head_object(key)
             metadata_hash = str((head.get("Metadata") or {}).get("content_sha256") or "").strip()
         except Exception as exc:
             logger.warning("governance sync head_object failed for %s: %s", key, exc)
@@ -1819,7 +1833,7 @@ def _sync_governance_documents() -> None:
         if existing and metadata_hash and str(existing.get("content_hash") or "") == metadata_hash:
             continue
 
-        body = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
+        body = _governance_store().read_bytes(key)
         content_hash = hashlib.sha256(body).hexdigest()
         if existing and str(existing.get("content_hash") or "") == content_hash:
             continue

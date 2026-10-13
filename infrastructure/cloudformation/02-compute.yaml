@@ -572,6 +572,9 @@ Resources:
           CONTENT_STORE_MODE: dual
           CONTENT_STORE_READ: legacy
           GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
+          # DVP-TSK-B44: the push-on-write recompute nudge targets THIS plane's recompute function (the code default is the
+          # prod name, which would make gamma nudge prod's record).
+          RECOMPUTE_GOVERNANCE_LAMBDA_NAME: !Sub "devops-recompute-governance${EnvironmentSuffix}"
           # DVP-TSK-B32 (isolation W4j): intent-training/ (training, rollback, inference boosts) goes through its own
           # store on the PER-ENVIRONMENT content bucket: writes dual, reads legacy via the shared CONTENT_STORE_READ pin
           # above (the governance and intent-training reads flip together, after the W3 delta for both prefixes).
@@ -711,7 +714,15 @@ Resources:
           S3_BUCKET: !Ref S3Bucket
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
-          S3_GOVERNANCE_PREFIX: !Sub "${S3EnvPrefix}governance/live"
+          # DVP-TSK-B44 (isolation W4i-2): governance/ is ONE shared corpus on both planes (io, DOC-EF4BC758CCC9) with
+          # UNPREFIXED keys, so this is `governance/live` on gamma too (it was ${S3EnvPrefix}governance/live, which read a
+          # stale gamma/governance/live). The reads go through the governance store on the PROD content bucket (no
+          # ${EnvironmentSuffix}), and GOVERNANCE_STORE_READ=legacy pins them to S3_BUCKET even though this function runs
+          # CONTENT_STORE_MODE=dual with CONTENT_STORE_READ unset below (agent-documents reads are content-first since B17).
+          # Drop the pin at the governance flip, after the W3 delta for governance/.
+          S3_GOVERNANCE_PREFIX: governance/live
+          GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
+          GOVERNANCE_STORE_READ: legacy
           # DVP-TSK-B14 (isolation W4d): agent-documents/ writes go to the content bucket AND the legacy bucket
           # (conditional version puts legacy first) (DOC-EF4BC758CCC9). S3_PREFIX above carries the legacy-only env prefix
           # that S3_ENV_PREFIX strips.
@@ -4649,6 +4660,15 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:*"
+              # DVP-TSK-B44: the governance_update push-on-write nudge (RECOMPUTE_GOVERNANCE_LAMBDA_NAME) invokes THIS plane's
+              # recompute function asynchronously. Named per plane: gamma's role must not (and need not) reach prod's.
+              - Sid: InvokeRecomputeGovernanceNudge
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-recompute-governance${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-recompute-governance${EnvironmentSuffix}:*"
               - Sid: ComponentRegistryTableAccess
                 Effect: Allow
                 Action:
@@ -5336,6 +5356,17 @@ Resources:
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}governance/live/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/governance/live/*"
+              # DVP-TSK-B44 (isolation W4i-2): governance/ is ONE shared corpus with UNPREFIXED keys on both planes, held in
+              # the PROD content bucket (no ${EnvironmentSuffix}) and, until the governance flip, read from the legacy bucket
+              # at governance/live/. The grants above resolve to gamma/governance/live and the gamma content bucket on
+              # gamma, so name the unprefixed legacy path and the prod content bucket explicitly. On prod this repeats them.
+              - Sid: S3GovernanceSharedCorpusRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/live/*"
               - Sid: S3ListPrefixes
                 Effect: Allow
                 Action:
@@ -5343,6 +5374,14 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+              # DVP-TSK-B44: ListBucket on the prod content bucket, unconditional like S3ListPrefixes above (so a content
+              # miss answers 404 -> legacy fallback, not 403, once reads leave legacy). On prod this repeats S3ListPrefixes.
+              - Sid: S3ListGovernanceSharedProdContent
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
               # ENC-TSK-I72 / ENC-TSK-I62: the governance sync path propagates a
               # governance_data_dictionary.json change into the governance-policies record
               # (discrete version + updated_at + dictionary_json blob), so the document-api
@@ -8561,6 +8600,42 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt RecomputeGovernanceSchedule.Arn
+
+  # DVP-TSK-B44 (isolation W4i-2): event-driven recompute for the shared governance corpus. governance/ is ONE corpus held
+  # in the PROD content bucket (name carries NO ${EnvironmentSuffix}) on both planes, so BOTH stacks create this rule on
+  # that SAME bucket's default-bus events and each targets its own plane's recompute. The bucket publishes to EventBridge
+  # (EventBridgeEnabled in isolation/w2-content-storage.yaml, prod stack). Rule names are suffixed so the two stacks
+  # coexist in one account/region. Additive: the legacy us-west-1 relay and the hourly backstop above stay until legacy
+  # writes stop. The recompute handler maps this event onto its S3-record path and de-dupes on the sequencer.
+  GovernanceContentChangedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-governance-content-changed${EnvironmentSuffix}"
+      Description: Recompute governance-version when governance/live/ changes in the prod content bucket (DVP-TSK-B44).
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
+          object:
+            key:
+              - prefix: governance/live/
+      Targets:
+        - Id: GovernanceContentChangedRecomputeTarget
+          Arn: !GetAtt RecomputeGovernanceFunction.Arn
+
+  GovernanceContentChangedPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RecomputeGovernanceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GovernanceContentChangedRule.Arn
 
   # Drift alarm — fires when the canonical record disagrees with live S3.
   GovernanceVersionDriftAlarm:

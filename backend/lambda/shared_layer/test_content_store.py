@@ -372,6 +372,32 @@ class TestGovernanceStore(unittest.TestCase):
         self.assertEqual(st.get_object_attributes("governance/live/agents.md", ObjectAttributes=["Checksum"])["VersionId"],
                          f"v-{LEGACY}")
 
+    def test_governance_store_read_pins_legacy_when_content_store_read_is_unset(self):
+        """DVP-TSK-B44: document_api runs dual with CONTENT_STORE_READ unset (agent-documents content-first)."""
+        s3 = _AttrS3()
+        s3.objects[(LEGACY, "governance/live/agents.md")] = (b"legacy", {})
+        s3.objects[(PROD_CONTENT, "governance/live/agents.md")] = (b"content", {})
+        env = {"CONTENT_STORE_MODE": "dual", "GOVERNANCE_STORE_READ": "legacy", "GOVERNANCE_CONTENT_BUCKET": PROD_CONTENT}
+        st = ContentStore.governance_from_env(s3, LEGACY, env)
+        self.assertEqual(st.read_mode, "legacy")
+        self.assertEqual(st.read_bytes("governance/live/agents.md"), b"legacy")
+
+    def test_governance_store_read_wins_over_content_store_read_and_auto_unpins(self):
+        base = {"CONTENT_STORE_MODE": "dual", "GOVERNANCE_CONTENT_BUCKET": PROD_CONTENT}
+        auto = ContentStore.governance_from_env(FakeS3(), LEGACY, dict(base, CONTENT_STORE_READ="legacy",
+                                                                       GOVERNANCE_STORE_READ="auto"))
+        self.assertEqual(auto.read_mode, "auto")
+        legacy = ContentStore.governance_from_env(FakeS3(), LEGACY, dict(base, CONTENT_STORE_READ="auto",
+                                                                         GOVERNANCE_STORE_READ=" Legacy "))
+        self.assertEqual(legacy.read_mode, "legacy")
+
+    def test_without_governance_store_read_the_content_store_read_still_applies(self):
+        base = {"CONTENT_STORE_MODE": "dual", "GOVERNANCE_CONTENT_BUCKET": PROD_CONTENT}
+        self.assertEqual(ContentStore.governance_from_env(FakeS3(), LEGACY, dict(base, CONTENT_STORE_READ="legacy")).read_mode,
+                         "legacy")
+        self.assertEqual(ContentStore.governance_from_env(FakeS3(), LEGACY, dict(base, GOVERNANCE_STORE_READ="")).read_mode,
+                         "auto")
+
 
 class TestGetObjectAttributes(unittest.TestCase):
     def test_dual_reads_content_first_and_falls_back_on_a_miss(self):
