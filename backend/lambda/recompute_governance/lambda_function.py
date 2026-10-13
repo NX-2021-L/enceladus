@@ -41,6 +41,22 @@ def _get_s3():
     return _s3_client
 
 
+def _governance_store():
+    """DVP-TSK-B40 (isolation W4i): every governance/live read goes through content_store's governance store.
+
+    governance/ is ONE shared corpus held only in the PROD content bucket on both planes (unprefixed keys), so the store
+    takes GOVERNANCE_CONTENT_BUCKET, never a per-environment bucket. Without GOVERNANCE_CONTENT_BUCKET, or with
+    CONTENT_STORE_MODE unset/legacy, every call is the same raw call on S3_BUCKET as before; CONTENT_STORE_READ=legacy
+    keeps reads on S3_BUCKET in dual mode. The hash inputs (file set, ChecksumSHA256) are byte-identical in both buckets
+    once the W3 delta has run, so the flip leaves the bundle hash unchanged. Built per call from _get_s3().
+    """
+    try:
+        from content_store import ContentStore  # shipped to the function root by .build_extras
+    except ImportError:  # local tests and the backfill CLI: the canonical shared-layer copy
+        from enceladus_shared.content_store import ContentStore
+    return ContentStore.governance_from_env(_get_s3(), S3_BUCKET)
+
+
 def _get_ddb():
     global _ddb_client
     if _ddb_client is None:
@@ -74,16 +90,13 @@ def _list_canonical_files() -> list[tuple[str, str]]:
 
     agents_md = f"{S3_GOVERNANCE_PREFIX}/agents.md"
     try:
-        _get_s3().head_object(Bucket=S3_BUCKET, Key=agents_md)
+        _governance_store().head_object(agents_md)
         files.append((_s3_key_to_uri(agents_md), agents_md))
     except Exception:
         logger.warning("agents.md not found in S3; skipping from canonical set")
 
-    paginator = _get_s3().get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=f"{S3_GOVERNANCE_PREFIX}/agents/"):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            files.append((_s3_key_to_uri(key), key))
+    for key in _governance_store().list_keys(f"{S3_GOVERNANCE_PREFIX}/agents/"):
+        files.append((_s3_key_to_uri(key), key))
 
     files.sort(key=lambda t: t[0])
     return files
@@ -100,11 +113,7 @@ def _get_file_checksum(s3_key: str) -> tuple[str, str]:
     without AdditionalChecksums will fail here intentionally — governance/live/*
     uploads are required to carry SHA256 checksums per the governance contract).
     """
-    resp = _get_s3().get_object_attributes(
-        Bucket=S3_BUCKET,
-        Key=s3_key,
-        ObjectAttributes=["Checksum"],
-    )
+    resp = _governance_store().get_object_attributes(s3_key, ObjectAttributes=["Checksum"])
     b64 = (resp.get("Checksum") or {}).get("ChecksumSHA256")
     if not b64:
         raise ValueError(
@@ -116,7 +125,7 @@ def _get_file_checksum(s3_key: str) -> tuple[str, str]:
 
 def _read_governance_revision(agents_md_key: str) -> str:
     """Extract governance_revision: from agents.md content."""
-    resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=agents_md_key)
+    resp = _governance_store().get_object(agents_md_key)
     content = resp["Body"].read().decode("utf-8")
     m = re.search(r"(?:^|\n)governance_revision:\s*(\S+)", content)
     return m.group(1).strip() if m else "unknown"

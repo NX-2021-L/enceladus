@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.11",
-  "updated_at": "2026-10-13T17:30:00Z",
-  "last_change_summary": "DVP-TSK-B32: isolation W4j; intent-training/ (coordination_api), unlearning-tombstones/ + unlearning-state/ (unlearning) and gdmp-remediation-state/ (corpus_entropy_gdmp_remediation) write dual through content_store, reads legacy-pinned until the delta; coordination_api gains the per-environment CONTENT_BUCKET for intent-training (governance/ keeps GOVERNANCE_CONTENT_BUCKET)",
+  "version": "2026-10-13.13",
+  "updated_at": "2026-10-13T19:45:00Z",
+  "last_change_summary": "DVP-TSK-B40: isolation W4i; governance/live readers (recompute_governance, governance_drift_check, MCP server catalog/body reads, dispatch_plan_generator, coordination_api governance GET) go through a governance ContentStore (ContentStore.governance_from_env: GOVERNANCE_CONTENT_BUCKET, unprefixed, legacy without it; new get_object_attributes for the hash checksums); behaviour-neutral until the read flip; content_store.py vendored into tools/enceladus-mcp-server (CI-guarded); recompute/drift roles read the shared prod content bucket",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,16 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.13",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B40: isolation W4i; governance/live readers (recompute_governance, governance_drift_check, MCP server catalog/body reads, dispatch_plan_generator, coordination_api governance GET) go through a governance ContentStore (ContentStore.governance_from_env: GOVERNANCE_CONTENT_BUCKET, unprefixed, legacy without it; new get_object_attributes for the hash checksums); behaviour-neutral until the read flip; content_store.py vendored into tools/enceladus-mcp-server (CI-guarded); recompute/drift roles read the shared prod content bucket"
+    },
+    {
+      "version": "2026-10-13.12",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B39: isolation W4k; rhythm-cycle/ (gamma-only) writes dual through content_store -- rhythm_cycle beat artifacts and stanzas plus the six heavy-beat tenants' completion stanzas -- with read_latest and the stanza list/get legacy-pinned; w3_copy_prefixes plans intent-training/, unlearning-*/, gdmp-remediation-state/ and rhythm-cycle/; the gamma content bucket expires rhythm artifacts after 7 days (N49 parity)"
+    },
     {
       "version": "2026-10-13.11",
       "date": "2026-10-13",

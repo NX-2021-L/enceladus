@@ -118,6 +118,55 @@ Resources:
           - Id: expired-delete-markers
             Status: Enabled
             ExpiredObjectDeleteMarker: true
+          # DVP-TSK-B39 (isolation W4k): ENC-TSK-N49 parity for the gamma-only rhythm-cycle/ prefix. jreese-net expires
+          # beat artifacts (and the heavy_integrate/tenant-results/ stanzas under each tier) after 7 days via
+          # tools/apply_rhythm_artifact_lifecycle.py; the dual writes land here too, so the same 7 days apply. These
+          # artifacts are ephemeral beat state, so their noncurrent versions skip the 90-day rollback window.
+          - !If
+            - IsProduction
+            - !Ref AWS::NoValue
+            - Id: RhythmArtifact-sense
+              Status: Enabled
+              Prefix: rhythm-cycle/sense/
+              ExpirationInDays: 7
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 1
+          - !If
+            - IsProduction
+            - !Ref AWS::NoValue
+            - Id: RhythmArtifact-light_integrate
+              Status: Enabled
+              Prefix: rhythm-cycle/light_integrate/
+              ExpirationInDays: 7
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 1
+          - !If
+            - IsProduction
+            - !Ref AWS::NoValue
+            - Id: RhythmArtifact-decide
+              Status: Enabled
+              Prefix: rhythm-cycle/decide/
+              ExpirationInDays: 7
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 1
+          - !If
+            - IsProduction
+            - !Ref AWS::NoValue
+            - Id: RhythmArtifact-heavy_integrate
+              Status: Enabled
+              Prefix: rhythm-cycle/heavy_integrate/
+              ExpirationInDays: 7
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 1
+          - !If
+            - IsProduction
+            - !Ref AWS::NoValue
+            - Id: RhythmArtifact-coherence
+              Status: Enabled
+              Prefix: rhythm-cycle/coherence/
+              ExpirationInDays: 7
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 1
       Tags:
         - Key: project
           Value: enceladus

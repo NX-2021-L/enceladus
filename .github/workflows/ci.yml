@@ -202,6 +202,14 @@ jobs:
           python3 tools/verify_cross_plane_arn_isolation.py
           python3 -m unittest tools.test_verify_cross_plane_arn_isolation
 
+      # DVP-TSK-B40 (isolation W4i, DOC-EF4BC758CCC9): tools/enceladus-mcp-server/content_store.py is a vendored copy of
+      # the shared-layer helper (it reaches every MCP Lambda root and local stdio servers). A drifted copy would split the
+      # governance/ read path between runtimes, so every vendored copy must equal the canonical one.
+      - name: content_store vendored copies match the shared layer (DVP-TSK-B40)
+        run: |
+          set -euo pipefail
+          python3 tools/isolation/sync_content_store.py --check
+
       # ENC-TSK-P15 AC-3/AC-4/AC-5 (ENC-ISS-669): the arm64 architecture
       # contract enumerated ONE repository's CloudFormation template while
       # the fleet spans two -- four production devops-owned Lambdas (plus a

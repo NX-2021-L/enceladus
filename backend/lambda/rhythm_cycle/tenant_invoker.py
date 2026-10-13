@@ -43,8 +43,8 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 
-from artifact_store import read_latest
-from config import CLOUDWATCH_NAMESPACE, PROJECT_ID, S3_BUCKET, TIER_PREDECESSOR, artifact_prefix
+from artifact_store import content_store, read_latest
+from config import CLOUDWATCH_NAMESPACE, PROJECT_ID, TIER_PREDECESSOR, artifact_prefix
 from identity import resolve_identity
 
 logger = logging.getLogger(__name__)
@@ -261,10 +261,9 @@ def write_completion_stanza(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail or {},
     }
-    _s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=result_key,
-        Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+    content_store(_s3).put_object(  # DVP-TSK-B39: dual mode writes the content bucket, then S3_BUCKET
+        result_key,
+        json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
         ContentType="application/json",
     )
 
@@ -274,26 +273,17 @@ def _list_stanza_tenants(result_prefix: str) -> List[str]:
         return []
     prefix = result_prefix.rstrip("/") + "/"
     found: List[str] = []
-    token: Optional[str] = None
-    while True:
-        kwargs: Dict[str, Any] = {"Bucket": S3_BUCKET, "Prefix": prefix}
-        if token:
-            kwargs["ContinuationToken"] = token
-        try:
-            resp = _s3.list_objects_v2(**kwargs)
-        except Exception as exc:
-            logger.warning("list_objects_v2 failed prefix=%s: %s", result_prefix, exc)
-            return found
-        for obj in resp.get("Contents", []):
-            key = obj.get("Key", "")
-            name = key[len(prefix):]
-            if name.endswith(".json"):
-                name = name[: -len(".json")]
-            if name:
-                found.append(name)
-        token = resp.get("NextContinuationToken")
-        if not token:
-            break
+    try:
+        keys = content_store(_s3).list_keys(prefix)  # DVP-TSK-B39: legacy-form keys; legacy-pinned until all writers are dual
+    except Exception as exc:
+        logger.warning("list_objects_v2 failed prefix=%s: %s", result_prefix, exc)
+        return found
+    for key in keys:
+        name = key[len(prefix):]
+        if name.endswith(".json"):
+            name = name[: -len(".json")]
+        if name:
+            found.append(name)
     return found
 
 
@@ -309,7 +299,7 @@ def _read_stanza(result_prefix: Optional[str], tenant_name: str) -> Optional[Dic
         return None
     key = f"{result_prefix.rstrip('/')}/{tenant_name}.json"
     try:
-        resp = _s3.get_object(Bucket=S3_BUCKET, Key=key)
+        resp = content_store(_s3).get_object(key)  # DVP-TSK-B39: legacy-pinned until all writers are dual
         body = json.loads(resp["Body"].read())
         return body if isinstance(body, dict) else None
     except Exception as exc:  # noqa: BLE001 - a read miss must degrade to UNKNOWN, never raise
