@@ -11773,6 +11773,11 @@ def _handle_escalation_decision(
     idem_key = (_gate_header(event, "Idempotency-Key")
                 or str(body.get("idempotencyKey") or body.get("idempotency_key") or "").strip())
     subject_version = body.get("subject_version", body.get("subjectVersion"))
+    # DVP-TSK-B18: the feed view backfills subject.version "" on legacy records that carry none
+    # (DVP-TSK-A38) and the kit echoes it back on decide; "" means "no version seen", not a version
+    # to compare (else every legacy approve is 412 subject_changed). Strict records still need one (428).
+    if isinstance(subject_version, str) and not subject_version.strip():
+        subject_version = None
     candidate_id = str(body.get("candidateId") or body.get("candidate_id") or "").strip()
     client_call_hash = str(body.get("callHash") or body.get("call_hash") or "").strip().lower()
     guidance_note = str(body.get("guidance_note") or "").strip()
