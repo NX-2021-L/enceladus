@@ -26,9 +26,8 @@ export function passkeyNoticeFor(result: string): Notice {
   if (result === 'invalid_session') {
     return {
       type: 'warning',
-      header: 'Sign in again first',
-      content:
-        'To add a passkey, sign in again first, then choose Add a passkey within a few minutes.',
+      header: 'Sign-in expired',
+      content: 'Your sign-in expired before the passkey was added. Choose Add a passkey again.',
     }
   }
   return {

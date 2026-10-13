@@ -35,10 +35,10 @@ describe('PasskeyResultNotice', () => {
     expect(window.location.hash).toBe('#top')
   })
 
-  it('shows the sign-in-again guidance for invalid_session and strips the param', async () => {
+  it('shows the expired-sign-in guidance for invalid_session and strips the param', async () => {
     await mountAt('/?passkey_result=invalid_session')
     expect(container.textContent).toContain(
-      'To add a passkey, sign in again first, then choose Add a passkey within a few minutes.',
+      'Your sign-in expired before the passkey was added. Choose Add a passkey again.',
     )
     expect(window.location.search).toBe('')
   })
