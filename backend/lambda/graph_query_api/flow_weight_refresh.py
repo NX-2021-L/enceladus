@@ -181,16 +181,21 @@ def _list_new_telemetry_objects(
     legacy bucket is ``bucket``) is given, the listing goes through it. Keys stay
     legacy-form; with CONTENT_STORE_READ=legacy it is the same single legacy
     list_objects_v2 as the raw path.
+
+    DVP-TSK-B45 (DVP-ISS-149): PATHWAY_TELEMETRY_PREFIX has no trailing slash and the
+    role grants s3:ListBucket only under ``<prefix>/*``, so a bare-prefix list is
+    AccessDenied. Both paths list ``prefix.rstrip('/') + '/'`` (an empty prefix stays empty).
     """
     out: List[Tuple[str, int]] = []
+    list_prefix = prefix.rstrip("/") + "/" if prefix else prefix
     try:
         if store is not None:
-            entries = store.list_objects(prefix)
+            entries = store.list_objects(list_prefix)
         else:
             paginator = s3_client.get_paginator("list_objects_v2")
             entries = [
                 obj
-                for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+                for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix)
                 for obj in page.get("Contents", []) or []
             ]
         for obj in entries:

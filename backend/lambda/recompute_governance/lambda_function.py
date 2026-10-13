@@ -224,6 +224,40 @@ def _cas_write(
 # Event normalization
 # ---------------------------------------------------------------------------
 
+def _eventbridge_s3_record(event: dict) -> dict | None:
+    """Translate an EventBridge S3 "Object Created" event into the S3 Records shape (DVP-TSK-B44).
+
+    governance/ is ONE shared corpus in the PROD content bucket on both planes; that bucket's EventBridge notifications
+    (rule GovernanceContentChangedRule in 02-compute) invoke each plane's recompute directly, so no cross-region SNS relay
+    is needed once legacy writes stop. The event is {"source": "aws.s3", "detail-type": "Object Created",
+    "detail": {"bucket": {"name"}, "object": {"key", "version-id", "sequencer", ...}}}; the key is raw (not URL-encoded,
+    unlike an S3 Records key). The result is the same record the SNS/raw paths yield, so the dedup, canonical-set filter
+    and CAS write are unchanged. Returns None for anything that is not an EventBridge S3 object event.
+    """
+    if not isinstance(event, dict) or event.get("source") != "aws.s3" or "detail" not in event:
+        return None
+    if str(event.get("detail-type") or "") != "Object Created":
+        logger.info("EventBridge S3 event %r is not Object Created; skipping", event.get("detail-type"))
+        return {}
+    detail = event.get("detail") or {}
+    obj = detail.get("object") or {}
+    key = obj.get("key")
+    if not key:
+        logger.info("EventBridge S3 event carries no object key; skipping")
+        return {}
+    return {
+        "eventSource": "aws:events-s3",
+        "s3": {
+            "bucket": {"name": (detail.get("bucket") or {}).get("name", "")},
+            "object": {
+                "key": key,
+                "sequencer": obj.get("sequencer", ""),
+                "versionId": obj.get("version-id", ""),
+            },
+        },
+    }
+
+
 def _extract_s3_record(event: dict) -> dict | None:
     """Return the first S3 notification record, unwrapping an SNS envelope if present.
 
@@ -237,6 +271,10 @@ def _extract_s3_record(event: dict) -> dict | None:
     forward/back compatibility and for direct-invoke validation. SNS subscription
     confirmations and s3:TestEvent payloads carry no S3 Records and are skipped.
     """
+    eb_record = _eventbridge_s3_record(event)
+    if eb_record is not None:
+        return eb_record or None  # {} = an EventBridge S3 event that is not an actionable Object Created
+
     records = event.get("Records", [])
     if not records:
         return None

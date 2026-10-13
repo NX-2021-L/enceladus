@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.17",
-  "updated_at": "2026-10-13T22:00:00Z",
-  "last_change_summary": "DVP-TSK-983: auth_refresh logs one diagnostic JSON line {\"event\":\"auth_claims\",\"path\":\"callback|refresh\",\"amr\":<list|null>,\"acr\":<str|null>,\"auth_time\":<int|null>,\"token_use\":<str>} wherever an ID token is obtained (the OAuth callback after the code exchange; the refresh grant, which serves both the legacy and kit refresh routes) to learn which amr Cognito emits for passkey vs password sign-in; the payload is decoded without re-verification via the existing _jwt_claims helper because the token was just received from Cognito over TLS; no token, sub, email, username or cookie value is ever logged and a diagnostic failure cannot fail a login. No schema or contract change",
+  "version": "2026-10-13.18",
+  "updated_at": "2026-10-13T23:00:00Z",
+  "last_change_summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. DVP-TSK-B45 (DVP-ISS-149): flow_weight_refresh lists pathway-telemetry with a trailing slash (prefix.rstrip('/') + '/') on both the raw and content_store paths, so the list matches the IAM prefix/* grant. No schema or contract change",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.18",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. DVP-TSK-B45 (DVP-ISS-149): flow_weight_refresh lists pathway-telemetry with a trailing slash (prefix.rstrip('/') + '/') on both the raw and content_store paths, so the list matches the IAM prefix/* grant. No schema or contract change"
+    },
     {
       "version": "2026-10-13.17",
       "date": "2026-10-13",
