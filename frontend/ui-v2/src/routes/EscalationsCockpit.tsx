@@ -20,8 +20,7 @@ import { useCanExecute } from '../auth/useCan'
 import { useEscalationRealtimeNonce } from './GateInboxPanel'
 import { cardNeedsStepUp, decideCard, describeError, describeReceipt, fetchCockpitFeed, type CockpitNotice } from './escalationCockpit'
 import { countByBucket, filterRows, toEscalationRows, type EscalationBucket, type EscalationRow } from './escalationRows'
-import { PushNudge } from '@io-kit/notify/react'
-import '@io-kit/notify/notify.css'
+import { EscalationPushNudge } from '../notifications/EscalationPushNudge'
 import { notifyApi } from '../notifications/notifyApi'
 import './escalations.css'
 
@@ -133,7 +132,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
 
   return (
     <>
-      {!compact && <PushNudge api={notifyApi} />}
+      {!compact && <EscalationPushNudge api={notifyApi} className="ev2-esc__notice" />}
       {focusId && !feedQuery.isPending && !focusRow && (
         <div className="ev2-esc__notice">
           <Alert type="warning" header={`${focusId} was not found`}>It is not in the pending queue or the recent decisions; it may have expired or belong to a project you cannot see.</Alert>
