@@ -5,7 +5,7 @@ import { ExecuteMachine, createDegradedCounter, createExecuteClient, mintedField
 import { resolveCall } from '@io-kit/schema_form/execute'
 import { adaptResponse, buildEnvelope, createActionsTransport, unwrapRpc } from '../api/actions'
 import { ACTION_COMMANDS, matchActionCommands } from './commands'
-import { BESPOKE_ACTIONS, FLAGGED_ACTIONS, loadActionRegistry } from './registry'
+import { BESPOKE_ACTIONS, DEFAULT_ON_ACTIONS, DEFAULT_ON_FLAGS, FLAGGED_ACTIONS, loadActionRegistry } from './registry'
 import capsFull from './capsFull.json'
 
 describe('generic coverage registry', () => {
@@ -14,11 +14,15 @@ describe('generic coverage registry', () => {
     if (existsSync(upstream)) expect(JSON.parse(readFileSync(upstream, 'utf8'))).toEqual(capsFull)
     const flagged = (capsFull.actions as Array<{ name: string; flag?: string }>).filter((a) => a.flag).map((a) => a.name)
     expect([...FLAGGED_ACTIONS].sort()).toEqual(flagged.sort())
+    // DVP-TSK-B35: the default-on list is exactly the actions behind a default-on flag
+    const live = (capsFull.actions as Array<{ name: string; flag?: string }>).filter((a) => a.flag && DEFAULT_ON_FLAGS.has(a.flag)).map((a) => a.name)
+    expect([...DEFAULT_ON_ACTIONS].sort()).toEqual(live.sort())
   })
 
-  it('covers all 82 flags-off actions; palette lists each without a bespoke route', async () => {
+  it('covers all 86 live actions (82 flags-off + 4 escalation); palette lists each without a bespoke route', async () => {
     const reg = await loadActionRegistry()
-    expect(reg.contracts).toHaveLength(82)
+    expect(reg.contracts).toHaveLength(86)
+    for (const a of DEFAULT_ON_ACTIONS) expect(reg.get(a)).toBeDefined()
     expect(reg.contracts.every((c) => c.inputSchema)).toBe(true)
     const names = new Set(ACTION_COMMANDS.map((c) => c.name))
     for (const c of reg.contracts) expect(names.has(c.action)).toBe(!BESPOKE_ACTIONS.has(c.action))

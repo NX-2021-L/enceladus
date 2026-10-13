@@ -3,8 +3,11 @@
 ## UI parity: generic coverage by default (DVP-TSK-895, supersedes route-or-waiver)
 
 `enceladus.jreese.net` runs the io-kit parity job (`.github/workflows/parity-report.yml`) as a
-blocking ratchet against `frontend/ui-v2/parity/baseline.json` (flags-off basis: flag-gated actions
-are excluded). Since DVP-TSK-895 the baseline is 82 covered / 0 partial / 0 missing of 82.
+blocking ratchet against `frontend/ui-v2/parity/baseline.json` (flags-off basis plus the flags that
+are ON by default in prod, `PARITY_FLAGS` in the workflow; every other flag-gated action is excluded).
+Since DVP-TSK-B35 the baseline is 86 covered / 0 partial / 0 missing of 86: the 82 unflagged actions
+plus the 4 `enable_escalation_primitive` actions. When a flag turns on in prod, add it to `PARITY_FLAGS`
+and to `DEFAULT_ON_FLAGS` in `src/actions/registry.ts`, and bump the baseline in the same PR.
 
 **A new registry action needs no route, no map entry and no waiver.** Every action in
 `tools/enceladus-mcp-server/parity/caps.json` is covered generically: the command palette lists it,
