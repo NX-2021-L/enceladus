@@ -269,6 +269,16 @@ class TestCopyAndConditionalPuts(unittest.TestCase):
         self.assertEqual(content_call[3]["IfNoneMatch"], "*")
         self.assertNotIn("ServerSideEncryption", content_call[3])
 
+    def test_conditional_put_drops_if_match_for_content(self):
+        # ETags differ across buckets (SSE-KMS); legacy arbitrates IfMatch, content is written unconditionally.
+        s3 = FakeS3()
+        store(s3, "dual", read="legacy").put_object("gamma/agent-documents/v/1.md", b"v", IfMatch='"abc"')
+        content_call = [c for c in s3.calls if c[1] == CONTENT][0]
+        legacy_call = [c for c in s3.calls if c[1] == LEGACY][0]
+        self.assertNotIn("IfMatch", content_call[3])
+        self.assertEqual(legacy_call[3]["IfMatch"], '"abc"')
+        self.assertIn((CONTENT, "agent-documents/v/1.md"), s3.objects)
+
     def test_conditional_put_legacy_precondition_failed_never_touches_content(self):
         s3 = FakeS3()
         s3.objects[(LEGACY, "gamma/agent-documents/v/1.md")] = (b"old", {})

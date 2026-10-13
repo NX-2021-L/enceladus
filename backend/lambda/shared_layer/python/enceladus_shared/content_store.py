@@ -172,16 +172,19 @@ class ContentStore:
         A conditional put (IfNoneMatch / IfMatch) in dual mode is the exception (DVP-TSK-B14): the legacy bucket is
         written FIRST and arbitrates. If it raises (e.g. PreconditionFailed because the immutable object exists) the
         error propagates and the content bucket is never touched. Only then is the content bucket written; a
-        PreconditionFailed there is swallowed, because the W3 snapshot already holds that immutable object. The legacy
-        response is returned in this case.
+        PreconditionFailed there is swallowed, because the W3 snapshot already holds that immutable object. IfMatch is
+        dropped for the content write: legacy already arbitrated it, and an ETag never matches across the two buckets
+        (SSE-KMS), so forwarding it would make every content write fail silently. The legacy response is returned.
         """
         targets = self._targets_for_write(key)
         if self.mode == "dual" and any(c in kwargs for c in _CONDITIONAL_KWARGS):
             legacy_bucket, legacy_k = targets[1]
             legacy_resp = self.s3.put_object(Bucket=legacy_bucket, Key=legacy_k, Body=body, **dict(kwargs))
             content_bucket, content_k = targets[0]
+            content_kw = self._content_kwargs(kwargs)
+            content_kw.pop("IfMatch", None)
             try:
-                self.s3.put_object(Bucket=content_bucket, Key=content_k, Body=body, **self._content_kwargs(kwargs))
+                self.s3.put_object(Bucket=content_bucket, Key=content_k, Body=body, **content_kw)
             except Exception as exc:
                 if not _is_precondition_failed(exc):
                     raise
