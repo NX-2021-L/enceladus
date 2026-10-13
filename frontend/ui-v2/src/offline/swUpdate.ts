@@ -1,81 +1,133 @@
 /**
- * ENC-TSK-M37 / ENC-TSK-M57 -- the "Refresh App" control's force-activate path.
+ * DVP-TSK-B42 -- "App refresh" is a deterministic, brute-force reset.
  *
- * M37 introduced the "App refresh" menu item (AppShell.tsx, above Log out) so a
- * waiting service worker could be force-activated instead of only ever showing
- * the dismiss-only "App update available" Flashbar. It captured registerSW's
- * return value (vite-plugin-pwa's `updateSW`, semantics: skipWaiting + reload
- * once the new worker takes control) via setUpdateSW().
+ * The previous path (ENC-TSK-M37 / M57, ENC-ISS-525) tried to be clever: force a
+ * service-worker update check, skipWaiting a waiting worker, wait for
+ * controllerchange, fall back to a plain reload. It was flaky -- a stale shell,
+ * a hung update() or a never-firing controllerchange left the app wrong or
+ * looking dead. io's spec replaces it: one press, everything stops, the server
+ * signals a fresh app, the client deletes everything it holds and hard-reloads.
  *
- * M57 (ENC-ISS-525): that alone was not enough. `updateSW(true)` only activates
- * a worker that is ALREADY waiting -- but an always-loaded SPA may not have
- * re-checked for a new service worker since the tab opened, so after a fresh
- * gamma deploy there is often NO waiting worker yet and `updateSW(true)`
- * silently no-ops (it does not even reload). Clicking "App refresh" then appears
- * dead and the user is forced into a manual hard reload. `refreshApp()` now:
- *   1. forces `registration.update()` so the browser notices a freshly deployed
- *      worker,
- *   2. activates it (skipWaiting) and reloads when one is waiting, and
- *   3. always falls back to a real reload so the freshest shell loads even when
- *      no new worker is found (the app shell is served NetworkFirst, so a reload
- *      pulls the latest index.html + content-hashed bundles from the network).
+ *   1. a full-screen blocking "Refreshing…" overlay, immediately
+ *   2. GET /api/v1/app/refresh (Clear-Site-Data: cache, storage, executionContexts; NOT cookies)
+ *   3. unregister every service worker registration
+ *   4. delete every CacheStorage cache
+ *   5. localStorage.clear() + sessionStorage.clear()
+ *   6. delete every IndexedDB database
+ *   7. location.replace('/?_r=' + Date.now())
+ *
+ * Every step has a timeout and a try/catch, so ANY failure or hang still ends in
+ * step 7. Normal-operation service-worker auto-update (registerSW in main.tsx,
+ * watchForUpdates) is untouched; only this manual path is replaced.
  */
 
-type UpdateSWFn = (reloadPage?: boolean) => Promise<void>
+import { signalAppRefresh } from '../api/appRefresh'
 
-let updateSWRef: UpdateSWFn | null = null
+/** Cap on the server round trip. */
+export const REFRESH_FETCH_TIMEOUT_MS = 4000
+/** Cap on each client-side deletion step. */
+export const REFRESH_STEP_TIMEOUT_MS = 2000
+const OVERLAY_ID = 'ev2-refresh-overlay'
 
-/** Called once from main.tsx with the function registerSW() returns. */
-export function setUpdateSW(fn: UpdateSWFn): void {
-  updateSWRef = fn
-}
-
-/** skipWaiting the waiting worker and reload once it takes control. Used when
- *  vite-plugin-pwa's `updateSW` was never captured. Reloads on a timeout too,
- *  in case `controllerchange` never fires (some browsers/edge cases). */
-function activateWaitingWorker(registration: ServiceWorkerRegistration): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = () => {
-      if (settled) return
-      settled = true
-      navigator.serviceWorker.removeEventListener('controllerchange', finish)
-      window.location.reload()
-      resolve()
-    }
-    navigator.serviceWorker.addEventListener('controllerchange', finish)
-    registration.waiting?.postMessage({ type: 'SKIP_WAITING' })
-    setTimeout(finish, 3000)
-  })
-}
-
-/** Force-loads the newest deployed build. Forces an update check first (an
- *  always-open SPA may not have re-checked since load), activates a waiting
- *  worker when present, and otherwise falls back to a plain reload so the
- *  NetworkFirst app shell still pulls the latest index.html + hashed bundles.
- *  ENC-ISS-525. */
-export async function refreshApp(): Promise<void> {
+/** Run one reset step: never throws, never outlives `ms`. */
+async function runStep(work: () => unknown, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    if ('serviceWorker' in navigator) {
-      const registration = await navigator.serviceWorker.getRegistration()
-      if (registration) {
-        // Force the browser to look for a newer worker before we conclude there
-        // is nothing to activate -- this is the check M37 was missing, and the
-        // reason a stale-but-open tab's "App refresh" click did nothing.
-        await registration.update()
-        if (registration.waiting) {
-          if (updateSWRef) {
-            // vite-plugin-pwa's updateSW: skipWaiting + reload-on-controllerchange.
-            await updateSWRef(true)
-            return
-          }
-          await activateWaitingWorker(registration)
-          return
-        }
-      }
-    }
+    await Promise.race([
+      Promise.resolve().then(work),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms)
+      }),
+    ])
   } catch {
-    // Any service-worker error -> fall through to a plain reload below.
+    // Any failure falls through to the next step -- the reload must always happen.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
-  window.location.reload()
+}
+
+/** Blocking overlay, appended synchronously to <body> (outside React) and the app made inert behind it. */
+function showRefreshOverlay(): void {
+  try {
+    if (document.getElementById(OVERLAY_ID)) return
+    const overlay = document.createElement('div')
+    overlay.id = OVERLAY_ID
+    overlay.className = 'ev2-refresh-overlay'
+    overlay.setAttribute('role', 'alertdialog')
+    overlay.setAttribute('aria-modal', 'true')
+    overlay.setAttribute('aria-busy', 'true')
+    overlay.setAttribute('aria-label', 'Refreshing')
+    const text = document.createElement('p')
+    text.className = 'ev2-refresh-overlay__text'
+    text.textContent = 'Refreshing…'
+    overlay.appendChild(text)
+    document.body.appendChild(overlay)
+    // Keyboard and assistive tech stop too: nothing behind the overlay is reachable.
+    document.getElementById('root')?.setAttribute('inert', '')
+  } catch {
+    // A missing DOM must not stop the reset.
+  }
+}
+
+async function unregisterServiceWorkers(): Promise<void> {
+  if (!('serviceWorker' in navigator)) return
+  const registrations = await navigator.serviceWorker.getRegistrations()
+  await Promise.allSettled(registrations.map((registration) => registration.unregister()))
+}
+
+async function deleteAllCaches(): Promise<void> {
+  if (typeof caches === 'undefined') return
+  const keys = await caches.keys()
+  await Promise.allSettled(keys.map((key) => caches.delete(key)))
+}
+
+function clearWebStorage(): void {
+  // Separate try blocks: a throwing localStorage must not skip sessionStorage.
+  try {
+    localStorage.clear()
+  } catch {
+    /* storage disabled */
+  }
+  try {
+    sessionStorage.clear()
+  } catch {
+    /* storage disabled */
+  }
+}
+
+async function deleteAllIndexedDb(): Promise<void> {
+  if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') return
+  const databases = await indexedDB.databases()
+  await Promise.allSettled(
+    databases.map(
+      (db) =>
+        new Promise<void>((resolve) => {
+          if (!db.name) return resolve()
+          const request = indexedDB.deleteDatabase(db.name)
+          // `blocked` = another connection is still open; the delete completes once the reload closes it.
+          request.onsuccess = request.onerror = request.onblocked = () => resolve()
+        }),
+    ),
+  )
+}
+
+let running: Promise<void> | null = null
+
+/** One press resets the app. Resolves only if the browser did not navigate away; a repeat press shares the run. */
+export function refreshApp(): Promise<void> {
+  if (running) return running
+  showRefreshOverlay()
+  running = (async () => {
+    try {
+      await runStep(signalAppRefresh, REFRESH_FETCH_TIMEOUT_MS)
+      await runStep(unregisterServiceWorkers, REFRESH_STEP_TIMEOUT_MS)
+      await runStep(deleteAllCaches, REFRESH_STEP_TIMEOUT_MS)
+      await runStep(clearWebStorage, REFRESH_STEP_TIMEOUT_MS)
+      await runStep(deleteAllIndexedDb, REFRESH_STEP_TIMEOUT_MS)
+    } finally {
+      window.location.replace('/?_r=' + Date.now())
+      running = null
+    }
+  })()
+  return running
 }

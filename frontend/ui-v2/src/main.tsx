@@ -12,7 +12,6 @@ import { RealtimeFeedProvider } from './realtime/RealtimeFeedProvider'
 import { CorpusProvider } from './search/CorpusProvider'
 import { AuthGate } from './auth/AuthGate'
 import { useOfflineStore } from './store/offlineStore'
-import { setUpdateSW } from './offline/swUpdate'
 // DVP-TSK-956: kit 0.4.0 standalone primitives (the safe-area insets, top-inset
 // class and no-focus-zoom class). Everything in it sits in cascade layers, so the
 // unlayered design-system-2 styles always win and the desktop look is unchanged.
@@ -31,10 +30,9 @@ installIosFocusZoomGuard()
 void queryClient.prefetchQuery(projectRegistryQueryOptions)
 
 if ('serviceWorker' in navigator) {
-  // ENC-TSK-M37: capture registerSW's return value so the "App refresh"
-  // control can force skipWaiting + reload (offline/swUpdate.ts) instead of
-  // only ever showing the dismiss-only "update available" banner.
-  const updateSW = registerSW({
+  // Normal-operation service-worker auto-update (registerSW + watchForUpdates). The manual
+  // "App refresh" control no longer goes through here: DVP-TSK-B42 made it a full reset (offline/swUpdate.ts).
+  registerSW({
     immediate: true,
     onNeedRefresh() {
       useOfflineStore.getState().setSwUpdateReady(true)
@@ -49,7 +47,6 @@ if ('serviceWorker' in navigator) {
       if (registration) watchForUpdates(registration)
     },
   })
-  setUpdateSW(updateSW)
 }
 
 ensureNotifySubscription()
