@@ -72,9 +72,9 @@ class InternalProfileMaskingTests(unittest.TestCase):
 
     def test_base_url_defaults_match_server_py(self):
         cfg = elr_config.InternalProfileConfig()
-        self.assertEqual(cfg.base_url("tracker"), "https://jreese.net/api/v1/tracker")
-        self.assertEqual(cfg.base_url("coordination"), "https://jreese.net/api/v1/coordination")
-        self.assertEqual(cfg.base_url("health"), "https://jreese.net/api/v1/health")
+        self.assertEqual(cfg.base_url("tracker"), "https://enceladus.jreese.net/api/v1/tracker")
+        self.assertEqual(cfg.base_url("coordination"), "https://enceladus.jreese.net/api/v1/coordination")
+        self.assertEqual(cfg.base_url("health"), "https://enceladus.jreese.net/api/v1/health")
         self.assertEqual(
             cfg.base_url("graph_query"),
             "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",
@@ -112,7 +112,7 @@ class McpHttpProfileMaskingTests(unittest.TestCase):
 
     def test_gateway_url_default(self):
         cfg = elr_config.McpHttpProfileConfig()
-        self.assertEqual(cfg.gateway_url, "https://jreese.net/api/v1/coordination/mcp")
+        self.assertEqual(cfg.gateway_url, "https://enceladus.jreese.net/api/v1/coordination/mcp")
 
     def test_gateway_url_env_override(self):
         with patch.dict("os.environ", {"ENCELADUS_MCP_GATEWAY_URL": "https://gateway.invalid/mcp"}, clear=False):

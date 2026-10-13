@@ -30,7 +30,7 @@ from urllib import request as _urllib_request
 
 DEFAULT_API_BASE = os.environ.get(
     "COORDINATION_API_BASE",
-    "https://jreese.net/api/v1/coordination",
+    "https://enceladus.jreese.net/api/v1/coordination",
 )
 DEFAULT_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 

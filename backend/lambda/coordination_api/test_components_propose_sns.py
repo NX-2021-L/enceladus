@@ -103,7 +103,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
         self.assertEqual(payload["project_id"], "enceladus")
         self.assertEqual(payload["proposing_agent_session_id"], "agent-session-sns-1")
         self.assertEqual(payload["requested_minimum_transition_type"], "external_deploy")
-        self.assertIn("jreese.net/components", payload["pwa_deep_link"])
+        self.assertIn("enceladus.jreese.net/components", payload["pwa_deep_link"])
 
     def test_no_topic_arn_skips_publish_silently(self):
         with mock.patch.object(coordination_lambda, "COMPONENT_EVENTS_TOPIC_ARN", ""), \

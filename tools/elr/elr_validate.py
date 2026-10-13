@@ -74,7 +74,7 @@ SESSION_CACHE_FILE = SESSION_CACHE_DIR / "governance_data_dictionary.json"
 # _governance_get() retrieves it for file_name="governance_data_dictionary.json":
 # GET {GOVERNANCE_API_BASE}/governance_data_dictionary.json via the
 # governance API's internal-key auth (X-Coordination-Internal-Key),
-# where GOVERNANCE_API_BASE defaults to https://jreese.net/api/v1/governance.
+# where GOVERNANCE_API_BASE defaults to https://enceladus.jreese.net/api/v1/governance.
 # elr_lib.config's "governance" API entry mirrors this base/key chain
 # verbatim, so InternalClient(api="governance") reproduces the same route.
 DICTIONARY_FILE_PATH = "/governance_data_dictionary.json"

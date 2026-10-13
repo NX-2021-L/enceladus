@@ -1886,7 +1886,7 @@ health = None
 fallback_reason = None
 capabilities_status = "unreachable"
 governance_hash = ""
-coordination_api_base = "https://jreese.net/api/v1/coordination"
+coordination_api_base = "https://enceladus.jreese.net/api/v1/coordination"
 try:
     import dispatch_plan_generator as dpg
     health = dpg.test_connection_health()
