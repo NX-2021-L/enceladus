@@ -5,3 +5,7 @@
 # `import corpus_entropy_core` resolves at runtime; keep in lockstep with the
 # canonical owner (backend/lambda/corpus_entropy_engine/corpus_entropy_core.py).
 backend/lambda/corpus_entropy_engine/corpus_entropy_core.py
+#
+# DVP-TSK-B32 (isolation W4j, DOC-EF4BC758CCC9): the dual-path S3 helper, so `import content_store` resolves for the
+# gdmp-remediation-state/ writer. Canonical copy lives in the shared layer.
+backend/lambda/shared_layer/python/enceladus_shared/content_store.py

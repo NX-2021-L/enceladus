@@ -18366,27 +18366,19 @@ def _handle_agent_session_unclaim_sweep(event: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _intent_training_s3_get(key: str) -> str:
-    import boto3
-
     bucket = _intent_training.INTENT_TRAINING_BUCKET
     if not bucket:
         raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
-    resp = boto3.client("s3").get_object(Bucket=bucket, Key=key)
-    return resp["Body"].read().decode("utf-8")
+    # DVP-TSK-B32 (isolation W4j): through content_store; reads stay on INTENT_TRAINING_BUCKET until the delta.
+    return _intent_training.store_get_text(key, _get_s3())
 
 
 def _intent_training_s3_put(key: str, body: str) -> None:
-    import boto3
-
     bucket = _intent_training.INTENT_TRAINING_BUCKET
     if not bucket:
         raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
-    boto3.client("s3").put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=body.encode("utf-8"),
-        ContentType="application/json",
-    )
+    # DVP-TSK-B32: dual mode writes the per-environment content bucket, then INTENT_TRAINING_BUCKET.
+    _intent_training.store_put_text(key, body, _get_s3())
 
 
 def _build_training_rank_fn(labels: List[Dict[str, Any]]):

@@ -80,6 +80,70 @@ def _prefix_key(suffix: str) -> str:
     return f"{base}/{suffix}"
 
 
+_S3: Any = None
+_STORE: Any = None
+_STORE_KEY: Optional[Tuple[Any, ...]] = None
+
+
+def _s3_client() -> Any:
+    global _S3
+    if _S3 is None:
+        import boto3
+
+        _S3 = boto3.client("s3")
+    return _S3
+
+
+def content_store(s3_client: Any = None) -> Any:
+    """DVP-TSK-B32 (isolation W4j): every intent-training/ object access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the per-environment CONTENT_BUCKET (key without the legacy-only S3_ENV_PREFIX) AND
+    INTENT_TRAINING_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every read (labels, active pointer, versions,
+    inference boosts) on INTENT_TRAINING_BUCKET until the W3 delta. coordination_api is already dual for governance/
+    (DVP-TSK-B22, its own GOVERNANCE_CONTENT_BUCKET), so no CONTENT_BUCKET means legacy here rather than a config error.
+    Mode legacy is a raw call on INTENT_TRAINING_BUCKET. Bound to the given client (default: one lazy boto3 client);
+    rebuilt when the client or the config changes. Callers only use it when INTENT_TRAINING_BUCKET is set.
+    """
+    global _STORE, _STORE_KEY
+    client = s3_client if s3_client is not None else _s3_client()
+    mode = (os.environ.get("CONTENT_STORE_MODE") or "legacy").strip().lower()
+    content_bucket = (os.environ.get("CONTENT_BUCKET") or "").strip()
+    if not content_bucket:
+        mode = "legacy"
+    cfg = (
+        mode,
+        content_bucket,
+        (os.environ.get("CONTENT_STORE_READ") or "auto").strip().lower(),
+        INTENT_TRAINING_BUCKET,
+        os.environ.get("S3_ENV_PREFIX", ""),
+    )
+    if _STORE is None or _STORE.s3 is not client or _STORE_KEY != cfg:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        _STORE = ContentStore(
+            client,
+            mode=cfg[0],
+            content_bucket=cfg[1],
+            legacy_bucket=cfg[3],
+            legacy_key_prefix=cfg[4],
+            read_mode=cfg[2],
+        )
+        _STORE_KEY = cfg
+    return _STORE
+
+
+def store_get_text(key: str, s3_client: Any = None) -> str:
+    """Read one intent-training/ object (legacy-form key) through content_store (DVP-TSK-B32)."""
+    return content_store(s3_client).get_object(key)["Body"].read().decode("utf-8")
+
+
+def store_put_text(key: str, body: str, s3_client: Any = None) -> None:
+    """Write one intent-training/ JSON object (legacy-form key) through content_store (DVP-TSK-B32)."""
+    content_store(s3_client).put_object(key, body.encode("utf-8"), ContentType="application/json")
+
+
 def is_training_hard_disabled() -> bool:
     return TRAINING_HARD_DISABLED
 
@@ -444,20 +508,7 @@ def load_inference_record_boosts(
         return {}
     if not INTENT_TRAINING_BUCKET:
         return {}
-    getter = get_object
-    if getter is None:
-        try:
-            import boto3
-
-            s3 = boto3.client("s3")
-
-            def _default_get(key: str) -> str:
-                resp = s3.get_object(Bucket=INTENT_TRAINING_BUCKET, Key=key)
-                return resp["Body"].read().decode("utf-8")
-
-            getter = _default_get
-        except Exception:  # noqa: BLE001
-            return {}
+    getter = get_object if get_object is not None else store_get_text  # DVP-TSK-B32: via content_store
     try:
         _pointer, active_version = load_active_weights_from_store(getter)
         if not active_version or active_version.get("training_disabled"):
