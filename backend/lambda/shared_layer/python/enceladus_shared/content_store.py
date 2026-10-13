@@ -158,6 +158,27 @@ class ContentStore:
                         return list(seen)[:max_keys]
         return list(seen)
 
+    def list_objects(self, prefix: str) -> List[Dict[str, Any]]:
+        """Like ``list_keys`` but returns the listing entries (``Key`` rewritten to legacy form; ``LastModified`` and
+        ``Size`` as S3 reports them) for callers that need the object timestamp (DVP-TSK-B20: the flow_weight refresh
+        watermark). Dual mode merges both buckets; a key present in both keeps the OLDER ``LastModified``, because the
+        W3 copy re-stamped the content-bucket object and the original write time is the legacy one."""
+        seen: Dict[str, Dict[str, Any]] = {}
+        for bucket, p, to_legacy in self._list_sources(prefix):
+            pag = self.s3.get_paginator("list_objects_v2")
+            for page in pag.paginate(Bucket=bucket, Prefix=p):
+                for o in page.get("Contents", []) or []:
+                    entry = dict(o)
+                    entry["Key"] = to_legacy(o["Key"])
+                    prior = seen.get(entry["Key"])
+                    if prior is None:
+                        seen[entry["Key"]] = entry
+                        continue
+                    lm, prior_lm = entry.get("LastModified"), prior.get("LastModified")
+                    if lm is not None and (prior_lm is None or lm < prior_lm):
+                        seen[entry["Key"]] = entry
+        return list(seen.values())
+
     def _list_sources(self, prefix: str):
         legacy = (self.legacy_bucket, prefix, lambda k: k)
         content = (self.content_bucket, self.content_key(prefix), lambda k: self.legacy_key_prefix + k)
