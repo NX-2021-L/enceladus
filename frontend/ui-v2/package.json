@@ -21,7 +21,7 @@
     "@io-kit/gates": "0.1.2",
     "@io-kit/md": "1.2.0",
     "@io-kit/notify": "0.3.1",
-    "@io-kit/recipes": "0.1.0",
+    "@io-kit/recipes": "0.1.1",
     "@io-kit/schema_form": "0.2.1",
     "@io-kit/search": "1.0.1",
     "@io-kit/search-ui": "1.0.11",
