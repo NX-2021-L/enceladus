@@ -5,6 +5,7 @@ Lambda endpoint for refreshing Cognito tokens and vending GitHub App tokens.
 Routes (via API Gateway proxy):
     POST /api/v1/auth/refresh          — Cognito token refresh
     POST /api/v1/auth/logout           — revoke the refresh token, clear the auth cookies (DVP-TSK-B41)
+    GET  /api/v1/app/refresh           — Clear-Site-Data: cache, storage, executionContexts (DVP-TSK-B42)
     GET  /api/v1/auth/github-token     — GitHub App installation access token
     OPTIONS /api/v1/auth/*             (CORS preflight)
 
@@ -680,6 +681,39 @@ def _handle_logout(event: Dict) -> Dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-B42: app refresh (server half of the PWA's brute-force reset)
+# ---------------------------------------------------------------------------
+# GET /api/v1/app/refresh tells the browser to drop everything it holds for this
+# origin: HTTP cache, storage (localStorage/sessionStorage/IndexedDB/service
+# workers/CacheStorage) and running execution contexts. "cookies" is
+# deliberately NOT listed, so the session survives and io stays signed in.
+# The SPA calls it first, then deletes the same things itself and hard-reloads.
+
+APP_REFRESH_CLEAR_SITE_DATA = '"cache", "storage", "executionContexts"'
+
+
+def _handle_app_refresh(event: Dict) -> Dict:
+    # Clear-Site-Data is honoured on any response, including a cross-site
+    # subresource load, so a third-party page could otherwise make a visitor's
+    # browser wipe this origin's storage. Browsers label that load
+    # Sec-Fetch-Site: cross-site/same-site; the SPA's own fetch is same-origin
+    # and a typed URL is "none". An absent header (old client, curl) is allowed.
+    fetch_site = _header(event, "sec-fetch-site").lower()
+    if fetch_site not in ("", "same-origin", "none"):
+        return _kit_error(403, "AUTH_FORBIDDEN", "same-origin requests only")
+    logger.info(json.dumps({"event": "app_refresh"}, separators=(",", ":")))
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "Clear-Site-Data": APP_REFRESH_CLEAR_SITE_DATA,
+        },
+        "body": json.dumps({"refreshed": True}),
+    }
+
+
 def _load_policy() -> Dict[str, Any]:
     with open(_POLICY_PATH, encoding="utf-8") as fh:
         return json.load(fh)
@@ -764,6 +798,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     if method == "GET" and path.rstrip("/").endswith("/auth/manifest"):
         return _handle_manifest(event)
+
+    # DVP-TSK-B42: server half of the PWA's "App refresh" reset.
+    if method == "GET" and path.rstrip("/").endswith("/app/refresh"):
+        return _handle_app_refresh(event)
 
     if method != "POST":
         return _error(405, "Method not allowed.")

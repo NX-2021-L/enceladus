@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.15",
+  "version": "2026-10-13.16",
   "updated_at": "2026-10-13T22:00:00Z",
-  "last_change_summary": "DVP-TSK-B41: auth_refresh gains POST /api/v1/auth/logout (RouteAuthLogout in 03-api.yaml): same X-Requested-With: io-kit + allow-listed Origin gate as the kit refresh route; revokes the refresh-token cookie at {COGNITO_HOSTED_UI_DOMAIN}/oauth2/revoke (best-effort, never fails the logout) and returns 200 {logged_out:true, logout_url} with Max-Age=0 Set-Cookie for enceladus_id_token, enceladus_refresh_token (Path=/) and enceladus_session_at (Path=/enceladus); logout_url is always the Hosted-UI {domain}/logout?client_id=..&logout_uri=<origin of WEBUI_OAUTH_REDIRECT_URI>/ (a LogoutURL registered on the PWA client for prod and gamma) unless the optional kill-switch env COGNITO_HOSTED_LOGOUT is 'false' (then null); no new CFN parameter; the SPA performLogout now awaits this call before navigating. No schema or existing-contract change",
+  "last_change_summary": "DVP-TSK-B42: auth_refresh gains GET /api/v1/app/refresh (RouteAppRefresh in 03-api.yaml), the server half of the PWA App refresh reset: public and stateless, 200 with Clear-Site-Data: \"cache\", \"storage\", \"executionContexts\" (never cookies, the session survives), Cache-Control: no-store and body {refreshed:true}; logs one identifier-free line {\"event\":\"app_refresh\"}; a request labelled Sec-Fetch-Site cross-site or same-site gets 403 without the header so a third-party page cannot make a browser wipe the origin. ui-v2 refreshApp is now a deterministic reset (blocking overlay, this call, unregister service workers, delete caches, clear web storage, delete IndexedDB, location.replace /?_r=<now>), each step bounded and failure-tolerant; SW auto-update for normal operation is unchanged. No schema or existing-contract change",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.16",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B42: auth_refresh gains GET /api/v1/app/refresh (RouteAppRefresh in 03-api.yaml), the server half of the PWA App refresh reset: public and stateless, 200 with Clear-Site-Data: \"cache\", \"storage\", \"executionContexts\" (never cookies, the session survives), Cache-Control: no-store and body {refreshed:true}; logs one identifier-free line {\"event\":\"app_refresh\"}; a request labelled Sec-Fetch-Site cross-site or same-site gets 403 without the header so a third-party page cannot make a browser wipe the origin. ui-v2 refreshApp is now a deterministic reset (blocking overlay, this call, unregister service workers, delete caches, clear web storage, delete IndexedDB, location.replace /?_r=<now>), each step bounded and failure-tolerant; SW auto-update for normal operation is unchanged. No schema or existing-contract change"
+    },
     {
       "version": "2026-10-13.15",
       "date": "2026-10-13",

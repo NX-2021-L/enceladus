@@ -224,3 +224,28 @@
   align-items: stretch;
   align-content: start;
 }
+
+/* DVP-TSK-B42: full-screen blocking overlay while "App refresh" resets the app
+   (offline/swUpdate.ts appends it straight to <body>, outside React, so it
+   shows even if the React tree is wedged). It swallows every pointer event. */
+.ev2-refresh-overlay {
+  position: fixed;
+  inset: var(--space-0);
+  /* io-inset-exempt top right bottom left: a full-screen blocking backdrop
+   * paints under the notch and home indicator by design; its centred text sits
+   * well inside every safe-area inset. */
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--enc-void);
+  cursor: progress;
+}
+.ev2-refresh-overlay__text {
+  margin: var(--space-0);
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-2xl);
+  line-height: var(--lh-tight);
+  color: var(--fg-display);
+}
