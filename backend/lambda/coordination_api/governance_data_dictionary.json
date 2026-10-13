@@ -1,7 +1,7 @@
 {
   "version": "2026-10-13.18",
   "updated_at": "2026-10-13T23:00:00Z",
-  "last_change_summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. No schema or contract change",
+  "last_change_summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. DVP-TSK-B45 (DVP-ISS-149): flow_weight_refresh lists pathway-telemetry with a trailing slash (prefix.rstrip('/') + '/') on both the raw and content_store paths, so the list matches the IAM prefix/* grant. No schema or contract change",
   "owners": [
     "enceladus-platform"
   ],
@@ -9571,7 +9571,7 @@
     {
       "version": "2026-10-13.18",
       "date": "2026-10-13",
-      "summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. No schema or contract change"
+      "summary": "DVP-TSK-B44: governance shared-corpus prep — gamma document_api reads the shared unprefixed corpus (legacy-pinned via GOVERNANCE_STORE_READ), EventBridge governance/live trigger on the prod content bucket for both planes' recompute, per-env RECOMPUTE_GOVERNANCE_LAMBDA_NAME. ContentStore.governance_from_env takes its read mode from the optional GOVERNANCE_STORE_READ (auto|legacy) before CONTENT_STORE_READ; recompute_governance accepts an EventBridge S3 Object Created event. DVP-TSK-B45 (DVP-ISS-149): flow_weight_refresh lists pathway-telemetry with a trailing slash (prefix.rstrip('/') + '/') on both the raw and content_store paths, so the list matches the IAM prefix/* grant. No schema or contract change"
     },
     {
       "version": "2026-10-13.17",
