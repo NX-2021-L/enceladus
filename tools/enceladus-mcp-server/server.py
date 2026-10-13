@@ -165,7 +165,7 @@ GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
-    "https://jreese.net/api/v1/coordination",
+    "https://enceladus.jreese.net/api/v1/coordination",
 )
 COMMON_INTERNAL_API_KEY = _first_nonempty_env(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
@@ -191,7 +191,7 @@ COORDINATION_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
 )
 DOCUMENT_API_BASE = os.environ.get(
     "ENCELADUS_DOCUMENT_API_BASE",
-    "https://jreese.net/api/v1/documents",
+    "https://enceladus.jreese.net/api/v1/documents",
 )
 DOCUMENT_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
@@ -199,7 +199,7 @@ DOCUMENT_API_INTERNAL_API_KEY = os.environ.get(
 )
 DEPLOY_API_BASE = os.environ.get(
     "ENCELADUS_DEPLOY_API_BASE",
-    "https://jreese.net/api/v1/deploy",
+    "https://enceladus.jreese.net/api/v1/deploy",
 )
 DEPLOY_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
@@ -211,16 +211,16 @@ DEPLOY_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
 )
 CHANGELOG_API_BASE = os.environ.get(
     "ENCELADUS_CHANGELOG_API_BASE",
-    "https://jreese.net/api/v1/changelog",
+    "https://enceladus.jreese.net/api/v1/changelog",
 )
 TRACKER_API_BASE = os.environ.get(
     "ENCELADUS_TRACKER_API_BASE",
-    "https://jreese.net/api/v1/tracker",
+    "https://enceladus.jreese.net/api/v1/tracker",
 )
 # ENC-FTR-037: Checkout service base URL
 CHECKOUT_SERVICE_API_BASE = os.environ.get(
     "CHECKOUT_SERVICE_API_BASE",
-    "https://jreese.net/api/v1/checkout",
+    "https://enceladus.jreese.net/api/v1/checkout",
 )
 # ENC-TSK-F63: Feature flags migrated from ENABLE_* env vars to AppConfig.
 # appconfig_flags.flag() reads from AppConfig extension (localhost:2772) with
@@ -251,7 +251,7 @@ TRACKER_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
 )
 GOVERNANCE_API_BASE = os.environ.get(
     "ENCELADUS_GOVERNANCE_API_BASE",
-    "https://jreese.net/api/v1/governance",
+    "https://enceladus.jreese.net/api/v1/governance",
 )
 GOVERNANCE_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
@@ -259,7 +259,7 @@ GOVERNANCE_API_INTERNAL_API_KEY = os.environ.get(
 )
 PROJECTS_API_BASE = os.environ.get(
     "ENCELADUS_PROJECTS_API_BASE",
-    "https://jreese.net/api/v1/coordination/projects",
+    "https://enceladus.jreese.net/api/v1/coordination/projects",
 )
 PROJECTS_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
@@ -275,7 +275,7 @@ GRAPH_QUERY_API_BASE = os.environ.get(
 )
 HEALTH_API_URL = os.environ.get(
     "ENCELADUS_HEALTH_API_URL",
-    "https://jreese.net/api/v1/health",
+    "https://enceladus.jreese.net/api/v1/health",
 )
 DEPLOY_CONFIG_BUCKET = os.environ.get("ENCELADUS_DEPLOY_CONFIG_BUCKET", "jreese-net")
 DEPLOY_CONFIG_PREFIX = os.environ.get("ENCELADUS_DEPLOY_CONFIG_PREFIX", "deploy-config")
@@ -327,7 +327,7 @@ NON_UI_SERVICE_GROUP_BY_TYPE = {
 DEPLOY_API_COOKIE = os.environ.get("ENCELADUS_DEPLOY_COOKIE", "")
 GITHUB_API_BASE = os.environ.get(
     "ENCELADUS_GITHUB_API_BASE",
-    "https://jreese.net/api/v1/github",
+    "https://enceladus.jreese.net/api/v1/github",
 )
 GITHUB_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_GITHUB_API_INTERNAL_API_KEY",

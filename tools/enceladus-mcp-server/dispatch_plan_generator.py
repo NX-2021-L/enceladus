@@ -64,7 +64,7 @@ S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governa
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
-    "https://jreese.net/api/v1/coordination",
+    "https://enceladus.jreese.net/api/v1/coordination",
 )
 COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
@@ -79,11 +79,11 @@ PROJECTS_API_BASE = os.environ.get(
 )
 DEPLOY_API_BASE = os.environ.get(
     "ENCELADUS_DEPLOY_API_BASE",
-    "https://jreese.net/api/v1/deploy",
+    "https://enceladus.jreese.net/api/v1/deploy",
 )
 HEALTH_API_URL = os.environ.get(
     "ENCELADUS_HEALTH_API_URL",
-    "https://jreese.net/api/v1/health",
+    "https://enceladus.jreese.net/api/v1/health",
 )
 HTTP_USER_AGENT = os.environ.get(
     "ENCELADUS_HTTP_USER_AGENT",
@@ -95,7 +95,7 @@ PLAN_VERSION = "0.3.0"
 # Callback endpoint template — filled per-dispatch
 CALLBACK_ENDPOINT_TEMPLATE = os.environ.get(
     "ENCELADUS_CALLBACK_ENDPOINT",
-    "https://jreese.net/api/v1/coordination/requests/{request_id}/callback",
+    "https://enceladus.jreese.net/api/v1/coordination/requests/{request_id}/callback",
 )
 CALLBACK_TOKEN_TTL_MINUTES = int(os.environ.get("ENCELADUS_CALLBACK_TOKEN_TTL", "120"))
 

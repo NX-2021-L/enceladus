@@ -146,6 +146,28 @@ def _get_s3():
     return _s3_client
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B14 (isolation W4d): agent-documents/ draft-body writes go through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND S3_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps reads on
+    S3_BUCKET. legacy (default) is byte-identical to a raw s3 put. Bound to the given client (default _get_s3()).
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = S3_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -238,6 +260,7 @@ def _read_document_body(doc: Dict[str, Any]) -> str:
     if not key:
         return ""
     try:
+        # Raw on purpose (DVP-TSK-B14): bucket/key are the document record's own s3_bucket/s3_key, not a computed key.
         resp = _get_s3().get_object(Bucket=bucket, Key=str(key))
         return resp["Body"].read().decode("utf-8", errors="replace")
     except Exception as exc:  # pragma: no cover - network/permission edge
@@ -494,10 +517,9 @@ def _put_lesson_candidate(payload: Dict[str, Any]) -> str:
 
     content_bytes = payload["content"].encode("utf-8")
     s3_key = _s3_key(project_id, document_id)
-    _get_s3().put_object(
-        Bucket=S3_BUCKET,
-        Key=s3_key,
-        Body=content_bytes,
+    _content_store().put_object(
+        s3_key,
+        content_bytes,
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )

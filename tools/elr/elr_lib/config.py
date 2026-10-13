@@ -38,14 +38,14 @@ VALID_PROFILES = (PROFILE_INTERNAL, PROFILE_MCP_HTTP)
 # (env var name, default) pairs, mirrored verbatim from
 # tools/enceladus-mcp-server/server.py's module-level constants.
 _API_BASE_DEFAULTS: Dict[str, Tuple[str, str]] = {
-    "coordination": ("ENCELADUS_COORDINATION_API_BASE", "https://jreese.net/api/v1/coordination"),
-    "document": ("ENCELADUS_DOCUMENT_API_BASE", "https://jreese.net/api/v1/documents"),
-    "deploy": ("ENCELADUS_DEPLOY_API_BASE", "https://jreese.net/api/v1/deploy"),
-    "changelog": ("ENCELADUS_CHANGELOG_API_BASE", "https://jreese.net/api/v1/changelog"),
-    "tracker": ("ENCELADUS_TRACKER_API_BASE", "https://jreese.net/api/v1/tracker"),
-    "checkout": ("CHECKOUT_SERVICE_API_BASE", "https://jreese.net/api/v1/checkout"),
-    "governance": ("ENCELADUS_GOVERNANCE_API_BASE", "https://jreese.net/api/v1/governance"),
-    "projects": ("ENCELADUS_PROJECTS_API_BASE", "https://jreese.net/api/v1/coordination/projects"),
+    "coordination": ("ENCELADUS_COORDINATION_API_BASE", "https://enceladus.jreese.net/api/v1/coordination"),
+    "document": ("ENCELADUS_DOCUMENT_API_BASE", "https://enceladus.jreese.net/api/v1/documents"),
+    "deploy": ("ENCELADUS_DEPLOY_API_BASE", "https://enceladus.jreese.net/api/v1/deploy"),
+    "changelog": ("ENCELADUS_CHANGELOG_API_BASE", "https://enceladus.jreese.net/api/v1/changelog"),
+    "tracker": ("ENCELADUS_TRACKER_API_BASE", "https://enceladus.jreese.net/api/v1/tracker"),
+    "checkout": ("CHECKOUT_SERVICE_API_BASE", "https://enceladus.jreese.net/api/v1/checkout"),
+    "governance": ("ENCELADUS_GOVERNANCE_API_BASE", "https://enceladus.jreese.net/api/v1/governance"),
+    "projects": ("ENCELADUS_PROJECTS_API_BASE", "https://enceladus.jreese.net/api/v1/coordination/projects"),
     "graph_query": (
         "ENCELADUS_GRAPH_QUERY_API_BASE",
         "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",
@@ -61,8 +61,8 @@ _API_BASE_DEFAULTS: Dict[str, Tuple[str, str]] = {
         "ENCELADUS_DOCUMENT_DIRECT_API_BASE",
         "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/documents",
     ),
-    "health": ("ENCELADUS_HEALTH_API_URL", "https://jreese.net/api/v1/health"),
-    "github": ("ENCELADUS_GITHUB_API_BASE", "https://jreese.net/api/v1/github"),
+    "health": ("ENCELADUS_HEALTH_API_URL", "https://enceladus.jreese.net/api/v1/health"),
+    "github": ("ENCELADUS_GITHUB_API_BASE", "https://enceladus.jreese.net/api/v1/github"),
 }
 
 # Per-API dedicated internal-key env vars. ``checkout`` deliberately reuses
@@ -175,7 +175,7 @@ DEFAULT_USER_AGENT = "enceladus-elr-core/1.0"
 
 # --- mcp-http profile ----------------------------------------------------
 MCP_GATEWAY_URL_ENV = "ENCELADUS_MCP_GATEWAY_URL"
-MCP_GATEWAY_URL_DEFAULT = "https://jreese.net/api/v1/coordination/mcp"
+MCP_GATEWAY_URL_DEFAULT = "https://enceladus.jreese.net/api/v1/coordination/mcp"
 # Optional bearer source chain: a caller-supplied bearer/id-token first
 # (e.g. a Cognito id_token minted via coordination.auth.cognito_session),
 # falling back to the static gateway key server.py validates as

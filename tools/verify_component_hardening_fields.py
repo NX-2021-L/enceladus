@@ -357,7 +357,7 @@ def main() -> int:
         print("(Live registry probe skipped. Set VERIFY_COMPONENT_HARDENING_LIVE=1 to enable.)")
         return 0
 
-    base_url = os.environ.get("COORDINATION_API_BASE") or "https://jreese.net/api/v1/coordination"
+    base_url = os.environ.get("COORDINATION_API_BASE") or "https://enceladus.jreese.net/api/v1/coordination"
     api_key = os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY") or os.environ.get(
         "COORDINATION_INTERNAL_API_KEY"
     )
