@@ -18,9 +18,8 @@
  * bearer (plus the HttpOnly cookie, credentials: 'include'). The backend, not
  * this file, remains the arbiter of the human-only gates.
  *
- * Step-up. Cards whose requiredAuth is step_up get the @io-kit/auth
- * cognito_max_age provider; until DVP-TSK-980 lands the server-side assurance
- * the hub treats interactive_human as sufficient and the slot stays dormant.
+ * Step-up. The hub enforces step-up server-side (DVP-TSK-980), so cards whose
+ * requiredAuth is step_up always run the @io-kit/auth cognito_max_age provider.
  *
  * Realtime. A live escalation record event (RealtimeFeedProvider, AppSync
  * namespace from DVP-TSK-928) bumps a nonce that swaps the source identity, which
