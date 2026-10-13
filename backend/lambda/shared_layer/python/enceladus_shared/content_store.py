@@ -7,7 +7,8 @@ Lambda uses for those prefixes, so a function moves by flipping one environment 
 call sites again:
 
     CONTENT_STORE_MODE = legacy   read/write the legacy bucket only (today's behaviour; the default)
-                       = dual     write BOTH (content first, then legacy); read content, fall back to legacy on a miss
+                       = dual     write BOTH (content first, then legacy; conditional puts legacy first); read content,
+                                  fall back to legacy on a miss
                        = content  read/write the content bucket only
 
 Keys are the legacy keys. In gamma the legacy key carries the ``gamma/`` prefix (S3_ENV_PREFIX); the content bucket
@@ -40,6 +41,20 @@ DEFAULT_LEGACY_BUCKET = "jreese-net"
 
 class ContentStoreConfigError(ValueError):
     pass
+
+
+def _error_code(exc: Exception) -> str:
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        return str((resp.get("Error") or {}).get("Code", ""))
+    return ""
+
+
+def _is_precondition_failed(exc: Exception) -> bool:
+    return _error_code(exc) in ("PreconditionFailed", "412")
+
+
+_CONDITIONAL_KWARGS = ("IfNoneMatch", "IfMatch")
 
 
 def _is_missing(exc: Exception) -> bool:
@@ -152,16 +167,63 @@ class ContentStore:
 
     # -- writes ------------------------------------------------------------------------------------------------
     def put_object(self, key: str, body: Any, **kwargs: Any) -> Dict[str, Any]:
-        """Write to every target for the mode; the FIRST target's response is returned (content in dual)."""
+        """Write to every target for the mode; the FIRST target's response is returned (content in dual).
+
+        A conditional put (IfNoneMatch / IfMatch) in dual mode is the exception (DVP-TSK-B14): the legacy bucket is
+        written FIRST and arbitrates. If it raises (e.g. PreconditionFailed because the immutable object exists) the
+        error propagates and the content bucket is never touched. Only then is the content bucket written; a
+        PreconditionFailed there is swallowed, because the W3 snapshot already holds that immutable object. The legacy
+        response is returned in this case.
+        """
+        targets = self._targets_for_write(key)
+        if self.mode == "dual" and any(c in kwargs for c in _CONDITIONAL_KWARGS):
+            legacy_bucket, legacy_k = targets[1]
+            legacy_resp = self.s3.put_object(Bucket=legacy_bucket, Key=legacy_k, Body=body, **dict(kwargs))
+            content_bucket, content_k = targets[0]
+            try:
+                self.s3.put_object(Bucket=content_bucket, Key=content_k, Body=body, **self._content_kwargs(kwargs))
+            except Exception as exc:
+                if not _is_precondition_failed(exc):
+                    raise
+            return legacy_resp
         responses = []
-        for bucket, k in self._targets_for_write(key):
-            kw = dict(kwargs)
-            if bucket == self.content_bucket:
-                # The content bucket encrypts with its own key by default and denies other keys / SSE-S3.
-                kw.pop("ServerSideEncryption", None)
-                kw.pop("SSEKMSKeyId", None)
-                kw.pop("ACL", None)
+        for bucket, k in targets:
+            kw = self._content_kwargs(kwargs) if bucket == self.content_bucket else dict(kwargs)
             responses.append(self.s3.put_object(Bucket=bucket, Key=k, Body=body, **kw))
+        return responses[0]
+
+    @staticmethod
+    def _content_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """The content bucket encrypts with its own key by default and denies other keys / SSE-S3."""
+        kw = dict(kwargs)
+        kw.pop("ServerSideEncryption", None)
+        kw.pop("SSEKMSKeyId", None)
+        kw.pop("ACL", None)
+        return kw
+
+    def copy_object(self, src_key: str, dest_key: str, **kwargs: Any) -> Dict[str, Any]:
+        """Server-side copy to every write target for ``dest_key``; both keys are legacy-form. First response returned.
+
+        Content target: the source is the content copy of ``src_key``. In dual mode a miss there (an object created
+        after the W3 snapshot exists only in legacy) retries once from the legacy source into the same content dest.
+        Legacy target: the source is the legacy copy of ``src_key``.
+        """
+        responses = []
+        for bucket, k in self._targets_for_write(dest_key):
+            if bucket == self.content_bucket:
+                kw = self._content_kwargs(kwargs)
+                try:
+                    resp = self.s3.copy_object(
+                        Bucket=bucket, Key=k, CopySource={"Bucket": self.content_bucket, "Key": self.content_key(src_key)}, **kw)
+                except Exception as exc:
+                    if self.mode != "dual" or not (_is_missing(exc) or _error_code(exc) in ("NoSuchKey", "404")):
+                        raise
+                    resp = self.s3.copy_object(
+                        Bucket=bucket, Key=k, CopySource={"Bucket": self.legacy_bucket, "Key": src_key}, **kw)
+            else:
+                resp = self.s3.copy_object(
+                    Bucket=bucket, Key=k, CopySource={"Bucket": self.legacy_bucket, "Key": src_key}, **dict(kwargs))
+            responses.append(resp)
         return responses[0]
 
     def upload_file(self, local_path: str, key: str, extra_args: Optional[Dict[str, Any]] = None) -> None:

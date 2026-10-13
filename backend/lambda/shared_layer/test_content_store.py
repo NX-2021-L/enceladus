@@ -18,6 +18,12 @@ class NoSuchKey(Exception):
         self.response = {"Error": {"Code": "NoSuchKey"}}
 
 
+class PreconditionFailed(Exception):
+    def __init__(self):
+        super().__init__("exists")
+        self.response = {"Error": {"Code": "PreconditionFailed"}}
+
+
 class AccessDenied(Exception):
     def __init__(self):
         super().__init__("denied")
@@ -36,6 +42,8 @@ class FakeS3:
 
     def put_object(self, Bucket, Key, Body, **kw):
         self.calls.append(("put", Bucket, Key, kw))
+        if kw.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
+            raise PreconditionFailed()
         self.objects[(Bucket, Key)] = (Body if isinstance(Body, bytes) else Body.encode(), kw)
         return {"Bucket": Bucket, "Key": Key}
 
@@ -45,6 +53,14 @@ class FakeS3:
         if (Bucket, Key) not in self.objects:
             raise NoSuchKey()
         return {"Body": io.BytesIO(self.objects[(Bucket, Key)][0]), "Bucket": Bucket}
+
+    def copy_object(self, Bucket, Key, CopySource, **kw):
+        self.calls.append(("copy", Bucket, Key, dict(kw, CopySource=CopySource)))
+        src = (CopySource["Bucket"], CopySource["Key"])
+        if src not in self.objects:
+            raise NoSuchKey()
+        self.objects[(Bucket, Key)] = (self.objects[src][0], kw)
+        return {"Bucket": Bucket, "Key": Key}
 
     def head_object(self, Bucket, Key, **kw):
         self.calls.append(("head", Bucket, Key, kw))
@@ -185,6 +201,115 @@ class TestWriterFirstPhase(unittest.TestCase):
         with self.assertRaises(ContentStoreConfigError):
             store(FakeS3(), "content", read="legacy")
         self.assertEqual(store(FakeS3(), "dual").read_mode, "auto")
+
+
+class TestCopyAndConditionalPuts(unittest.TestCase):
+    """DVP-TSK-B14 (isolation W4d): copy_object and legacy-first conditional puts."""
+
+    def _copy_kw(self):
+        return dict(ContentType="text/markdown", MetadataDirective="REPLACE", ServerSideEncryption="AES256")
+
+    def test_dual_copy_hits_both_targets_from_their_own_bucket(self):
+        s3 = FakeS3()
+        s3.objects[(CONTENT, "agent-documents/p/versions/D/2.md")] = (b"v2", {})
+        s3.objects[(LEGACY, "gamma/agent-documents/p/versions/D/2.md")] = (b"v2", {})
+        store(s3, "dual", read="legacy").copy_object(
+            "gamma/agent-documents/p/versions/D/2.md", "gamma/agent-documents/p/D.md", **self._copy_kw())
+        copies = [c for c in s3.calls if c[0] == "copy"]
+        self.assertEqual([(c[1], c[2], c[3]["CopySource"]) for c in copies], [
+            (CONTENT, "agent-documents/p/D.md", {"Bucket": CONTENT, "Key": "agent-documents/p/versions/D/2.md"}),
+            (LEGACY, "gamma/agent-documents/p/D.md", {"Bucket": LEGACY, "Key": "gamma/agent-documents/p/versions/D/2.md"})])
+        self.assertNotIn("ServerSideEncryption", copies[0][3])
+        self.assertEqual(copies[1][3]["ServerSideEncryption"], "AES256")
+        self.assertEqual(copies[0][3]["MetadataDirective"], "REPLACE")
+
+    def test_dual_copy_content_source_miss_falls_back_to_the_legacy_source(self):
+        s3 = FakeS3()
+        s3.objects[(LEGACY, "gamma/agent-documents/p/versions/D/3.md")] = (b"v3", {})  # created after the W3 snapshot
+        store(s3, "dual", read="legacy").copy_object(
+            "gamma/agent-documents/p/versions/D/3.md", "gamma/agent-documents/p/D.md")
+        copies = [(c[1], c[2], c[3]["CopySource"]) for c in s3.calls if c[0] == "copy"]
+        self.assertEqual(copies, [
+            (CONTENT, "agent-documents/p/D.md", {"Bucket": CONTENT, "Key": "agent-documents/p/versions/D/3.md"}),
+            (CONTENT, "agent-documents/p/D.md", {"Bucket": LEGACY, "Key": "gamma/agent-documents/p/versions/D/3.md"}),
+            (LEGACY, "gamma/agent-documents/p/D.md", {"Bucket": LEGACY, "Key": "gamma/agent-documents/p/versions/D/3.md"})])
+        self.assertIn((CONTENT, "agent-documents/p/D.md"), s3.objects)
+
+    def test_copy_non_miss_error_on_the_content_source_is_not_retried(self):
+        s3 = FakeS3()
+        s3.copy_object = lambda **kw: (_ for _ in ()).throw(AccessDenied())
+        with self.assertRaises(AccessDenied):
+            store(s3, "dual").copy_object("a", "b")
+
+    def test_content_mode_copy_uses_the_content_bucket_only(self):
+        s3 = FakeS3()
+        s3.objects[(CONTENT, "agent-documents/x.md")] = (b"x", {})
+        store(s3, "content").copy_object("gamma/agent-documents/x.md", "gamma/agent-documents/y.md")
+        self.assertEqual([(c[1], c[2], c[3]["CopySource"]) for c in s3.calls if c[0] == "copy"],
+                         [(CONTENT, "agent-documents/y.md", {"Bucket": CONTENT, "Key": "agent-documents/x.md"})])
+
+    def test_content_mode_copy_miss_does_not_fall_back(self):
+        with self.assertRaises(NoSuchKey):
+            store(FakeS3(), "content").copy_object("gamma/agent-documents/x.md", "gamma/agent-documents/y.md")
+
+    def test_legacy_mode_copy_is_legacy_only(self):
+        s3 = FakeS3()
+        s3.objects[(LEGACY, "gamma/a")] = (b"a", {})
+        store(s3, "legacy").copy_object("gamma/a", "gamma/b")
+        self.assertEqual([(c[1], c[2]) for c in s3.calls if c[0] == "copy"], [(LEGACY, "gamma/b")])
+
+    def test_conditional_put_writes_legacy_first_then_content(self):
+        s3 = FakeS3()
+        resp = store(s3, "dual", read="legacy").put_object(
+            "gamma/agent-documents/v/1.md", b"v", IfNoneMatch="*", ServerSideEncryption="AES256")
+        self.assertEqual([(c[1], c[2]) for c in s3.calls if c[0] == "put"],
+                         [(LEGACY, "gamma/agent-documents/v/1.md"), (CONTENT, "agent-documents/v/1.md")])
+        self.assertEqual(resp["Bucket"], LEGACY)
+        content_call = [c for c in s3.calls if c[1] == CONTENT][0]
+        self.assertEqual(content_call[3]["IfNoneMatch"], "*")
+        self.assertNotIn("ServerSideEncryption", content_call[3])
+
+    def test_conditional_put_legacy_precondition_failed_never_touches_content(self):
+        s3 = FakeS3()
+        s3.objects[(LEGACY, "gamma/agent-documents/v/1.md")] = (b"old", {})
+        with self.assertRaises(PreconditionFailed):
+            store(s3, "dual", read="legacy").put_object("gamma/agent-documents/v/1.md", b"new", IfNoneMatch="*")
+        self.assertEqual([c[1] for c in s3.calls], [LEGACY])
+        self.assertNotIn((CONTENT, "agent-documents/v/1.md"), s3.objects)
+
+    def test_conditional_put_content_precondition_failed_is_swallowed(self):
+        s3 = FakeS3()
+        s3.objects[(CONTENT, "agent-documents/v/1.md")] = (b"snapshot", {})  # the W3 snapshot holds it
+        resp = store(s3, "dual", read="legacy").put_object("gamma/agent-documents/v/1.md", b"v", IfNoneMatch="*")
+        self.assertEqual(resp["Bucket"], LEGACY)
+        self.assertEqual(s3.objects[(CONTENT, "agent-documents/v/1.md")][0], b"snapshot")
+        self.assertEqual(s3.objects[(LEGACY, "gamma/agent-documents/v/1.md")][0], b"v")
+
+    def test_conditional_put_content_non_precondition_error_propagates(self):
+        s3 = FakeS3()
+        s3.deny = set()
+        real = s3.put_object
+
+        def put(Bucket, Key, Body, **kw):
+            if Bucket == CONTENT:
+                raise AccessDenied()
+            return real(Bucket=Bucket, Key=Key, Body=Body, **kw)
+        s3.put_object = put
+        with self.assertRaises(AccessDenied):
+            store(s3, "dual").put_object("gamma/k", b"v", IfNoneMatch="*")
+
+    def test_unconditional_put_order_is_unchanged_content_then_legacy(self):
+        s3 = FakeS3()
+        resp = store(s3, "dual", read="legacy").put_object("gamma/agent-documents/d.md", b"d", ContentType="text/markdown")
+        self.assertEqual([(c[1], c[2]) for c in s3.calls if c[0] == "put"],
+                         [(CONTENT, "agent-documents/d.md"), (LEGACY, "gamma/agent-documents/d.md")])
+        self.assertEqual(resp["Bucket"], CONTENT)
+
+    def test_conditional_put_outside_dual_mode_is_a_plain_single_target_write(self):
+        for mode, bucket, key in (("legacy", LEGACY, "gamma/k"), ("content", CONTENT, "k")):
+            s3 = FakeS3()
+            store(s3, mode).put_object("gamma/k", b"v", IfNoneMatch="*")
+            self.assertEqual([(c[1], c[2]) for c in s3.calls], [(bucket, key)])
 
 
 if __name__ == "__main__":
