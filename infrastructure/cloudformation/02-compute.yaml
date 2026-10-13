@@ -698,11 +698,12 @@ Resources:
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
           S3_GOVERNANCE_PREFIX: !Sub "${S3EnvPrefix}governance/live"
-          # DVP-TSK-B14 (isolation W4d): writer-first phase -- agent-documents/ writes go to the content bucket AND the
-          # legacy bucket (conditional version puts legacy first), reads stay on legacy until every writer of the prefix is
-          # dual (DOC-EF4BC758CCC9). S3_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          # DVP-TSK-B14 (isolation W4d): agent-documents/ writes go to the content bucket AND the legacy bucket
+          # (conditional version puts legacy first) (DOC-EF4BC758CCC9). S3_PREFIX above carries the legacy-only env prefix
+          # that S3_ENV_PREFIX strips.
+          # DVP-TSK-B17 (isolation W4e): every writer of the prefix is dual now, so CONTENT_STORE_READ=legacy is gone and
+          # reads are content-first with a legacy fallback on a miss.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           # ENC-TSK-I63 / ENC-TSK-I62: needed so the governance sync path can propagate a
@@ -3161,6 +3162,14 @@ Resources:
           RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           STAGNATION_THRESHOLD_DAYS: "14"
           COMPLIANCE_SCORE_THRESHOLD: "70"
+          # DVP-TSK-B17 (isolation W4e): docstore_integrity reads agent-documents/ through content_store -- content bucket
+          # first, legacy (DOCSTORE_S3_BUCKET, default jreese-net) on a miss. DOCSTORE_S3_PREFIX was unset here, so gamma
+          # read PROD's unprefixed agent-documents/ in jreese-net; it is env-prefixed now, and S3_ENV_PREFIX is what the
+          # store strips to form the gamma content-bucket key.
+          CONTENT_STORE_MODE: dual
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
+          DOCSTORE_S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           # ISS-465-style kill switch -- installed before the first scheduled
           # run; io clears to "0" to enable. Mirrors TRAINING_HARD_DISABLED
           # (K02) / UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
@@ -7371,6 +7380,23 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/rhythm-cycle/*/tenant-results/*"
+              # DVP-TSK-B17 (isolation W4e): docstore_integrity reads document bodies and version objects straight from S3
+              # (read-only), content bucket first and legacy on a miss. The role is gamma-only, so S3EnvPrefix is "gamma/".
+              - Sid: DocstoreIntegrityRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
+              # Without ListBucket a missing key answers 403, not 404: the store's legacy fallback never fires and the
+              # document is reported missing (a false I-D1/I-D3 finding).
+              - Sid: DocstoreIntegrityList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
