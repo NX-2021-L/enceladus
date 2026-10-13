@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.08",
-  "updated_at": "2026-10-13T09:10:00Z",
-  "last_change_summary": "DVP-TSK-B28: enceladus Add a passkey runs authorize prompt=login with a passkey-intent state; auth_refresh continues to the managed-login /passkeys/add after the code exchange",
+  "version": "2026-10-13.09",
+  "updated_at": "2026-10-13T16:26:02Z",
+  "last_change_summary": "DVP-TSK-B30: the escalations view parses proposedCalls (stored as a JSON string by tracker_mutation for producer and recipe gates) like candidates/evidence/blastRadius, so the cockpit opens and approves those cards; view-only (etag and decide basis unchanged).",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.09",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B30: the escalations view parses proposedCalls (stored as a JSON string by tracker_mutation for producer and recipe gates) like candidates/evidence/blastRadius, so the cockpit opens and approves those cards; view-only (etag and decide basis unchanged)."
+    },
     {
       "version": "2026-10-13.08",
       "date": "2026-10-13",

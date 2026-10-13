@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { callHashFor, type GateCard } from '@io-kit/gates'
 
 /** DVP-TSK-A20: the restored cockpit on a mocked kit source (authFetch records the hub requests). */
 const { authFetch, stepUp } = vi.hoisted(() => ({ authFetch: vi.fn(), stepUp: vi.fn() }))
@@ -182,6 +183,27 @@ describe('decide through the kit path', () => {
     })
     await flush()
     expect(listCalls().length).toBeGreaterThan(before)
+  })
+})
+
+describe('producer cards with JSON-string gate fields (DVP-TSK-B30)', () => {
+  // DVP-ESC-011..015 as the hub served them before B30: proposedCalls is the stored JSON string.
+  const CALL = {
+    capability: 'recipe.publish', mcpTool: 'recipe_publish_request', method: 'POST',
+    path: '/api/v1/tracker/devops/recipe/DVP-REC-001/apply', args: { version: '1.0.0', target: 'published' },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }, callHash: 'bbd05bc3',
+  }
+  const RECIPE = base({ id: 'DVP-ESC-011', project_id: 'devops', kind: 'acceptance', family: 'decision', risk: 'medium', state: 'pending', title: 'Publish recipe governance-arc (DVP-REC-001@1.0.0)', subject: { record_id: 'DVP-REC-001', project: 'devops', version: '1.0.0' }, etag: '"e011"', createdAt: iso(NOW - 600_000), expiresAt: iso(NOW + 5 * 86400_000), requiredAuth: 'interactive_human', evidence: EV, proposedCalls: JSON.stringify([CALL]) })
+
+  it('opens the card and approves with the hash of the call, not the legacy triple', async () => {
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET' && String(url).includes('pending') ? json(listBody([RECIPE])) : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-011')
+    expect(document.body.textContent).toContain('Proposed call')
+    await click(byText('button', 'Approve & apply'))
+    const expected = await callHashFor({ ...RECIPE, proposedCalls: [CALL] } as unknown as GateCard)
+    expect(String((posts()[0][1] as RequestInit).body)).toContain(expected)
   })
 })
 
