@@ -11,10 +11,17 @@
  * OAuth redirect regardless). REDIRECT_URI is a FIXED registered Cognito
  * callback — it must match byte-for-byte both the redirect_uri auth_refresh
  * uses for the token exchange and a CallbackURL on the app client.
+ *
+ * DVP-TSK-B24: the hosted-UI domain is the managed-login v2 custom domain
+ * (auth.enceladus.jreese.net), which is what carries Cognito-native passkeys
+ * (WebAuthn, RP = that domain) for this client. The classic prefix domain
+ * (enceladus-status-356364570033.auth.us-east-1.amazoncognito.com) is kept
+ * untouched for the MCP / Claude-connector DCR clients; the PWA no longer uses
+ * it. VITE_COGNITO_HOSTED_UI_DOMAIN overrides the domain at build time.
  */
 
 const COGNITO_HOSTED_UI_DOMAIN =
-  'https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com'
+  import.meta.env.VITE_COGNITO_HOSTED_UI_DOMAIN || 'https://auth.enceladus.jreese.net'
 const COGNITO_CLIENT_ID = '6q607dk3liirhtecgps7hifmlk'
 const COGNITO_SCOPES = 'openid email profile'
 // ENC-TSK-P51: per-plane redirect. The deploy lane bakes VITE_OAUTH_REDIRECT_URI
@@ -53,4 +60,21 @@ export function buildLoginUrl(): string {
 /** Start the login flow (full-page navigation to the Cognito Hosted UI). */
 export function redirectToLogin(): void {
   window.location.assign(buildLoginUrl())
+}
+
+/** DVP-TSK-B24: managed-login v2 "add a passkey" URL. Uses the SAME registered
+ *  redirect_uri as login, so Cognito returns to /api/v1/auth/callback with
+ *  `?result=<success|invalid_session|...>` (no `code`), which auth_refresh
+ *  turns into `/?passkey_result=...` for the SPA notice. */
+export function buildAddPasskeyUrl(): string {
+  const params = new URLSearchParams({
+    client_id: COGNITO_CLIENT_ID,
+    redirect_uri: OAUTH_REDIRECT_URI,
+  })
+  return `${COGNITO_HOSTED_UI_DOMAIN}/passkeys/add?${params.toString()}`
+}
+
+/** Start the add-a-passkey flow (full-page navigation to managed login). */
+export function redirectToAddPasskey(): void {
+  window.location.assign(buildAddPasskeyUrl())
 }

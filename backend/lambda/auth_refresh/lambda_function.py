@@ -39,7 +39,7 @@ import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, Optional
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -71,9 +71,17 @@ REFRESH_TOKEN_MAX_AGE = 2592000  # 30 days
 # a FIXED registered Cognito callback (the durable vanity URL); the post-login
 # 302 uses a relative Location so the browser returns to whatever host it is
 # on. Prod is untouched (it keeps its own edge + jreese.net callback).
+#
+# DVP-TSK-B24: the PWA login + token exchange run on the managed-login v2
+# custom domain (the domain that carries Cognito-native passkeys, WebAuthn RP =
+# auth.enceladus.jreese.net). The classic prefix domain stays what the MCP /
+# Claude-connector DCR clients use and is kept here ONLY as the token-exchange
+# fallback (COGNITO_PREFIX_DOMAIN below); never point the PWA login at it.
+COGNITO_CUSTOM_DOMAIN = "https://auth.enceladus.jreese.net"
+COGNITO_PREFIX_DOMAIN = "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com"
 COGNITO_HOSTED_UI_DOMAIN = os.environ.get(
     "COGNITO_HOSTED_UI_DOMAIN",
-    "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com",
+    COGNITO_CUSTOM_DOMAIN,
 )
 WEBUI_OAUTH_REDIRECT_URI = os.environ.get(
     "WEBUI_OAUTH_REDIRECT_URI",
@@ -311,12 +319,21 @@ def _b64url_decode_path(state: str) -> str:
     return _safe_return_path(decoded)
 
 
-def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
-    """POST the authorization code to Cognito's /oauth2/token endpoint.
+class _TokenExchangeFailed(ValueError):
+    """Non-200 from /oauth2/token; `oauth_error` is Cognito's `error` field."""
+
+    def __init__(self, message: str, oauth_error: str = "") -> None:
+        super().__init__(message)
+        self.oauth_error = oauth_error
+
+
+def _post_token_exchange(domain: str, code: str) -> Dict[str, Any]:
+    """POST the authorization code to `<domain>/oauth2/token` and return the JSON.
 
     Public client (no secret) — grant_type=authorization_code with
-    client_id + code + the fixed registered redirect_uri. Raises ValueError on
-    any non-200 or missing id_token.
+    client_id + code + the fixed registered redirect_uri. Raises
+    _TokenExchangeFailed (a ValueError) on an HTTP error, ValueError on an
+    unreachable endpoint.
     """
     body = urlencode({
         "grant_type": "authorization_code",
@@ -325,21 +342,48 @@ def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
         "redirect_uri": WEBUI_OAUTH_REDIRECT_URI,
     }).encode("utf-8")
     req = urllib.request.Request(
-        f"{COGNITO_HOSTED_UI_DOMAIN}/oauth2/token",
+        f"{domain.rstrip('/')}/oauth2/token",
         data=body,
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+            return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         logger.warning("oauth token exchange failed: %s %s", exc.code, detail)
-        raise ValueError("token_exchange_failed") from exc
+        oauth_error = ""
+        try:
+            parsed = json.loads(detail)
+            if isinstance(parsed, dict):
+                oauth_error = str(parsed.get("error") or "")
+        except ValueError:
+            pass
+        raise _TokenExchangeFailed("token_exchange_failed", oauth_error) from exc
     except urllib.error.URLError as exc:
         logger.error("oauth token endpoint unreachable: %s", exc)
         raise ValueError("token_endpoint_unreachable") from exc
+
+
+def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
+    """Exchange the authorization code for tokens. Raises ValueError on failure.
+
+    DVP-TSK-B24: exchanges on COGNITO_HOSTED_UI_DOMAIN (the managed-login v2
+    custom domain). Authorization codes belong to the pool, so a code issued on
+    either domain redeems on either. Safety net: if the first attempt returns
+    `invalid_grant` and a different domain is available, retry ONCE against the
+    classic prefix domain (the callback cannot tell which domain issued the
+    code, so the retry is unconditional on origin).
+    """
+    try:
+        data = _post_token_exchange(COGNITO_HOSTED_UI_DOMAIN, code)
+    except _TokenExchangeFailed as exc:
+        same = COGNITO_HOSTED_UI_DOMAIN.rstrip("/") == COGNITO_PREFIX_DOMAIN.rstrip("/")
+        if exc.oauth_error != "invalid_grant" or same:
+            raise
+        logger.info("invalid_grant on %s; retrying once on the prefix domain", COGNITO_HOSTED_UI_DOMAIN)
+        data = _post_token_exchange(COGNITO_PREFIX_DOMAIN, code)
 
     id_token = data.get("id_token")
     if not id_token:
@@ -362,7 +406,15 @@ def _handle_oauth_callback(event: Dict) -> Dict:
         logger.info("oauth callback error param: %s", params.get("error"))
         return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
     if not code:
-        return _error(400, "Missing authorization code.")
+        # DVP-TSK-B24: managed login's /passkeys/add returns to this same
+        # registered callback with `?result=<success|invalid_session|...>` and
+        # no code. Hand the result to the SPA as /?passkey_result=<result>; the
+        # session cookies are deliberately untouched. A return with neither
+        # code nor result just goes to the app root.
+        result = params.get("result")
+        location = "/?passkey_result=" + quote(result, safe="") if result else "/"
+        logger.info("oauth callback without code; result=%s", result)
+        return {"statusCode": 302, "headers": {"Location": location, "Cache-Control": "no-store"}, "body": ""}
 
     try:
         tokens = _exchange_code_for_tokens(code)
