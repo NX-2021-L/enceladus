@@ -33,7 +33,29 @@ export async function fetchCockpitFeed(compact = false): Promise<CockpitFeed> {
         return [] as GateCard[]
       })
   const [p, t] = await Promise.all([pending, terminal])
-  return { cards: [...p, ...t.slice(0, TERMINAL_CAP * 3)], terminalError }
+  return { cards: [...p, ...t.slice(0, TERMINAL_CAP * 3)].map(normalizeCard), terminalError }
+}
+
+function arrayField<T>(value: unknown): T[] | undefined {
+  let v = value
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v) } catch { return undefined }
+  }
+  return Array.isArray(v) ? (v as T[]) : undefined
+}
+
+/**
+ * DVP-TSK-B30: the hub stores producer and recipe gate fields as JSON strings. A card served with
+ * one unparsed (proposedCalls before B30) crashed EscalationDetail (`calls.map`) and made the kit
+ * hash the legacy triple instead of the call, so read string arrays back and drop non-arrays.
+ */
+export function normalizeCard(card: GateCard): GateCard {
+  return {
+    ...card,
+    proposedCalls: arrayField<NonNullable<GateCard['proposedCalls']>[number]>(card.proposedCalls),
+    candidates: arrayField<NonNullable<GateCard['candidates']>[number]>(card.candidates),
+    evidence: arrayField<GateCard['evidence'][number]>(card.evidence) ?? [],
+  }
 }
 
 export const cardNeedsStepUp = (card: GateCard): boolean =>

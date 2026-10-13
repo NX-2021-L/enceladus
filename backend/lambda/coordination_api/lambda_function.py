@@ -10648,7 +10648,11 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     info = _escalation_expiry_info(escalation, now)
     if not escalation.get("expiresAt") and info["expiresAt"]:
         escalation["expiresAt"] = info["expiresAt"]
-    for key in ("candidates", "evidence", "blastRadius"):
+    # DVP-TSK-B30: proposedCalls too. tracker_mutation stores producer and recipe gate calls as a
+    # JSON string; served raw, the cockpit's `calls.map` threw on DVP-ESC-011..015 and the kit
+    # hashed the legacy triple instead of the call. Neither the etag nor the decide basis
+    # (_escalation_call_basis) reads this view field, so the parse is view-only.
+    for key in ("candidates", "evidence", "blastRadius", "proposedCalls"):
         raw = escalation.get(key)
         if isinstance(raw, str):
             try:
