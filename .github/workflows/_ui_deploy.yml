@@ -518,7 +518,7 @@ jobs:
           HASH=$(curl -sf \
             -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
             -H "Accept: application/json" \
-            "https://jreese.net/api/v1/health" \
+            "https://enceladus.jreese.net/api/v1/health" \
             | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('governance_hash',''))" 2>/dev/null || true)
           echo "governance_hash=${HASH}" >> "$GITHUB_OUTPUT"
           echo "Governance hash: ${HASH:-(fetch failed)}"
