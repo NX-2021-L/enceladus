@@ -1413,6 +1413,12 @@ Resources:
             - IsGamma
             - https://enceladus-gamma.jreese.net/api/v1/auth/callback
             - https://enceladus.jreese.net/api/v1/auth/callback
+          # DVP-TSK-B24: the PWA login + token exchange run on the managed-login
+          # v2 custom domain (Cognito-native passkeys). Explicit on both planes.
+          # The classic prefix domain is NOT referenced here: it stays the MCP /
+          # Claude-connector DCR domain (ENCELADUS_COGNITO_DOMAIN) and is only
+          # the in-code invalid_grant token-exchange fallback.
+          COGNITO_HOSTED_UI_DOMAIN: https://auth.enceladus.jreese.net
       Tags:
         - Key: Project
           Value: enceladus

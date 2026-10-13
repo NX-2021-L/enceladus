@@ -22,7 +22,7 @@ lf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lf)
 
 ROOT = HERE.parents[2]
-HOSTED = "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com"
+HOSTED = "https://auth.enceladus.jreese.net"  # DVP-TSK-B24: managed-login v2 custom domain
 
 
 def _event(query=None, method="GET", path="/api/v1/auth/login"):
