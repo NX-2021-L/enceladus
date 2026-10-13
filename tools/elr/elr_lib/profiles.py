@@ -51,7 +51,7 @@ PROFILE_PROD = "prod"
 PROFILE_V4_GAMMA = "v4-gamma"
 VALID_ENVIRONMENT_PROFILES: Tuple[str, ...] = (PROFILE_PROD, PROFILE_V4_GAMMA)
 
-_PROD_API_HOST = "https://jreese.net"
+_PROD_API_HOST = "https://enceladus.jreese.net"
 _GAMMA_API_HOST = "https://enceladus-gamma.jreese.net"
 # Direct API Gateway execute-api host of the PROD plane (ENC-TSK-Q51, BRD
 # NFR-3). Prod keeps graph_query and the compact_context document reads on it

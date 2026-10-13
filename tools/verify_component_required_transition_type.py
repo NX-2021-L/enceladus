@@ -203,7 +203,7 @@ def main() -> int:
 
     base_url = (
         os.environ.get("COORDINATION_API_BASE")
-        or "https://jreese.net/api/v1/coordination"
+        or "https://enceladus.jreese.net/api/v1/coordination"
     )
     api_key = os.environ.get(
         "ENCELADUS_COORDINATION_INTERNAL_API_KEY"

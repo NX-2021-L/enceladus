@@ -18,7 +18,7 @@ class GetEnvironmentProfileTests(unittest.TestCase):
             profile = elr_profiles.get_environment_profile()
         self.assertEqual(profile.name, "prod")
         self.assertEqual(profile.mcp_base_url, "https://mcp.jreese.net")
-        self.assertEqual(profile.coordination_base_url, "https://jreese.net/api/v1/coordination")
+        self.assertEqual(profile.coordination_base_url, "https://enceladus.jreese.net/api/v1/coordination")
 
     def test_explicit_name_selects_v4_gamma(self):
         profile = elr_profiles.get_environment_profile("v4-gamma")
@@ -53,7 +53,7 @@ class GetEnvironmentProfileTests(unittest.TestCase):
         gamma = elr_profiles.get_environment_profile("v4-gamma")
         prod = elr_profiles.get_environment_profile("prod")
         for api in ("coordination", "document", "deploy", "changelog", "tracker", "checkout", "governance", "health", "github"):
-            self.assertTrue(prod.api_base_overrides[api].startswith("https://jreese.net/"))
+            self.assertTrue(prod.api_base_overrides[api].startswith("https://enceladus.jreese.net/"))
             self.assertTrue(gamma.api_base_overrides[api].startswith("https://enceladus-gamma.jreese.net/"))
             # Same path suffix on both hosts.
             prod_suffix = prod.api_base_overrides[api].split("jreese.net", 1)[1]
@@ -75,7 +75,7 @@ class GetEnvironmentProfileTests(unittest.TestCase):
             gamma.api_base_overrides["document_direct"], "https://enceladus-gamma.jreese.net/api/v1/documents"
         )
         # The ordinary document base (batch_get, doc_get, doc_patch) is untouched on prod.
-        self.assertEqual(prod.api_base_overrides["document"], "https://jreese.net/api/v1/documents")
+        self.assertEqual(prod.api_base_overrides["document"], "https://enceladus.jreese.net/api/v1/documents")
 
 
 class InternalProfileConfigEnvironmentThreadingTests(unittest.TestCase):
@@ -91,8 +91,8 @@ class InternalProfileConfigEnvironmentThreadingTests(unittest.TestCase):
                 if key.startswith("ENCELADUS_") or key == "CHECKOUT_SERVICE_API_BASE":
                     os.environ.pop(key, None)
             cfg = elr_config.InternalProfileConfig()
-        self.assertEqual(cfg.base_url("tracker"), "https://jreese.net/api/v1/tracker")
-        self.assertEqual(cfg.base_url("document"), "https://jreese.net/api/v1/documents")
+        self.assertEqual(cfg.base_url("tracker"), "https://enceladus.jreese.net/api/v1/tracker")
+        self.assertEqual(cfg.base_url("document"), "https://enceladus.jreese.net/api/v1/documents")
         self.assertEqual(
             cfg.base_url("graph_query"),
             "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",

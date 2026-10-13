@@ -466,7 +466,7 @@ DISPATCH_WORKLOG_MAX_ENTRIES = int(os.environ.get("DISPATCH_WORKLOG_MAX_ENTRIES"
 WORKER_RUNTIME_LOG_GROUP = os.environ.get("WORKER_RUNTIME_LOG_GROUP", "/enceladus/coordination/worker-runtime")
 MCP_SERVER_LOG_GROUP = os.environ.get("MCP_SERVER_LOG_GROUP", "/enceladus/mcp/server")
 MCP_AUDIT_CALLER_IDENTITY = os.environ.get("MCP_AUDIT_CALLER_IDENTITY", "devops-coordination-api")
-COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://jreese.net")
+COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://enceladus.jreese.net")
 COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/v1/coordination/mcp")
 ENABLE_MCP_GOVERNANCE_PROMPT = _appconfig_flag("enable_mcp_governance_prompt", env_fallback="ENABLE_MCP_GOVERNANCE_PROMPT", default=True)
 # ENC-FTR-052: Governed Lesson Primitive
@@ -6412,7 +6412,7 @@ health = None
 fallback_reason = None
 capabilities_status = "unreachable"
 governance_hash = ""
-coordination_api_base = "https://jreese.net/api/v1/coordination"
+coordination_api_base = "https://enceladus.jreese.net/api/v1/coordination"
 try:
     import dispatch_plan_generator as dpg
     health = dpg.test_connection_health()
@@ -9977,7 +9977,7 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
 COMPONENT_EVENTS_TOPIC_ARN = os.environ.get("COMPONENT_EVENTS_TOPIC_ARN", "")
 COMPONENT_PROPOSAL_PWA_DEEP_LINK = os.environ.get(
     "COMPONENT_PROPOSAL_PWA_DEEP_LINK",
-    "https://jreese.net/components?filter=pending",
+    "https://enceladus.jreese.net/components?filter=pending",
 )
 
 

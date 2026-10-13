@@ -8,7 +8,7 @@ Usage:
 
 Environment variables (can be set instead of flags):
     ENCELADUS_COORDINATION_INTERNAL_API_KEY  — internal API key
-    COORDINATION_API_BASE                    — base URL (default: https://jreese.net/api/v1/coordination)
+    COORDINATION_API_BASE                    — base URL (default: https://enceladus.jreese.net/api/v1/coordination)
     CHECKOUT_ASSISTANT_KEY                   — checkout-service-assistant key (allows setting
                                                non-default transition_type at create time)
     COORDINATION_DIRECT_APIGW_BASE           — direct APIGW URL used for assistant-key calls
@@ -1487,7 +1487,7 @@ def main() -> None:
     base_url = (
         args.base_url
         or os.environ.get("COORDINATION_API_BASE", "")
-        or "https://jreese.net/api/v1/coordination"
+        or "https://enceladus.jreese.net/api/v1/coordination"
     )
     api_key = (
         args.api_key

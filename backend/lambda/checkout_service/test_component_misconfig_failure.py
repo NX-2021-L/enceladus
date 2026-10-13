@@ -149,7 +149,7 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
         self.assertEqual(details["component_id"], "comp-checkout-service")
         self.assertEqual(details["reason"], "missing")
         self.assertIn(
-            "jreese.net/components/comp-checkout-service", details["remediation_url"]
+            "enceladus.jreese.net/components/comp-checkout-service", details["remediation_url"]
         )
         self.assertIn("required_transition_type", details["remediation_guidance"])
         self.assertIn("DOC-157A790F9E8B", details["rule_citation"])

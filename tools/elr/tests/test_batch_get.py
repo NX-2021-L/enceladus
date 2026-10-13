@@ -261,11 +261,11 @@ class NoListRouteTests(unittest.TestCase):
             with self.subTest(record_id=raw_id, url=req.full_url):
                 self.assertEqual(req.get_method(), "GET")
                 parts = urllib.parse.urlsplit(req.full_url)
-                self.assertEqual(f"{parts.scheme}://{parts.netloc}", "https://jreese.net")
+                self.assertEqual(f"{parts.scheme}://{parts.netloc}", "https://enceladus.jreese.net")
                 self.assertEqual(parts.path, f"/api/v1/tracker/_/task/{raw_id}")
                 self.assertEqual(parts.query, "")
                 self.assertIn(raw_id, req.full_url)
-                lowered = req.full_url.lower()
+                lowered = (parts.path + "?" + parts.query).lower()  # host (enceladus.jreese.net) is not project inference
                 for forbidden in ("enceladus", "intelligence", "devops", "/mcp", "prefix_map"):
                     self.assertNotIn(forbidden, lowered, f"{forbidden!r} leaked into {req.full_url!r}")
 

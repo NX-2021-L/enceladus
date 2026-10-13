@@ -43,7 +43,7 @@ Environment variables:
     COMPONENTS_TABLE              component registry DynamoDB table (default: component-registry)
     DOCUMENT_API_BASE             document API base URL (defaults from TRACKER_API_BASE sibling)
     CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
-    COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
+    COORDINATION_API_BASE         base URL for coordination API (default: https://enceladus.jreese.net/api/v1/coordination)
 
 Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041, ENC-ISS-106, ENC-ISS-172
 
@@ -164,7 +164,7 @@ COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hif
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 COORDINATION_API_BASE = os.environ.get(
-    "COORDINATION_API_BASE", "https://jreese.net/api/v1/coordination"
+    "COORDINATION_API_BASE", "https://enceladus.jreese.net/api/v1/coordination"
 )
 DOCUMENT_API_BASE = os.environ.get(
     "DOCUMENT_API_BASE",
@@ -1872,7 +1872,7 @@ _WEB_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
         },
     },
     "example": {
-        "url": "https://jreese.net/enceladus",
+        "url": "https://enceladus.jreese.net/",
         "http_status": 200,
         "checked_at": "2026-03-08T22:45:00Z",
     },
@@ -2820,7 +2820,7 @@ def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
     guidance sufficient for an agent to self-correct on the next attempt
     without additional tool calls (F50/AC-4).
     """
-    remediation_url = f"https://jreese.net/components/{exc.component_id}"
+    remediation_url = f"https://enceladus.jreese.net/components/{exc.component_id}"
     details: Dict[str, Any] = {
         "component_id": exc.component_id,
         "reason": exc.reason,

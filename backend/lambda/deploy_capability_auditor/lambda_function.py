@@ -17,9 +17,9 @@ document APIs using COORDINATION_INTERNAL_API_KEY. No direct DynamoDB or S3
 writes from the Lambda.
 
 Environment variables:
-  COORDINATION_API_BASE        https://jreese.net/api/v1 (or direct APIGW URL)
-  DOCUMENT_API_BASE            https://jreese.net/api/v1/documents
-  TRACKER_API_BASE             https://jreese.net/api/v1/tracker
+  COORDINATION_API_BASE        https://enceladus.jreese.net/api/v1 (or direct APIGW URL)
+  DOCUMENT_API_BASE            https://enceladus.jreese.net/api/v1/documents
+  TRACKER_API_BASE             https://enceladus.jreese.net/api/v1/tracker
   COORDINATION_INTERNAL_API_KEY internal key shared with coordination_api
   MANIFEST_DOC_ID              fixed DOC-* id that is PATCHed each run (upsert)
   APIGW_API_ID                 prod API Gateway v2 ID (optional; auto-resolved if absent)
@@ -45,7 +45,7 @@ logger.setLevel(logging.INFO)
 
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COORDINATION_API_BASE = os.environ.get(
-    "COORDINATION_API_BASE", "https://jreese.net/api/v1"
+    "COORDINATION_API_BASE", "https://enceladus.jreese.net/api/v1"
 ).rstrip("/")
 INTERNAL_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 MANIFEST_DOC_ID = os.environ.get("MANIFEST_DOC_ID", "")
