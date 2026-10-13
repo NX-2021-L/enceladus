@@ -406,6 +406,49 @@ class TestExpirySweeper(_Base):
         with mock.patch.object(self.lf, "ENABLE_ESCALATION_PRIMITIVE", False):
             self.assertEqual(503, self.lf._handle_escalation_sweep("enceladus", {})["statusCode"])
 
+    # --- DVP-TSK-B33: scheduled (EventBridge) path -------------------------------
+    SCHEDULED = {"enceladus_task": "escalation_sweep"}
+
+    def test_scheduled_event_runs_the_all_projects_sweep_as_the_sweeper(self):
+        stale = _escalation_item(status="requested")  # expired by NOW
+        ddb = self._ddb([stale])
+        with mock.patch.object(self.lf, "_get_ddb", return_value=ddb):
+            resp = self.lf.lambda_handler(dict(self.SCHEDULED), None)
+        body = json.loads(resp["body"])
+        self.assertEqual(200, resp["statusCode"], resp["body"])
+        ddb.scan.assert_called_once()  # project enumeration == the "*" / "_" sweep
+        self.assertEqual(1, body["swept_count"])
+        self.assertEqual("ENC-ESC-001", body["swept"][0]["escalation_id"])
+        event = ddb.update_item.call_args.kwargs["ExpressionAttributeValues"][":event"]["L"][0]["M"]
+        self.assertEqual("expired", event["event_type"]["S"])
+        self.assertEqual("system:escalation-expiry-sweeper", event["actor"]["S"])
+
+    def test_scheduled_event_delegates_to_the_shared_sweep_with_all_projects(self):
+        canned = {"statusCode": 200, "body": "{}"}
+        with mock.patch.object(self.lf, "_handle_escalation_sweep", return_value=canned) as sweep:
+            self.assertIs(canned, self.lf.lambda_handler(dict(self.SCHEDULED), None))
+        sweep.assert_called_once_with("*", {})
+
+    def test_scheduled_event_honours_the_flag(self):
+        with mock.patch.object(self.lf, "ENABLE_ESCALATION_PRIMITIVE", False):
+            self.assertEqual(503, self.lf.lambda_handler(dict(self.SCHEDULED), None)["statusCode"])
+
+    def test_api_events_do_not_trigger_the_scheduled_sweep(self):
+        api_event = {
+            "requestContext": {"http": {"method": "OPTIONS"}},
+            "rawPath": "/api/v1/tracker/enceladus/escalation/sweep",
+            "enceladus_task": "escalation_sweep",  # even a spoofed task key cannot ride an API event
+        }
+        with mock.patch.object(self.lf, "_handle_escalation_sweep") as sweep:
+            resp = self.lf.lambda_handler(api_event, None)
+            self.assertEqual(204, resp["statusCode"])  # CORS preflight: ordinary routing
+            ordinary = {"requestContext": {"http": {"method": "OPTIONS"}}, "rawPath": "/api/v1/tracker/pending-updates"}
+            self.lf.lambda_handler(ordinary, None)
+            self.lf.lambda_handler({"source": "aws.events", "detail-type": "Scheduled Event"}, None)
+        sweep.assert_not_called()
+        self.assertFalse(self.lf._is_escalation_scheduled_sweep({"enceladus_task": "other"}))
+        self.assertFalse(self.lf._is_escalation_scheduled_sweep({"recipe_run_sweep": True}))
+
     def test_expired_is_a_terminal_fsm_state(self):
         self.assertEqual(set(), self.lf._ESCALATION_FSM["expired"])
         self.assertIn("expired", self.lf._ESCALATION_FSM["requested"])
