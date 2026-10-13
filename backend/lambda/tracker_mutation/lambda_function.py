@@ -9722,6 +9722,32 @@ def _handle_escalation_sweep(project_id: str, body: Dict) -> Dict:
     })
 
 
+# DVP-TSK-B33: scheduled escalation expiry sweep. EventBridge rule
+# EscalationExpirySweepRule (rate(15 minutes)) invokes this function with the
+# constant input {"enceladus_task": "escalation_sweep"} -- the same dedicated-input
+# convention as the recipe-run sweeper ({"recipe_run_sweep": true}). It runs the
+# SAME sweep as POST /_/escalation/sweep over ALL projects as
+# system:escalation-expiry-sweeper, so expired requested escalations move to
+# expired without anyone calling the route. An API-shaped event (it carries
+# requestContext) never takes this path.
+_ESCALATION_SWEEP_TASK = "escalation_sweep"
+
+
+def _is_escalation_scheduled_sweep(event: Any) -> bool:
+    return (
+        isinstance(event, dict)
+        and event.get("enceladus_task") == _ESCALATION_SWEEP_TASK
+        and "requestContext" not in event
+    )
+
+
+def _escalation_scheduled_sweep(event: Dict[str, Any]) -> Dict:
+    """EventBridge rate(15 minutes): the all-projects _handle_escalation_sweep."""
+    result = _handle_escalation_sweep("*", {})
+    logger.info("scheduled escalation expiry sweep: status=%s", result.get("statusCode"))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # ENC-FTR-121 Ph2 / ENC-TSK-J69 — applyEscalatedMutation
 #
@@ -10398,6 +10424,8 @@ def _handle_recipe_route(method: str, project_id: str, rec_id: Optional[str], su
 def lambda_handler(event: Dict, context: Any) -> Dict:
     if isinstance(event, dict) and event.get("recipe_run_sweep") and "requestContext" not in event:
         return _recipe_run_scheduled_sweep(event)
+    if _is_escalation_scheduled_sweep(event):
+        return _escalation_scheduled_sweep(event)
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
         or event.get("httpMethod", "")

@@ -143,7 +143,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const followNav = (event: { detail: { href?: string; text?: React.ReactNode } }) => {
     const href = event.detail.href
     if (href === LOGOUT_HREF) {
-      performLogout()
+      // DVP-TSK-B41: async -- awaits the server logout (revokes the HttpOnly
+      // refresh cookie) before navigating away.
+      void performLogout()
       return
     }
     if (href === ADD_PASSKEY_HREF) {
@@ -151,10 +153,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       return
     }
     if (href === REFRESH_APP_HREF) {
-      // ENC-TSK-M37 -- force-activates the waiting service worker
-      // (skipWaiting) and reloads, replacing the old dismiss-only "App
-      // update available" banner that never actually called skipWaiting
-      // and left probes running against a stale precached shell.
+      // DVP-TSK-B42 -- brute-force reset (replaces ENC-TSK-M37/M57's flaky
+      // skipWaiting path): blocking overlay, server Clear-Site-Data signal,
+      // delete service workers / caches / storage / IndexedDB, hard reload.
       void refreshApp()
       return
     }

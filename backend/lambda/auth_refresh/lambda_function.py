@@ -4,6 +4,8 @@ Lambda endpoint for refreshing Cognito tokens and vending GitHub App tokens.
 
 Routes (via API Gateway proxy):
     POST /api/v1/auth/refresh          — Cognito token refresh
+    POST /api/v1/auth/logout           — revoke the refresh token, clear the auth cookies (DVP-TSK-B41)
+    GET  /api/v1/app/refresh           — Clear-Site-Data: cache, storage, executionContexts (DVP-TSK-B42)
     GET  /api/v1/auth/github-token     — GitHub App installation access token
     OPTIONS /api/v1/auth/*             (CORS preflight)
 
@@ -21,6 +23,8 @@ Environment variables:
     COGNITO_USER_POOL_ID        us-east-1_b2D0V3E1k
     COGNITO_CLIENT_ID           6q607dk3liirhtecgps7hifmlk
     COGNITO_REGION              default: us-east-1
+    COGNITO_HOSTED_LOGOUT       optional kill-switch for the Hosted-UI logout hop: unset/'true' = on,
+                                'false' = POST /auth/logout returns logout_url null (DVP-TSK-B41)
     GITHUB_APP_ID               GitHub App numeric ID
     GITHUB_INSTALLATION_ID      Installation ID for NX-2021-L org
     GITHUB_PRIVATE_KEY_SECRET   Secrets Manager secret name (default: devops/github-app/private-key)
@@ -83,6 +87,12 @@ COGNITO_HOSTED_UI_DOMAIN = os.environ.get(
     "COGNITO_HOSTED_UI_DOMAIN",
     COGNITO_CUSTOM_DOMAIN,
 )
+# DVP-TSK-B41: kill-switch for the Hosted-UI logout hop. The post-logout
+# landing URI is derived from WEBUI_OAUTH_REDIRECT_URI (scheme://host/), which
+# the PWA app client has registered as a LogoutURL on prod and gamma, so no
+# per-environment setting is needed. 'false' makes logout_url null (the SPA
+# then just goes to '/'); unset or anything else keeps the hop on.
+COGNITO_HOSTED_LOGOUT = os.environ.get("COGNITO_HOSTED_LOGOUT", "")
 WEBUI_OAUTH_REDIRECT_URI = os.environ.get(
     "WEBUI_OAUTH_REDIRECT_URI",
     "https://enceladus-gamma.jreese.net/api/v1/auth/callback",
@@ -246,6 +256,7 @@ def _refresh_tokens(refresh_token: str) -> Dict[str, str]:
     id_token = result.get("IdToken")
     if not id_token:
         raise ValueError("No id_token in Cognito response")
+    _log_auth_claims("refresh", id_token)
 
     return {
         "id_token": id_token,
@@ -444,6 +455,7 @@ def _handle_oauth_callback(event: Dict) -> Dict:
         # re-prompt sign-in if still unauthenticated.
         return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
 
+    _log_auth_claims("callback", tokens["id_token"])
     target = _b64url_decode_path(state)
     now_ms = str(int(time.time() * 1000))
 
@@ -571,6 +583,41 @@ def _jwt_claims(token: str) -> Dict[str, Any]:
         return {}
 
 
+def _log_auth_claims(path: str, id_token: str) -> None:
+    """DVP-TSK-983: log which amr/acr Cognito emitted for this sign-in.
+
+    One JSON line, exactly these keys: event, path ("callback" | "refresh"),
+    amr (list of short strings or null), acr (str or null), auth_time (int or
+    null), token_use (str). The token was just received from Cognito over TLS,
+    so its payload is decoded WITHOUT re-verifying (this is a diagnostic, never
+    an authorization input). Nothing identifying is logged -- no token, sub,
+    email, username or cookie value -- and a failure here can never break auth.
+    """
+    try:
+        claims = _jwt_claims(id_token)
+        amr = claims.get("amr")
+        if isinstance(amr, list):
+            amr = [a[:32] for a in amr[:8] if isinstance(a, str)]
+        else:
+            amr = None
+        acr = claims.get("acr")
+        auth_time = claims.get("auth_time")
+        token_use = claims.get("token_use")
+        logger.info(json.dumps(
+            {
+                "event": "auth_claims",
+                "path": path,
+                "amr": amr,
+                "acr": acr[:64] if isinstance(acr, str) else None,
+                "auth_time": int(auth_time) if isinstance(auth_time, (int, float)) and not isinstance(auth_time, bool) else None,
+                "token_use": token_use[:16] if isinstance(token_use, str) else "unknown",
+            },
+            separators=(",", ":"),
+        ))
+    except Exception:  # noqa: BLE001 - a diagnostic must never fail a login
+        logger.warning("auth_claims diagnostic failed")
+
+
 def _handle_kit_refresh(event: Dict) -> Dict:
     origin = _header(event, "origin")
     if origin not in ALLOWED_ORIGINS:
@@ -600,6 +647,108 @@ def _handle_kit_refresh(event: Dict) -> Dict:
         f"enceladus_session_at={now_ms}; Path=/enceladus; Secure; SameSite=None; Max-Age={SESSION_COOKIE_MAX_AGE}",
     ]
     return out
+
+
+# ---------------------------------------------------------------------------
+# DVP-TSK-B41: logout (revoke the refresh token + clear every auth cookie)
+# ---------------------------------------------------------------------------
+
+def _revoke_refresh_token(refresh_token: str) -> bool:
+    """Best-effort POST <hosted-ui>/oauth2/revoke (form: token, client_id).
+
+    Public client, no secret. Returns True when Cognito accepted the revoke.
+    Never raises, and never logs the token (only the failure class / HTTP code).
+    """
+    body = urlencode({"token": refresh_token, "client_id": COGNITO_CLIENT_ID}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COGNITO_HOSTED_UI_DOMAIN.rstrip('/')}/oauth2/revoke",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError as exc:
+        logger.warning("logout revoke rejected: http %s", exc.code)
+    except Exception as exc:  # noqa: BLE001 - revoke is best-effort, never fails the logout
+        logger.warning("logout revoke failed: %s", type(exc).__name__)
+    return False
+
+
+def _logout_url() -> Optional[str]:
+    """Hosted-UI /logout URL that ends the Cognito session and returns to the app.
+
+    logout_uri is the origin of WEBUI_OAUTH_REDIRECT_URI plus '/', a LogoutURL
+    registered on the PWA client for prod and gamma. None when the kill-switch
+    COGNITO_HOSTED_LOGOUT is 'false' or the redirect URI has no scheme/host.
+    """
+    if (COGNITO_HOSTED_LOGOUT or "").strip().lower() == "false":
+        return None
+    parsed = urlparse(WEBUI_OAUTH_REDIRECT_URI)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    query = urlencode({"client_id": COGNITO_CLIENT_ID, "logout_uri": f"{parsed.scheme}://{parsed.netloc}/"})
+    return f"{COGNITO_HOSTED_UI_DOMAIN.rstrip('/')}/logout?{query}"
+
+
+def _handle_logout(event: Dict) -> Dict:
+    """POST /api/v1/auth/logout — end the cookie session server-side.
+
+    Same CSRF/origin gate as the kit refresh route: `X-Requested-With: io-kit`
+    plus an allow-listed Origin (403 AUTH_FORBIDDEN otherwise, nothing cleared
+    or revoked). A valid call revokes the refresh token at Cognito (best-effort)
+    and clears every cookie this Lambda sets via Set-Cookie ... Max-Age=0 with
+    the exact Path/attributes they were set with, so an HttpOnly refresh cookie
+    the page cannot touch no longer survives a log out.
+    """
+    origin = _header(event, "origin")
+    if origin not in ALLOWED_ORIGINS or not _is_kit_request(event):
+        return _kit_error(403, "AUTH_FORBIDDEN", "origin or request header not allowed")
+    refresh_token = _extract_refresh_token(event)
+    revoked = _revoke_refresh_token(refresh_token) if refresh_token else False
+    logger.info("logout; refresh_cookie_present=%s revoked=%s", bool(refresh_token), revoked)
+    out = _response(
+        200,
+        {"logged_out": True, "logout_url": _logout_url()},
+        {"Cache-Control": "no-store", "Access-Control-Allow-Origin": origin},
+    )
+    out["cookies"] = _clear_cookies()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# DVP-TSK-B42: app refresh (server half of the PWA's brute-force reset)
+# ---------------------------------------------------------------------------
+# GET /api/v1/app/refresh tells the browser to drop everything it holds for this
+# origin: HTTP cache, storage (localStorage/sessionStorage/IndexedDB/service
+# workers/CacheStorage) and running execution contexts. "cookies" is
+# deliberately NOT listed, so the session survives and io stays signed in.
+# The SPA calls it first, then deletes the same things itself and hard-reloads.
+
+APP_REFRESH_CLEAR_SITE_DATA = '"cache", "storage", "executionContexts"'
+
+
+def _handle_app_refresh(event: Dict) -> Dict:
+    # Clear-Site-Data is honoured on any response, including a cross-site
+    # subresource load, so a third-party page could otherwise make a visitor's
+    # browser wipe this origin's storage. Browsers label that load
+    # Sec-Fetch-Site: cross-site/same-site; the SPA's own fetch is same-origin
+    # and a typed URL is "none". An absent header (old client, curl) is allowed.
+    fetch_site = _header(event, "sec-fetch-site").lower()
+    if fetch_site not in ("", "same-origin", "none"):
+        return _kit_error(403, "AUTH_FORBIDDEN", "same-origin requests only")
+    logger.info(json.dumps({"event": "app_refresh"}, separators=(",", ":")))
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "Clear-Site-Data": APP_REFRESH_CLEAR_SITE_DATA,
+        },
+        "body": json.dumps({"refreshed": True}),
+    }
 
 
 def _load_policy() -> Dict[str, Any]:
@@ -687,8 +836,17 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if method == "GET" and path.rstrip("/").endswith("/auth/manifest"):
         return _handle_manifest(event)
 
+    # DVP-TSK-B42: server half of the PWA's "App refresh" reset.
+    if method == "GET" and path.rstrip("/").endswith("/app/refresh"):
+        return _handle_app_refresh(event)
+
     if method != "POST":
         return _error(405, "Method not allowed.")
+
+    # DVP-TSK-B41: real logout (revoke + clear cookies). Before the refresh
+    # dispatch: a logout must never fall through to the refresh path.
+    if path.rstrip("/").endswith("/auth/logout"):
+        return _handle_logout(event)
 
     if _is_kit_request(event):
         return _handle_kit_refresh(event)

@@ -975,6 +975,29 @@ Resources:
       RouteKey: GET /api/v1/auth/login
       Target: !Sub integrations/${AuthRefreshIntegration}
 
+  # DVP-TSK-B41: real logout. POST /api/v1/auth/logout revokes the refresh token
+  # at Cognito (best-effort) and clears every auth cookie (the HttpOnly refresh
+  # cookie is invisible to the page, so only the edge can clear it). Same
+  # X-Requested-With: io-kit + Origin gate as POST /api/v1/auth/refresh.
+  RouteAuthLogout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/auth/logout
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  # DVP-TSK-B42: server half of the PWA's "App refresh". Public and stateless:
+  # answers 200 + Clear-Site-Data: "cache", "storage", "executionContexts"
+  # (not "cookies": the session survives) so the browser drops its HTTP cache,
+  # storage and running contexts; the SPA then deletes the same client-side and
+  # hard-reloads. Same-origin, so no OPTIONS route is needed.
+  RouteAppRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/app/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
   RouteAuthGitHubToken:
     Type: AWS::ApiGatewayV2::Route
     Properties:

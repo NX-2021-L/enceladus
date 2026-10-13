@@ -23,8 +23,8 @@
       "description": "How the decider authenticated. step_up is treated as interactive_human until DVP-TSK-980 lands (recorded degraded mode, see assurance)."
     },
     "Assurance": {
-      "enum": ["session", "interactive_human", "step_up", "step_up_degraded", "aal1", "aal2"],
-      "description": "aal1 = interactive-human ID token only (default); aal2 = a verified method-tagged proof (cognito_max_age) raised it. step_up_degraded is the legacy label for an unverified step-up proof, now recorded as aal1 + proof_method step_up + degraded_mode (until DVP-TSK-980)."
+      "enum": ["session", "interactive_human", "step_up", "aal1", "aal2"],
+      "description": "aal1 = interactive-human ID token only (default); aal2 = a verified method-tagged proof (cognito_max_age) raised it. The hub verifies step-up proofs server-side (DVP-TSK-980); the degraded mode that recorded an unverified proof as aal1 is retired."
     },
     "ProofMethod": { "enum": ["none", "webauthn", "cognito_acr", "cognito_max_age", "step_up"], "description": "Method tag of the step-up proof (DVP-FTR-105 AC1)." },
     "Timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
@@ -109,7 +109,6 @@
         "auth_time": { "$ref": "#/$defs/Timestamp" },
         "assurance": { "$ref": "#/$defs/Assurance" },
         "proof_method": { "$ref": "#/$defs/ProofMethod" },
-        "degraded_mode": { "type": "boolean", "description": "True when a step_up proof was accepted unverified (recorded as interactive_human until DVP-TSK-980)." },
         "inputs": { "type": "object", "description": "Decider inputs, validated against the card inputs_schema when present." },
         "callHash": { "$ref": "#/$defs/Sha256Hex" },
         "idempotencyKey": { "type": "string", "minLength": 1 },
@@ -146,8 +145,7 @@
         "auth_method": { "$ref": "#/$defs/AuthMethod" },
         "auth_time": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
         "assurance": { "$ref": "#/$defs/Assurance" },
-        "proof_method": { "$ref": "#/$defs/ProofMethod" },
-        "degraded_mode": { "type": "boolean" }
+        "proof_method": { "$ref": "#/$defs/ProofMethod" }
       },
       "additionalProperties": true
     },

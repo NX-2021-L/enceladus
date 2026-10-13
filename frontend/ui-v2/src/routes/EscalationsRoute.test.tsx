@@ -120,6 +120,24 @@ describe('restored cockpit layout on the hub data', () => {
     expect(container.querySelector('[data-testid="gate-inbox-panel"]')).toBeNull()
   })
 
+  it('?escalations=legacy is inert: the pre-kit renderer is gone and the current cockpit renders (DVP-TSK-B34)', async () => {
+    window.history.replaceState(null, '', '/escalations?escalations=legacy')
+    expect(window.location.search).toBe('?escalations=legacy')
+    await mount(<EscalationsRoute />)
+    // identical to the default render: ONE PageHeader, the cockpit tabs and rows, the hub's all-projects feed
+    expect(container.querySelectorAll('h1').length).toBe(1)
+    expect(container.textContent).toContain('3 pending')
+    for (const label of ['Pending', 'Approved', 'Denied', 'All']) expect(container.textContent).toContain(label)
+    expect(container.textContent).toContain('DVP-ESC-100')
+    expect(container.textContent).toContain('TC-200')
+    expect(container.querySelector('button.ev2-esc__idlink')).toBeTruthy()
+    expect(container.querySelector('[data-testid="gate-inbox-panel"]')).toBeNull()
+    // no pre-kit per-project fan-out or ESC-only reader: only the two all-projects hub list calls
+    expect(authFetch.mock.calls.length).toBe(2)
+    for (const c of listCalls()) expect(String(c[0])).toContain('project_id=*')
+    expect(listCalls().length).toBe(2)
+  })
+
   it('shows terminal rows under the Approved and Denied tabs', async () => {
     await mount(<EscalationsRoute />)
     await click(tab('Approved'))
