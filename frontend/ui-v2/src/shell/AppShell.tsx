@@ -143,7 +143,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const followNav = (event: { detail: { href?: string; text?: React.ReactNode } }) => {
     const href = event.detail.href
     if (href === LOGOUT_HREF) {
-      performLogout()
+      // DVP-TSK-B41: async -- awaits the server logout (revokes the HttpOnly
+      // refresh cookie) before navigating away.
+      void performLogout()
       return
     }
     if (href === ADD_PASSKEY_HREF) {

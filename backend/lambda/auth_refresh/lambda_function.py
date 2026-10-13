@@ -4,6 +4,7 @@ Lambda endpoint for refreshing Cognito tokens and vending GitHub App tokens.
 
 Routes (via API Gateway proxy):
     POST /api/v1/auth/refresh          — Cognito token refresh
+    POST /api/v1/auth/logout           — revoke the refresh token, clear the auth cookies (DVP-TSK-B41)
     GET  /api/v1/auth/github-token     — GitHub App installation access token
     OPTIONS /api/v1/auth/*             (CORS preflight)
 
@@ -21,6 +22,8 @@ Environment variables:
     COGNITO_USER_POOL_ID        us-east-1_b2D0V3E1k
     COGNITO_CLIENT_ID           6q607dk3liirhtecgps7hifmlk
     COGNITO_REGION              default: us-east-1
+    COGNITO_HOSTED_LOGOUT       optional kill-switch for the Hosted-UI logout hop: unset/'true' = on,
+                                'false' = POST /auth/logout returns logout_url null (DVP-TSK-B41)
     GITHUB_APP_ID               GitHub App numeric ID
     GITHUB_INSTALLATION_ID      Installation ID for NX-2021-L org
     GITHUB_PRIVATE_KEY_SECRET   Secrets Manager secret name (default: devops/github-app/private-key)
@@ -83,6 +86,12 @@ COGNITO_HOSTED_UI_DOMAIN = os.environ.get(
     "COGNITO_HOSTED_UI_DOMAIN",
     COGNITO_CUSTOM_DOMAIN,
 )
+# DVP-TSK-B41: kill-switch for the Hosted-UI logout hop. The post-logout
+# landing URI is derived from WEBUI_OAUTH_REDIRECT_URI (scheme://host/), which
+# the PWA app client has registered as a LogoutURL on prod and gamma, so no
+# per-environment setting is needed. 'false' makes logout_url null (the SPA
+# then just goes to '/'); unset or anything else keeps the hop on.
+COGNITO_HOSTED_LOGOUT = os.environ.get("COGNITO_HOSTED_LOGOUT", "")
 WEBUI_OAUTH_REDIRECT_URI = os.environ.get(
     "WEBUI_OAUTH_REDIRECT_URI",
     "https://enceladus-gamma.jreese.net/api/v1/auth/callback",
@@ -602,6 +611,75 @@ def _handle_kit_refresh(event: Dict) -> Dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# DVP-TSK-B41: logout (revoke the refresh token + clear every auth cookie)
+# ---------------------------------------------------------------------------
+
+def _revoke_refresh_token(refresh_token: str) -> bool:
+    """Best-effort POST <hosted-ui>/oauth2/revoke (form: token, client_id).
+
+    Public client, no secret. Returns True when Cognito accepted the revoke.
+    Never raises, and never logs the token (only the failure class / HTTP code).
+    """
+    body = urlencode({"token": refresh_token, "client_id": COGNITO_CLIENT_ID}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COGNITO_HOSTED_UI_DOMAIN.rstrip('/')}/oauth2/revoke",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError as exc:
+        logger.warning("logout revoke rejected: http %s", exc.code)
+    except Exception as exc:  # noqa: BLE001 - revoke is best-effort, never fails the logout
+        logger.warning("logout revoke failed: %s", type(exc).__name__)
+    return False
+
+
+def _logout_url() -> Optional[str]:
+    """Hosted-UI /logout URL that ends the Cognito session and returns to the app.
+
+    logout_uri is the origin of WEBUI_OAUTH_REDIRECT_URI plus '/', a LogoutURL
+    registered on the PWA client for prod and gamma. None when the kill-switch
+    COGNITO_HOSTED_LOGOUT is 'false' or the redirect URI has no scheme/host.
+    """
+    if (COGNITO_HOSTED_LOGOUT or "").strip().lower() == "false":
+        return None
+    parsed = urlparse(WEBUI_OAUTH_REDIRECT_URI)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    query = urlencode({"client_id": COGNITO_CLIENT_ID, "logout_uri": f"{parsed.scheme}://{parsed.netloc}/"})
+    return f"{COGNITO_HOSTED_UI_DOMAIN.rstrip('/')}/logout?{query}"
+
+
+def _handle_logout(event: Dict) -> Dict:
+    """POST /api/v1/auth/logout — end the cookie session server-side.
+
+    Same CSRF/origin gate as the kit refresh route: `X-Requested-With: io-kit`
+    plus an allow-listed Origin (403 AUTH_FORBIDDEN otherwise, nothing cleared
+    or revoked). A valid call revokes the refresh token at Cognito (best-effort)
+    and clears every cookie this Lambda sets via Set-Cookie ... Max-Age=0 with
+    the exact Path/attributes they were set with, so an HttpOnly refresh cookie
+    the page cannot touch no longer survives a log out.
+    """
+    origin = _header(event, "origin")
+    if origin not in ALLOWED_ORIGINS or not _is_kit_request(event):
+        return _kit_error(403, "AUTH_FORBIDDEN", "origin or request header not allowed")
+    refresh_token = _extract_refresh_token(event)
+    revoked = _revoke_refresh_token(refresh_token) if refresh_token else False
+    logger.info("logout; refresh_cookie_present=%s revoked=%s", bool(refresh_token), revoked)
+    out = _response(
+        200,
+        {"logged_out": True, "logout_url": _logout_url()},
+        {"Cache-Control": "no-store", "Access-Control-Allow-Origin": origin},
+    )
+    out["cookies"] = _clear_cookies()
+    return out
+
+
 def _load_policy() -> Dict[str, Any]:
     with open(_POLICY_PATH, encoding="utf-8") as fh:
         return json.load(fh)
@@ -689,6 +767,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     if method != "POST":
         return _error(405, "Method not allowed.")
+
+    # DVP-TSK-B41: real logout (revoke + clear cookies). Before the refresh
+    # dispatch: a logout must never fall through to the refresh path.
+    if path.rstrip("/").endswith("/auth/logout"):
+        return _handle_logout(event)
 
     if _is_kit_request(event):
         return _handle_kit_refresh(event)
