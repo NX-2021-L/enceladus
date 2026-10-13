@@ -1,19 +1,20 @@
 {
-  "version": "2026-10-13.05",
-  "updated_at": "2026-10-13T04:30:00Z",
-  "last_change_summary": "DVP-TSK-B20: isolation W4g; graph_query_api pathway-telemetry/ writes dual through content_store, flow_weight_refresh reads via the store (legacy until the delta)",
+  "version": "2026-10-13.06",
+  "updated_at": "2026-10-13T05:30:00Z",
+  "last_change_summary": "DVP-TSK-B22: isolation W4h; governance_update writes governance/live + history to jreese-net AND the shared prod content bucket (GOVERNANCE_CONTENT_BUCKET, both planes, unprefixed keys), reads stay legacy",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
     "content_store.mode": {
-      "description": "DVP-TSK-A78/B04/B05 (isolation W4, DOC-EF4BC758CCC9): Lambdas reach the Enceladus S3 prefixes through enceladus_shared.content_store, configured per function by environment. CONTENT_STORE_MODE=legacy (default; legacy bucket only) | dual (writes to the content bucket then the legacy bucket; reads try the content bucket and fall back to legacy only on NoSuchKey/404) | content (content bucket only). Keys stay in legacy form; S3_ENV_PREFIX (gamma: 'gamma/') is dropped for the per-environment content bucket enceladus-content${EnvironmentSuffix}-<acct>-<region>. First adopter: reference_search (dual). DVP-TSK-B14: in dual mode a conditional put (IfNoneMatch/IfMatch) writes the legacy bucket first and a legacy error stops the write before the content bucket; a content-side PreconditionFailed is swallowed (the W3 snapshot already holds the immutable object). copy_object copies per write target and, in dual mode, retries a content-source miss from the legacy source. Writer-first adopters (dual writes, CONTENT_STORE_READ=legacy): feed_publisher, project_service, memory_consolidation (its only agent-documents/ store call is a write). DVP-TSK-B17 (W4e): readers of agent-documents/ go content-first -- document_api (dual, no CONTENT_STORE_READ; content bucket first, legacy on a miss) and corpus_entropy_engine (new adopter; docstore_integrity reads dual via content_store, DOCSTORE_S3_PREFIX now env-prefixed so gamma no longer reads prod's prefix). DVP-TSK-B20 (W4g): graph_query_api (new adopter; _emit_pathway_telemetry writes pathway-telemetry/ dual, CONTENT_STORE_READ=legacy; close_wave and flow_weight_refresh read through the store, pinned to legacy). ContentStore.list_objects returns listing entries with LastModified (the older stamp wins when a key is in both buckets, as the W3 copy re-stamped the content objects).",
+      "description": "DVP-TSK-A78/B04/B05 (isolation W4, DOC-EF4BC758CCC9): Lambdas reach the Enceladus S3 prefixes through enceladus_shared.content_store, configured per function by environment. CONTENT_STORE_MODE=legacy (default; legacy bucket only) | dual (writes to the content bucket then the legacy bucket; reads try the content bucket and fall back to legacy only on NoSuchKey/404) | content (content bucket only). Keys stay in legacy form; S3_ENV_PREFIX (gamma: 'gamma/') is dropped for the per-environment content bucket enceladus-content${EnvironmentSuffix}-<acct>-<region>. First adopter: reference_search (dual). DVP-TSK-B14: in dual mode a conditional put (IfNoneMatch/IfMatch) writes the legacy bucket first and a legacy error stops the write before the content bucket; a content-side PreconditionFailed is swallowed (the W3 snapshot already holds the immutable object). copy_object copies per write target and, in dual mode, retries a content-source miss from the legacy source. Writer-first adopters (dual writes, CONTENT_STORE_READ=legacy): feed_publisher, project_service, memory_consolidation (its only agent-documents/ store call is a write). DVP-TSK-B17 (W4e): readers of agent-documents/ go content-first -- document_api (dual, no CONTENT_STORE_READ; content bucket first, legacy on a miss) and corpus_entropy_engine (new adopter; docstore_integrity reads dual via content_store, DOCSTORE_S3_PREFIX now env-prefixed so gamma no longer reads prod's prefix). DVP-TSK-B20 (W4g): graph_query_api (new adopter; _emit_pathway_telemetry writes pathway-telemetry/ dual, CONTENT_STORE_READ=legacy; close_wave and flow_weight_refresh read through the store, pinned to legacy). ContentStore.list_objects returns listing entries with LastModified (the older stamp wins when a key is in both buckets, as the W3 copy re-stamped the content objects). DVP-TSK-B22 (W4h): coordination_api governance_update is a dual writer through its own lazy store (_governance_store) built from GOVERNANCE_CONTENT_BUCKET instead of from_env. governance/ is ONE shared corpus held only in the PROD content bucket enceladus-content-<acct>-<region> (no EnvironmentSuffix) on BOTH planes (io, DOC-EF4BC758CCC9, 2026-10-13); keys are unprefixed governance/live/... and governance/history/... on both planes, and gamma must not use enceladus-content-gamma-* for governance. Reads stay legacy (CONTENT_STORE_READ=legacy). An unset GOVERNANCE_CONTENT_BUCKET or mode legacy is exactly today's jreese-net-only behaviour.",
       "fields": {
         "CONTENT_STORE_MODE": {"type": "string", "enum": ["legacy", "dual", "content"], "definition": "Which bucket(s) a function reads and writes for the Enceladus prefixes."},
         "CONTENT_BUCKET": {"type": "string", "definition": "The per-environment content bucket; required unless the mode is legacy."},
         "S3_ENV_PREFIX": {"type": "string", "definition": "Legacy-only key prefix (gamma: gamma/), stripped for the content bucket."},
-        "CONTENT_STORE_READ": {"type": "string", "enum": ["auto", "legacy"], "definition": "DVP-TSK-B09: legacy keeps reads on the legacy bucket while dual writes go to both (writer-first phase); auto follows the mode."}
+        "CONTENT_STORE_READ": {"type": "string", "enum": ["auto", "legacy"], "definition": "DVP-TSK-B09: legacy keeps reads on the legacy bucket while dual writes go to both (writer-first phase); auto follows the mode."},
+        "GOVERNANCE_CONTENT_BUCKET": {"type": "string", "definition": "DVP-TSK-B22: the PROD content bucket (enceladus-content-<acct>-<region>, no EnvironmentSuffix) that holds the single shared governance/ corpus on both planes; read only by coordination_api governance_update. Unset means legacy-only behaviour."}
       }
     },
     "tracker_mutation.get_record_project_sentinel": {
@@ -9567,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.06",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-B22: isolation W4h; governance_update writes governance/live + history to jreese-net AND the shared prod content bucket (GOVERNANCE_CONTENT_BUCKET, both planes, unprefixed keys), reads stay legacy"
+    },
     {
       "version": "2026-10-13.05",
       "date": "2026-10-13",
