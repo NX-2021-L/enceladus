@@ -4,3 +4,7 @@
 # dedup_convergence` resolves at runtime (same precedent as graph_sync/embedding.py
 # -> graph_query_api). Keep in lockstep with the canonical owner.
 backend/lambda/graph_query_api/dedup_convergence.py
+#
+# DVP-TSK-B39 (isolation W4k, DOC-EF4BC758CCC9): the dual-path S3 helper, so `import content_store` resolves for the
+# rhythm completion stanza. Canonical copy lives in the shared layer.
+backend/lambda/shared_layer/python/enceladus_shared/content_store.py

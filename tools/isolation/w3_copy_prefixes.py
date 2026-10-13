@@ -38,6 +38,9 @@ DEST_REGION = "us-west-2"
 PREFIXES = (
     "agent-documents/", "governance/", "agent-scratch/", "mobile/", "proposals/", "pathway-telemetry/",
     "deploy-config/", "deploy-sources/", "cfn-templates/", "cfn-staging/", "security/",
+    # DVP-TSK-B39: W4 writer-first prefixes (B32: intent-training, unlearning-*, gdmp-remediation-state; B39:
+    # rhythm-cycle, gamma-only) so the delta and parity cover them before their reads flip.
+    "intent-training/", "unlearning-tombstones/", "unlearning-state/", "gdmp-remediation-state/", "rhythm-cycle/",
 )
 
 

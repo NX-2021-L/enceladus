@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -13,6 +14,26 @@ from config import S3_BUCKET, artifact_prefix
 
 logger = logging.getLogger(__name__)
 _s3 = boto3.client("s3")
+_STORE: Any = None
+
+
+def content_store(client: Any = None) -> Any:
+    """DVP-TSK-B39 (isolation W4k): every rhythm-cycle/ object access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the per-environment content bucket (key without the legacy-only S3_ENV_PREFIX) AND
+    S3_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps read_latest and the tenant stanza list/get on S3_BUCKET until
+    every writer of the prefix (this function and the heavy-beat tenants) is dual. legacy (default) is byte-identical
+    to a raw s3 call. Bound to the given client (default this module's _s3); rebuilt when the client changes.
+    """
+    global _STORE
+    client = _s3 if client is None else client
+    if _STORE is None or _STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        _STORE = ContentStore.from_env(client, dict(os.environ, LEGACY_BUCKET=S3_BUCKET))
+    return _STORE
 
 
 def _tier_base(tier: str) -> str:
@@ -35,7 +56,7 @@ def latest_key(tier: str) -> str:
 def read_latest(tier: str) -> Optional[Dict[str, Any]]:
     key = latest_key(tier)
     try:
-        resp = _s3.get_object(Bucket=S3_BUCKET, Key=key)
+        resp = content_store().get_object(key)  # DVP-TSK-B39: legacy-pinned until every writer is dual
         body = resp["Body"].read().decode("utf-8")
         return json.loads(body)
     except _s3.exceptions.NoSuchKey:
@@ -56,10 +77,9 @@ def write_artifact(tier: str, payload: Dict[str, Any], beat_ts: Optional[datetim
     latest = latest_key(tier)
 
     for key in (ts_key, latest):
-        _s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=key,
-            Body=body,
+        content_store().put_object(  # DVP-TSK-B39: dual mode writes the content bucket, then S3_BUCKET
+            key,
+            body,
             ContentType="application/json",
         )
     return {"timestamped_key": ts_key, "latest_key": latest, "bytes": str(len(body))}

@@ -2582,6 +2582,12 @@ Resources:
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza.
           RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
+          # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
+          # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           ADAPTIVE_TRIGGER_MIN_HANDOFFS: !Ref HceAdaptiveMinHandoffs
           HCE_LOOKBACK_DAYS: "90"
           HCE_PROPOSER_ID: ENC-FTR-064
@@ -3007,6 +3013,12 @@ Resources:
           PROJECT_ID: enceladus
           # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza.
           RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
+          # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
+          # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           SECRETS_REGION: !Ref "AWS::Region"
           # ENC-TSK-K43: cross-Lambda invoke target for the real Fiedler lambda2
           # (FTR-088 CSR/Fiedler path, ISS-465-compliant).
@@ -3099,6 +3111,12 @@ Resources:
           PERCOLATION_TABLE: !Sub "enceladus-percolation-telemetry${EnvironmentSuffix}"
           # ENC-TSK-N24: bucket for the rhythm heavy-beat completion stanza.
           RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
+          # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
+          # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           CLOUDWATCH_NAMESPACE: Enceladus/Percolation
           PROJECT_ID: enceladus
           MC_TRIALS: "40"
@@ -8589,6 +8607,13 @@ Resources:
           S3_BUCKET: !Ref S3Bucket
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           S3_PREFIX: rhythm-cycle
+          # DVP-TSK-B39 (isolation W4k): writer-first phase -- beat artifacts (artifact_store, identity, baseline) and
+          # stanzas written through tenant_invoker go to the content bucket AND S3_BUCKET; read_latest and the tenant
+          # stanza list/get stay on legacy until every rhythm-cycle/ writer (this function and the heavy-beat tenants)
+          # is dual and the W3 delta has run (DOC-EF4BC758CCC9).
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           CLOUDWATCH_NAMESPACE: Enceladus/Rhythm
           PROJECTS_TABLE: projects
           AGENT_SESSIONS_TABLE: agent-sessions
