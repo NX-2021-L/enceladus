@@ -152,7 +152,7 @@ def test_refresh_legacy_pin_lists_and_reads_legacy_only_same_result_as_raw(env, 
     store = lf._content_store(s3)
     via_store = fwr._list_new_telemetry_objects(s3, LEGACY, PREFIX, 0, 100, store=store)
     flow_store = fwr._aggregate_hit_flow(s3, LEGACY, via_store, store=store)
-    assert s3.lists == [(LEGACY, PREFIX)] and {b for b, _ in s3.gets} == {LEGACY}
+    assert s3.lists == [(LEGACY, PREFIX + "/")] and {b for b, _ in s3.gets} == {LEGACY}
     raw = fwr._list_new_telemetry_objects(s3, LEGACY, PREFIX, 0, 100)
     assert via_store == raw and len(raw) == 2
     assert flow_store == fwr._aggregate_hit_flow(s3, LEGACY, raw) == {"e1": 5}
@@ -164,14 +164,14 @@ def test_run_refresh_uses_the_store_for_the_configured_bucket(env, monkeypatch):
     driver = _FakeDriver(watermark_response=None)
     result = fwr.run_refresh(driver, s3, {})
     assert result["ok"] and result["applied"] and result["edges_reinforced"] == 1
-    assert s3.lists == [(LEGACY, PREFIX)] and {b for b, _ in s3.gets} == {LEGACY}
+    assert s3.lists == [(LEGACY, PREFIX + "/")] and {b for b, _ in s3.gets} == {LEGACY}
 
 
 def test_explicit_other_bucket_stays_a_raw_legacy_read(env, monkeypatch):
     env(read=None)  # even with content-first reads configured, a foreign bucket is not the content store's business
     s3 = _use(monkeypatch, _FakeS3({("other-bucket", "p/x.jsonl"): (_hit("e9", 1), T0)}))
     result = fwr.run_refresh(_FakeDriver(watermark_response=None), s3, {"bucket": "other-bucket", "prefix": "p"})
-    assert result["applied"] and s3.lists == [("other-bucket", "p")]
+    assert result["applied"] and s3.lists == [("other-bucket", "p/")]
     assert {b for b, _ in s3.gets} == {"other-bucket"}
 
 
@@ -202,3 +202,45 @@ def test_read_unset_content_hit_is_read_from_content_and_a_miss_falls_back_to_le
     assert (CONTENT, "pathway-telemetry/wave_id=W1/a.jsonl") in s3.gets
     assert s3.gets.count((LEGACY, f"{PREFIX}/wave_id=W1/a.jsonl")) == 0
     assert (CONTENT, "pathway-telemetry/wave_id=W1/b.jsonl") in s3.gets and (LEGACY, f"{PREFIX}/wave_id=W1/b.jsonl") in s3.gets
+
+
+# -- DVP-TSK-B45 (DVP-ISS-149): the list prefix carries a trailing slash (IAM allows only <prefix>/*) -----------------
+@pytest.mark.parametrize("configured", ["pathway-telemetry", "pathway-telemetry/", "gamma/pathway-telemetry", "gamma/pathway-telemetry/"])
+def test_raw_list_prefix_has_exactly_one_trailing_slash(configured):
+    s3 = _FakeS3({(LEGACY, f"{configured.rstrip('/')}/wave_id=W1/a.jsonl"): (_hit("e1", 1), T0)})
+    assert [k for k, _ in fwr._list_new_telemetry_objects(s3, LEGACY, configured, 0, 100)] == [
+        f"{configured.rstrip('/')}/wave_id=W1/a.jsonl"]
+    assert s3.lists == [(LEGACY, configured.rstrip("/") + "/")]
+
+
+def test_prod_list_prefix_is_pathway_telemetry_slash_on_both_paths(env, monkeypatch):
+    env(read="legacy")
+    monkeypatch.setattr(lf, "PATHWAY_TELEMETRY_PREFIX", "pathway-telemetry")
+    monkeypatch.setenv("S3_ENV_PREFIX", "")
+    s3 = _use(monkeypatch, _FakeS3({(LEGACY, "pathway-telemetry/wave_id=W1/a.jsonl"): (_hit("e1", 1), T0)}))
+    raw = fwr._list_new_telemetry_objects(s3, LEGACY, "pathway-telemetry", 0, 100)
+    via_store = fwr._list_new_telemetry_objects(s3, LEGACY, "pathway-telemetry", 0, 100, store=lf._content_store(s3))
+    assert raw == via_store and len(raw) == 1
+    assert s3.lists == [(LEGACY, "pathway-telemetry/")] * 2
+
+
+def test_gamma_list_prefix_is_gamma_pathway_telemetry_slash_on_both_paths(env, monkeypatch):
+    env(read="legacy")  # PREFIX == gamma/pathway-telemetry, S3_ENV_PREFIX == gamma/
+    s3 = _use(monkeypatch, _FakeS3(_seed()))
+    fwr._list_new_telemetry_objects(s3, LEGACY, PREFIX, 0, 100)
+    fwr._list_new_telemetry_objects(s3, LEGACY, PREFIX, 0, 100, store=lf._content_store(s3))
+    assert s3.lists == [(LEGACY, "gamma/pathway-telemetry/")] * 2
+
+
+def test_gamma_content_first_lists_the_unprefixed_content_key_with_the_slash(env, monkeypatch):
+    env(read=None)
+    s3 = _use(monkeypatch, _FakeS3(_seed()))
+    fwr._list_new_telemetry_objects(s3, LEGACY, PREFIX, 0, 100, store=lf._content_store(s3))
+    assert s3.lists == [(CONTENT, "pathway-telemetry/"), (LEGACY, "gamma/pathway-telemetry/")]
+
+
+def test_run_refresh_lists_with_the_slash(env, monkeypatch):
+    env(read="legacy")
+    s3 = _use(monkeypatch, _FakeS3(_seed()))
+    fwr.run_refresh(_FakeDriver(watermark_response=None), s3, {})
+    assert s3.lists == [(LEGACY, "gamma/pathway-telemetry/")]

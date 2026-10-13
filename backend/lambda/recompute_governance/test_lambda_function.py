@@ -273,3 +273,90 @@ def test_malformed_sns_message_does_not_raise(monkeypatch):
     mod.handler(event, None)  # must not raise
 
     assert not read_calls
+
+
+# ---------------------------------------------------------------------------
+# DVP-TSK-B44: EventBridge "Object Created" from the PROD content bucket (shared governance corpus)
+# ---------------------------------------------------------------------------
+
+def _make_eventbridge_event(key: str, sequencer: str = "EB-SEQ1", version_id: str = "v1",
+                            detail_type: str = "Object Created") -> dict:
+    """The real shape: aws.s3 / Object Created, key RAW (not URL-encoded), version-id hyphenated."""
+    return {
+        "version": "0",
+        "id": "17793124-05d4-b198-2fde-7ededc63b103",
+        "detail-type": detail_type,
+        "source": "aws.s3",
+        "account": "356364570033",
+        "time": "2026-10-13T20:00:00Z",
+        "region": "us-west-2",
+        "resources": ["arn:aws:s3:::enceladus-content-356364570033-us-west-2"],
+        "detail": {
+            "version": "0",
+            "bucket": {"name": "enceladus-content-356364570033-us-west-2"},
+            "object": {"key": key, "size": 5, "etag": "abc", "version-id": version_id, "sequencer": sequencer},
+            "request-id": "N4N7GDK58NMKJ12R",
+            "requester": "356364570033",
+            "source-ip-address": "1.2.3.4",
+            "reason": "PutObject",
+        },
+    }
+
+
+def test_extract_s3_record_handles_eventbridge():
+    rec = mod._extract_s3_record(_make_eventbridge_event("governance/live/agents/x y.md", sequencer="E1", version_id="V9"))
+    assert rec["s3"]["object"] == {"key": "governance/live/agents/x y.md", "sequencer": "E1", "versionId": "V9"}
+
+
+def test_eventbridge_event_triggers_a_recompute(monkeypatch):
+    _stub_canonical(monkeypatch)
+    monkeypatch.setattr(mod, "_read_current_record", lambda: None)
+
+    written = {}
+    monkeypatch.setattr(
+        mod,
+        "_cas_write",
+        lambda *, governance_revision, governance_hash, generation, file_entries, source_event, expected_cas: (
+            written.update({"generation": generation, "source_event": source_event}) or True
+        ),
+    )
+
+    mod.handler(_make_eventbridge_event("governance/live/agents.md", sequencer="EBSEQ1", version_id="vEB"), None)
+
+    assert written["generation"] == 1
+    assert written["source_event"] == {
+        "s3_sequencer": "EBSEQ1", "trigger_s3_key": "governance/live/agents.md", "trigger_version_id": "vEB",
+    }
+
+
+def test_eventbridge_same_sequencer_dedups(monkeypatch):
+    _stub_canonical(monkeypatch)
+    monkeypatch.setattr(
+        mod, "_read_current_record",
+        lambda: {"generation": 3, "cas_version": 3, "source_event": {"s3_sequencer": "EBSEQ1"}},
+    )
+    writes = []
+    monkeypatch.setattr(mod, "_cas_write", lambda **kw: writes.append(kw) or True)
+
+    mod.handler(_make_eventbridge_event("governance/live/agents.md", sequencer="EBSEQ1"), None)
+
+    assert not writes
+
+
+def test_eventbridge_non_canonical_key_and_other_detail_types_are_skipped(monkeypatch):
+    read_calls = []
+    monkeypatch.setattr(mod, "_read_current_record", lambda: read_calls.append(1) or None)
+
+    mod.handler(_make_eventbridge_event("governance/live/other.json"), None)
+    mod.handler(_make_eventbridge_event("governance/live/agents.md", detail_type="Object Deleted"), None)
+    mod.handler({"source": "aws.s3", "detail-type": "Object Created", "detail": {"object": {}}}, None)
+
+    assert not read_calls
+
+
+def test_other_event_shapes_still_win_over_the_eventbridge_branch():
+    """The backstop's synthetic Records input has no top-level 'source', so it keeps the original path."""
+    backstop = {"Records": [{"eventSource": "aws:scheduled-backstop",
+                             "s3": {"object": {"key": "governance/live/agents.md", "sequencer": "", "versionId": ""}}}]}
+    assert mod._extract_s3_record(backstop)["s3"]["object"]["key"] == "governance/live/agents.md"
+    assert mod._eventbridge_s3_record(backstop) is None

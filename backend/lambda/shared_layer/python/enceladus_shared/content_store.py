@@ -104,11 +104,14 @@ class ContentStore:
         both planes, with unprefixed keys (io, DOC-EF4BC758CCC9, 2026-10-13; writers since DVP-TSK-B22). So the content
         bucket is GOVERNANCE_CONTENT_BUCKET -- never the per-environment CONTENT_BUCKET -- and S3_ENV_PREFIX is ignored.
         No GOVERNANCE_CONTENT_BUCKET means legacy (raw calls on ``legacy_bucket``), not a config error, so a function
-        without the variable behaves exactly as before. CONTENT_STORE_MODE / CONTENT_STORE_READ apply as usual."""
+        without the variable behaves exactly as before. CONTENT_STORE_MODE applies as usual. The read mode comes from
+        GOVERNANCE_STORE_READ (auto|legacy) when it is set, else from CONTENT_STORE_READ (DVP-TSK-B44): a function whose
+        agent-documents reads are content-first (CONTENT_STORE_READ unset) can still keep governance/ reads legacy-pinned
+        with GOVERNANCE_STORE_READ=legacy, so the two flips stay independent."""
         e = os.environ if env is None else env
         content_bucket = (e.get("GOVERNANCE_CONTENT_BUCKET") or "").strip()
         mode = (e.get("CONTENT_STORE_MODE") or "legacy").strip().lower() if content_bucket else "legacy"
-        read_mode = (e.get("CONTENT_STORE_READ") or "auto").strip().lower()
+        read_mode = (e.get("GOVERNANCE_STORE_READ") or e.get("CONTENT_STORE_READ") or "auto").strip().lower()
         return cls(s3_client, mode=mode, content_bucket=content_bucket, legacy_bucket=legacy_bucket,
                    legacy_key_prefix="", read_mode=read_mode)
 

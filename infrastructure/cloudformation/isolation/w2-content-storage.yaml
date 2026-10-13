@@ -107,6 +107,14 @@ Resources:
             BucketKeyEnabled: true
       VersioningConfiguration:
         Status: Enabled
+      # DVP-TSK-B44 (isolation W4i-2): governance/ is ONE shared corpus held in the PROD content bucket (io,
+      # DOC-EF4BC758CCC9), so BOTH planes' devops-recompute-governance[-gamma] must run when governance/live/ changes here.
+      # S3 cannot invoke a Lambda in another plane's stack and the legacy us-west-1 SNS relay is gamma-only, so the bucket
+      # publishes to the default event bus and each plane's 02-compute stack owns a GovernanceContentChangedRule on it
+      # (prefix governance/live/). Enabled on both envs (the gamma bucket just has no rule); no other behaviour changes.
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
       LifecycleConfiguration:
         Rules:
           - Id: noncurrent-rollback-window
