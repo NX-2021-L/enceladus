@@ -1,0 +1,3 @@
+# DVP-TSK-B39 (isolation W4k, DOC-EF4BC758CCC9): the dual-path S3 helper, copied to the function root by
+# .github/workflows/_build.yml so `import content_store` resolves for rhythm-cycle/ writes. Canonical copy lives in the shared layer.
+backend/lambda/shared_layer/python/enceladus_shared/content_store.py

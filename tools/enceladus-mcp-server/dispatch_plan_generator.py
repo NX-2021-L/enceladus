@@ -289,6 +289,37 @@ def _get_s3():
     return _s3_client
 
 
+def _load_content_store_cls():
+    """DVP-TSK-B40: content_store.py is vendored next to this file (tools/enceladus-mcp-server, copied to the root of
+    every MCP Lambda by _build.yml); the shared-layer copy and a by-path load cover the other import contexts (local
+    stdio, modules loaded by path from another directory)."""
+    try:
+        from content_store import ContentStore
+    except ImportError:
+        try:
+            from enceladus_shared.content_store import ContentStore
+        except ImportError:
+            import importlib.util
+
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "content_store.py")
+            spec = importlib.util.spec_from_file_location("content_store", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+            ContentStore = module.ContentStore
+    return ContentStore
+
+
+def _governance_store():
+    """DVP-TSK-B40 (isolation W4i): governance/live S3 reads go through content_store's governance store.
+
+    governance/ is ONE shared corpus held only in the PROD content bucket on both planes (unprefixed keys), so the store
+    takes GOVERNANCE_CONTENT_BUCKET; S3_BUCKET (ENCELADUS_S3_BUCKET) is the legacy bucket. Without
+    GOVERNANCE_CONTENT_BUCKET (local stdio, MCP Lambdas outside CloudFormation) every call is the same raw call as before;
+    in coordination_api (dual, CONTENT_STORE_READ=legacy) reads stay on legacy until the flip. Built per call.
+    """
+    return _load_content_store_cls().governance_from_env(_get_s3(), S3_BUCKET)
+
+
 def _now_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -372,17 +403,9 @@ def _uri_from_file_name(name: str) -> Optional[str]:
 def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
     """Build governance catalog from deterministic S3 prefix (ENC-TSK-474)."""
     try:
-        s3 = _get_s3()
+        store = _governance_store()
         prefix = S3_GOVERNANCE_PREFIX.rstrip("/") + "/"
-        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
-        objects = list(resp.get("Contents", []))
-        while resp.get("IsTruncated"):
-            resp = s3.list_objects_v2(
-                Bucket=S3_BUCKET,
-                Prefix=prefix,
-                ContinuationToken=resp["NextContinuationToken"],
-            )
-            objects.extend(resp.get("Contents", []))
+        objects = store.list_objects(prefix)  # DVP-TSK-B40: legacy-form keys
     except Exception as exc:
         logger.warning("S3 governance listing failed: %s", exc)
         return {}
@@ -397,7 +420,7 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
         if not uri:
             continue
         try:
-            content_resp = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            content_resp = store.get_object(s3_key)  # DVP-TSK-B40: governance/live via the governance store
             content = content_resp["Body"].read()
             content_hash = hashlib.sha256(content).hexdigest()
         except Exception as exc:

@@ -447,6 +447,20 @@ def _is_tenant_invoke(event: Dict[str, Any]) -> bool:
     return bool(str(event.get("result_key") or "").strip())
 
 
+def _rhythm_results_store(s3):
+    """DVP-TSK-B39 (isolation W4k): the rhythm completion stanza goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the per-environment content bucket (result_key without the legacy-only
+    S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (legacy), so rhythm_cycle can later read stanzas content-first. Unset or
+    legacy mode is byte-identical to the raw put this replaces.
+    """
+    try:
+        from content_store import ContentStore  # shipped to the function root by .build_extras
+    except ImportError:  # local tests: the canonical shared-layer copy
+        from enceladus_shared.content_store import ContentStore
+    return ContentStore.from_env(s3, dict(os.environ, LEGACY_BUCKET=RHYTHM_RESULTS_BUCKET))
+
+
 def _write_rhythm_stanza(
     event: Dict[str, Any],
     status: str,
@@ -477,10 +491,9 @@ def _write_rhythm_stanza(
     try:
         import boto3  # lazy, mirrors module idiom — keeps module import AWS-free
 
-        boto3.client("s3", region_name=DDB_REGION).put_object(
-            Bucket=RHYTHM_RESULTS_BUCKET,
-            Key=result_key,
-            Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        _rhythm_results_store(boto3.client("s3", region_name=DDB_REGION)).put_object(  # DVP-TSK-B39: dual writes content, then RHYTHM_RESULTS_BUCKET
+            result_key,
+            json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
             ContentType="application/json",
         )
         return True

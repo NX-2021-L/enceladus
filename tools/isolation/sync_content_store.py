@@ -6,6 +6,8 @@ the move ships with that function's own Gen2 build and needs no shared-layer rep
 
   python3 tools/isolation/sync_content_store.py --add document_api   # vendor into backend/lambda/document_api/
   python3 tools/isolation/sync_content_store.py --check              # CI: every vendored copy == canonical
+  (tools/enceladus-mcp-server/content_store.py is a vendored copy too: refresh it with
+   cp backend/lambda/shared_layer/python/enceladus_shared/content_store.py tools/enceladus-mcp-server/)
 """
 
 from __future__ import annotations
@@ -22,9 +24,17 @@ CANONICAL = os.path.join(ROOT, "backend/lambda/shared_layer/python/enceladus_sha
 LAMBDA_DIR = os.path.join(ROOT, "backend/lambda")
 
 
+# DVP-TSK-B40: the MCP server vendors a copy next to server.py (it ships to every MCP Lambda root and runs as a local
+# stdio server, where neither .build_extras nor the shared layer applies).
+MCP_SERVER_COPY = os.path.join(ROOT, "tools", "enceladus-mcp-server", "content_store.py")
+
+
 def vendored_copies():
-    return sorted(p for p in glob.glob(os.path.join(LAMBDA_DIR, "*", "content_store.py"))
-                  if os.sep + "shared_layer" + os.sep not in p)
+    copies = [p for p in glob.glob(os.path.join(LAMBDA_DIR, "*", "content_store.py"))
+              if os.sep + "shared_layer" + os.sep not in p]
+    if os.path.isfile(MCP_SERVER_COPY):
+        copies.append(MCP_SERVER_COPY)
+    return sorted(copies)
 
 
 def check() -> int:

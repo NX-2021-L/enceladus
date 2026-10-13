@@ -47,6 +47,12 @@ class TestPlan(unittest.TestCase):
         for p in w.PREFIXES:
             self.assertTrue(p.endswith("/"))
 
+    def test_w4_writer_first_prefixes_are_planned(self):
+        # DVP-TSK-B39: the B32 prefixes and rhythm-cycle/ need the delta and parity before their reads flip.
+        for p in ("intent-training/", "unlearning-tombstones/", "unlearning-state/", "gdmp-remediation-state/",
+                  "rhythm-cycle/"):
+            self.assertIn(p, w.PREFIXES)
+
     def test_copy_keeps_metadata_and_requests_sha256(self):
         calls = []
 
