@@ -279,6 +279,11 @@ def _handle_github_token(event: Dict) -> Dict:
 import base64  # noqa: E402  (grouped with the callback feature)
 
 _AUTH_LOOP_PATHS = ("/api/v1/auth/callback", "/api/v1/auth/login")
+# DVP-TSK-B28: fixed OAuth `state` path the SPA sends for "Add a passkey"
+# (authorize with prompt=login). It is a plain same-origin relative path, so it
+# survives `_safe_return_path` unchanged; the callback matches it EXACTLY.
+# Keep in sync with PASSKEY_ADD_STATE_PATH in frontend/ui-v2/src/auth/authConfig.ts.
+PASSKEY_ADD_STATE_PATH = "/__passkey_add__"
 _MAX_AGE_RE = re.compile(r"[0-9]{1,10}")
 
 
@@ -391,6 +396,21 @@ def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
     return {"id_token": id_token, "refresh_token": data.get("refresh_token")}
 
 
+def _passkey_add_url() -> str:
+    """Managed-login v2 `/passkeys/add` URL on the custom domain (DVP-TSK-B28).
+
+    Same client id and registered redirect_uri as the token exchange, so the
+    return (`?result=...`, no code) lands on this callback again.
+    """
+    domain = COGNITO_HOSTED_UI_DOMAIN.rstrip("/")
+    if domain == COGNITO_PREFIX_DOMAIN.rstrip("/"):
+        # Passkeys only exist on the custom domain; never send the user to the
+        # classic prefix domain (the token-exchange fallback / MCP domain).
+        domain = COGNITO_CUSTOM_DOMAIN.rstrip("/")
+    query = urlencode({"client_id": COGNITO_CLIENT_ID, "redirect_uri": WEBUI_OAUTH_REDIRECT_URI})
+    return f"{domain}/passkeys/add?{query}"
+
+
 def _handle_oauth_callback(event: Dict) -> Dict:
     """GET /api/v1/auth/callback — Cognito Hosted-UI redirect lands here.
 
@@ -438,6 +458,14 @@ def _handle_oauth_callback(event: Dict) -> Dict:
             f"enceladus_refresh_token={tokens['refresh_token']}; "
             f"Path=/; Secure; HttpOnly; SameSite=None; Max-Age={REFRESH_TOKEN_MAX_AGE}"
         )
+
+    if target == PASSKEY_ADD_STATE_PATH:
+        # DVP-TSK-B28: the user came from "Add a passkey" and has just completed
+        # a fresh sign-in. Cookies are set exactly as for a normal login; the
+        # redirect continues to managed login's /passkeys/add, which needs that
+        # recent hosted-UI session. Always the custom domain, even if the code
+        # exchange fell back to the prefix domain: passkeys only exist there.
+        target = _passkey_add_url()
 
     logger.info("oauth callback succeeded; redirecting to %s", target)
     return {

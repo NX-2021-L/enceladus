@@ -62,16 +62,33 @@ export function redirectToLogin(): void {
   window.location.assign(buildLoginUrl())
 }
 
-/** DVP-TSK-B24: managed-login v2 "add a passkey" URL. Uses the SAME registered
- *  redirect_uri as login, so Cognito returns to /api/v1/auth/callback with
- *  `?result=<success|invalid_session|...>` (no `code`), which auth_refresh
- *  turns into `/?passkey_result=...` for the SPA notice. */
+/** DVP-TSK-B28: fixed OAuth `state` path meaning "after sign-in, continue to
+ *  managed login's /passkeys/add". It is a plain same-origin relative path so it
+ *  passes auth_refresh's `_safe_return_path` unchanged (starts with a single '/',
+ *  no scheme/host/backslash/control chars, not the callback or login route).
+ *  auth_refresh matches it EXACTLY after the code exchange; any other state is
+ *  an ordinary return path. Keep in sync with PASSKEY_ADD_STATE_PATH there. */
+export const PASSKEY_ADD_STATE_PATH = '/__passkey_add__'
+
+/** DVP-TSK-B28: "add a passkey" entry URL. Managed login only serves
+ *  /passkeys/add with a RECENT hosted-UI session, and the Enceladus cookie
+ *  session outlives it, so a direct link mostly bounced back with
+ *  `result=invalid_session`. Instead this builds the normal `/oauth2/authorize`
+ *  URL (same client, redirect_uri and scopes as login) with `prompt=login` to
+ *  force a fresh sign-in, and a passkey-intent `state`. auth_refresh's callback
+ *  exchanges the code, sets the cookies, then 302s to /passkeys/add. The return
+ *  from /passkeys/add (`?result=...`, no `code`) still lands on the callback and
+ *  becomes `/?passkey_result=...` for the SPA notice. */
 export function buildAddPasskeyUrl(): string {
   const params = new URLSearchParams({
+    response_type: 'code',
     client_id: COGNITO_CLIENT_ID,
     redirect_uri: OAUTH_REDIRECT_URI,
+    scope: COGNITO_SCOPES,
+    state: base64UrlEncode(PASSKEY_ADD_STATE_PATH),
+    prompt: 'login',
   })
-  return `${COGNITO_HOSTED_UI_DOMAIN}/passkeys/add?${params.toString()}`
+  return `${COGNITO_HOSTED_UI_DOMAIN}/oauth2/authorize?${params.toString()}`
 }
 
 /** Start the add-a-passkey flow (full-page navigation to managed login). */
