@@ -11,3 +11,7 @@
 # = false on every query, despite the corpus being fully embedded). Declaring it
 # here restores packaging.
 backend/lambda/graph_sync/embedding.py
+#
+# DVP-TSK-B20 (isolation W4, DOC-EF4BC758CCC9): the dual-path S3 helper, so `import content_store` resolves for the
+# pathway-telemetry/ writer and readers. Canonical copy lives in the shared layer.
+backend/lambda/shared_layer/python/enceladus_shared/content_store.py
