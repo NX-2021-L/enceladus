@@ -1,0 +1,19 @@
+/* DVP-TSK-B11 (io report 2026-10-12): the header search sheet rows follow the record-row design system: the feed card
+ * (.ev2-rc--feed, recordCard.css) and the record id (.enc-record-id). The kit SearchLauncher exposes every row style as a
+ * --io-launcher-* variable (defaults = the plain kit look), so the host sets variables and never overrides kit selectors.
+ * Colours stay the system roles: --accent is the enceladus teal and --fg-muted is the dust tone used for project/type. */
+.io-sheet[data-variant="palette"] {
+  --io-launcher-option-py: var(--space-2);
+  --io-launcher-option-px: var(--space-4);
+  --io-launcher-option-gap: var(--space-1);
+  --io-launcher-title-font: var(--font-body);
+  --io-launcher-title-size: 13.5px;
+  --io-launcher-title-weight: var(--fw-medium);
+  --io-launcher-title-leading: var(--lh-snug);
+  --io-launcher-meta-font: var(--font-mono);
+  --io-launcher-meta-size: 11.5px;
+  --io-launcher-id-accent: 100%;
+  --io-launcher-id-opacity: 0.85;
+  --io-launcher-kind-muted: 100%;
+  --io-launcher-kind-opacity: 1;
+}

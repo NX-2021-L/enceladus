@@ -5,6 +5,7 @@ import { inferRecordNavigation } from '../api/projectRegistry'
 import { matchActionCommands } from '../actions/commands'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import { suggestRows } from '../search/corpusSource'
+import './headerSearch.css'
 
 /**
  * DVP-TSK-995 (design D13): the header "Search…" box is the kit SearchLauncher. A 44px magnifier at every width plus
@@ -16,12 +17,13 @@ export function buildHeaderSuggestions(text: string, rows: readonly IndexRow[], 
   const nav = inferRecordNavigation(text, projects)
   if (nav) {
     const href = nav.type === 'document' ? documentHref(nav.id) : nav.projectId ? recordHrefForType(nav.projectId, nav.type, nav.id) : null
-    if (href) out.push({ id: `jump:${nav.id}`, title: `Open ${nav.id}`, subtitle: nav.type, href })
+    if (href) out.push({ id: `jump:${nav.id}`, title: `Open ${nav.id}`, recordId: nav.id, kind: nav.type, href })
   }
   for (const row of suggestRows(rows, text, 8)) {
     const project = typeof row.fields.project_id === 'string' ? row.fields.project_id : 'enceladus'
     const href = row.type === 'document' ? documentHref(row.id) : recordHrefForType(project, row.type as never, row.id)
-    out.push({ id: row.id, title: row.title || row.id, subtitle: `${row.id} · ${row.type}`, href })
+    // DVP-TSK-B11: structured meta, so the id renders like .enc-record-id (mono accent) and the type in dim mono.
+    out.push({ id: row.id, title: row.title || row.id, recordId: row.id, kind: row.type, href })
   }
   for (const c of matchActionCommands(text).slice(0, 3)) {
     out.push({ id: `action:${c.name}`, title: c.name, subtitle: c.title, href: `/actions/${c.name}` })
