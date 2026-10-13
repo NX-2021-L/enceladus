@@ -88,6 +88,31 @@ def _get_s3():
     return _s3_client
 
 
+_CONTENT_STORE = None
+
+
+def _content_store():
+    """DVP-TSK-B32 (isolation W4j): every gdmp-remediation-state/ access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the per-environment content bucket AND GDMP_STATE_BUCKET (legacy);
+    CONTENT_STORE_READ=legacy keeps the run counter read on GDMP_STATE_BUCKET until the W3 delta (the counter is
+    read-modify-write, so it must never regenerate from a stale content copy). legacy (default) is byte-identical to a
+    raw s3 call. Bound to _get_s3(); rebuilt if the client or the legacy bucket changes. Callers must only use it when
+    GDMP_STATE_BUCKET is set.
+    """
+    global _CONTENT_STORE
+    client = _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client or _CONTENT_STORE.legacy_bucket != GDMP_STATE_BUCKET:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = GDMP_STATE_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 # ---------------------------------------------------------------------------
 # Governed HTTP (document API) -- mirrors corpus_entropy_engine/lambda_function.py.
 # No direct DynamoDB/S3 document access; stays within the governed read/write
@@ -220,7 +245,7 @@ def _load_run_counter() -> int:
         return 0
     key = f"{GDMP_STATE_PREFIX.strip().strip('/')}/run_counter.json"
     try:
-        resp = _get_s3().get_object(Bucket=GDMP_STATE_BUCKET, Key=key)
+        resp = _content_store().get_object(key)  # DVP-TSK-B32: legacy-pinned until the delta
         payload = json.loads(resp["Body"].read().decode("utf-8"))
         return int(payload.get("run_count") or 0)
     except Exception:
@@ -231,10 +256,9 @@ def _save_run_counter(run_count: int) -> None:
     if not GDMP_STATE_BUCKET:
         return
     key = f"{GDMP_STATE_PREFIX.strip().strip('/')}/run_counter.json"
-    _get_s3().put_object(
-        Bucket=GDMP_STATE_BUCKET,
-        Key=key,
-        Body=json.dumps({"run_count": run_count}).encode("utf-8"),
+    _content_store().put_object(  # DVP-TSK-B32: dual mode writes the content bucket, then GDMP_STATE_BUCKET
+        key,
+        json.dumps({"run_count": run_count}).encode("utf-8"),
         ContentType="application/json",
     )
 
@@ -329,14 +353,9 @@ def _persist_run_breakdown(breakdown: Dict[str, Any]) -> Optional[str]:
     key = f"{prefix}/breakdowns/run-{safe_ts}-n{breakdown.get('run_count')}.json"
     body = json.dumps(breakdown, indent=2, sort_keys=True).encode("utf-8")
     try:
-        s3 = _get_s3()
-        s3.put_object(Bucket=GDMP_STATE_BUCKET, Key=key, Body=body, ContentType="application/json")
-        s3.put_object(
-            Bucket=GDMP_STATE_BUCKET,
-            Key=f"{prefix}/breakdowns/latest.json",
-            Body=body,
-            ContentType="application/json",
-        )
+        store = _content_store()  # DVP-TSK-B32: dual mode writes the content bucket, then GDMP_STATE_BUCKET
+        store.put_object(key, body, ContentType="application/json")
+        store.put_object(f"{prefix}/breakdowns/latest.json", body, ContentType="application/json")
         logger.info("[INFO] Persisted run breakdown to s3://%s/%s", GDMP_STATE_BUCKET, key)
         return f"s3://{GDMP_STATE_BUCKET}/{key}"
     except Exception as exc:  # noqa: BLE001 -- audit persistence must not break the run

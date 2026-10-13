@@ -31,6 +31,8 @@ sys.path.append(
         os.path.dirname(os.path.abspath(__file__)), "..", "corpus_entropy_engine"
     )
 )
+# DVP-TSK-B32: enceladus_shared.content_store (shipped to the function root by .build_extras at deploy time).
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared_layer", "python"))
 
 import gdmp_remediation_core as core  # noqa: E402
 import lambda_function as mod  # noqa: E402

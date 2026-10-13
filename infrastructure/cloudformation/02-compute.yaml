@@ -568,10 +568,16 @@ Resources:
           # AND the content bucket; reads stay legacy. governance/ is ONE shared corpus held only in the PROD content bucket
           # on BOTH planes (io decision DOC-EF4BC758CCC9, 2026-10-13): the bucket name deliberately carries NO
           # ${EnvironmentSuffix} and the keys are unprefixed, so gamma must never point this at enceladus-content-gamma-*.
-          # The governance store takes its own bucket, so CONTENT_BUCKET / S3_ENV_PREFIX are not set here.
+          # The governance store takes its own bucket and never reads CONTENT_BUCKET / S3_ENV_PREFIX.
           CONTENT_STORE_MODE: dual
           CONTENT_STORE_READ: legacy
           GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
+          # DVP-TSK-B32 (isolation W4j): intent-training/ (training, rollback, inference boosts) goes through its own
+          # store on the PER-ENVIRONMENT content bucket: writes dual, reads legacy via the shared CONTENT_STORE_READ pin
+          # above (the governance and intent-training reads flip together, after the W3 delta for both prefixes).
+          # INTENT_TRAINING_PREFIX carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
       Tags:
         - Key: Project
           Value: enceladus
@@ -2311,11 +2317,13 @@ Resources:
           # env_drift_registry.json so the env-parity gate protects them.
           PATHWAY_TELEMETRY_BUCKET: !Ref S3Bucket
           PATHWAY_TELEMETRY_PREFIX: !Sub "${S3EnvPrefix}pathway-telemetry"
-          # DVP-TSK-B20 (isolation W4g): writer-first phase -- pathway-telemetry/ writes go to the content bucket AND the
-          # legacy bucket; reads (close_wave, flow_weight_refresh) stay on legacy until every writer of the prefix is
-          # dual (DOC-EF4BC758CCC9). PATHWAY_TELEMETRY_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          # DVP-TSK-B20 (isolation W4g): pathway-telemetry/ writes go to the content bucket AND the legacy bucket
+          # (DOC-EF4BC758CCC9). PATHWAY_TELEMETRY_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          # DVP-TSK-B31 (W4g read flip): CONTENT_STORE_READ=legacy is gone -- close_wave and flow_weight_refresh list both
+          # buckets and read content first, legacy on a miss. Precondition: the W3 delta for pathway-telemetry/ ran after
+          # the B20 writers went dual, so every listed key is in the content bucket. A content miss may answer 403 rather
+          # than 404 (the content ListBucket grant stays prefix-conditioned, DVP-ISS-149), and 403 skips the legacy fallback.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           # ENC-TSK-L43 (B67 Search2.0): OpenSearch keyword arm + within-search facets.
@@ -2635,6 +2643,14 @@ Resources:
           UNLEARNING_BUCKET: !Ref S3Bucket
           UNLEARNING_PREFIX: !Sub "${S3EnvPrefix}unlearning-tombstones"
           UNLEARNING_STATE_PREFIX: !Sub "${S3EnvPrefix}unlearning-state"
+          # DVP-TSK-B32 (isolation W4j): writer-first phase -- unlearning-tombstones/ and unlearning-state/ writes and
+          # deletes go to the content bucket AND the legacy bucket; the run counter read and the expired-tombstone
+          # list/get stay on legacy until the W3 delta (DOC-EF4BC758CCC9). The prefixes above carry the legacy-only env
+          # prefix that S3_ENV_PREFIX strips.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           DEFAULT_PROJECT_ID: enceladus
           UNLEARNING_DRY_RUN: "1"
           UNLEARNING_MUTATION_ENABLED: "0"
@@ -3298,6 +3314,13 @@ Resources:
           COMPLIANCE_SCORE_THRESHOLD: "70"
           GDMP_STATE_BUCKET: !Ref S3Bucket
           GDMP_STATE_PREFIX: !Sub "${S3EnvPrefix}gdmp-remediation-state"
+          # DVP-TSK-B32 (isolation W4j): writer-first phase -- gdmp-remediation-state/ writes (run counter, breakdowns)
+          # go to the content bucket AND the legacy bucket; the run counter read stays on legacy until the W3 delta
+          # (DOC-EF4BC758CCC9). GDMP_STATE_PREFIX carries the legacy-only env prefix that S3_ENV_PREFIX strips.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           GDMP_MAX_DOCS_PER_RUN: "200"
           # DATA-SAFETY: Stage-1 mutation-ramp ARMED 2026-07-07 per io directive
           # #2 (ENC-TSK-L90). After the initial IO_APPROVAL_RUNS candidate
@@ -7497,6 +7520,14 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}gdmp-remediation-state/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/gdmp-remediation-state/*"
+              # DVP-TSK-B32 (isolation W4j): after the read flip a content miss must answer 404, not 403, or the store's
+              # legacy fallback never fires and the run counter reads as 0 (the io-approval ramp would restart).
+              - Sid: GdmpRampStateListContentBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
