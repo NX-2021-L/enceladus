@@ -107,6 +107,14 @@ Resources:
             BucketKeyEnabled: true
       VersioningConfiguration:
         Status: Enabled
+      # DVP-TSK-B43 (isolation W4l): the shared governance/ corpus lives only in the prod bucket; its governance/live
+      # Object Created events drive each plane's recompute through an EventBridge rule in 02-compute.yaml
+      # (RecomputeGovernanceContentEventRule). The gamma bucket holds no governance/, so it emits nothing.
+      NotificationConfiguration: !If
+        - IsProduction
+        - EventBridgeConfiguration:
+            EventBridgeEnabled: true
+        - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: noncurrent-rollback-window
