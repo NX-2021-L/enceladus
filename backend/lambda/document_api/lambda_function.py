@@ -815,6 +815,29 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B14 (isolation W4d): every agent-documents/ object access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND S3_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
+    read on S3_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
+    given client (default _get_s3()); rebuilt if the client changes. governance/ and mobile/v1/reference stay raw.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = S3_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 def _get_cloudwatch():
     """ENC-TSK-P70 AC-4: lazy singleton with a short fast-fail timeout — the
     LegacyWriteUnguarded metric is fire-and-forget and must never slow a request."""
@@ -1199,10 +1222,9 @@ def _upload_content(
     content_hash = hashlib.sha256(content_bytes).hexdigest()
     size_bytes = len(content_bytes)
 
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=content_bytes,
+    _content_store(s3).put_object(
+        key,
+        content_bytes,
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
@@ -1240,11 +1262,11 @@ def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> No
     conditional write is what actually arbitrates who gets a given version
     number; this is defense in depth, not the primary guard).
     """
+    store = _content_store(s3)  # DVP-TSK-B14: dual mode writes legacy first (it arbitrates IfNoneMatch), then content
     try:
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=key,
-            Body=content_bytes,
+        store.put_object(
+            key,
+            content_bytes,
             ContentType="text/markdown; charset=utf-8",
             CacheControl="max-age=0, s-maxage=300, must-revalidate",
             IfNoneMatch="*",
@@ -1263,7 +1285,7 @@ def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> No
         # HeadObject-then-put fallback below.
 
     try:
-        s3.head_object(Bucket=S3_BUCKET, Key=key)
+        store.head_object(key)
         logger.warning("[ENC-TSK-P72] version object already exists, not overwritten: key=%s", key)
         return
     except ClientError as exc:
@@ -1271,10 +1293,9 @@ def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> No
             raise
     except Exception:  # noqa: BLE001
         pass
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=content_bytes,
+    store.put_object(
+        key,
+        content_bytes,
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
@@ -1300,12 +1321,10 @@ def _upload_content_staged(
 def _promote_staged_content(staging_key: str, project_id: str, document_id: str) -> str:
     """Copy the staging object onto the canonical key after a guarded conditional
     write succeeds. Returns the canonical s3_key."""
-    s3 = _get_s3()
     canonical_key = _s3_key(project_id, document_id)
-    s3.copy_object(
-        Bucket=S3_BUCKET,
-        CopySource={"Bucket": S3_BUCKET, "Key": staging_key},
-        Key=canonical_key,
+    _content_store().copy_object(
+        staging_key,
+        canonical_key,
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
         MetadataDirective="REPLACE",
@@ -1317,7 +1336,7 @@ def _delete_s3_object_best_effort(key: str) -> None:
     """Delete an orphaned staging object after a lost conditional-write race.
     Never raises — logs the orphan key at WARNING if deletion fails."""
     try:
-        _get_s3().delete_object(Bucket=S3_BUCKET, Key=key)
+        _content_store().delete_object(key)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ENC-TSK-P70] orphaned staging object left behind (delete failed): key=%s err=%s", key, exc)
 
@@ -1339,10 +1358,11 @@ def _get_content(
     the env prefix self-provisions. The fallback swallows AccessDenied so the
     Lambda stays safe to deploy ahead of the IAM read grant.
     """
-    s3 = _get_s3()
+    s3 = _get_s3()  # raw: the exception classes and the stored-bucket fallback (it targets whatever bucket the record names)
+    store = _content_store(s3)
     key = _s3_key(project_id, document_id)
     try:
-        resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        resp = store.get_object(key)
         return resp["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         pass
@@ -1370,10 +1390,9 @@ def _get_content(
         raise
 
     try:
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=key,
-            Body=content.encode("utf-8"),
+        store.put_object(
+            key,
+            content.encode("utf-8"),
             ContentType="text/markdown; charset=utf-8",
             CacheControl="max-age=0, s-maxage=300, must-revalidate",
         )
@@ -1569,10 +1588,9 @@ def _put_document_content_bytes(
     key = _s3_key(project_id, document_id)
     content_hash = hashlib.sha256(content_bytes).hexdigest()
     size_bytes = len(content_bytes)
-    _get_s3().put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=content_bytes,
+    _content_store().put_object(
+        key,
+        content_bytes,
         ContentType="text/markdown; charset=utf-8",
         CacheControl="max-age=0, s-maxage=300, must-revalidate",
     )
@@ -2494,7 +2512,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         logger.error("DynamoDB put_item failed: %s", exc)
         # Attempt to clean up S3
         try:
-            _get_s3().delete_object(Bucket=S3_BUCKET, Key=s3_key)
+            _content_store().delete_object(s3_key)
         except Exception:
             pass
         return _error(500, "Failed to save document metadata.")
@@ -3952,10 +3970,11 @@ def _append_history_sidecar(project_id: str, document_id: str, events: List[Dict
     as newline-delimited JSON to the S3 sidecar, read-modify-append. Only
     ever called from the rollover path below — the sidecar is append-only,
     per AC-3's "the sidecar is only ever appended by this handler"."""
-    s3 = _get_s3()
+    s3 = _get_s3()  # raw: kept for the NoSuchKey exception class
+    store = _content_store(s3)
     key = _history_sidecar_key(project_id, document_id)
     try:
-        resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        resp = store.get_object(key)
         existing_body = resp["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         existing_body = ""
@@ -3964,8 +3983,8 @@ def _append_history_sidecar(project_id: str, document_id: str, events: List[Dict
             raise
         existing_body = ""
     new_lines = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events)
-    s3.put_object(
-        Bucket=S3_BUCKET, Key=key, Body=(existing_body + new_lines).encode("utf-8"),
+    store.put_object(
+        key, (existing_body + new_lines).encode("utf-8"),
         ContentType="application/x-ndjson",
     )
 
@@ -4082,8 +4101,7 @@ def _load_document_history_events(
     plain-python history_event dicts, ascending ts (caller may re-sort)."""
     events: List[Dict[str, Any]] = []
     try:
-        s3 = _get_s3()
-        resp = s3.get_object(Bucket=S3_BUCKET, Key=_history_sidecar_key(project_id, document_id))
+        resp = _content_store().get_object(_history_sidecar_key(project_id, document_id))
         raw = resp["Body"].read().decode("utf-8")
         for line in raw.splitlines():
             line = line.strip()
@@ -4133,7 +4151,7 @@ def _version_object_exists(
     if version in cache:
         return cache[version]
     try:
-        _get_s3().head_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, version))
+        _content_store().head_object(_staging_s3_key(project_id, document_id, version))
         cache[version] = True
     except Exception:  # noqa: BLE001
         cache[version] = False
@@ -4246,11 +4264,11 @@ def _handle_document_diff(document_id: str, qs: Dict[str, Any]) -> Dict:
         return _error(404, f"Document not found: {document_id}")
     project_id = item.get("project_id", {}).get("S", "")
 
-    s3 = _get_s3()
+    store = _content_store()
 
     def _load_version(v: int) -> Optional[str]:
         try:
-            r = s3.get_object(Bucket=S3_BUCKET, Key=_staging_s3_key(project_id, document_id, v))
+            r = store.get_object(_staging_s3_key(project_id, document_id, v))
             return r["Body"].read().decode("utf-8")
         except Exception:  # noqa: BLE001
             return None
@@ -4332,7 +4350,7 @@ def _get_document_at_version(
 
     key = _staging_s3_key(project_id, document_id, target_version)
     try:
-        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)
+        resp = _content_store().get_object(key)
         content = resp["Body"].read().decode("utf-8")
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ENC-TSK-P72] version object read failed: key=%s err=%s", key, exc)
