@@ -144,6 +144,51 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B51 (isolation W4l): every deploy-config/ and deploy-sources/ object access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND CONFIG_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
+    read on CONFIG_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
+    given client (default _get_s3()); rebuilt if the client changes. deploy-sources/ is only read here (its writers are
+    outside this function); a project config may point at another bucket or prefix, and those calls stay raw
+    (see _source_store).
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = CONFIG_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
+def _source_store(s3: Any, bucket: str, key_or_prefix: str):
+    """The content store when (bucket, key_or_prefix) is the CONFIG_BUCKET deploy-sources/ tree, else None (raw call).
+
+    A project's deploy config can name any source bucket and prefix; only the CONFIG_BUCKET deploy-sources/ tree moves to
+    the content bucket, so every other location keeps the raw client. S3_ENV_PREFIX is optional on the key.
+    """
+    env_prefix = os.environ.get("S3_ENV_PREFIX", "")
+    rel = key_or_prefix[len(env_prefix):] if env_prefix and key_or_prefix.startswith(env_prefix) else key_or_prefix
+    if bucket == CONFIG_BUCKET and rel.startswith("deploy-sources/"):
+        return _content_store(s3)
+    return None
+
+
+def _get_source_object(s3: Any, bucket: str, key: str) -> Dict[str, Any]:
+    store = _source_store(s3, bucket, key)
+    if store is not None:
+        return store.get_object(key)
+    return s3.get_object(Bucket=bucket, Key=key)
+
+
 def _get_codebuild():
     global _cb
     if _cb is None:
@@ -255,9 +300,8 @@ def _get_pending_requests(project_id: str) -> List[Dict[str, Any]]:
 def _check_deploy_state(project_id: str) -> str:
     """Read the PAUSED/ACTIVE state from S3."""
     try:
-        s3 = _get_s3()
         key = f"{CONFIG_PREFIX}/{project_id}/state.json"
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        resp = _content_store().get_object(key)
         data = json.loads(resp["Body"].read().decode("utf-8"))
         return data.get("state", "ACTIVE")
     except ClientError:
@@ -340,11 +384,11 @@ def _read_project_deploy_config(project_id: str) -> Optional[Dict[str, Any]]:
 
 def _read_deploy_config(project_id: str) -> Dict[str, Any]:
     """Read deploy config with fallbacks for missing deploy.json."""
-    s3 = _get_s3()
+    store = _content_store()
     key = f"{CONFIG_PREFIX}/{project_id}/deploy.json"
     fallback_required = False
     try:
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        resp = store.get_object(key)
         return json.loads(resp["Body"].read().decode("utf-8"))
     except ClientError as e:
         code = (e.response or {}).get("Error", {}).get("Code", "")
@@ -381,13 +425,12 @@ def _read_deploy_config(project_id: str) -> Dict[str, Any]:
 
 def _persist_deploy_config(project_id: str, config: Dict[str, Any]) -> None:
     """Persist synthesized/fallback deploy.json so downstream CodeBuild fetches succeed."""
-    s3 = _get_s3()
+    store = _content_store()
     key = f"{CONFIG_PREFIX}/{project_id}/deploy.json"
     try:
-        s3.put_object(
-            Bucket=CONFIG_BUCKET,
-            Key=key,
-            Body=json.dumps(config, indent=2).encode("utf-8"),
+        store.put_object(
+            key,
+            json.dumps(config, indent=2).encode("utf-8"),
             ContentType="application/json",
         )
         logger.info("[INFO] Persisted fallback deploy config to s3://%s/%s", CONFIG_BUCKET, key)
@@ -571,16 +614,14 @@ def _finalize_record_only(
 
     # 3. Write current-version.json
     try:
-        s3 = _get_s3()
         version_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
         version_data = json.dumps(
             {"version": new_version, "deployed_at": now, "spec_id": spec_id},
             indent=2,
         ).encode("utf-8")
-        s3.put_object(
-            Bucket=CONFIG_BUCKET,
-            Key=version_key,
-            Body=version_data,
+        _content_store().put_object(
+            version_key,
+            version_data,
             ContentType="application/json",
         )
         logger.info("[SUCCESS] current-version.json updated to v%s (record-only)", new_version)
@@ -663,7 +704,7 @@ def _get_current_version(project_id: str, config: Dict) -> str:
     # --- Primary: current-version.json ---
     try:
         version_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=version_key)
+        resp = _content_store(s3).get_object(version_key)
         data = json.loads(resp["Body"].read().decode("utf-8"))
         version = data.get("version", "")
         if version and re.match(r"^\d+\.\d+\.\d+$", version):
@@ -703,7 +744,7 @@ def _get_current_version(project_id: str, config: Dict) -> str:
 
         for key in archive_keys:
             logger.info("Source archive candidate (fallback): %s", key)
-            obj = s3.get_object(Bucket=source_bucket, Key=key)
+            obj = _get_source_object(s3, source_bucket, key)
             with zipfile.ZipFile(io.BytesIO(obj["Body"].read())) as zf:
                 if version_file not in zf.namelist():
                     continue
@@ -1019,6 +1060,10 @@ def _candidate_source_locations(
 def _list_source_archive_keys(source_bucket: str, source_prefix: str) -> List[str]:
     """List all .zip keys under prefix with full S3 pagination (ENC-ISS-212)."""
     s3 = _get_s3()
+    store = _source_store(s3, source_bucket, source_prefix)
+    if store is not None:
+        # DVP-TSK-B51: only the key names are used, so list_keys (legacy-pinned by env; dual reads would merge both buckets).
+        return sorted((k for k in store.list_keys(f"{source_prefix}/") if k.endswith(".zip")), reverse=True)
     zips: List[str] = []
     kwargs: Dict[str, Any] = {"Bucket": source_bucket, "Prefix": f"{source_prefix}/"}
     while True:
@@ -1111,7 +1156,7 @@ def _build_lambda_zip_from_source(project_id: str, target: Dict[str, Any]) -> by
     for source_key in archive_keys:
         attempted.append(source_key)
         logger.info("[INFO] Building inline Lambda package from s3://%s/%s (%s)", source_bucket, source_key, marker)
-        src_obj = s3.get_object(Bucket=source_bucket, Key=source_key)
+        src_obj = _get_source_object(s3, source_bucket, source_key)
 
         written = 0
         out_bytes = io.BytesIO()

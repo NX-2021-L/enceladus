@@ -88,6 +88,29 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B51 (isolation W4l): every deploy-config/ access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND CONFIG_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
+    read on CONFIG_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
+    given client (default _get_s3()); rebuilt if the client changes.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = CONFIG_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -256,17 +279,15 @@ def _handle_success(project_id: str, spec_id: str, build_id: str, build_duration
     # Write current-version.json to S3 so the orchestrator reads the correct
     # version on the next deployment (DVP-TSK-323)
     try:
-        s3 = _get_s3()
         version_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
         version_data = json.dumps({
             "version": version,
             "deployed_at": now,
             "spec_id": spec_id,
         }, indent=2).encode("utf-8")
-        s3.put_object(
-            Bucket=CONFIG_BUCKET,
-            Key=version_key,
-            Body=version_data,
+        _content_store().put_object(
+            version_key,
+            version_data,
             ContentType="application/json",
         )
         logger.info(f"[SUCCESS] current-version.json updated to v{version}")

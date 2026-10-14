@@ -154,6 +154,29 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B51 (isolation W4l): every deploy-config/ access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND CONFIG_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
+    read on CONFIG_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
+    given client (default _get_s3()); rebuilt if the client changes.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = CONFIG_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 # ---------------------------------------------------------------------------
 # CORS + Response helpers
 # ---------------------------------------------------------------------------
@@ -371,10 +394,10 @@ def _query_project_history(project_id: str, limit: int, change_type_filter: Opti
 
 def _read_current_version(project_id: str) -> Optional[Dict]:
     """Read deploy-config/{project_id}/current-version.json from S3."""
-    s3 = _get_s3()
+    store = _content_store()
     key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
     try:
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        resp = store.get_object(key)
         data = json.loads(resp["Body"].read())
         return {
             "project_id": project_id,

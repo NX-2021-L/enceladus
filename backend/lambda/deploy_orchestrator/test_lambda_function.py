@@ -243,9 +243,10 @@ class DeployOrchestratorNonUiInlineExecutionTests(unittest.TestCase):
 class DeployOrchestratorSourceArchiveFallbackTests(unittest.TestCase):
     def test_resolve_latest_source_archive_falls_back_to_parent_prefix(self) -> None:
         s3 = MagicMock()
-        s3.list_objects_v2.side_effect = [
-            {"Contents": []},
-            {"Contents": [{"Key": "deploy-sources/devops/20260301.zip"}]},
+        # DVP-TSK-B51: deploy-sources/ listing goes through content_store.list_keys (paginator)
+        s3.get_paginator.return_value.paginate.side_effect = [
+            [{"Contents": []}],
+            [{"Contents": [{"Key": "deploy-sources/devops/20260301.zip"}]}],
         ]
         with patch.object(
             deploy_orchestrator,
@@ -277,12 +278,12 @@ class DeployOrchestratorSourceArchiveFallbackTests(unittest.TestCase):
         )
 
         s3 = MagicMock()
-        s3.list_objects_v2.return_value = {
+        s3.get_paginator.return_value.paginate.return_value = [{
             "Contents": [
                 {"Key": "deploy-sources/devops/20260301-newest.zip"},
                 {"Key": "deploy-sources/devops/20260228-older.zip"},
             ]
-        }
+        }]
         s3.get_object.side_effect = [
             {"Body": io.BytesIO(newest)},
             {"Body": io.BytesIO(older)},
