@@ -165,7 +165,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
                 )}
                 <Button variant="link" onClick={() => setOpenKey(focusRow.key)}>Details</Button>
               </div>
-              {cardNeedsStepUp(focusRow.card) && <p className="ev2-esc__hint">Deciding asks you to re-authenticate first (step-up).</p>}
+              {cardNeedsStepUp(focusRow.card) && <p className="ev2-esc__hint">Deciding asks you to sign in again first; use your passkey.</p>}
             </>
           ) : (
             <div className="ev2-esc__actions ev2-esc__actions--closed">This escalation is {focusRow.status}: decisions are only available while it is pending. <Button variant="link" onClick={() => setOpenKey(focusRow.key)}>Details</Button></div>
@@ -248,7 +248,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
               />
             </FormField>
             {cardNeedsStepUp(openRow.card) && (
-              <p className="ev2-esc__hint" data-testid="step-up-required">Approving or denying asks you to re-authenticate first (step-up).</p>
+              <p className="ev2-esc__hint" data-testid="step-up-required">Approving or denying asks you to sign in again first; use your passkey.</p>
             )}
           </div>
         )}

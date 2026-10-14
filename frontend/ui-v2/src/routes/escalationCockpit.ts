@@ -6,7 +6,7 @@
  * requiredAuth step_up cards. The backend remains the arbiter of the human-only gates.
  */
 import {
-  assertVerdictAllowed, callHashFor, createGateSource, makeIdempotencyKey, needsStepUp,
+  assertVerdictAllowed, callHashFor, createGateSource, GateHttpError, makeIdempotencyKey, needsStepUp,
   type DecideInput, type DecideProof, type DecideReceipt, type GateCard, type State, type Verdict,
 } from '@io-kit/gates'
 import type { StepUpProviderLike } from '@io-kit/gates/react'
@@ -103,10 +103,20 @@ export function describeReceipt(card: GateCard, verdict: Verdict, receipt: Decid
   }
 }
 
+// DVP-TSK-984 (E41-R3): the hub's 403 step-up refusals. Cognito reports no amr, so the rule is a fresh
+// managed-login sign-in (auth_time within 5 minutes), where the passkey is the offered factor.
+const STEP_UP_REFUSALS = new Set(['step_up_required', 'step_up_rejected', 'step_up_unverified', 'auth_context_incomplete'])
+
 export function describeError(e: unknown, cardChanged: boolean): CockpitNotice {
   const message = e instanceof Error ? e.message : String(e)
   if (/redirect/i.test(`${(e as { name?: string })?.name ?? ''} ${message}`)) {
     return { type: 'warning', header: 'Continuing sign-in', detail: 'Continuing sign-in to confirm your identity; choose again when you return.' }
+  }
+  if (e instanceof GateHttpError && e.status === 403 && e.reason !== undefined && STEP_UP_REFUSALS.has(e.reason)) {
+    return {
+      type: 'warning', header: 'Sign in with your passkey',
+      detail: 'This decision needs a fresh sign-in from the last 5 minutes. Sign in with your passkey, then choose again.',
+    }
   }
   if (cardChanged) {
     return { type: 'warning', header: 'Card changed', detail: 'This card changed since it was rendered (412); the queue was refreshed. Review it and choose again.' }
