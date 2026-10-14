@@ -213,9 +213,9 @@
         "inputs": { "type": "object", "description": "E4-R12. Validated against the card inputs_schema (422), stored as decision.inputs." },
         "proof": {
           "type": "object",
-          "description": "Method-tagged step-up proof (DVP-FTR-105 AC1). cognito_max_age is verified against the ID token auth_time (assurance aal2); step_up is accepted unverified and recorded degraded until DVP-TSK-980; anything else is refused 403.",
+          "description": "Method-tagged step-up proof (DVP-FTR-105 AC1). cognito_max_age is verified against the ID token auth_time (assurance aal2); keycloak_acr is verified against the hub-exchanged Keycloak ID token acr (passkey) and auth_time (assurance aal2, DVP-TSK-986); step_up is accepted unverified and recorded degraded until DVP-TSK-980; anything else is refused 403.",
           "required": ["method"],
-          "properties": { "method": { "enum": ["cognito_max_age", "step_up"] }, "auth_time": {} },
+          "properties": { "method": { "enum": ["cognito_max_age", "keycloak_acr", "step_up"] }, "auth_time": {} },
           "additionalProperties": false
         },
         "reason": { "type": "string", "minLength": 1 },
