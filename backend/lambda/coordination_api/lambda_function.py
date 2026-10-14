@@ -43,7 +43,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -11281,10 +11281,12 @@ def _escalation_required_assurance(escalation: Optional[Dict[str, Any]]) -> str:
     return "aal2" if risk in ("high", "critical") else "aal1"
 
 
-def _verify_proof_cognito_max_age(claims: Dict[str, Any], proof: Dict[str, Any],
-                                  now: dt.datetime) -> str:
+def _step_up_auth_time_problem(claims: Dict[str, Any], proof: Dict[str, Any],
+                               now: dt.datetime, label: str) -> str:
     """'' when the proof matches the caller's token auth_time and is fresh, else why not.
-    Serves Cognito ID tokens and HubExchange principals (source auth_time) alike."""
+    Shared by every verifier that anchors on the token auth_time (cognito_max_age,
+    keycloak_acr): the proof's auth_time must equal the token's and be <=
+    ESCALATION_STEP_UP_MAX_AGE_SECONDS old. ``label`` prefixes the reason text."""
     claimed_raw = proof.get("auth_time")
     claimed = _gate_epoch_to_ts(claimed_raw)
     if claimed is None and _gate_parse_ts(claimed_raw) is not None:
@@ -11293,17 +11295,109 @@ def _verify_proof_cognito_max_age(claims: Dict[str, Any], proof: Dict[str, Any],
     max_age = int(os.environ.get("ESCALATION_STEP_UP_MAX_AGE_SECONDS", "300") or 300)
     parsed = _gate_parse_ts(token_time)
     if not token_time or not claimed or claimed != token_time or parsed is None:
-        return "cognito_max_age proof does not match the caller's token auth_time"
+        return f"{label} proof does not match the caller's token auth_time"
     age = (now - parsed).total_seconds()
     if age < -60 or age > max_age:
-        return f"cognito_max_age proof is stale (age {int(age)}s > {max_age}s); re-authenticate"
+        return f"{label} proof is stale (age {int(age)}s > {max_age}s); re-authenticate"
     return ""
 
 
-# Verifier registry keyed by proof method. DVP-TSK-983 adds the 'webauthn' entry
-# (and nothing else changes at any call site: DVP-FTR-105 / ruling F-06).
-_STEP_UP_VERIFIERS = {"cognito_max_age": _verify_proof_cognito_max_age}
+def _verify_proof_cognito_max_age(claims: Dict[str, Any], proof: Dict[str, Any],
+                                  now: dt.datetime) -> str:
+    """'' when the proof matches the caller's token auth_time and is fresh, else why not.
+    Serves Cognito ID tokens and HubExchange principals (source auth_time) alike."""
+    return _step_up_auth_time_problem(claims, proof, now, "cognito_max_age")
+
+
+# DVP-TSK-986 (ruling E41-R7): Keycloak-native passkey step-up carried through the
+# F-05 hub-exchange principal. Config is env-driven and parsed defensively once per
+# distinct env value (a malformed value fails CLOSED: nothing accepted / nothing enforced
+# beyond what parsed cleanly).
+_HUB_PASSKEY_ACR_DEFAULT = '{"vagamod-keycloak": ["passkey"]}'
+_hub_passkey_config_cache: Dict[Tuple[str, str], Tuple[Dict[str, FrozenSet[str]], FrozenSet[str]]] = {}
+
+
+def _hub_passkey_config() -> Tuple[Dict[str, FrozenSet[str]], FrozenSet[str]]:
+    """(source -> accepted acr values, sources that REQUIRE a keycloak_acr step-up)."""
+    raw_acr = (os.environ.get("HUB_PASSKEY_ACR_JSON") or "").strip() or _HUB_PASSKEY_ACR_DEFAULT
+    raw_required = os.environ.get("HUB_PASSKEY_REQUIRED_SOURCES") or ""
+    cache_key = (raw_acr, raw_required)
+    cached = _hub_passkey_config_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    accepted: Dict[str, FrozenSet[str]] = {}
+    try:
+        parsed = json.loads(raw_acr)
+    except (TypeError, ValueError):
+        parsed = None
+        logger.warning("[WARN] HUB_PASSKEY_ACR_JSON is not valid JSON; keycloak_acr accepts nothing")
+    if isinstance(parsed, dict):
+        for source, values in parsed.items():
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(source, str) or not source.strip() or not isinstance(values, (list, tuple)):
+                continue
+            acrs = frozenset(v for v in values if isinstance(v, str) and v.strip())
+            if acrs:
+                accepted[source.strip()] = acrs
+    required = frozenset(part.strip() for part in raw_required.split(",") if part.strip())
+    if len(_hub_passkey_config_cache) > 16:
+        _hub_passkey_config_cache.clear()
+    _hub_passkey_config_cache[cache_key] = (accepted, required)
+    return accepted, required
+
+
+def _hub_source_name(claims: Dict[str, Any]) -> str:
+    """Hub source name of a hub_exchange principal ('' for any other caller)."""
+    if str((claims or {}).get("auth_mode") or "") != "hub_exchange":
+        return ""
+    name = str(claims.get("hub_source_name") or "").strip()
+    if name:
+        return name
+    method = str(claims.get("auth_method") or "")
+    return method.split(":", 1)[1].strip() if method.startswith("hub_exchange:") else ""
+
+
+def _verify_proof_keycloak_acr(claims: Dict[str, Any], proof: Dict[str, Any],
+                               now: dt.datetime) -> str:
+    """'' when a hub-exchanged Keycloak passkey login satisfies the step-up, else why not.
+
+    Passes only for a hub_exchange principal whose source is in the passkey-ACR config,
+    whose source-token ``acr`` is one that source's accepted values, AND whose proof
+    carries the same fresh, matching auth_time as cognito_max_age. Cognito (non-hub)
+    principals can never use this method."""
+    if str((claims or {}).get("auth_mode") or "") != "hub_exchange":
+        return "keycloak_acr proof requires a hub-exchanged principal"
+    source = _hub_source_name(claims)
+    accepted, _required = _hub_passkey_config()
+    if not source or source not in accepted:
+        return "keycloak_acr proof is not enabled for this hub source"
+    if str(claims.get("acr") or "") not in accepted[source]:
+        return "keycloak_acr proof requires a passkey-level authentication (acr not accepted)"
+    return _step_up_auth_time_problem(claims, proof, now, "keycloak_acr")
+
+
+# Verifier registry keyed by proof method (DVP-FTR-105 / ruling F-06). 'webauthn' stays a
+# RESERVED slot (the io-kit signed-assertion mechanism, DVP-TSK-983); DVP-TSK-986 adds
+# 'keycloak_acr' for the Keycloak passkey step-up carried by the hub-exchange principal
+# (E41-R7). Nothing else changes at any call site.
+_STEP_UP_VERIFIERS = {
+    "cognito_max_age": _verify_proof_cognito_max_age,
+    "keycloak_acr": _verify_proof_keycloak_acr,
+}
 _STEP_UP_RESERVED_METHODS = frozenset({"webauthn"})
+
+
+def _step_up_required_hint(claims: Dict[str, Any]) -> str:
+    if str((claims or {}).get("auth_mode") or "") == "hub_exchange":
+        return ("this escalation requires a fresh step-up proof {method:'cognito_max_age', auth_time} "
+                "or, for a Keycloak passkey sign-in, {method:'keycloak_acr', auth_time}")
+    return "this escalation requires a fresh step-up proof {method:'cognito_max_age', auth_time}"
+
+
+def _evidence_amr(value: Any) -> List[str]:
+    sanitize = getattr(_hub_exchange, "sanitize_amr", None)
+    return sanitize(value) if callable(sanitize) else []
 
 
 def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
@@ -11319,6 +11413,9 @@ def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
     'step_up', or risk high|critical) refuses a verdict without such a proof
     (step_up_required). The unverified 'step_up' method is retired
     (step_up_unverified); 'webauthn' is a reserved slot (method_not_enabled).
+    'keycloak_acr' (DVP-TSK-986) is the hub-exchange Keycloak passkey proof; a hub source
+    listed in HUB_PASSKEY_REQUIRED_SOURCES accepts no other method on an aal2 gate
+    (passkey_required). The source token acr / amr are recorded when present.
     Fail-closed; never a silent downgrade. The failure value is a str carrying .reason.
     """
     required = _escalation_required_assurance(escalation)
@@ -11328,6 +11425,12 @@ def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
         "auth_method": _escalation_auth_method(claims), "auth_time": auth_time,
         "assurance": "aal1", "proof_method": "none",
     }
+    acr_claim = claims.get("acr")
+    if isinstance(acr_claim, str) and 0 < len(acr_claim) <= 64:
+        evidence["acr"] = acr_claim
+    amr_claim = _evidence_amr(claims.get("amr"))
+    if amr_claim:
+        evidence["amr"] = amr_claim
     if not all(evidence.get(k) for k in ("auth_method", "auth_time", "assurance")):
         return None, _StepUpRefusal(
             "auth_method, auth_time and assurance must all be determinable for a decision",
@@ -11337,13 +11440,16 @@ def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
         proof = body.get("step_up", body.get("proof"))
     if proof in (None, "", {}):
         if required == "aal2":
-            return None, _StepUpRefusal(
-                "this escalation requires a fresh step-up proof {method:'cognito_max_age', auth_time}",
-                "step_up_required")
+            return None, _StepUpRefusal(_step_up_required_hint(claims), "step_up_required")
         return evidence, ""
     if not isinstance(proof, dict):
         return None, _StepUpRefusal("step-up proof must be an object {method, auth_time}", miss)
     method = str(proof.get("method") or proof.get("kind") or "").strip().lower()
+    if required == "aal2" and method != "keycloak_acr":
+        hub_source = _hub_source_name(claims)
+        if hub_source and hub_source in _hub_passkey_config()[1]:
+            return None, _StepUpRefusal(
+                "this source requires a passkey step-up (method keycloak_acr)", "passkey_required")
     if method == "step_up":
         return None, _StepUpRefusal(
             "the unverified 'step_up' proof method is retired; use a verifiable method",
@@ -11961,6 +12067,9 @@ def _handle_escalation_decision(
         "auth_method": evidence["auth_method"], "auth_time": evidence["auth_time"],
         "assurance": evidence["assurance"], "proof_method": evidence["proof_method"],
     }
+    for key in ("acr", "amr"):   # DVP-TSK-986: source-token context, recorded when present
+        if evidence.get(key):
+            chain_fields[key] = evidence[key]
     decided_entry = _escalation_log_entry(len(log) + 1, prev_hash, dict(
         chain_fields, event="decided", verdict=verdict, payloadHash=payload_hash,
         candidateId=candidate_id or None, note=guidance_note or None))
@@ -11971,7 +12080,8 @@ def _handle_escalation_decision(
         "seq": decided_entry["seq"], "prevHash": prev_hash, "hash": decided_entry["hash"],
     }
     for key, val in (("callHash", call_hash), ("idempotencyKey", idem_key),
-                     ("note", guidance_note), ("candidateId", candidate_id)):
+                     ("note", guidance_note), ("candidateId", candidate_id),
+                     ("acr", evidence.get("acr")), ("amr", evidence.get("amr"))):
         if val:
             decision_record[key] = val
     if inputs is not None:

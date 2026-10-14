@@ -8,7 +8,7 @@ think: the io-graph Cognito pool). The hub's decide only understands the
 enceladus Cognito human session. This module generalizes io's D-F05 ruling:
 an ID token from an ALLOW-LISTED issuer is exchanged for a short-lived (<= 15
 min) hub principal bound to io's allow-listed identity, carrying the source
-issuer, auth_time and acr. coordination_api (exchange, list, decide) and the
+issuer, auth_time, acr and amr. coordination_api (exchange, list, decide) and the
 escalation-decision authorizer accept that principal through
 ``Authorization: HubExchange <token>`` and re-verify it on every request.
 
@@ -69,6 +69,30 @@ _JWKS_TTL_SECONDS = 600
 _SECRET_TTL_SECONDS = 300
 _CLOCK_LEEWAY_SECONDS = 30
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,63}$")
+_AMR_MAX_ENTRIES = 8
+_AMR_MAX_LEN = 32
+_AMR_ENTRY_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def sanitize_amr(value: Any) -> List[str]:
+    """DVP-TSK-986: the source token's ``amr`` as a bounded list of safe strings.
+
+    A single string becomes [string]; anything that is not a string list yields
+    []. At most 8 entries, each <= 32 chars matching ^[A-Za-z0-9_.:-]+$; every
+    other entry is dropped. Absent / malformed amr is [] (never an error).
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: List[str] = []
+    for item in value:
+        if (isinstance(item, str) and 0 < len(item) <= _AMR_MAX_LEN
+                and _AMR_ENTRY_RE.fullmatch(item)):
+            out.append(item)
+        if len(out) >= _AMR_MAX_ENTRIES:
+            break
+    return out
 
 
 class HubExchangeError(Exception):
@@ -262,13 +286,13 @@ def _sign(signing_input: str, key: Optional[bytes] = None) -> str:
 
 
 def mint_hub_token(*, sub: str, email: str, src_iss: str, src_name: str, auth_time: int,
-                   acr: str, now: Optional[int] = None) -> Dict[str, Any]:
+                   acr: str, amr: Any = None, now: Optional[int] = None) -> Dict[str, Any]:
     """Mint the short-lived hub principal. Returns {hub_token, expires_at, ...}."""
     iat = int(now if now is not None else time.time())
     exp = iat + _ttl_seconds()
     claims = {
         "sub": sub, "email": email, "src_iss": src_iss, "src_name": src_name,
-        "auth_time": int(auth_time), "acr": acr, "iat": iat, "exp": exp,
+        "auth_time": int(auth_time), "acr": acr, "amr": sanitize_amr(amr), "iat": iat, "exp": exp,
         "kind": HUB_KIND, "jti": uuid.uuid4().hex,
     }
     payload = _b64e(json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8"))
@@ -333,6 +357,7 @@ def principal_claims(hub_claims: Dict[str, Any]) -> Dict[str, Any]:
         "auth_mode": HUB_AUTH_MODE, "kind": HUB_KIND, "token_use": "id",
         "sub": hub_claims.get("sub"), "email": hub_claims.get("email"),
         "auth_time": int(hub_claims["auth_time"]), "acr": hub_claims.get("acr") or "",
+        "amr": sanitize_amr(hub_claims.get("amr")),
         "hub_source_issuer": hub_claims.get("src_iss"), "hub_source_name": name,
         "auth_method": f"hub_exchange:{name}", "iat": int(hub_claims["iat"]),
         "exp": int(hub_claims["exp"]),
@@ -471,7 +496,8 @@ def exchange(id_token: str, allowlist_loader: Callable[[], Set[str]],
     if not sub:
         raise _deny_auth("source token carries no sub")
     acr = str(claims.get("acr") or "")
+    amr = sanitize_amr(claims.get("amr"))
     minted = mint_hub_token(sub=sub, email=email, src_iss=issuer["iss"], src_name=issuer["name"],
-                            auth_time=auth_time, acr=acr, now=current)
+                            auth_time=auth_time, acr=acr, amr=amr, now=current)
     return {"hub_token": minted["hub_token"], "expires_at": minted["expires_at"],
-            "auth_time": auth_time, "acr": acr, "issuer": issuer["name"]}
+            "auth_time": auth_time, "acr": acr, "amr": amr, "issuer": issuer["name"]}
