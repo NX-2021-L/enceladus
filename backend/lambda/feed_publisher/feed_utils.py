@@ -1224,9 +1224,14 @@ def generate_reference_docs_from_s3(
     Used by the cloud Lambda feed publisher where no local filesystem has the
     reference docs. For each project, reads the reference#{project} DynamoDB row
     to get the s3_key, then downloads from S3 and writes to output_dir/reference/.
+
+    DVP-TSK-B53 (isolation W4n): a row naming the legacy feed bucket (FEED_BUCKET) is read through the feed
+    ContentStore (content-first, legacy fallback on a miss); a row naming any other bucket is read raw.
     """
     require_boto3()
     s3 = s3_client or boto3.client("s3", region_name="us-east-1")
+    legacy_bucket = (os.environ.get("FEED_BUCKET") or DEFAULT_MOBILE_S3_BUCKET).strip()
+    store = _feed_content_store(s3, legacy_bucket)
     ref_dir = output_dir / "reference"
     ref_dir.mkdir(parents=True, exist_ok=True)
     output_paths: Dict[str, Path] = {}
@@ -1253,7 +1258,10 @@ def generate_reference_docs_from_s3(
             continue
 
         try:
-            s3_resp = s3.get_object(Bucket=s3_bucket, Key=s3_key)
+            if s3_bucket == legacy_bucket:
+                s3_resp = store.get_object(s3_key)
+            else:
+                s3_resp = s3.get_object(Bucket=s3_bucket, Key=s3_key)
             body = s3_resp["Body"].read()
         except Exception as exc:
             log("ERROR", f"{LOG_PREFIX}: S3 download failed for {entry.name}: {exc}")

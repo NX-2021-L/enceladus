@@ -159,6 +159,7 @@ def test_cloudformation_env_is_writer_first():
     m = re.search(r"(?ms)^  UnlearningFunction:\n(.*?)(?=^  [A-Za-z0-9]+:\n)", text)
     assert m
     fn = m.group(1)
-    for line in ("CONTENT_STORE_MODE: dual", "CONTENT_STORE_READ: legacy", "S3_ENV_PREFIX: !Ref S3EnvPrefix",
+    for line in ("CONTENT_STORE_MODE: dual", "S3_ENV_PREFIX: !Ref S3EnvPrefix",
                  'CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"'):
         assert line in fn
+    assert "CONTENT_STORE_READ: " not in fn  # DVP-TSK-B53: reads go content-first after the W3 delta

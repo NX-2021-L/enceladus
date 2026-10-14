@@ -579,16 +579,16 @@ Resources:
           # ${EnvironmentSuffix} and the keys are unprefixed, so gamma must never point this at enceladus-content-gamma-*.
           # The governance store takes its own bucket and never reads CONTENT_BUCKET / S3_ENV_PREFIX.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
-          # DVP-TSK-B46: governance/ reads flip content-first; intent-training stays legacy-pinned via CONTENT_STORE_READ.
+          # DVP-TSK-B46: governance/ reads flip content-first (GOVERNANCE_STORE_READ overrides CONTENT_STORE_READ for that store).
           GOVERNANCE_STORE_READ: auto
           # DVP-TSK-B44: the push-on-write recompute nudge targets THIS plane's recompute function (the code default is the
           # prod name, which would make gamma nudge prod's record).
           RECOMPUTE_GOVERNANCE_LAMBDA_NAME: !Sub "devops-recompute-governance${EnvironmentSuffix}"
           # DVP-TSK-B32 (isolation W4j): intent-training/ (training, rollback, inference boosts) goes through its own
-          # store on the PER-ENVIRONMENT content bucket: writes dual, reads legacy via the shared CONTENT_STORE_READ pin
-          # above (the governance and intent-training reads flip together, after the W3 delta for both prefixes).
+          # store on the PER-ENVIRONMENT content bucket: writes dual; reads content-first since DVP-TSK-B53 (CONTENT_STORE_READ
+          # unset, legacy fallback on a miss).
           # INTENT_TRAINING_PREFIX carries the legacy-only env prefix that S3_ENV_PREFIX strips.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
@@ -1159,7 +1159,7 @@ Resources:
           # DVP-TSK-B09 (isolation W4c): writer-first phase -- writes go to the content bucket AND the legacy bucket,
           # reads stay on legacy until every writer of the prefix is dual (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -1771,7 +1771,7 @@ Resources:
           # DVP-TSK-B09 (isolation W4c): writer-first phase -- writes go to the content bucket AND the legacy bucket,
           # reads stay on legacy until every writer of the prefix is dual (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
@@ -2578,7 +2578,7 @@ Resources:
           # legacy bucket (conditional version puts legacy first), reads stay on legacy until every writer of the prefix is
           # dual (DOC-EF4BC758CCC9). S3_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX strips.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza
@@ -2653,7 +2653,7 @@ Resources:
           # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
           # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           ADAPTIVE_TRIGGER_MIN_HANDOFFS: !Ref HceAdaptiveMinHandoffs
@@ -2722,7 +2722,7 @@ Resources:
           # list/get stay on legacy until the W3 delta (DOC-EF4BC758CCC9). The prefixes above carry the legacy-only env
           # prefix that S3_ENV_PREFIX strips.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           DEFAULT_PROJECT_ID: enceladus
@@ -3084,7 +3084,7 @@ Resources:
           # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
           # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           SECRETS_REGION: !Ref "AWS::Region"
@@ -3182,7 +3182,7 @@ Resources:
           # DVP-TSK-B39 (isolation W4k): the rhythm completion stanza is written through content_store -- dual writes the
           # content bucket (result_key without the legacy-only S3_ENV_PREFIX) AND RHYTHM_RESULTS_BUCKET (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CLOUDWATCH_NAMESPACE: Enceladus/Percolation
@@ -3404,7 +3404,7 @@ Resources:
           # go to the content bucket AND the legacy bucket; the run counter read stays on legacy until the W3 delta
           # (DOC-EF4BC758CCC9). GDMP_STATE_PREFIX carries the legacy-only env prefix that S3_ENV_PREFIX strips.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           GDMP_MAX_DOCS_PER_RUN: "200"
@@ -6222,6 +6222,14 @@ Resources:
                   - !Sub "arn:aws:s3:::enceladus-ui-v2${EnvironmentSuffix}/mobile/v1/*"
                   - - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
                     - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/*"
+              # DVP-TSK-B53: reference-doc reads go content-first; without ListBucket a missing key answers 403, not 404, and
+              # the store's legacy fallback never fires. Unconditional, like the other W4 content grants.
+              - Sid: S3MobileFeedsContentList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               - Sid: EventBridgePut
                 Effect: Allow
                 Action: events:PutEvents
@@ -7243,6 +7251,14 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/agent-documents/*"
+              # DVP-TSK-B53: document-body reads go content-first; without ListBucket a missing key answers 403, not 404, and
+              # the store's legacy fallback never fires. Unconditional, like the other W4 content grants.
+              - Sid: S3DocumentsContentList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               # ENC-TSK-N23: rhythm heavy-beat tenant completion stanza
               # (tenant_invoker.py contract) — write-only, tenant-results scoped.
               - Sid: RhythmStanzaWrite
@@ -8828,7 +8844,7 @@ Resources:
           # stanza list/get stay on legacy until every rhythm-cycle/ writer (this function and the heavy-beat tenants)
           # is dual and the W3 delta has run (DOC-EF4BC758CCC9).
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           CLOUDWATCH_NAMESPACE: Enceladus/Rhythm
           PROJECTS_TABLE: projects
