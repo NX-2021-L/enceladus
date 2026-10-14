@@ -1,4 +1,4 @@
-import type { AppSyncEventsConfig } from '../api/appsyncConfig'
+import { authedChannel, type AppSyncEventsConfig } from '../api/appsyncConfig'
 import type { FeedRealtimeEvent, GapTooLargeSignal } from '../types/feedEvents'
 
 export const GAP_CURSOR_THRESHOLD = 1_000_000_000 // ~1000 events at 1ms cursor spacing
@@ -42,7 +42,16 @@ export interface AppSyncRealtimeClientOptions {
   lastCursor: number
   onEvent: (event: RealtimeClientEvent) => void
   webSocketFactory?: (url: string, protocols: string[]) => WebSocket
+  /**
+   * DVP-TSK-928: resolves the signed-in user's Cognito token (null = no session). With `config.authedNamespace` set,
+   * the client subscribes to the Cognito namespace using this token and uses the API key only when it resolves null.
+   * Absent => API-key transport exactly as before. Called on every (re)connect so the token is always fresh.
+   */
+  getAuthToken?: () => Promise<string | null>
 }
+
+/** Which credential a connection was opened with; decides the channel namespace and the auth header. */
+type RealtimeAuth = { kind: 'apikey' } | { kind: 'cognito'; token: string }
 
 function base64UrlEncode(value: string): string {
   const bytes = new TextEncoder().encode(value)
@@ -51,11 +60,22 @@ function base64UrlEncode(value: string): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-function buildAuthSubprotocol(config: AppSyncEventsConfig, sinceCursor?: number): string {
-  const header: Record<string, string> = {
-    host: config.httpHost,
-    'x-api-key': config.apiKey,
-  }
+/** AppSync Events authorization object: `x-api-key` for the API-key namespaces, `Authorization` (raw JWT) for Cognito. */
+function authorizationFor(
+  config: AppSyncEventsConfig,
+  auth: RealtimeAuth,
+  sinceCursor?: number,
+): Record<string, string> {
+  const authorization: Record<string, string> =
+    auth.kind === 'cognito'
+      ? { host: config.httpHost, Authorization: auth.token }
+      : { host: config.httpHost, 'x-api-key': config.apiKey }
+  if (sinceCursor && sinceCursor > 0) authorization.since = String(sinceCursor)
+  return authorization
+}
+
+function buildAuthSubprotocol(config: AppSyncEventsConfig, auth: RealtimeAuth, sinceCursor?: number): string {
+  const header: Record<string, string> = authorizationFor(config, auth)
   if (sinceCursor && sinceCursor > 0) {
     header.since = String(sinceCursor)
   }
@@ -84,8 +104,13 @@ export class AppSyncRealtimeClient {
   private readonly config: AppSyncEventsConfig
   private readonly onEvent: (event: RealtimeClientEvent) => void
   private readonly wsFactory: (url: string, protocols: string[]) => WebSocket
+  private readonly getAuthToken: (() => Promise<string | null>) | undefined
 
   private socket: WebSocket | null = null
+  // DVP-TSK-928: credential of the live/pending connection, and a generation counter so a token lookup that
+  // resolves after stop()/manualRetry()/a newer connect() cannot open a second socket.
+  private mode: RealtimeAuth['kind'] = 'apikey'
+  private connectEpoch = 0
   private subscriptionId: string | null = null
   private livenessTimer: ReturnType<typeof setInterval> | null = null
   private lastServerFrameAt = 0
@@ -108,6 +133,7 @@ export class AppSyncRealtimeClient {
     this.config = options.config
     this.onEvent = options.onEvent
     this.lastCursor = options.lastCursor
+    this.getAuthToken = options.getAuthToken
     this.wsFactory =
       options.webSocketFactory ??
       ((url, protocols) => new WebSocket(url, protocols))
@@ -189,16 +215,48 @@ export class AppSyncRealtimeClient {
     }
   }
 
-  private sendSubscribeFrame(socket: WebSocket, id: string, channel: string): void {
-    if (socket.readyState !== WebSocket.OPEN) return
-    socket.send(
-      JSON.stringify({
-        type: 'subscribe',
-        id,
-        channel,
-        authorization: { host: this.config.httpHost, 'x-api-key': this.config.apiKey },
-      }),
-    )
+  /** `path` is the un-namespaced channel ("/records/{id}"); the Cognito namespace is applied per connection mode. */
+  private channelFor(path: string): string {
+    const namespace = this.config.authedNamespace
+    return this.mode === 'cognito' && namespace ? authedChannel(namespace, path) : path
+  }
+
+  private sendSubscribeFrame(socket: WebSocket, id: string, path: string, sinceCursor?: number): void {
+    if (this.mode !== 'cognito' || !this.getAuthToken) {
+      if (socket.readyState !== WebSocket.OPEN) return
+      socket.send(
+        JSON.stringify({
+          type: 'subscribe',
+          id,
+          channel: this.channelFor(path),
+          authorization: authorizationFor(this.config, { kind: 'apikey' }, sinceCursor),
+        }),
+      )
+      return
+    }
+    // DVP-TSK-928: a Cognito subscribe frame carries a token resolved now (cached and cheap while valid), so a
+    // long-lived socket's later per-record watches never reuse an expired connect-time token. A session that
+    // vanished or a failed lookup closes the socket: the reconnect path re-evaluates credentials (and falls back
+    // to the API key only when there is no session).
+    const channel = this.channelFor(path)
+    const closeToReconnect = () => {
+      if (this.socket === socket && !this.disposed) socket.close()
+    }
+    void this.getAuthToken().then((token) => {
+      if (this.disposed || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return
+      if (!token) {
+        closeToReconnect()
+        return
+      }
+      socket.send(
+        JSON.stringify({
+          type: 'subscribe',
+          id,
+          channel,
+          authorization: authorizationFor(this.config, { kind: 'cognito', token }, sinceCursor),
+        }),
+      )
+    }, closeToReconnect)
   }
 
   private sendUnsubscribeFrame(id: string): void {
@@ -210,8 +268,42 @@ export class AppSyncRealtimeClient {
   private connect(): void {
     if (this.disposed || !this.config.enabled) return
 
+    const epoch = ++this.connectEpoch
+    if (!this.getAuthToken || !this.config.authedNamespace) {
+      this.openApiKeyOrBackOff()
+      return
+    }
+    // DVP-TSK-928: a signed-in session connects to the Cognito namespace; no session falls back to the API key
+    // WHEN ONE IS CONFIGURED (gamma). Production ships no key (E41-R2): there, no session means no connection --
+    // never an unauthenticated or key-less socket. A lookup failure with a session is a reconnect-worthy fault,
+    // NOT a silent downgrade to the API key.
+    this.getAuthToken().then(
+      (token) => {
+        if (this.disposed || epoch !== this.connectEpoch) return
+        if (token) this.openSocket({ kind: 'cognito', token })
+        else this.openApiKeyOrBackOff()
+      },
+      (error) => {
+        if (this.disposed || epoch !== this.connectEpoch) return
+        this.scheduleReconnect(`auth token unavailable: ${String(error)}`)
+      },
+    )
+  }
+
+  private openApiKeyOrBackOff(): void {
+    if (this.config.apiKey) {
+      this.openSocket({ kind: 'apikey' })
+      return
+    }
+    this.scheduleReconnect('no session and no API key configured')
+  }
+
+  private openSocket(auth: RealtimeAuth): void {
+    if (this.disposed) return
+    this.mode = auth.kind
+
     const url = `wss://${this.config.realtimeHost}/event/realtime`
-    const protocols = ['aws-appsync-event-ws', buildAuthSubprotocol(this.config, this.lastCursor)]
+    const protocols = ['aws-appsync-event-ws', buildAuthSubprotocol(this.config, auth, this.lastCursor)]
 
     try {
       this.socket = this.wsFactory(url, protocols)
@@ -366,18 +458,7 @@ export class AppSyncRealtimeClient {
     if (socket.readyState !== WebSocket.OPEN) return
 
     this.subscriptionId = crypto.randomUUID()
-    socket.send(
-      JSON.stringify({
-        type: 'subscribe',
-        id: this.subscriptionId,
-        channel: this.config.feedChannel,
-        authorization: {
-          host: this.config.httpHost,
-          'x-api-key': this.config.apiKey,
-          ...(this.lastCursor > 0 ? { since: String(this.lastCursor) } : {}),
-        },
-      }),
-    )
+    this.sendSubscribeFrame(socket, this.subscriptionId, this.config.feedChannel, this.lastCursor)
   }
 
   /**

@@ -5,8 +5,20 @@ name: Parity Report
 # is reachable from a ui-v2 route (io-kit parity). Blocking-with-ratchet: the
 # job fails when `missing` rises above (or `covered` drops below)
 # frontend/ui-v2/parity/baseline.json, and on invalid input. It never demands
-# that coverage rise. Basis is flags-off (product truth: flag-gated actions are
-# excluded) in the baseline, the gate and the report alike, so all three agree.
+# that coverage rise. Basis is flags-off plus the flags that are ON by default in
+# prod (PARITY_FLAGS, below) in the baseline, the gate and the report alike, so all
+# three agree.
+#
+# DVP-TSK-B35: PARITY_FLAGS = enable_escalation_primitive. That flag gates 4 MCP
+# actions (escalation.get/.list/.request/.watch) that are live in prod (server.py
+# ENABLE_ESCALATION_PRIMITIVE default=True) and that ui-v2 serves (bespoke /escalations
+# for .list, generated form for the rest; see src/actions/registry.ts
+# DEFAULT_ON_FLAGS), so a flags-off run left them outside the ratchet. The kit takes
+# flags, not action names, so counting .list and .request means counting the whole
+# flag: baseline 82 -> 86. Flags still OFF in prod (recipe, lesson, handoff, component,
+# typed relationships) stay excluded; turning one on in prod adds it here and bumps
+# the baseline in the same PR. Smaller than a per-action allow list (needs kit
+# support) or editing caps.json (must stay equal to the server registry).
 # Route-or-waiver: a PR that adds a registry action ships a route/map entry, a
 # waiver in frontend/ui-v2/parity/waivers.yaml, or an explicit baseline bump
 # (see CONTRIBUTING.md).
@@ -46,6 +58,7 @@ jobs:
       PARITY_DIR: frontend/ui-v2/parity
       CAPS: tools/enceladus-mcp-server/parity/caps.json
       STACK: enceladus.jreese.net
+      PARITY_FLAGS: enable_escalation_primitive
     steps:
       - uses: actions/checkout@v4
 
@@ -104,14 +117,16 @@ jobs:
         shell: bash
         run: python3 -I -m unittest discover -s "$PARITY_DIR/tests"
 
-      - name: Parity (blocking-with-ratchet, flags off)
+      - name: Parity (blocking-with-ratchet, default-on flags)
         shell: bash
         run: |
           set -euo pipefail
           io-kit parity validate "$CAPS" "$PARITY_DIR/routes.yaml" "$PARITY_DIR/baseline.json"
           A=(--caps "$CAPS" --routes "$PARITY_DIR/routes.yaml" --stack "$STACK"
-             --mapping "$PARITY_DIR/map.yaml" --waivers "$PARITY_DIR/waivers.yaml")
-          # no --flags: flag-gated actions excluded, same basis as baseline.json
+             --mapping "$PARITY_DIR/map.yaml" --waivers "$PARITY_DIR/waivers.yaml"
+             --flags "$PARITY_FLAGS")
+          # --flags = the flags ON by default in prod (DVP-TSK-B35), same basis as baseline.json;
+          # every other flag-gated action stays excluded
           io-kit parity report "${A[@]}" --format md --out parity-report || true
           cat parity-report/*.md >> "$GITHUB_STEP_SUMMARY" || true
           io-kit parity baseline check --baseline "$PARITY_DIR/baseline.json" "${A[@]}" \

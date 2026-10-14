@@ -8,6 +8,7 @@ interface ImportMetaEnv {
   readonly VITE_APPSYNC_API_KEY?: string
   readonly VITE_APPSYNC_REGION?: string
   readonly VITE_APPSYNC_FEED_CHANNEL?: string
+  readonly VITE_APPSYNC_AUTHED_NAMESPACE?: string
 }
 
 interface ImportMeta {

@@ -854,6 +854,64 @@ Resources:
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
 
+          # DVP-TSK-928 (io ruling E41-R2): the PRODUCTION Events API (stack enceladus-appsync-events) does not exist
+          # yet, so its id cannot be pinned the way the gamma one is, and a stack-output ImportValue would deadlock the
+          # first deploy (this policy must exist before that stack can export anything). The three statements below
+          # are scoped by TAG instead: the template stamps Project=enceladus / Component=pwa-realtime on its API.
+          # * Create: CreateApi has no resource ARN to name, so it is "*" gated on the request carrying the tag.
+          # * Tag at create: only an API that has NO Component tag yet may be tagged pwa-realtime (Null condition),
+          #   so the role cannot re-label somebody else's API into its own management scope.
+          # * Manage: Get/Update/Delete/Untag/ListTags only on APIs already carrying Component=pwa-realtime.
+          # The gamma statements above stay pinned and untouched; if the tag conditions ever mis-evaluate, only the
+          # production plane is affected, never gamma.
+          - Sid: AppSyncEventsApiCreateTagged
+            Effect: Allow
+            Action:
+              - appsync:CreateApi
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Component: pwa-realtime
+                aws:RequestedRegion: us-west-2
+          - Sid: AppSyncEventsApiTagAtCreate
+            Effect: Allow
+            Action:
+              - appsync:TagResource
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Component: pwa-realtime
+              "Null":
+                aws:ResourceTag/Component: "true"
+          - Sid: AppSyncEventsApiManageTagged
+            Effect: Allow
+            Action:
+              - appsync:GetApi
+              - appsync:UpdateApi
+              - appsync:DeleteApi
+              - appsync:UntagResource
+              - appsync:ListTagsForResource
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Component: pwa-realtime
+          # Sub-resource ARNs ("/v1/apis/{id}/channelNamespace/{name}") carry only the API id, so they cannot be
+          # name- or tag-scoped; the production API id is unknown until it is created. The wildcard is limited to the
+          # one sub-resource type the production template creates. The production plane has NO ApiKey resource, so
+          # no apikeys/* wildcard is granted: the key grant above stays pinned to the gamma API.
+          - Sid: AppSyncEventsChannelNamespaceManageProd
+            Effect: Allow
+            Action:
+              - appsync:GetChannelNamespace
+              - appsync:ListChannelNamespaces
+              - appsync:CreateChannelNamespace
+              - appsync:UpdateChannelNamespace
+              - appsync:DeleteChannelNamespace
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/*/channelNamespace/*"
+
   # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
   # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to
   # CloudFormationDeployRole without ever being represented in this stack.

@@ -65,11 +65,11 @@
       "notes": "ENC-TSK-L82; mirrors cloudformation-monitoring-stack-deploy.yml plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
     },
     "cloudformation-appsync-events-stack-deploy.yml": {
-      "class": "already-gated",
+      "class": "conditional",
       "gated_jobs": [
         "apply"
       ],
-      "notes": "ENC-TSK-M56: new workflow, gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); plan/apply split mirroring cloudformation-agent-auth-stack-deploy.yml, apply environment: v4-gamma. Adds a monthly schedule trigger for API-key rolling renewal (schedule events have no branch ref, pinned gamma via github.event_name == 'schedule' in ENVIRONMENT_SUFFIX)."
+      "notes": "ENC-TSK-M56 + DVP-TSK-928 (io ruling E41-R2): plan/apply split mirroring cloudformation-monitoring-stack-deploy.yml; apply environment by resolved plane (v4/** or schedule or target_environment=gamma -> v4-gamma, else v3-prod with io as required reviewer). The production plane (stack enceladus-appsync-events) is Cognito-only with no ApiKey resource; the monthly schedule and the API-key renewal are pinned gamma via github.event_name == 'schedule' in ENVIRONMENT_SUFFIX; ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed."
     },
     "cloudformation-codedeploy-stack-deploy.yml": {
       "class": "prod-mutating",

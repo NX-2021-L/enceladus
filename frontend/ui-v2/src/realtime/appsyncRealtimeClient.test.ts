@@ -512,3 +512,260 @@ describe('AppSyncRealtimeClient — per-record watch (ENC-TSK-L29)', () => {
     client.stop()
   })
 })
+
+// DVP-TSK-928: Cognito-authenticated namespace — a signed-in session subscribes with its token, the API key
+// serves only the no-session case, and the DVP-TSK-919 reconnect/liveness policy is unchanged.
+class AuthSocket extends MockWebSocket {
+  readonly url: string
+  readonly protocols: string[]
+  constructor(url: string, protocols: string[]) {
+    super(url, protocols)
+    this.url = url
+    this.protocols = protocols
+  }
+  connectHeader(): Record<string, string> {
+    const raw = this.protocols[1].replace(/^header-/, '').replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(raw)) as Record<string, string>
+  }
+  frames(): Array<Record<string, unknown>> {
+    return this.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>)
+  }
+}
+
+const authedConfig: AppSyncEventsConfig = { ...config, authedNamespace: 'authed' }
+
+function authedClient(
+  getAuthToken: () => Promise<string | null>,
+  onEvent: (event: { type: string }) => void = () => {},
+  overrides: Partial<AppSyncEventsConfig> = {},
+) {
+  return new AppSyncRealtimeClient({
+    config: { ...authedConfig, ...overrides },
+    lastCursor: 0,
+    onEvent,
+    getAuthToken,
+    webSocketFactory: (url, protocols) => new AuthSocket(url, protocols) as unknown as WebSocket,
+  })
+}
+
+const flushMicrotasks = async () => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
+describe('AppSyncRealtimeClient — Cognito namespace (DVP-TSK-928)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    MockWebSocket.instances = []
+  })
+
+  const sockets = () => MockWebSocket.instances as AuthSocket[]
+
+  it('connects with the Cognito token and subscribes to the authed namespace, never sending the API key', async () => {
+    const client = authedClient(async () => 'cognito.id.token')
+    client.start()
+    await flushMicrotasks()
+
+    const socket = sockets()[0]
+    expect(socket.connectHeader()).toEqual({ host: config.httpHost, Authorization: 'cognito.id.token' })
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await flushMicrotasks()
+
+    const subscribe = socket.frames().find((frame) => frame.type === 'subscribe')
+    expect(subscribe?.channel).toBe('/authed/feed/updates')
+    expect(subscribe?.authorization).toEqual({ host: config.httpHost, Authorization: 'cognito.id.token' })
+    expect(socket.sent.join('')).not.toContain('x-api-key')
+    expect(socket.sent.join('')).not.toContain('test-key')
+    client.stop()
+  })
+
+  it('carries the resume cursor in the Cognito authorization as it does for the API key', async () => {
+    const client = new AppSyncRealtimeClient({
+      config: authedConfig,
+      lastCursor: 1234,
+      onEvent: () => {},
+      getAuthToken: async () => 'tok',
+      webSocketFactory: (url, protocols) => new AuthSocket(url, protocols) as unknown as WebSocket,
+    })
+    client.start()
+    await flushMicrotasks()
+    const socket = sockets()[0]
+    expect(socket.connectHeader().since).toBe('1234')
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await flushMicrotasks()
+    const subscribe = socket.frames().find((frame) => frame.type === 'subscribe')
+    expect((subscribe?.authorization as Record<string, string>).since).toBe('1234')
+    client.stop()
+  })
+
+  it('falls back to the API-key namespace only when there is no session', async () => {
+    const client = authedClient(async () => null)
+    client.start()
+    await flushMicrotasks()
+
+    const socket = sockets()[0]
+    expect(socket.connectHeader()).toEqual({ host: config.httpHost, 'x-api-key': 'test-key' })
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    const subscribe = socket.frames().find((frame) => frame.type === 'subscribe')
+    expect(subscribe?.channel).toBe('/feed/updates')
+    expect(subscribe?.authorization).toEqual({ host: config.httpHost, 'x-api-key': 'test-key' })
+    client.stop()
+  })
+
+  it('stays on the API key when no namespace is configured, even if a token source is supplied', () => {
+    const getAuthToken = vi.fn(async () => 'tok')
+    const client = authedClient(getAuthToken, () => {}, { authedNamespace: '' })
+    client.start()
+    expect(getAuthToken).not.toHaveBeenCalled()
+    expect(sockets()[0].connectHeader()['x-api-key']).toBe('test-key')
+    client.stop()
+  })
+
+  it('does not downgrade a session whose token lookup fails: it backs off and retries instead', async () => {
+    vi.useFakeTimers()
+    const events: Array<{ type: string }> = []
+    let calls = 0
+    const client = authedClient(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('edge unreachable')
+      return 'tok-2'
+    }, (event) => events.push(event))
+
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sockets()).toHaveLength(0)
+    expect(events.map((event) => event.type)).toContain('reconnecting')
+
+    await vi.advanceTimersByTimeAsync(BACKOFF_CAP_MS)
+    expect(sockets()).toHaveLength(1)
+    expect(sockets()[0].connectHeader().Authorization).toBe('tok-2')
+    client.stop()
+  })
+
+  it('re-resolves the token on every reconnect so an expired token is never replayed', async () => {
+    vi.useFakeTimers()
+    const tokens = ['tok-1', 'tok-2']
+    const client = authedClient(async () => tokens.shift() ?? 'tok-n')
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sockets()[0].connectHeader().Authorization).toBe('tok-1')
+
+    sockets()[0].close()
+    await vi.advanceTimersByTimeAsync(BACKOFF_CAP_MS)
+    expect(sockets()).toHaveLength(2)
+    expect(sockets()[1].connectHeader().Authorization).toBe('tok-2')
+    client.stop()
+  })
+
+  it('a token lookup that resolves after stop() or a newer connect opens no extra socket', async () => {
+    const resolvers: Array<(token: string | null) => void> = []
+    const client = authedClient(() => new Promise<string | null>((resolve) => resolvers.push(resolve)))
+
+    client.start()
+    client.manualRetry() // supersedes the first pending lookup
+    expect(resolvers).toHaveLength(2)
+    resolvers[0]('stale')
+    await flushMicrotasks()
+    expect(sockets()).toHaveLength(0)
+    resolvers[1]('fresh')
+    await flushMicrotasks()
+    expect(sockets()).toHaveLength(1)
+    expect(sockets()[0].connectHeader().Authorization).toBe('fresh')
+
+    client.stop()
+    client.manualRetry()
+    await flushMicrotasks()
+    expect(sockets()).toHaveLength(1)
+  })
+
+  it('watchRecord subscribes to /authed/records/{id} with a freshly resolved token', async () => {
+    let current = 'tok-connect'
+    const client = authedClient(async () => current)
+    client.start()
+    await flushMicrotasks()
+    const socket = sockets()[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await flushMicrotasks()
+
+    current = 'tok-later'
+    client.watchRecord('ENC-TSK-928', () => {})
+    await flushMicrotasks()
+
+    const watch = socket.frames().find((frame) => frame.channel === '/authed/records/ENC-TSK-928')
+    expect(watch?.authorization).toEqual({ host: config.httpHost, Authorization: 'tok-later' })
+    client.stop()
+  })
+
+  it('a session lost mid-connection closes the socket so the reconnect re-evaluates credentials', async () => {
+    vi.useFakeTimers()
+    let session: string | null = 'tok'
+    const events: Array<{ type: string }> = []
+    const client = authedClient(async () => session, (event) => events.push(event))
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = sockets()[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    session = null
+    client.watchRecord('ENC-TSK-928', () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(socket.readyState).toBe(3)
+    expect(events.map((event) => event.type)).toContain('reconnecting')
+
+    await vi.advanceTimersByTimeAsync(BACKOFF_CAP_MS)
+    expect(sockets().at(-1)!.connectHeader()).toEqual({ host: config.httpHost, 'x-api-key': 'test-key' })
+    client.stop()
+  })
+
+  it('Cognito-only (no API key, as in production): connects with the token and never sends a key', async () => {
+    const client = authedClient(async () => 'prod.id.token', () => {}, { apiKey: '' })
+    client.start()
+    await flushMicrotasks()
+    const socket = sockets()[0]
+    expect(socket.connectHeader()).toEqual({ host: config.httpHost, Authorization: 'prod.id.token' })
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await flushMicrotasks()
+    client.watchRecord('ENC-TSK-928', () => {})
+    await flushMicrotasks()
+    expect(socket.sent.join('')).not.toContain('x-api-key')
+    expect(socket.frames().filter((frame) => frame.type === 'subscribe').map((frame) => frame.channel)).toEqual([
+      '/authed/feed/updates',
+      '/authed/records/ENC-TSK-928',
+    ])
+    client.stop()
+  })
+
+  it('Cognito-only: no session means no socket and a bounded back-off, never an API-key fallback', async () => {
+    vi.useFakeTimers()
+    const events: Array<{ type: string }> = []
+    const client = authedClient(async () => null, (event) => events.push(event), { apiKey: '' })
+    client.start()
+    for (let i = 0; i <= MAX_AUTO_RECONNECT_ATTEMPTS; i++) {
+      await vi.advanceTimersByTimeAsync(BACKOFF_CAP_MS)
+    }
+    expect(sockets()).toHaveLength(0)
+    expect(events.map((event) => event.type)).toContain('manual_retry_required')
+    client.stop()
+  })
+
+  it('keeps the liveness watchdog on a Cognito connection', async () => {
+    vi.useFakeTimers()
+    const client = authedClient(async () => 'tok')
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = sockets()[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack', connectionTimeoutMs: 1000 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    await vi.advanceTimersByTimeAsync(1000 + LIVENESS_CHECK_INTERVAL_MS + 1)
+    expect(socket.readyState).toBe(3)
+    client.stop()
+  })
+})

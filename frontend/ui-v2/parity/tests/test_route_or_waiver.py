@@ -11,6 +11,8 @@ from pathlib import Path
 PARITY = Path(__file__).resolve().parents[1]
 CAPS = PARITY.parents[2] / "tools" / "enceladus-mcp-server" / "parity" / "caps.json"
 CLI = shutil.which("io-kit")
+# DVP-TSK-B35: the same flags the workflow passes (PARITY_FLAGS), so baseline.json (86) is compared like for like.
+PARITY_FLAGS = "enable_escalation_primitive"
 
 
 @unittest.skipUnless(CLI, "io-kit CLI not installed")
@@ -25,7 +27,8 @@ class RouteOrWaiver(unittest.TestCase):
             cmd = [CLI, "parity", "baseline", "check", "--baseline", str(PARITY / "baseline.json"),
                    "--caps", str(td / "caps.json"), "--routes", str(PARITY / "routes.yaml"),
                    "--stack", "enceladus.jreese.net", "--mapping", str(PARITY / "map.yaml"),
-                   "--waivers", str(td / "waivers.yaml"), "--mode", "blocking", "--today", "2026-10-10"]
+                   "--waivers", str(td / "waivers.yaml"), "--flags", PARITY_FLAGS,
+                   "--mode", "blocking", "--today", "2026-10-10"]
             return subprocess.run(cmd, capture_output=True, text=True)
 
     def test_new_action_without_route_or_waiver_fails(self):
