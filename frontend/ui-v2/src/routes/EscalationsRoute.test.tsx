@@ -182,6 +182,19 @@ describe('decide through the kit path', () => {
     expect(String((posts()[0][1] as RequestInit).body)).toContain('cognito_max_age')
   })
 
+  it('a 403 step-up refusal asks for a passkey sign-in, not a generic error (DVP-TSK-984)', async () => {
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'POST'
+        ? json(JSON.stringify({ error: 'this escalation requires a fresh step-up proof', reason: 'step_up_required' }), 403)
+        : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-300')
+    expect(container.textContent).toContain('use your passkey')
+    await click(byText('button', 'Approve & apply'))
+    expect(container.textContent).toContain('Sign in with your passkey')
+    expect(container.textContent).not.toContain('Decision was not recorded')
+  })
+
   it('a 412 card_changed refreshes the queue and tells io', async () => {
     authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
       (init?.method ?? 'GET') === 'POST' ? json(JSON.stringify({ error: 'card_changed', reason: 'card_changed' }), 412) : defaultImpl(url, init))
