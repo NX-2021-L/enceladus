@@ -1,470 +1,743 @@
 {
-  "synthetic": true,
-  "synthetic_note": "Built from the governance-arc definition with plausible results; replace with the recorded RUN-* transcript of the live io run.",
-  "recipe": {
-    "recipe_id": "DVP-REC-001",
-    "name": "governance-arc",
-    "version": "1.0.0",
-    "content_hash": "sha256:756028859fdbc03f4090bb3c9c65f781d505cf8f7591fc3409e4d0c89f21c19c",
-    "definition": {
-      "description": "Create a task, set its components, check it out, then walk code, acceptance and deploy gates to closed.",
-      "execution": "deterministic",
-      "inputs": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "project_id",
-          "title",
-          "components"
-        ],
-        "properties": {
-          "project_id": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "components": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "minItems": 1
-          },
-          "acceptance_criteria": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "minItems": 1
-          },
-          "transition_type": {
-            "type": "string",
-            "enum": [
-              "github_pr_deploy",
-              "lambda_deploy",
-              "web_deploy",
-              "code_only",
-              "no_code"
-            ],
-            "default": "code_only"
-          }
-        }
-      },
-      "outputs": {
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "record_id"
-          ],
-          "properties": {
-            "record_id": {
-              "type": "string"
-            },
-            "commit_complete_id": {
-              "type": "string"
-            }
-          }
-        },
-        "from": {
-          "record_id": "$create.record_id",
-          "commit_complete_id": "$committed.commit_complete_id"
-        }
-      },
-      "steps": [
-        {
-          "id": "create",
-          "action": "tracker.create",
-          "arguments": {
-            "project_id": "$inputs.project_id",
-            "record_type": "task",
-            "title": "$inputs.title",
-            "transition_type": "$inputs.transition_type",
-            "acceptance_criteria": "$inputs.acceptance_criteria"
-          },
-          "on_error": "abort"
-        },
-        {
-          "id": "set_components",
-          "action": "tracker.set",
-          "arguments": {
-            "record_id": "$create.record_id",
-            "field": "components",
-            "value": "$inputs.components"
-          },
-          "on_error": "abort"
-        },
-        {
-          "id": "checkout",
-          "action": "checkout.task",
-          "arguments": {
-            "record_id": "$create.record_id",
-            "active_agent_session_id": "$run.started_by"
-          },
-          "on_error": "abort"
-        },
-        {
-          "id": "code_gate",
-          "type": "gate",
-          "gate": {
-            "prompt": "Code is complete. Provide the commit sha.",
-            "inputs": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "commit_sha"
-              ],
-              "properties": {
-                "commit_sha": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{7,40}$"
-                }
-              }
-            },
-            "timeout": {
-              "seconds": 86400
-            },
-            "on_reject": "cancelled",
-            "on_expire": "expired"
-          }
-        },
-        {
-          "id": "committed",
-          "action": "checkout.advance",
-          "arguments": {
-            "record_id": "$create.record_id",
-            "target_status": "committed",
-            "provider": "$run.started_by",
-            "transition_evidence": {
-              "commit_sha": "$code_gate.inputs.commit_sha"
-            }
-          },
-          "on_error": "abort"
-        },
-        {
-          "id": "acceptance_gate",
-          "type": "gate",
-          "gate": {
-            "prompt": "Accept the delivered work against the acceptance criteria.",
-            "inputs": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [],
-              "properties": {
-                "note": {
-                  "type": "string"
-                }
-              }
-            },
-            "timeout": {
-              "seconds": 86400
-            },
-            "on_reject": "failed",
-            "on_expire": "expired",
-            "sensitive": true
-          }
-        },
-        {
-          "id": "deploy_gate",
-          "type": "gate",
-          "gate": {
-            "prompt": "Approve the deploy.",
-            "inputs": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [],
-              "properties": {
-                "note": {
-                  "type": "string"
-                }
-              }
-            },
-            "timeout": {
-              "seconds": 86400
-            },
-            "on_reject": "failed",
-            "on_expire": "expired",
-            "sensitive": true
-          }
-        },
-        {
-          "id": "close",
-          "action": "checkout.advance",
-          "arguments": {
-            "record_id": "$create.record_id",
-            "target_status": "closed",
-            "provider": "$run.started_by"
-          },
-          "on_error": "abort"
-        }
-      ],
-      "surfaces": [
-        "enceladus"
-      ],
-      "tools": [
-        "checkout.advance",
-        "checkout.task",
-        "tracker.create",
-        "tracker.set"
-      ]
-    }
-  },
-  "project_id": "devops",
-  "run_id": "DVP-RUN-001",
-  "started_by": "agent-a",
-  "governance_hash": "gh-replay-0001",
-  "inputs": {
-    "project_id": "devops",
-    "title": "Replay: governance arc on a no_code task",
-    "components": [
-      "comp-enceladus-mcp-server"
+ "recipe": {
+  "recipe_id": "DVP-REC-001",
+  "name": "governance-arc",
+  "version": "1.1.0",
+  "content_hash": "sha256:da640cc49f2c631f8394dc3250b308149251342cbcb3bffe6611e226d4effb80",
+  "definition": {
+   "description": "Create a no_code task, set its components and check it out, then walk the code, acceptance and release gates to closed. Every gate is a human decision; the runner makes no agent calls of its own beyond the governed tracker/checkout writes. v1.1.0 replaces 1.0.0, whose committed step could never succeed (in-progress allows only coding-complete, and no_code has no committed state).",
+   "execution": "deterministic",
+   "tools": [
+    "checkout.advance",
+    "checkout.task",
+    "tracker.create",
+    "tracker.set",
+    "tracker.set_acceptance_evidence"
+   ],
+   "surfaces": [
+    "enceladus"
+   ],
+   "inputs": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "project_id",
+     "title",
+     "components",
+     "acceptance_criteria"
     ],
-    "acceptance_criteria": [
-      "Run reaches completed with every gate cleared by a human"
-    ],
-    "transition_type": "no_code"
-  },
-  "segments": [
-    {
-      "calls": [
-        {
-          "step_id": "create",
-          "surface": "enceladus",
-          "action": "tracker.create",
-          "arguments": {
-            "project_id": "devops",
-            "record_type": "task",
-            "title": "Replay: governance arc on a no_code task",
-            "transition_type": "no_code",
-            "acceptance_criteria": [
-              "Run reaches completed with every gate cleared by a human"
-            ]
-          },
-          "dry_run": false,
-          "idempotency_key": "DVP-RUN-001:create",
-          "idempotency": "at_least_once",
-          "on_error": "abort"
-        },
-        {
-          "step_id": "set_components",
-          "surface": "enceladus",
-          "action": "tracker.set",
-          "arguments": {
-            "record_id": {
-              "$ref": "create",
-              "path": [
-                "record_id"
-              ]
-            },
-            "field": "components",
-            "value": [
-              "comp-enceladus-mcp-server"
-            ]
-          },
-          "dry_run": false,
-          "idempotency_key": "DVP-RUN-001:set_components",
-          "idempotency": "at_least_once",
-          "on_error": "abort"
-        },
-        {
-          "step_id": "checkout",
-          "surface": "enceladus",
-          "action": "checkout.task",
-          "arguments": {
-            "record_id": {
-              "$ref": "create",
-              "path": [
-                "record_id"
-              ]
-            },
-            "active_agent_session_id": "agent-a"
-          },
-          "dry_run": false,
-          "idempotency_key": "DVP-RUN-001:checkout",
-          "idempotency": "at_least_once",
-          "on_error": "abort"
-        }
-      ],
-      "results": [
-        {
-          "step_id": "create",
-          "ok": true,
-          "result": {
-            "record_id": "DVP-TSK-9001",
-            "record_type": "task",
-            "status": "open"
-          }
-        },
-        {
-          "step_id": "set_components",
-          "ok": true,
-          "result": {
-            "record_id": "DVP-TSK-9001",
-            "field": "components",
-            "updated": true
-          }
-        },
-        {
-          "step_id": "checkout",
-          "ok": true,
-          "result": {
-            "record_id": "DVP-TSK-9001",
-            "checkout_id": "CHK-REPLAY-0001",
-            "status": "checked_out"
-          }
-        }
-      ]
-    },
-    {
-      "calls": [
-        {
-          "step_id": "committed",
-          "surface": "enceladus",
-          "action": "checkout.advance",
-          "arguments": {
-            "record_id": "DVP-TSK-9001",
-            "target_status": "committed",
-            "provider": "agent-a",
-            "transition_evidence": {
-              "commit_sha": "3f9c2ab41d7e"
-            }
-          },
-          "dry_run": false,
-          "idempotency_key": "DVP-RUN-001:committed",
-          "idempotency": "at_least_once",
-          "on_error": "abort"
-        }
-      ],
-      "results": [
-        {
-          "step_id": "committed",
-          "ok": true,
-          "result": {
-            "record_id": "DVP-TSK-9001",
-            "status": "committed",
-            "commit_complete_id": "CCI-9A1B2C3D4E5F"
-          }
-        }
-      ]
-    },
-    {
-      "calls": [
-        {
-          "step_id": "close",
-          "surface": "enceladus",
-          "action": "checkout.advance",
-          "arguments": {
-            "record_id": "DVP-TSK-9001",
-            "target_status": "closed",
-            "provider": "agent-a"
-          },
-          "dry_run": false,
-          "idempotency_key": "DVP-RUN-001:close",
-          "idempotency": "at_least_once",
-          "on_error": "abort"
-        }
-      ],
-      "results": [
-        {
-          "step_id": "close",
-          "ok": true,
-          "result": {
-            "record_id": "DVP-TSK-9001",
-            "status": "closed"
-          }
-        }
-      ]
+    "properties": {
+     "project_id": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "components": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "minItems": 1
+     },
+     "acceptance_criteria": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 1
+     }
     }
-  ],
-  "gates": [
-    {
-      "step_id": "code_gate",
-      "decision": "approve",
-      "decider": "io@example.com",
-      "inputs": {
-        "commit_sha": "3f9c2ab41d7e"
+   },
+   "outputs": {
+    "from": {
+     "record_id": "$create.record_id"
+    },
+    "schema": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "record_id"
+     ],
+     "properties": {
+      "record_id": {
+       "type": "string"
       }
-    },
-    {
-      "step_id": "acceptance_gate",
-      "decision": "approve",
-      "decider": "io@example.com",
-      "inputs": {
-        "note": "Acceptance criteria verified."
-      },
-      "step_up": false
-    },
-    {
-      "step_id": "deploy_gate",
-      "decision": "approve",
-      "decider": "io@example.com",
-      "inputs": {
-        "note": "Deploy approved."
-      },
-      "step_up": true
+     }
     }
-  ],
-  "expected": {
-    "final_state": "completed",
-    "step_statuses": {
-      "create": "ok",
-      "set_components": "ok",
-      "checkout": "ok",
-      "code_gate": "ok",
-      "committed": "ok",
-      "acceptance_gate": "ok",
-      "deploy_gate": "ok",
-      "close": "ok"
+   },
+   "steps": [
+    {
+     "id": "create",
+     "action": "tracker.create",
+     "on_error": "abort",
+     "arguments": {
+      "project_id": "$inputs.project_id",
+      "record_type": "task",
+      "title": "$inputs.title",
+      "transition_type": "no_code",
+      "acceptance_criteria": "$inputs.acceptance_criteria"
+     }
     },
-    "receipts": {
-      "create": {
-        "record_id": "DVP-TSK-9001"
-      },
-      "set_components": {
-        "record_id": "DVP-TSK-9001"
-      },
-      "checkout": {
-        "record_id": "DVP-TSK-9001",
-        "checkout_id": "CHK-REPLAY-0001"
-      },
-      "committed": {
-        "record_id": "DVP-TSK-9001",
-        "commit_complete_id": "CCI-9A1B2C3D4E5F"
-      },
-      "close": {
-        "record_id": "DVP-TSK-9001"
+    {
+     "id": "set_components",
+     "action": "tracker.set",
+     "on_error": "abort",
+     "arguments": {
+      "record_id": "$create.record_id",
+      "field": "components",
+      "value": "$inputs.components"
+     }
+    },
+    {
+     "id": "checkout",
+     "action": "checkout.task",
+     "on_error": "abort",
+     "arguments": {
+      "record_id": "$create.record_id",
+      "active_agent_session_id": "$run.started_by"
+     }
+    },
+    {
+     "id": "code_gate",
+     "gate": "human",
+     "prompt": "The work is done. Approve to mark the task coding-complete.",
+     "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+       "note": {
+        "type": "string"
+       }
       }
+     },
+     "on_reject": "cancelled",
+     "on_expire": "expired",
+     "timeout": {
+      "seconds": 86400
+     }
     },
-    "step_results": {
-      "create": {
-        "record_id": "DVP-TSK-9001",
-        "record_type": "task",
-        "status": "open"
-      },
-      "set_components": {
-        "record_id": "DVP-TSK-9001",
-        "field": "components",
-        "updated": true
-      },
-      "checkout": {
-        "record_id": "DVP-TSK-9001",
-        "checkout_id": "CHK-REPLAY-0001",
-        "status": "checked_out"
-      },
-      "committed": {
-        "record_id": "DVP-TSK-9001",
-        "status": "committed",
-        "commit_complete_id": "CCI-9A1B2C3D4E5F"
-      },
-      "close": {
-        "record_id": "DVP-TSK-9001",
-        "status": "closed"
+    {
+     "id": "coding_complete",
+     "action": "checkout.advance",
+     "on_error": "abort",
+     "arguments": {
+      "record_id": "$create.record_id",
+      "provider": "$run.started_by",
+      "target_status": "coding-complete"
+     }
+    },
+    {
+     "id": "acceptance_gate",
+     "gate": "human",
+     "prompt": "Accept the work against its acceptance criterion and give the evidence.",
+     "sensitive": true,
+     "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "evidence"
+      ],
+      "properties": {
+       "evidence": {
+        "type": "string",
+        "minLength": 1
+       }
       }
+     },
+     "on_reject": "failed",
+     "on_expire": "expired",
+     "timeout": {
+      "seconds": 86400
+     }
     },
-    "outputs": {
-      "record_id": "DVP-TSK-9001",
-      "commit_complete_id": "CCI-9A1B2C3D4E5F"
+    {
+     "id": "accept_ac",
+     "action": "tracker.set_acceptance_evidence",
+     "on_error": "abort",
+     "arguments": {
+      "record_id": "$create.record_id",
+      "criterion_index": 0,
+      "evidence": "$acceptance_gate.inputs.evidence",
+      "evidence_acceptance": true,
+      "provider": "$run.started_by"
+     }
+    },
+    {
+     "id": "deploy_gate",
+     "gate": "human",
+     "prompt": "Approve closing the task (no_code: nothing to deploy).",
+     "sensitive": true,
+     "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+       "note": {
+        "type": "string"
+       }
+      }
+     },
+     "on_reject": "failed",
+     "on_expire": "expired",
+     "timeout": {
+      "seconds": 86400
+     }
+    },
+    {
+     "id": "close",
+     "action": "checkout.advance",
+     "on_error": "abort",
+     "arguments": {
+      "record_id": "$create.record_id",
+      "provider": "$run.started_by",
+      "target_status": "closed",
+      "transition_evidence": {
+       "no_code_evidence": "$acceptance_gate.inputs.evidence"
+      }
+     }
     }
+   ]
   }
+ },
+ "project_id": "devops",
+ "run_id": "DVP-RUN-003",
+ "started_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+ "governance_hash": "cbb831e0f8b91361b8316de56f2223a83afcefcb5950e8c3737d758aba29584f",
+ "recorded_from": {
+  "run_id": "DVP-RUN-003",
+  "completed_at": "2026-10-14T03:41:37Z",
+  "telemetry": {
+   "agent_calls": 0,
+   "gates_opened": 3,
+   "steps_total": 9,
+   "writes": 6
+  },
+  "gate_escalations": [
+   "DVP-ESC-021",
+   "DVP-ESC-022",
+   "DVP-ESC-023"
+  ],
+  "note": "Recorded from the live prod run (DVP-TSK-B36). Start and resume were clicked in io's browser at io's request; every gate was decided by io (ai@jreese.net); the acceptance evidence text was chosen by io and attached through the hub apply hook."
+ },
+ "inputs": {
+  "acceptance_criteria": [
+   "Run reaches completed with every gate cleared by a uman"
+  ],
+  "components": [
+   "comp-io-kit"
+  ],
+  "project_id": "devops",
+  "title": "B36: governance arc recorded run (DVP-REC-001 v1.1.)"
+ },
+ "segments": [
+  {
+   "calls": [
+    {
+     "step_id": "create",
+     "surface": "enceladus",
+     "action": "tracker.create",
+     "arguments": {
+      "project_id": "devops",
+      "record_type": "task",
+      "title": "B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+      "transition_type": "no_code",
+      "acceptance_criteria": [
+       "Run reaches completed with every gate cleared by a uman"
+      ]
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:create",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    },
+    {
+     "step_id": "set_components",
+     "surface": "enceladus",
+     "action": "tracker.set",
+     "arguments": {
+      "record_id": {
+       "$ref": "create",
+       "path": [
+        "record_id"
+       ]
+      },
+      "field": "components",
+      "value": [
+       "comp-io-kit"
+      ]
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:set_components",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    },
+    {
+     "step_id": "checkout",
+     "surface": "enceladus",
+     "action": "checkout.task",
+     "arguments": {
+      "record_id": {
+       "$ref": "create",
+       "path": [
+        "record_id"
+       ]
+      },
+      "active_agent_session_id": "74e824a8-f091-7007-c2b5-f4dddd90ac8e"
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:checkout",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    }
+   ],
+   "results": [
+    {
+     "step_id": "create",
+     "ok": true,
+     "result": {
+      "created_at": "2026-10-14T03:33:37Z",
+      "record_id": "DVP-TSK-B50",
+      "success": true
+     }
+    },
+    {
+     "step_id": "set_components",
+     "ok": true,
+     "result": {
+      "field": "components",
+      "record_id": "DVP-TSK-B50",
+      "success": true,
+      "sync_version": 2,
+      "updated_at": "2026-10-14T03:33:37Z",
+      "value": [
+       "comp-io-kit"
+      ]
+     }
+    },
+    {
+     "step_id": "checkout",
+     "ok": true,
+     "result": {
+      "checked_out_at": "2026-10-14T03:33:39.022285+00:00",
+      "checked_out_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+      "checkout_count": 1,
+      "checkout_transition_type": "no_code",
+      "coordination_request_id": null,
+      "success": true,
+      "task": {
+       "acceptance_criteria": [
+        {
+         "description": "Run reaches completed with every gate cleared by a uman",
+         "evidence": "",
+         "evidence_acceptance": false
+        }
+       ],
+       "active_agent_session": true,
+       "active_agent_session_id": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "active_agent_session_parent": false,
+       "auto_walk_opt_out": false,
+       "checked_out_at": "2026-10-14T03:33:38Z",
+       "checked_out_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "checkout_count": 1,
+       "checkout_state": "checked_out",
+       "closed_count": 0,
+       "components": [
+        "comp-io-kit"
+       ],
+       "context_node": {
+        "access_frequency": 0,
+        "freshness_score": 1.0,
+        "information_density": 0.026,
+        "structural_importance": 0.0
+       },
+       "coordination": false,
+       "created_at": "2026-10-14T03:33:37Z",
+       "feed_scope": "global",
+       "history": [
+        {
+         "description": "Created via tracker API [provider=recipe_runner]: B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+         "status": "created",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Field 'components' set to '['comp-io-kit']' [provider=recipe_runner]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Agent session checkout by 74e824a8-f091-7007-c2b5-f4dddd90ac8e [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'status' set to 'in-progress' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        }
+       ],
+       "item_id": "DVP-TSK-B50",
+       "last_update_note": "Field 'status' set to 'in-progress' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+       "project_id": "devops",
+       "record_id": "task#DVP-TSK-B50",
+       "record_type": "task",
+       "status": "in-progress",
+       "sync_version": 4,
+       "task_id": "DVP-TSK-B50",
+       "title": "B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+       "transition_type": "no_code",
+       "updated_at": "2026-10-14T03:33:38Z",
+       "version_seq": 15906,
+       "write_source": {
+        "channel": "mcp_server",
+        "coordination_request_id": "",
+        "dispatch_id": "",
+        "provider": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+        "timestamp": "2026-10-14T03:33:38Z"
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "calls": [
+    {
+     "step_id": "coding_complete",
+     "surface": "enceladus",
+     "action": "checkout.advance",
+     "arguments": {
+      "record_id": "DVP-TSK-B50",
+      "provider": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+      "target_status": "coding-complete"
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:coding_complete",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    }
+   ],
+   "results": [
+    {
+     "step_id": "coding_complete",
+     "ok": true,
+     "result": {
+      "matrix_version": 1,
+      "new_status": "coding-complete",
+      "previous_status": "in-progress",
+      "success": true,
+      "task": {
+       "acceptance_criteria": [
+        {
+         "description": "Run reaches completed with every gate cleared by a uman",
+         "evidence": "",
+         "evidence_acceptance": false
+        }
+       ],
+       "active_agent_session": true,
+       "active_agent_session_id": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "active_agent_session_parent": false,
+       "auto_walk_opt_out": false,
+       "checked_out_at": "2026-10-14T03:33:38Z",
+       "checked_out_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "checkout_count": 1,
+       "checkout_state": "checked_out",
+       "checkout_transition_type": "no_code",
+       "closed_count": 0,
+       "components": [
+        "comp-io-kit"
+       ],
+       "context_node": {
+        "access_frequency": 0,
+        "freshness_score": 1.0,
+        "information_density": 0.026,
+        "structural_importance": 0.0
+       },
+       "coordination": false,
+       "created_at": "2026-10-14T03:33:37Z",
+       "feed_scope": "global",
+       "history": [
+        {
+         "description": "Created via tracker API [provider=recipe_runner]: B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+         "status": "created",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Field 'components' set to '['comp-io-kit']' [provider=recipe_runner]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Agent session checkout by 74e824a8-f091-7007-c2b5-f4dddd90ac8e [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'status' set to 'in-progress' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'checkout_transition_type' set to 'no_code' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'status' set to 'coding-complete' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:56Z"
+        }
+       ],
+       "item_id": "DVP-TSK-B50",
+       "last_update_note": "Field 'status' set to 'coding-complete' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+       "project_id": "devops",
+       "record_id": "task#DVP-TSK-B50",
+       "record_type": "task",
+       "status": "coding-complete",
+       "sync_version": 6,
+       "task_id": "DVP-TSK-B50",
+       "title": "B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+       "transition_type": "no_code",
+       "updated_at": "2026-10-14T03:33:56Z",
+       "version_seq": 15908,
+       "write_source": {
+        "channel": "mcp_server",
+        "coordination_request_id": "",
+        "dispatch_id": "",
+        "provider": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+        "timestamp": "2026-10-14T03:33:56Z"
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "calls": [
+    {
+     "step_id": "accept_ac",
+     "surface": "enceladus",
+     "action": "tracker.set_acceptance_evidence",
+     "arguments": {
+      "record_id": "DVP-TSK-B50",
+      "criterion_index": 0,
+      "evidence": "Accepted by io: DVP-RUN-003 (governance-arc v1.1.0) created, checked out and advanced DVP-TSK-B50 with every gate decided by a human; no agent decided any gate.",
+      "evidence_acceptance": true,
+      "provider": "74e824a8-f091-7007-c2b5-f4dddd90ac8e"
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:accept_ac",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    }
+   ],
+   "results": [
+    {
+     "step_id": "accept_ac",
+     "ok": true,
+     "result": {
+      "all_criteria_accepted": true,
+      "completion_eligible": true,
+      "criteria_summary": [
+       {
+        "description": "Run reaches completed with every gate cleared by a uman",
+        "evidence_acceptance": true,
+        "index": 0
+       }
+      ],
+      "criterion_index": 0,
+      "evidence_acceptance": true,
+      "record_id": "DVP-TSK-B50",
+      "success": true,
+      "updated_at": "2026-10-14T03:41:14Z"
+     }
+    }
+   ]
+  },
+  {
+   "calls": [
+    {
+     "step_id": "close",
+     "surface": "enceladus",
+     "action": "checkout.advance",
+     "arguments": {
+      "record_id": "DVP-TSK-B50",
+      "provider": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+      "target_status": "closed",
+      "transition_evidence": {
+       "no_code_evidence": "Accepted by io: DVP-RUN-003 (governance-arc v1.1.0) created, checked out and advanced DVP-TSK-B50 with every gate decided by a human; no agent decided any gate."
+      }
+     },
+     "dry_run": false,
+     "idempotency_key": "DVP-RUN-003:close",
+     "idempotency": "at_least_once",
+     "on_error": "abort"
+    }
+   ],
+   "results": [
+    {
+     "step_id": "close",
+     "ok": true,
+     "result": {
+      "matrix_version": 1,
+      "new_status": "closed",
+      "previous_status": "coding-complete",
+      "retirement_prompt": "Prompt the user if this session can now be retired, or retire the session if it is certain that the full scope of the current session assignment is complete.",
+      "success": true,
+      "task": {
+       "acceptance_criteria": [
+        {
+         "description": "Run reaches completed with every gate cleared by a uman",
+         "evidence": "Accepted by io: DVP-RUN-003 (governance-arc v1.1.0) created, checked out and advanced DVP-TSK-B50 with every gate decided by a human; no agent decided any gate.",
+         "evidence_acceptance": true
+        }
+       ],
+       "active_agent_session": false,
+       "active_agent_session_id": "",
+       "active_agent_session_parent": false,
+       "auto_walk_opt_out": false,
+       "checked_in_at": "2026-10-14T03:41:37Z",
+       "checked_in_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "checked_out_at": "2026-10-14T03:33:38Z",
+       "checked_out_by": "74e824a8-f091-7007-c2b5-f4dddd90ac8e",
+       "checkout_count": 1,
+       "checkout_state": "checked_in",
+       "checkout_transition_type": "no_code",
+       "closed_count": 1,
+       "components": [
+        "comp-io-kit"
+       ],
+       "context_node": {
+        "access_frequency": 0,
+        "freshness_score": 1.0,
+        "information_density": 0.026,
+        "structural_importance": 0.0
+       },
+       "coordination": false,
+       "created_at": "2026-10-14T03:33:37Z",
+       "feed_scope": "global",
+       "history": [
+        {
+         "description": "Created via tracker API [provider=recipe_runner]: B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+         "status": "created",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Field 'components' set to '['comp-io-kit']' [provider=recipe_runner]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:37Z"
+        },
+        {
+         "description": "Agent session checkout by 74e824a8-f091-7007-c2b5-f4dddd90ac8e [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'status' set to 'in-progress' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'checkout_transition_type' set to 'no_code' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:38Z"
+        },
+        {
+         "description": "Field 'status' set to 'coding-complete' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:33:56Z"
+        },
+        {
+         "description": "Acceptance criterion [0] evidence accepted [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]: Run reaches completed with every gate cleared by a uman",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:41:14Z"
+        },
+        {
+         "description": "Field 'status' set to 'closed' [provider=74e824a8-f091-7007-c2b5-f4dddd90ac8e]",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:41:37Z"
+        },
+        {
+         "description": "Agent session released",
+         "status": "worklog",
+         "timestamp": "2026-10-14T03:41:37Z"
+        }
+       ],
+       "item_id": "DVP-TSK-B50",
+       "last_update_note": "Agent session released",
+       "project_id": "devops",
+       "record_id": "task#DVP-TSK-B50",
+       "record_type": "task",
+       "status": "closed",
+       "sync_version": 9,
+       "task_id": "DVP-TSK-B50",
+       "title": "B36: governance arc recorded run (DVP-REC-001 v1.1.)",
+       "transition_type": "no_code",
+       "updated_at": "2026-10-14T03:41:37Z",
+       "version_seq": 15964,
+       "write_source": {
+        "channel": "mcp_server",
+        "coordination_request_id": "",
+        "dispatch_id": "",
+        "provider": "",
+        "timestamp": "2026-10-14T03:41:37Z"
+       }
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "gates": [
+  {
+   "step_id": "code_gate",
+   "decision": "approve",
+   "decider": "ai@jreese.net",
+   "inputs": {}
+  },
+  {
+   "step_id": "acceptance_gate",
+   "decision": "approve",
+   "decider": "ai@jreese.net",
+   "inputs": {
+    "evidence": "Accepted by io: DVP-RUN-003 (governance-arc v1.1.0) created, checked out and advanced DVP-TSK-B50 with every gate decided by a human; no agent decided any gate."
+   }
+  },
+  {
+   "step_id": "deploy_gate",
+   "decision": "approve",
+   "decider": "ai@jreese.net",
+   "inputs": {}
+  }
+ ],
+ "expected": {
+  "final_state": "completed",
+  "step_statuses": {
+   "create": "ok",
+   "set_components": "ok",
+   "checkout": "ok",
+   "code_gate": "ok",
+   "coding_complete": "ok",
+   "acceptance_gate": "ok",
+   "accept_ac": "ok",
+   "deploy_gate": "ok",
+   "close": "ok"
+  },
+  "receipts": {
+   "create": {
+    "record_id": "DVP-TSK-B50"
+   },
+   "set_components": {
+    "record_id": "DVP-TSK-B50"
+   },
+   "accept_ac": {
+    "record_id": "DVP-TSK-B50"
+   }
+  },
+  "outputs": {
+   "record_id": "DVP-TSK-B50"
+  }
+ }
 }

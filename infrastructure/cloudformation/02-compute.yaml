@@ -13,10 +13,15 @@ Parameters:
     Type: String
     Default: "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/recipe-runner/mcp-api-key-nvFY2Z"
     Description: DVP-TSK-968 - ARN of the SAME Secrets Manager secret the MCP lambda's ENCELADUS_MCP_API_KEY comes from (never a new copy). Empty keeps the recipe runner on the in-process path and disables the sweep rule.
-  RecipeMcpUrl:
+  RecipeMcpUrlOverride:
     Type: String
-    Default: https://mcp.jreese.net/mcp
-    Description: DVP-TSK-968 - streamable-HTTP endpoint of the governed MCP server used by the recipe runner (E4-R16).
+    Default: ""
+    Description: >-
+      DVP-TSK-B36 - optional override for the governed MCP endpoint the recipe runner calls. Empty selects the
+      plane's own enceladus-mcp-streamable Function URL (static-key auth, what the runner's key is for).
+      Renamed from RecipeMcpUrl: `aws cloudformation deploy` keeps an unlisted parameter's previous value, so the
+      old parameter would have pinned https://mcp.jreese.net/mcp, which is now the OAuth edge and answers the
+      runner's static key with 401 (no recipe run could start until 2026-10-14).
   RecipeRunnerAgentTypeId:
     Type: String
     Default: "ENC-AGT-00N"
@@ -354,6 +359,7 @@ Parameters:
 
 Conditions:
   HasRecipeMcpSecret: !Not [!Equals [!Ref RecipeMcpApiKeySecretArn, ""]]
+  HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
@@ -606,7 +612,9 @@ Resources:
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
-      Timeout: 10
+      # DVP-TSK-B36: a recipe-run segment (runner session register + claim + several governed MCP writes) runs
+      # inside one API request; 10s killed DVP-RUN-002 mid-segment. 29s stays under the HTTP API's 30s cap.
+      Timeout: 29
       Architectures:
         - arm64
       SnapStart: !If
@@ -626,7 +634,15 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
-          RECIPE_MCP_URL: !Ref RecipeMcpUrl
+          # DVP-TSK-B36: the plane's own MCP Function URL (verified 2026-10-14: the runner key answers 200 with a
+          # governance hash there, 401 on mcp.jreese.net). Stack outputs do not export these URLs, hence literals.
+          RECIPE_MCP_URL: !If
+            - HasRecipeMcpUrlOverride
+            - !Ref RecipeMcpUrlOverride
+            - !If
+              - IsProduction
+              - "https://4yhnhvq64ek34a2npdgbmjbp2m0wxjil.lambda-url.us-west-2.on.aws/mcp"
+              - "https://2wfabj4prcz2vemmk4kwief2pa0etnmy.lambda-url.us-west-2.on.aws/mcp"
           RECIPE_MCP_API_KEY_SECRET_ARN: !Ref RecipeMcpApiKeySecretArn
           RECIPE_RUNNER_AGENT_TYPE_ID: !Ref RecipeRunnerAgentTypeId
           RECIPE_SWEEP_PROJECT_IDS: "enceladus,devops"
