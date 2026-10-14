@@ -1336,7 +1336,8 @@ Resources:
           # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
           # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B52 (W4l-2): CONTENT_STORE_READ=legacy removed -- deploy-config/ + deploy-sources/ reads go content-first,
+          # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
@@ -1518,7 +1519,8 @@ Resources:
           # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
           # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B52 (W4l-2): CONTENT_STORE_READ=legacy removed -- deploy-config/ + deploy-sources/ reads go content-first,
+          # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CODEBUILD_PROJECT: devops-ui-deploy-builder
@@ -1576,7 +1578,8 @@ Resources:
           # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
           # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B52 (W4l-2): CONTENT_STORE_READ=legacy removed -- deploy-config/ + deploy-sources/ reads go content-first,
+          # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -2010,7 +2013,8 @@ Resources:
           # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
           # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
           CONTENT_STORE_MODE: dual
-          CONTENT_STORE_READ: legacy
+          # DVP-TSK-B52 (W4l-2): CONTENT_STORE_READ=legacy removed -- deploy-config/ + deploy-sources/ reads go content-first,
+          # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
