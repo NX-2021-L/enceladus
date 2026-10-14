@@ -35,6 +35,24 @@ describe('getAppSyncEventsConfig authed namespace', () => {
     }
   })
 
+  it('enables realtime on a Cognito namespace alone, with no API key (production)', () => {
+    vi.stubEnv('VITE_APPSYNC_HTTP_HOST', 'abc.appsync-api.us-west-2.amazonaws.com')
+    vi.stubEnv('VITE_APPSYNC_REALTIME_HOST', 'abc.appsync-realtime-api.us-west-2.amazonaws.com')
+    vi.stubEnv('VITE_APPSYNC_API_KEY', '')
+    vi.stubEnv('VITE_APPSYNC_AUTHED_NAMESPACE', 'authed')
+    const config = getAppSyncEventsConfig()
+    expect(config.enabled).toBe(true)
+    expect(config.apiKey).toBe('')
+  })
+
+  it('stays disabled with neither an API key nor a Cognito namespace', () => {
+    vi.stubEnv('VITE_APPSYNC_HTTP_HOST', 'abc.appsync-api.us-west-2.amazonaws.com')
+    vi.stubEnv('VITE_APPSYNC_REALTIME_HOST', 'abc.appsync-realtime-api.us-west-2.amazonaws.com')
+    vi.stubEnv('VITE_APPSYNC_API_KEY', '')
+    vi.stubEnv('VITE_APPSYNC_AUTHED_NAMESPACE', '')
+    expect(getAppSyncEventsConfig().enabled).toBe(false)
+  })
+
   it('prefixes channel paths with the namespace', () => {
     expect(authedChannel('authed', '/feed/updates')).toBe('/authed/feed/updates')
     expect(authedChannel('authed', 'records/X')).toBe('/authed/records/X')

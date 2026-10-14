@@ -28,7 +28,12 @@ Cognito namespace (DVP-TSK-928, dual-publish):
   published first and are unaffected. During this parallel phase a failure on the
   authed channels never fails the record (it would re-publish the legacy channels
   on retry and could poison the shard): it is logged and counted in the
-  AuthedPublishFailed metric. The retirement phase flips this to fail-closed.
+  AuthedPublishFailed metric.
+
+  Cognito-only plane (production, APPSYNC_EVENTS_LEGACY_PUBLISH=false): there are
+  no API-key namespaces and no API key, so the authed channels are the ONLY
+  channels and are fail-closed: an error propagates exactly like a legacy
+  publish error today (retry, DLQ, or poison-skip for a permanent 4xx).
 
 Partial-batch failure:
   Returns the ReportBatchItemFailures contract
@@ -66,6 +71,9 @@ Environment variables:
                                  Cognito-authenticated channel namespace to mirror
                                  every event into (e.g. "authed"). Unset/empty =
                                  legacy API-key channels only.
+  APPSYNC_EVENTS_LEGACY_PUBLISH  "false" = publish ONLY to the authed namespace
+                                 (Cognito-only plane; requires the namespace).
+                                 Default true (gamma: legacy channels + mirror).
   APPSYNC_EVENTS_TIMEOUT         HTTP timeout seconds (default: 5).
   DEFAULT_PROJECT_ID             Fallback project id if a record lacks one
                                  (default: enceladus).
@@ -104,6 +112,12 @@ APPSYNC_EVENTS_API_KEY = os.environ.get("APPSYNC_EVENTS_API_KEY", "").strip()
 APPSYNC_EVENTS_REGION = os.environ.get("APPSYNC_EVENTS_REGION", "us-west-2").strip()
 # DVP-TSK-928: AuthedNamespace in 06-appsync-events.yaml. Empty disables the Cognito-namespace dual-publish.
 APPSYNC_EVENTS_AUTHED_NAMESPACE = os.environ.get("APPSYNC_EVENTS_AUTHED_NAMESPACE", "").strip().strip("/")
+# DVP-TSK-928 (io ruling E41-R2): production is Cognito-only -- no API-key namespaces exist there.
+APPSYNC_EVENTS_LEGACY_PUBLISH = os.environ.get("APPSYNC_EVENTS_LEGACY_PUBLISH", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 APPSYNC_EVENTS_TIMEOUT = float(os.environ.get("APPSYNC_EVENTS_TIMEOUT", "5") or "5")
 DEFAULT_PROJECT_ID = os.environ.get("DEFAULT_PROJECT_ID", "enceladus").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in {"1", "true", "yes"}
@@ -501,6 +515,20 @@ def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, An
         if full_body is not None
         else event_json
     )
+
+    if not APPSYNC_EVENTS_LEGACY_PUBLISH:
+        # Cognito-only plane: the authed namespace is the sole, fail-closed transport.
+        if not APPSYNC_EVENTS_AUTHED_NAMESPACE:
+            raise RuntimeError("APPSYNC_EVENTS_LEGACY_PUBLISH is off but APPSYNC_EVENTS_AUTHED_NAMESPACE is not set")
+        for channel in channel_targets(payload):
+            _post_event(
+                url,
+                host,
+                authed_channel(channel),
+                detail_event_json if channel.startswith("/records/") else event_json,
+                force_sigv4=True,
+            )
+        return
 
     for channel in channel_targets(payload):
         is_record_channel = channel.startswith("/records/")

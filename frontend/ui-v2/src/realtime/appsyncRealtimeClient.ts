@@ -270,21 +270,32 @@ export class AppSyncRealtimeClient {
 
     const epoch = ++this.connectEpoch
     if (!this.getAuthToken || !this.config.authedNamespace) {
-      this.openSocket({ kind: 'apikey' })
+      this.openApiKeyOrBackOff()
       return
     }
-    // DVP-TSK-928: a signed-in session connects to the Cognito namespace; no session falls back to the API key.
-    // A lookup failure with a session is a reconnect-worthy fault, NOT a silent downgrade to the API key.
+    // DVP-TSK-928: a signed-in session connects to the Cognito namespace; no session falls back to the API key
+    // WHEN ONE IS CONFIGURED (gamma). Production ships no key (E41-R2): there, no session means no connection --
+    // never an unauthenticated or key-less socket. A lookup failure with a session is a reconnect-worthy fault,
+    // NOT a silent downgrade to the API key.
     this.getAuthToken().then(
       (token) => {
         if (this.disposed || epoch !== this.connectEpoch) return
-        this.openSocket(token ? { kind: 'cognito', token } : { kind: 'apikey' })
+        if (token) this.openSocket({ kind: 'cognito', token })
+        else this.openApiKeyOrBackOff()
       },
       (error) => {
         if (this.disposed || epoch !== this.connectEpoch) return
         this.scheduleReconnect(`auth token unavailable: ${String(error)}`)
       },
     )
+  }
+
+  private openApiKeyOrBackOff(): void {
+    if (this.config.apiKey) {
+      this.openSocket({ kind: 'apikey' })
+      return
+    }
+    this.scheduleReconnect('no session and no API key configured')
   }
 
   private openSocket(auth: RealtimeAuth): void {

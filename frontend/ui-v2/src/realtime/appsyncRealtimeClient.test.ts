@@ -722,6 +722,38 @@ describe('AppSyncRealtimeClient — Cognito namespace (DVP-TSK-928)', () => {
     client.stop()
   })
 
+  it('Cognito-only (no API key, as in production): connects with the token and never sends a key', async () => {
+    const client = authedClient(async () => 'prod.id.token', () => {}, { apiKey: '' })
+    client.start()
+    await flushMicrotasks()
+    const socket = sockets()[0]
+    expect(socket.connectHeader()).toEqual({ host: config.httpHost, Authorization: 'prod.id.token' })
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    await flushMicrotasks()
+    client.watchRecord('ENC-TSK-928', () => {})
+    await flushMicrotasks()
+    expect(socket.sent.join('')).not.toContain('x-api-key')
+    expect(socket.frames().filter((frame) => frame.type === 'subscribe').map((frame) => frame.channel)).toEqual([
+      '/authed/feed/updates',
+      '/authed/records/ENC-TSK-928',
+    ])
+    client.stop()
+  })
+
+  it('Cognito-only: no session means no socket and a bounded back-off, never an API-key fallback', async () => {
+    vi.useFakeTimers()
+    const events: Array<{ type: string }> = []
+    const client = authedClient(async () => null, (event) => events.push(event), { apiKey: '' })
+    client.start()
+    for (let i = 0; i <= MAX_AUTO_RECONNECT_ATTEMPTS; i++) {
+      await vi.advanceTimersByTimeAsync(BACKOFF_CAP_MS)
+    }
+    expect(sockets()).toHaveLength(0)
+    expect(events.map((event) => event.type)).toContain('manual_retry_required')
+    client.stop()
+  })
+
   it('keeps the liveness watchdog on a Cognito connection', async () => {
     vi.useFakeTimers()
     const client = authedClient(async () => 'tok')

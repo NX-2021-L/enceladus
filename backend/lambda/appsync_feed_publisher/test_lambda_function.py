@@ -867,3 +867,68 @@ def test_sigv4_headers_sign_for_the_appsync_service_in_the_publish_region():
     assert auth["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIATEST/")
     assert "/us-west-2/appsync/aws4_request" in auth["authorization"]
     assert auth["x-amz-security-token"] == "session-token"
+
+
+def test_cognito_only_plane_publishes_to_the_authed_namespace_alone_with_sigv4():
+    rec = _authed_rec()
+    payload = mod.build_event_payload(rec, 0)
+    full_body = mod.build_full_record_body(rec)
+    posts, fake = _capture_posts()
+    with patch.object(mod, "APPSYNC_EVENTS_LEGACY_PUBLISH", False), patch.object(
+        mod, "APPSYNC_EVENTS_AUTHED_NAMESPACE", "authed"
+    ), patch.object(mod, "APPSYNC_EVENTS_API_KEY", ""), patch.object(
+        mod, "_sigv4_headers", return_value={"Authorization": "AWS4-HMAC-SHA256 sig"}
+    ) as sigv4, patch.object(mod.urllib.request, "urlopen", side_effect=fake):
+        mod.publish_to_appsync(payload, full_body)
+
+    assert sorted(c for c, _h, _e in posts) == [
+        "/authed/feed/updates",
+        "/authed/projects/enceladus",
+        "/authed/records/ENC-TSK-928",
+    ]
+    assert all("x-api-key" not in h for _c, h, _e in posts)
+    assert sigv4.call_count == 3
+    by_channel = {c: e for c, _h, e in posts}
+    assert json.loads(by_channel["/authed/records/ENC-TSK-928"][0])["record"] == full_body
+
+
+def test_cognito_only_plane_is_fail_closed_unlike_the_gamma_mirror():
+    payload = mod.build_event_payload(_authed_rec(), 0)
+    posts, fake = _capture_posts(authed_error=_http_error(503, b"unavailable"))
+    with patch.object(mod, "APPSYNC_EVENTS_LEGACY_PUBLISH", False), patch.object(
+        mod, "APPSYNC_EVENTS_AUTHED_NAMESPACE", "authed"
+    ), patch.object(mod, "_sigv4_headers", return_value={"Authorization": "AWS4-HMAC-SHA256 sig"}), patch.object(
+        mod.urllib.request, "urlopen", side_effect=fake
+    ):
+        try:
+            mod.publish_to_appsync(payload)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+        else:  # pragma: no cover
+            raise AssertionError("authed publish failure must propagate on the Cognito-only plane")
+
+
+def test_cognito_only_plane_without_a_namespace_is_a_loud_misconfiguration():
+    payload = mod.build_event_payload(_authed_rec(), 0)
+    with patch.object(mod, "APPSYNC_EVENTS_LEGACY_PUBLISH", False), patch.object(
+        mod, "APPSYNC_EVENTS_AUTHED_NAMESPACE", ""
+    ):
+        try:
+            mod.publish_to_appsync(payload)
+        except RuntimeError as exc:
+            assert "APPSYNC_EVENTS_AUTHED_NAMESPACE" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("expected RuntimeError")
+
+
+def test_cognito_only_permanent_rejection_is_poison_skipped_by_the_handler():
+    rec = _authed_rec()
+    posts, fake = _capture_posts(authed_error=_http_error(403, b"Unauthorized"))
+    with patch.object(mod, "DRY_RUN", False), patch.object(mod, "APPSYNC_EVENTS_LEGACY_PUBLISH", False), patch.object(
+        mod, "APPSYNC_EVENTS_AUTHED_NAMESPACE", "authed"
+    ), patch.object(mod, "_sigv4_headers", return_value={"Authorization": "AWS4-HMAC-SHA256 sig"}), patch.object(
+        mod.urllib.request, "urlopen", side_effect=fake
+    ), patch.object(mod, "_cloudwatch") as cw:
+        result = mod.handler({"Records": [rec]}, None)
+    assert result == {}
+    assert cw.put_metric_data.call_args.kwargs["MetricData"][0]["MetricName"] == "PoisonRecordSkipped"

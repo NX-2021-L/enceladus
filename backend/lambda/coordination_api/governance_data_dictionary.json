@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.19",
-  "updated_at": "2026-10-13T23:56:05Z",
-  "last_change_summary": "DVP-TSK-928 phase 1: Cognito-authenticated realtime. devops-appsync-feed-publisher gains the optional APPSYNC_EVENTS_AUTHED_NAMESPACE env var; when set it ALSO publishes every event to /<namespace><channel> (SigV4/AWS_IAM) after the unchanged API-key channels, isolating authed failures (logged + AuthedPublishFailed metric, never a batch failure). 06-appsync-events.yaml adds the AMAZON_COGNITO_USER_POOLS auth provider and the AuthedNamespace channel namespace; ui-v2 subscribes to it with the signed-in user's Cognito token when VITE_APPSYNC_AUTHED_NAMESPACE is set. No schema or contract change; the API-key namespaces are untouched",
+  "version": "2026-10-13.20",
+  "updated_at": "2026-10-14T00:08:35Z",
+  "last_change_summary": "DVP-TSK-928 phase 2 (io ruling E41-R2): production Cognito-only AppSync Events plane. devops-appsync-feed-publisher gains APPSYNC_EVENTS_LEGACY_PUBLISH; when false (production) it publishes ONLY to the Cognito namespace (/<APPSYNC_EVENTS_AUTHED_NAMESPACE><channel>, SigV4) and is fail-closed (errors retry / DLQ / poison-skip like any publish); gamma (default true) keeps the API-key channels plus the isolated authed mirror. 06-appsync-events.yaml now deploys both planes (production has no ApiKey resource), the deploy workflow gains the v3-prod lane, the deploy-role AppSync grants cover the production API by tag, and ui-v2 enables realtime on a Cognito namespace alone (no API-key fallback when no key is configured). No schema or contract change",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.20",
+      "date": "2026-10-13",
+      "summary": "DVP-TSK-928 phase 2 (io ruling E41-R2): production Cognito-only AppSync Events plane. devops-appsync-feed-publisher gains APPSYNC_EVENTS_LEGACY_PUBLISH; when false (production) it publishes ONLY to the Cognito namespace (/<APPSYNC_EVENTS_AUTHED_NAMESPACE><channel>, SigV4) and is fail-closed (errors retry / DLQ / poison-skip like any publish); gamma (default true) keeps the API-key channels plus the isolated authed mirror. 06-appsync-events.yaml now deploys both planes (production has no ApiKey resource), the deploy workflow gains the v3-prod lane, the deploy-role AppSync grants cover the production API by tag, and ui-v2 enables realtime on a Cognito namespace alone (no API-key fallback when no key is configured). No schema or contract change"
+    },
     {
       "version": "2026-10-13.19",
       "date": "2026-10-13",

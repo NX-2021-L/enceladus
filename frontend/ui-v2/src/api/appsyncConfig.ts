@@ -7,8 +7,9 @@ export interface AppSyncEventsConfig {
   /**
    * DVP-TSK-928: Cognito-authenticated channel namespace (06-appsync-events.yaml `authed`). When set, a signed-in
    * session subscribes to `/<namespace>/<channel>` with its Cognito token instead of the API key; with no session the
-   * client falls back to the API-key namespaces. Empty/absent keeps the API-key transport only (rollout is opt-in:
-   * set the VITE_APPSYNC_AUTHED_NAMESPACE repo variable once the CFN stack carries the namespace).
+   * client falls back to the API-key namespaces -- but only when an API key is configured; with none (production)
+   * a signed-out client does not connect at all. Empty/absent keeps the API-key transport only (rollout is opt-in:
+   * set the VITE_APPSYNC_AUTHED_NAMESPACE variable for the plane once its CFN stack carries the namespace).
    */
   authedNamespace?: string
   enabled: boolean
@@ -37,7 +38,9 @@ export function getAppSyncEventsConfig(): AppSyncEventsConfig {
   const rawNamespace = (import.meta.env.VITE_APPSYNC_AUTHED_NAMESPACE ?? '').trim().replace(/^\/+|\/+$/g, '')
   const authedNamespace = NAMESPACE_PATTERN.test(rawNamespace) ? rawNamespace : ''
 
-  const enabled = Boolean(httpHost && realtimeHost && apiKey)
+  // DVP-TSK-928 (E41-R2): production is Cognito-only and ships NO API key, so a Cognito namespace alone enables
+  // realtime. With no apiKey the client never falls back to one (appsyncRealtimeClient: no session => no socket).
+  const enabled = Boolean(httpHost && realtimeHost && (apiKey || authedNamespace))
 
   return { httpHost, realtimeHost, apiKey, region, feedChannel, authedNamespace, enabled }
 }

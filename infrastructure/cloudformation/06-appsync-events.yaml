@@ -15,14 +15,19 @@ Description: >
   ESCALATED (privileged-terminal, live-state) residual steps — see Metadata
   section "EscalatedResidualSteps" at the bottom of this template.
 
+# DVP-TSK-928 (io ruling E41-R2): two planes, selected by EnvironmentSuffix.
+#   gamma ("-gamma"): API-key namespaces (feed/records/projects) plus the Cognito `authed` namespace in parallel.
+#   production (""): Cognito-ONLY. No ApiKey resource and no API_KEY auth mode anywhere; the only namespace is
+#   `authed` (subscribe = AMAZON_COGNITO_USER_POOLS, publish = AWS_IAM) and the publisher publishes to it alone
+#   (APPSYNC_EVENTS_LEGACY_PUBLISH=false). Both planes deploy from cloudformation-appsync-events-stack-deploy.yml.
 Parameters:
   Environment:
     Type: String
     Default: gamma
     AllowedValues: [production, gamma]
     Description: >
-      Deployment environment. This template is gamma-only in current scope
-      (PLN-006 v4-migration invariant); production is a later io-gated cutover.
+      Deployment environment label. Resource conditions key on EnvironmentSuffix
+      (IsGamma), not on this value; the deploy workflow passes both so they agree.
   EnvironmentSuffix:
     Type: String
     Default: "-gamma"
@@ -38,7 +43,10 @@ Parameters:
       its stream ARN as <DataStackName>-TrackerStreamArn.
   SharedLayerArn:
     Type: String
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:12
+    # DVP-TSK-928: Default moved :12 -> :15 (02-compute.yaml's current pin) for the NEW production stack. The live
+    # gamma stack is unaffected: an existing parameter keeps its previous value (UsePreviousValue), it does not
+    # re-read the Default. The publisher uses stdlib + boto3 only, so the layer is not load-bearing.
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:15
     Description: Shared enceladus_shared layer ARN (mirrors 02-compute.yaml pin).
   # DVP-TSK-928: Cognito user-pool auth for the PWA subscriber. NEW parameters: a deploy that does not pass them
   # takes these Defaults (an existing parameter keeps its previous value via UsePreviousValue, a new one does not),
@@ -61,7 +69,11 @@ Parameters:
       PWA client so the dynamically-registered MCP/DCR clients in the same pool cannot subscribe.
   ApiKeyExpiresEpoch:
     Type: Number
+    # DVP-TSK-928: Default 0 so the production plane (no ApiKey resource) need not supply it; the gamma lane still
+    # passes it on every run, which is what renews the key (ENC-TSK-M56).
+    Default: 0
     Description: >
+      GAMMA ONLY (ignored on production, which has no ApiKey resource).
       Unix epoch seconds (rounded to the nearest hour by AppSync) for
       FeedEventsApiKey's expiration. MUST be supplied at deploy time by the
       deploying workflow (computed as "now + up to 365 days", AppSync's hard
@@ -76,6 +88,7 @@ Parameters:
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # DVP-TSK-928: production is Cognito-only; every API-key artefact below is gated on IsGamma.
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
   # plane is arm64 now; the two former conditional sites below are literal arm64/python3.12.
 
@@ -89,28 +102,40 @@ Resources:
     Properties:
       Name: !Sub "enceladus-feed-events${EnvironmentSuffix}"
       EventConfig:
-        # API-key auth is the primary path for gamma; AWS_IAM (SigV4) is the
-        # documented alternative supported by the publisher Lambda.
-        AuthProviders:
-          - AuthType: API_KEY
-          - AuthType: AWS_IAM
-          # DVP-TSK-928: signed-in PWA users authenticate with their Cognito token. Added alongside API_KEY, not
-          # instead of it: the API-key namespaces keep working until the retirement phase.
-          - AuthType: AMAZON_COGNITO_USER_POOLS
-            CognitoConfig:
-              UserPoolId: !Ref CognitoUserPoolId
-              AwsRegion: !Ref CognitoUserPoolRegion
-              AppIdClientRegex: !Ref CognitoAppClientIdRegex
-        ConnectionAuthModes:
-          - AuthType: API_KEY
-          - AuthType: AWS_IAM
-          - AuthType: AMAZON_COGNITO_USER_POOLS
-        DefaultPublishAuthModes:
-          - AuthType: API_KEY
-          - AuthType: AWS_IAM
-        DefaultSubscribeAuthModes:
-          - AuthType: API_KEY
-          - AuthType: AWS_IAM
+        # Gamma: API-key auth is the primary path; AWS_IAM (SigV4) is the documented alternative supported by the
+        # publisher Lambda; AMAZON_COGNITO_USER_POOLS (DVP-TSK-928) runs alongside.
+        # Production: Cognito-only connections; AWS_IAM stays an auth provider purely so the publisher can sign.
+        AuthProviders: !If
+          - IsGamma
+          - - AuthType: API_KEY
+            - AuthType: AWS_IAM
+            - AuthType: AMAZON_COGNITO_USER_POOLS
+              CognitoConfig:
+                UserPoolId: !Ref CognitoUserPoolId
+                AwsRegion: !Ref CognitoUserPoolRegion
+                AppIdClientRegex: !Ref CognitoAppClientIdRegex
+          - - AuthType: AWS_IAM
+            - AuthType: AMAZON_COGNITO_USER_POOLS
+              CognitoConfig:
+                UserPoolId: !Ref CognitoUserPoolId
+                AwsRegion: !Ref CognitoUserPoolRegion
+                AppIdClientRegex: !Ref CognitoAppClientIdRegex
+        ConnectionAuthModes: !If
+          - IsGamma
+          - - AuthType: API_KEY
+            - AuthType: AWS_IAM
+            - AuthType: AMAZON_COGNITO_USER_POOLS
+          - - AuthType: AMAZON_COGNITO_USER_POOLS
+        DefaultPublishAuthModes: !If
+          - IsGamma
+          - - AuthType: API_KEY
+            - AuthType: AWS_IAM
+          - - AuthType: AWS_IAM
+        DefaultSubscribeAuthModes: !If
+          - IsGamma
+          - - AuthType: API_KEY
+            - AuthType: AWS_IAM
+          - - AuthType: AMAZON_COGNITO_USER_POOLS
       Tags:
         - Key: Project
           Value: enceladus
@@ -120,6 +145,7 @@ Resources:
   # API key for browser/PWA subscribers and for the publisher's X-Api-Key path.
   FeedEventsApiKey:
     Type: AWS::AppSync::ApiKey
+    Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
       ApiId: !GetAtt FeedEventsApi.ApiId
@@ -139,6 +165,7 @@ Resources:
   # ---------------------------------------------------------------------------
   FeedNamespace:
     Type: AWS::AppSync::ChannelNamespace
+    Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
       ApiId: !GetAtt FeedEventsApi.ApiId
@@ -152,6 +179,7 @@ Resources:
 
   RecordsNamespace:
     Type: AWS::AppSync::ChannelNamespace
+    Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
       ApiId: !GetAtt FeedEventsApi.ApiId
@@ -165,6 +193,7 @@ Resources:
 
   ProjectsNamespace:
     Type: AWS::AppSync::ChannelNamespace
+    Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
       ApiId: !GetAtt FeedEventsApi.ApiId
@@ -309,7 +338,13 @@ Resources:
           # the denial surfaces as "ApiKey ... not found" -> UPDATE_ROLLBACK.
           # Ref = arn:aws:appsync:<region>:<acct>:apis/<apiId>/apikeys/<keyId>;
           # the key id IS the key value, so the rendered env var is unchanged.
-          APPSYNC_EVENTS_API_KEY: !Select [3, !Split ["/", !Ref FeedEventsApiKey]]
+          # Production has no ApiKey resource: the variable is absent there (the publisher then signs with SigV4).
+          APPSYNC_EVENTS_API_KEY: !If
+            - IsGamma
+            - !Select [3, !Split ["/", !Ref FeedEventsApiKey]]
+            - !Ref "AWS::NoValue"
+          # Production publishes ONLY to the Cognito namespace; gamma keeps the API-key channels and mirrors.
+          APPSYNC_EVENTS_LEGACY_PUBLISH: !If [IsGamma, "true", "false"]
           APPSYNC_EVENTS_REGION: !Ref AWS::Region
           # DVP-TSK-928: name of AuthedNamespace; the publisher mirrors every event to /authed<channel> with SigV4.
           # Unset => legacy API-key channels only.
@@ -392,6 +427,9 @@ Outputs:
     Value: !GetAtt FeedEventsApi.Dns.Realtime
     Export:
       Name: !Sub ${AWS::StackName}-FeedEventsRealtimeEndpoint
+  # DVP-TSK-928: the values to copy into the GitHub variables that _ui_deploy.yml bakes into the ui-v2 bundle.
+  FeedEventsAuthedNamespace:
+    Value: authed
   AppSyncFeedPublisherFunctionArn:
     Value: !GetAtt AppSyncFeedPublisherFunction.Arn
     Export:
@@ -401,7 +439,7 @@ Metadata:
   EscalatedResidualSteps:
     Description: >
       Privileged-terminal / live-state steps required to make this stack live on
-      gamma. CloudFormation declares intent; these must be executed by an
+      gamma and production (production function: devops-appsync-feed-publisher). CloudFormation declares intent; these must be executed by an
       operator with io-dev-admin credentials.
     Steps:
       # ESCALATED-1: New-Lambda pre-create. The Gen2 update-function-code path
@@ -427,6 +465,7 @@ Metadata:
       #     --query 'Table.StreamSpecification'
       # and, if absent, enable NEW_AND_OLD_IMAGES via a controlled data-stack
       # update before this EventSourceMapping can bind.
-      # ESCALATED-4 (DVP-TSK-928): the PWA opts in to the Cognito namespace per build.
-      - "ESCALATED-4: After this stack applies, set GitHub repo variable VITE_APPSYNC_AUTHED_NAMESPACE=authed so _ui_deploy.yml builds ui-v2 with the Cognito namespace. Unset keeps the API-key transport."
+      # ESCALATED-4 (DVP-TSK-928): the PWA opts in to the Cognito namespace per build and per plane.
+      - "ESCALATED-4 (gamma): after this stack applies, set GitHub repo variable VITE_APPSYNC_AUTHED_NAMESPACE=authed so _ui_deploy.yml builds the gamma ui-v2 with the Cognito namespace. Unset keeps the API-key transport."
+      - "ESCALATED-5 (production): after the production stack applies, set repo variables VITE_APPSYNC_HTTP_HOST_PROD (FeedEventsHttpEndpoint), VITE_APPSYNC_REALTIME_HOST_PROD (FeedEventsRealtimeEndpoint) and VITE_APPSYNC_AUTHED_NAMESPACE_PROD=authed (FeedEventsAuthedNamespace). There is NO production API key."
       - "ESCALATED-3: Verify devops-project-tracker-gamma stream is live (NEW_AND_OLD_IMAGES) and exported as enceladus-data-gamma-TrackerStreamArn before the EventSourceMapping binds."
