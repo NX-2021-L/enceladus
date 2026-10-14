@@ -141,7 +141,7 @@ class CloudFormationTests(unittest.TestCase):
         self.assertIsNotNone(m)
         fn = m.group(1)
         self.assertIn("CONTENT_STORE_MODE: dual", fn)
-        self.assertIn("CONTENT_STORE_READ: legacy", fn)
+        self.assertNotIn("CONTENT_STORE_READ: ", fn)  # DVP-TSK-B53: intent-training reads go content-first
         self.assertIn('GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"', fn)
         self.assertIn('CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"', fn)
         self.assertIn("S3_ENV_PREFIX: !Ref S3EnvPrefix", fn)

@@ -117,9 +117,10 @@ def test_cloudformation_env_and_list_grant():
         return m.group(1)
 
     fn = block("CorpusEntropyGdmpRemediationFunction")
-    for line in ("CONTENT_STORE_MODE: dual", "CONTENT_STORE_READ: legacy", "S3_ENV_PREFIX: !Ref S3EnvPrefix",
+    for line in ("CONTENT_STORE_MODE: dual", "S3_ENV_PREFIX: !Ref S3EnvPrefix",
                  'CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"'):
         assert line in fn
+    assert "CONTENT_STORE_READ: " not in fn  # DVP-TSK-B53: reads go content-first after the W3 delta
     role = block("CorpusEntropyGdmpRemediationRole")
     grant = role.split("Sid: GdmpRampStateListContentBucket", 1)[1].split("- PolicyName:", 1)[0]
     assert "s3:ListBucket" in grant
