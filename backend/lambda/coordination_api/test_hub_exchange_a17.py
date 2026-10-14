@@ -101,6 +101,53 @@ class TestExchange(HubBase):
                 self.assertEqual(now - 120, claims["auth_time"])
                 self.assertEqual("io@jreese.net", claims["email"])
 
+    def test_amr_is_carried_through_exchange_token_and_principal(self):
+        """DVP-TSK-986: the source amr rides exactly like acr."""
+        resp = self.exchange(src_token(acr="passkey", amr=["hwk", "user", "pwd"]))
+        self.assertEqual(200, resp["statusCode"], resp["body"])
+        out = json.loads(resp["body"])
+        self.assertEqual(["hwk", "user", "pwd"], out["amr"])
+        self.assertEqual("passkey", out["acr"])
+        verified = hx.verify_hub_token(out["hub_token"])
+        self.assertEqual(["hwk", "user", "pwd"], verified["amr"])
+        principal = hx.principal_claims(verified)
+        self.assertEqual(["hwk", "user", "pwd"], principal["amr"])
+        self.assertEqual("passkey", principal["acr"])
+
+    def test_amr_is_sanitized_to_a_bounded_list_of_safe_strings(self):
+        resp = self.exchange(src_token(amr="hwk"))                    # single string -> [string]
+        self.assertEqual(["hwk"], json.loads(resp["body"])["amr"])
+        many = [f"m{i}" for i in range(12)]
+        resp = self.exchange(src_token(amr=many))                     # at most 8 entries
+        self.assertEqual(many[:8], json.loads(resp["body"])["amr"])
+        dirty = ["ok", "has space", "x" * 33, "x" * 32, "a/b", "", 7, None, {"a": 1}, "urn:x-y.z_1", "<b>"]
+        resp = self.exchange(src_token(amr=dirty))                    # everything else dropped
+        self.assertEqual(["ok", "x" * 32, "urn:x-y.z_1"], json.loads(resp["body"])["amr"])
+        for junk in ({"hwk": 1}, 5, True, 1.5):                       # not a list / string -> []
+            resp = self.exchange(src_token(amr=junk))
+            self.assertEqual(200, resp["statusCode"], junk)
+            self.assertEqual([], json.loads(resp["body"])["amr"], junk)
+        self.assertEqual([], hx.sanitize_amr(None))
+        self.assertEqual([], hx.sanitize_amr(""))
+        self.assertEqual(["a"], hx.sanitize_amr(("a", "b c")))
+
+    def test_absent_amr_is_an_empty_list_and_never_breaks_a_principal(self):
+        resp = self.exchange(src_token())                             # no amr claim at all
+        self.assertEqual(200, resp["statusCode"], resp["body"])
+        out = json.loads(resp["body"])
+        self.assertEqual([], out["amr"])
+        self.assertEqual([], hx.verify_hub_token(out["hub_token"])["amr"])
+        # A token minted before this change (no amr key in the payload) still verifies
+        # and yields a principal with amr [].
+        legacy = hx.verify_hub_token(out["hub_token"])
+        legacy.pop("amr")
+        principal = hx.principal_claims(legacy)
+        self.assertEqual([], principal["amr"])
+        self.assertEqual(
+            [], hx.verify_hub_token(hx.mint_hub_token(
+                sub="u", email="io@jreese.net", src_iss=ISSUERS[0]["iss"], src_name="vagamod-keycloak",
+                auth_time=int(time.time()) - 60, acr="1")["hub_token"])["amr"])
+
     def test_unknown_issuer_is_refused_without_detail(self):
         resp = self.exchange(src_token(iss="https://evil.example/realms/x"))
         self.assertEqual(401, resp["statusCode"])

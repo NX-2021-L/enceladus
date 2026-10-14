@@ -570,6 +570,9 @@ Resources:
           # DVP-TSK-A17 (E4-R14): hub token exchange (fail closed when issuers are empty).
           HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
           HUB_SHELL_ORIGINS: !Ref HubShellOrigins
+          # DVP-TSK-986 (E41-R7): Keycloak passkey step-up (method keycloak_acr); enforcement stays OFF (empty) until io has enrolled a passkey.
+          HUB_PASSKEY_ACR_JSON: '{"vagamod-keycloak": ["passkey"]}'
+          HUB_PASSKEY_REQUIRED_SOURCES: ""
           # DVP-TSK-B22 (isolation W4h): governance_update writes governance/live + governance/history to the legacy bucket
           # AND the content bucket; reads stay legacy. governance/ is ONE shared corpus held only in the PROD content bucket
           # on BOTH planes (io decision DOC-EF4BC758CCC9, 2026-10-13): the bucket name deliberately carries NO

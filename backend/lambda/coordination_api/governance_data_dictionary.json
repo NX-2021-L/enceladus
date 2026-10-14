@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.20",
-  "updated_at": "2026-10-14T00:08:35Z",
-  "last_change_summary": "DVP-TSK-928 phase 2 (io ruling E41-R2): production Cognito-only AppSync Events plane. devops-appsync-feed-publisher gains APPSYNC_EVENTS_LEGACY_PUBLISH; when false (production) it publishes ONLY to the Cognito namespace (/<APPSYNC_EVENTS_AUTHED_NAMESPACE><channel>, SigV4) and is fail-closed (errors retry / DLQ / poison-skip like any publish); gamma (default true) keeps the API-key channels plus the isolated authed mirror. 06-appsync-events.yaml now deploys both planes (production has no ApiKey resource), the deploy workflow gains the v3-prod lane, the deploy-role AppSync grants cover the production API by tag, and ui-v2 enables realtime on a Cognito namespace alone (no API-key fallback when no key is configured). No schema or contract change",
+  "version": "2026-10-13.21",
+  "updated_at": "2026-10-14T04:50:00Z",
+  "last_change_summary": "DVP-TSK-986 (io ruling E41-R7): Keycloak-native passkey step-up for the F-05 hub-exchange principal. hub_exchange now carries the source ID token's amr claim (sanitized: string list, <= 8 entries, each <= 32 chars of [A-Za-z0-9_.:-]) alongside acr through mint_hub_token/principal_claims/the exchange response; coordination_api gains the step-up proof method keycloak_acr (hub_exchange principal, source in HUB_PASSKEY_ACR_JSON, acr accepted for that source, same fresh matching auth_time rule as cognito_max_age; 'webauthn' stays reserved for the io-kit signed assertion), opt-in enforcement via HUB_PASSKEY_REQUIRED_SOURCES (default empty = OFF; reason passkey_required), and decision-log entries additionally record acr and amr when present. gates.schema.json ProofMethod gains keycloak_acr. Additive; no required field or enum value removed",
   "owners": [
     "enceladus-platform"
   ],
@@ -9568,6 +9568,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.21",
+      "date": "2026-10-14",
+      "summary": "DVP-TSK-986 (io ruling E41-R7): Keycloak-native passkey step-up for the F-05 hub-exchange principal. hub_exchange now carries the source ID token's amr claim (sanitized: string list, <= 8 entries, each <= 32 chars of [A-Za-z0-9_.:-]) alongside acr through mint_hub_token/principal_claims/the exchange response; coordination_api gains the step-up proof method keycloak_acr (hub_exchange principal, source in HUB_PASSKEY_ACR_JSON, acr accepted for that source, same fresh matching auth_time rule as cognito_max_age; 'webauthn' stays reserved for the io-kit signed assertion), opt-in enforcement via HUB_PASSKEY_REQUIRED_SOURCES (default empty = OFF; reason passkey_required), and decision-log entries additionally record acr and amr when present. gates.schema.json ProofMethod gains keycloak_acr. Additive; no required field or enum value removed"
+    },
     {
       "version": "2026-10-13.20",
       "date": "2026-10-13",
