@@ -19,8 +19,16 @@ def fx():
 def test_replay_passes_on_the_fixture_with_zero_agent_calls(fx):
     res = rr.replay(fx)
     assert res["ok"], res["failures"]
-    assert res["summary"] == "recipes parity: governance-arc replay PASS (3 segments, 3 gates, agent_calls=0)"
-    assert res["status"] == "completed" and res["agent_calls"] == 0 and res["run_id"] == "DVP-RUN-001"
+    assert res["summary"] == "recipes parity: governance-arc replay PASS (4 segments, 3 gates, agent_calls=0)"
+    assert res["status"] == "completed" and res["agent_calls"] == 0 and res["run_id"] == "DVP-RUN-003"
+
+
+def test_the_fixture_is_the_recorded_prod_run_not_a_synthetic_one(fx):
+    # DVP-TSK-B36: recorded from DVP-RUN-003 (governance-arc 1.1.0) on prod, every gate decided by io.
+    assert not fx.get("synthetic")
+    assert fx["recorded_from"]["run_id"] == "DVP-RUN-003"
+    assert fx["recorded_from"]["telemetry"]["agent_calls"] == 0
+    assert [g["decider"] for g in fx["gates"]] == ["ai@jreese.net"] * 3
 
 
 def test_sensitive_gates_refuse_the_starter_before_the_human_decision(fx):
@@ -56,7 +64,7 @@ def test_a_missing_gate_decision_leaves_the_run_awaiting_gate(fx):
     bad["gates"] = bad["gates"][:-1]                       # no decision recorded for deploy_gate
     res = rr.replay(bad)
     assert res["status"] == "awaiting_gate" and not res["ok"]
-    assert res["gates"] == 2 and res["segments"] == 2 and "replay FAIL" in res["summary"]
+    assert res["gates"] == 2 and res["segments"] == 3 and "replay FAIL" in res["summary"]
     assert any(f.startswith("final_state:") for f in res["failures"])
 
 
