@@ -9,6 +9,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getAppSyncEventsConfig } from '../api/appsyncConfig'
 import { fetchFeedSnapshot } from '../api/feeds'
+import { getRealtimeAuthToken } from '../auth/authClient'
 import {
   AppSyncRealtimeClient,
   type RealtimeClientEvent,
@@ -169,6 +170,9 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
       config,
       lastCursor: initialCursor,
       onEvent: handleClientEvent,
+      // DVP-TSK-928: with a Cognito namespace configured, a signed-in session subscribes with its own token and the
+      // API key serves only the no-session case; unset keeps the API-key transport unchanged.
+      getAuthToken: config.authedNamespace ? getRealtimeAuthToken : undefined,
     })
     clientRef.current = client
     client.start()

@@ -133,6 +133,51 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Resolve AppSync realtime config for the target plane
+        # ENC-TSK-K70 / DVP-TSK-928 (io ruling E41-R2). The AppSync Events values are GitHub repo VARIABLES (not
+        # CFN describe-stacks) because this build job is deliberately credential-less and ungated: granting it AWS
+        # access, or attaching a GitHub Environment (which would make a prod build wait for io a SECOND time on top
+        # of the deploy job's own gate), would weaken the FTR-120 gating model. So the two planes use two variable
+        # sets, selected here by the same plane rule as VITE_OAUTH_REDIRECT_URI and the deploy job:
+        #   gamma (target_environment=gamma, or v4/main with no override):
+        #     VITE_APPSYNC_HTTP_HOST, VITE_APPSYNC_REALTIME_HOST, VITE_APPSYNC_API_KEY, VITE_APPSYNC_AUTHED_NAMESPACE
+        #   production (everything else):
+        #     VITE_APPSYNC_HTTP_HOST_PROD, VITE_APPSYNC_REALTIME_HOST_PROD, VITE_APPSYNC_AUTHED_NAMESPACE_PROD
+        # Production is Cognito-only: its API key is forced EMPTY here, whatever repo variables hold, so a prod
+        # bundle can never carry (or fall back to) an API key. Selection is done in shell, not with `a && b || c`
+        # expressions, because an unset variable is '' (falsy) and would silently fall through to the OTHER plane's
+        # value. Empty hosts => appsyncConfig.ts disables realtime (S3-snapshot degrade), by construction.
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.target_environment }}
+          REF_NAME: ${{ github.ref_name }}
+          GAMMA_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST }}
+          GAMMA_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST }}
+          GAMMA_API_KEY: ${{ vars.VITE_APPSYNC_API_KEY }}
+          GAMMA_AUTHED_NAMESPACE: ${{ vars.VITE_APPSYNC_AUTHED_NAMESPACE }}
+          PROD_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST_PROD }}
+          PROD_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST_PROD }}
+          PROD_AUTHED_NAMESPACE: ${{ vars.VITE_APPSYNC_AUTHED_NAMESPACE_PROD }}
+        run: |
+          set -euo pipefail
+          if [ "${TARGET_ENVIRONMENT}" = "gamma" ] || { [ -z "${TARGET_ENVIRONMENT}" ] && [ "${REF_NAME}" = "v4/main" ]; }; then
+            plane=gamma
+            {
+              echo "VITE_APPSYNC_HTTP_HOST=${GAMMA_HTTP_HOST}"
+              echo "VITE_APPSYNC_REALTIME_HOST=${GAMMA_REALTIME_HOST}"
+              echo "VITE_APPSYNC_API_KEY=${GAMMA_API_KEY}"
+              echo "VITE_APPSYNC_AUTHED_NAMESPACE=${GAMMA_AUTHED_NAMESPACE}"
+            } >> "${GITHUB_ENV}"
+          else
+            plane=production
+            {
+              echo "VITE_APPSYNC_HTTP_HOST=${PROD_HTTP_HOST}"
+              echo "VITE_APPSYNC_REALTIME_HOST=${PROD_REALTIME_HOST}"
+              echo "VITE_APPSYNC_API_KEY="
+              echo "VITE_APPSYNC_AUTHED_NAMESPACE=${PROD_AUTHED_NAMESPACE}"
+            } >> "${GITHUB_ENV}"
+          fi
+          echo "AppSync realtime config resolved for plane=${plane}"
+
       - name: Build
         env:
           # Same-origin API base (07-ui-cdn /api/* behavior proxies to API GW).
@@ -142,20 +187,8 @@ jobs:
           # /mobile/v1/ S3 objects (which are being retired). Same-origin;
           # the 07-ui-cdn /api/* behavior proxies to API GW.
           VITE_FEED_BASE_URL: /api/v1/feed
-          # ENC-TSK-K70: AppSync Events realtime config. Sourced from GitHub
-          # repo VARIABLES (not CFN describe-stacks) because this build job is
-          # deliberately credential-less and ungated — granting it AWS access
-          # to resolve stack outputs would weaken the FTR-120 gating model.
-          # Set once after 06-appsync-events.yaml provisions (K56):
-          #   gh variable set VITE_APPSYNC_HTTP_HOST     --body <HttpEndpoint host>
-          #   gh variable set VITE_APPSYNC_REALTIME_HOST --body <RealtimeEndpoint host>
-          #   gh variable set VITE_APPSYNC_API_KEY       --body <ApiKey>
-          # Empty/unset => appsyncConfig.ts disables realtime and the feed pane
-          # degrades to S3-snapshot mode (skip-if-absent by construction). The
-          # API key is public-by-design (it ships in the JS bundle either way).
-          VITE_APPSYNC_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST }}
-          VITE_APPSYNC_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST }}
-          VITE_APPSYNC_API_KEY: ${{ vars.VITE_APPSYNC_API_KEY }}
+          # VITE_APPSYNC_{HTTP_HOST,REALTIME_HOST,API_KEY,AUTHED_NAMESPACE} come from the previous step
+          # ("Resolve AppSync realtime config for the target plane") via GITHUB_ENV.
           VITE_APPSYNC_REGION: us-west-2
           # ENC-TSK-P51: OAuth redirect baked per resolved plane. The callback
           # must be same-origin with the viewer (auth_refresh sets the session

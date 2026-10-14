@@ -7,43 +7,57 @@ name: CloudFormation AppSync Events Stack Deploy
 # a deploy to renew it — gamma's entire realtime transport returned 401
 # UnauthorizedException on every connection_init as a result.
 #
-# DEPLOY TARGET: gamma (v4) ONLY. v3-prod is FROZEN (DOC-499FA089EC30). This
-# workflow therefore triggers exclusively on v4/** branches and resolves
-# ENVIRONMENT_SUFFIX to "-gamma"; it must never run against main / production.
+# DVP-TSK-928 (io ruling E41-R2): the stack now deploys to BOTH planes, the same
+# shape as the other CFN lanes (cloudformation-monitoring-stack-deploy.yml):
+#   * v4/** push (or target_environment=gamma)  -> stack enceladus-appsync-events-gamma,
+#     apply in the v4-gamma Environment (no reviewer).
+#   * main push (or target_environment=production) -> stack enceladus-appsync-events,
+#     apply in the v3-prod Environment (required reviewer: io). A prod-targeted run
+#     therefore PAUSES at the apply job as a reviewable, rejectable request.
+# The production plane is Cognito-only: it has no ApiKey resource, so the key
+# renewal below is gamma-only and the monthly schedule is pinned to gamma.
 #
-# Plan/apply split (ENC-TSK-J62/J63 pattern, mirrors cloudformation-agent-auth-
-# stack-deploy.yml): the stack is gamma-only by construction (guard-gamma-only
-# refuses anything else), so apply runs in the v4-gamma environment — no
-# reviewer pause, but structurally identical to its gated siblings.
-#
-# Every run (push, manual dispatch, or the monthly schedule below) recomputes
-# ApiKeyExpiresEpoch as "now + 364 days" and re-passes it, so a normal deploy
-# doubles as a rolling key renewal — this is deliberate, not incidental: it
-# is what prevents ENC-TSK-M56 from recurring.
+# Plan/apply split (ENC-TSK-J62/J63 pattern). Change-set creation uses
+# `aws cloudformation deploy --no-execute-changeset`, which preserves the
+# parameter-override semantics: a parameter that is NOT listed reuses the stack's
+# stored value (UsePreviousValue) while a parameter that is new to the stack takes
+# its template Default. The Cognito parameters added by DVP-TSK-928 are therefore
+# deliberately not overridden here; DataStackName and Environment are passed
+# explicitly so the two planes can never inherit each other's value.
 
 on:
   push:
     branches:
+      - main
       - 'v4/**'
     paths:
       - "infrastructure/cloudformation/06-appsync-events.yaml"
       - ".github/workflows/cloudformation-appsync-events-stack-deploy.yml"
   schedule:
-    # Monthly renewal — comfortably inside AppSync's 365-day max, well short
-    # of ever approaching another expiration-driven outage.
+    # Monthly gamma API-key renewal — comfortably inside AppSync's 365-day max, well
+    # short of ever approaching another expiration-driven outage. Gamma only.
     - cron: '0 6 1 * *'
   workflow_dispatch:
     inputs:
       stack_name:
-        description: "CloudFormation stack name for 06-appsync-events template"
+        description: "CloudFormation stack name for 06-appsync-events template (the -gamma suffix is appended on the gamma plane)"
         type: string
         required: false
         default: "enceladus-appsync-events"
+      # Same P40/P54 pattern as the monitoring lane: empty keeps the ref-derived
+      # routing (push and schedule events never supply it); 'production' targets the
+      # prod stack from a trusted v4 ref, with the apply still pausing at the v3-prod gate.
+      target_environment:
+        description: "Override the target plane (empty = derive from ref). 'production' pauses at the v3-prod required-reviewer gate before applying."
+        type: choice
+        required: false
+        default: ""
+        options: ["", "gamma", "production"]
       reason:
         description: "Why this deploy is being triggered"
         type: string
         required: false
-        default: "manual appsync-events stack deploy (gamma)"
+        default: "manual appsync-events stack deploy"
 
 permissions:
   contents: read
@@ -56,28 +70,15 @@ concurrency:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/06-appsync-events.yaml
-  # schedule events have no github.ref branch context — pin the renewal cron
-  # to v4/main explicitly so ENVIRONMENT_SUFFIX still resolves to "-gamma".
-  ENVIRONMENT_SUFFIX: ${{ (startsWith(github.ref, 'refs/heads/v4/') || github.event_name == 'schedule') && '-gamma' || '' }}
+  # Gamma-first on purpose (GitHub Actions treats '' as falsy): the schedule, an explicit
+  # 'gamma' input, or (no input) a v4/** ref resolve to '-gamma'; an explicit 'production'
+  # input or a main-ref event resolve to '' (prod). Mirrors the monitoring lane.
+  ENVIRONMENT_SUFFIX: ${{ (github.event_name == 'schedule' || github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-appsync-events
 
 jobs:
-  guard-gamma-only:
-    name: Guard — gamma only
-    runs-on: ubuntu-latest
-    steps:
-      - name: Refuse non-gamma targets
-        run: |
-          set -euo pipefail
-          if [ "${ENVIRONMENT_SUFFIX}" != "-gamma" ]; then
-            echo "::error::AppSync Events stack is gamma-only (v3-prod is FROZEN, DOC-499FA089EC30)."
-            exit 1
-          fi
-          echo "Gamma target confirmed (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})."
-
   plan:
     name: Plan AppSync Events stack change-set
-    needs: guard-gamma-only
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -104,13 +105,23 @@ jobs:
           set -euo pipefail
           stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
           echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
-          # 364 days: one day inside AppSync's 365-day hard max, hour-rounded
-          # by AppSync itself regardless of the exact second we compute here.
-          expires_epoch=$(date -u -d '+364 days' +%s)
+          if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
+            plane=gamma
+            # 364 days: one day inside AppSync's 365-day hard max, hour-rounded
+            # by AppSync itself regardless of the exact second we compute here.
+            expires_epoch=$(date -u -d '+364 days' +%s)
+            echo "Computed ApiKeyExpiresEpoch=${expires_epoch} ($(date -u -d "@${expires_epoch}"))"
+          else
+            plane=production
+            # Production has no ApiKey resource (Cognito-only): nothing to renew.
+            expires_epoch=""
+          fi
+          echo "plane=${plane}" >> "${GITHUB_OUTPUT}"
           echo "expires_epoch=${expires_epoch}" >> "${GITHUB_OUTPUT}"
-          echo "Computed ApiKeyExpiresEpoch=${expires_epoch} ($(date -u -d "@${expires_epoch}"))"
+          echo "Plane=${plane} stack=${stack_name}"
 
       - name: Clean up ROLLBACK_COMPLETE stack if present (gamma self-heal)
+        if: env.ENVIRONMENT_SUFFIX == '-gamma'
         run: |
           set -euo pipefail
           stack_name="${{ steps.params.outputs.stack_name }}"
@@ -135,6 +146,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          overrides=(
+            "EnvironmentSuffix=${ENVIRONMENT_SUFFIX}"
+            "Environment=${{ steps.params.outputs.plane }}"
+            "DataStackName=enceladus-data${ENVIRONMENT_SUFFIX}"
+          )
+          if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
+            overrides+=("ApiKeyExpiresEpoch=${{ steps.params.outputs.expires_epoch }}")
+          fi
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
@@ -144,9 +164,7 @@ jobs:
             --no-execute-changeset \
             --s3-bucket enceladus-cfn-staging-us-west-2 \
             --s3-prefix 06-appsync-events/ \
-            --parameter-overrides \
-              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}" \
-              ApiKeyExpiresEpoch="${{ steps.params.outputs.expires_epoch }}" 2>&1 | tee /tmp/plan.log
+            --parameter-overrides "${overrides[@]}" 2>&1 | tee /tmp/plan.log
 
           if grep -q "No changes to deploy" /tmp/plan.log; then
             echo "has_changes=false" >> "${GITHUB_OUTPUT}"
@@ -171,7 +189,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## AppSync Events stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo "## AppSync Events stack plan — ${{ steps.params.outputs.stack_name }} (${{ steps.params.outputs.plane }})"
             echo ""
             echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
             echo ""
@@ -190,9 +208,10 @@ jobs:
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Gamma-only lane; environment kept for structural parity with the gated
-    # CFN siblings (ENC-FTR-120).
-    environment: v4-gamma
+    # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has none. A prod-targeted
+    # run therefore pauses here as a rejectable request. Gate on the RESOLVED plane (same expression
+    # as ENVIRONMENT_SUFFIX above; the environment key cannot read env.*).
+    environment: ${{ (github.event_name == 'schedule' || github.event.inputs.target_environment == 'gamma' || (github.event.inputs.target_environment == '' && startsWith(github.ref, 'refs/heads/v4/'))) && 'v4-gamma' || 'v3-prod' }}
 
     steps:
       - name: Configure AWS credentials (environment-scoped OIDC)
@@ -232,7 +251,7 @@ jobs:
             --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
             --output table || echo "(describe-stack-events unavailable)"
 
-      - name: Report deployed stack state
+      - name: Report deployed stack state and UI variable values
         run: |
           set -euo pipefail
           aws cloudformation describe-stacks \
@@ -240,3 +259,14 @@ jobs:
             --stack-name "${{ needs.plan.outputs.stack_name }}" \
             --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
             --output table
+          # DVP-TSK-928: the values to copy into the GitHub variables _ui_deploy.yml bakes into ui-v2.
+          {
+            echo "## ui-v2 realtime variables — ${{ needs.plan.outputs.stack_name }}"
+            echo '```'
+            aws cloudformation describe-stacks \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}" \
+              --query 'Stacks[0].Outputs[?OutputKey==`FeedEventsHttpEndpoint` || OutputKey==`FeedEventsRealtimeEndpoint` || OutputKey==`FeedEventsAuthedNamespace`].[OutputKey,OutputValue]' \
+              --output text
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
