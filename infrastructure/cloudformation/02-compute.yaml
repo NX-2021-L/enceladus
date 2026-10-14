@@ -572,6 +572,8 @@ Resources:
           CONTENT_STORE_MODE: dual
           CONTENT_STORE_READ: legacy
           GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
+          # DVP-TSK-B46: governance/ reads flip content-first; intent-training stays legacy-pinned via CONTENT_STORE_READ.
+          GOVERNANCE_STORE_READ: auto
           # DVP-TSK-B44: the push-on-write recompute nudge targets THIS plane's recompute function (the code default is the
           # prod name, which would make gamma nudge prod's record).
           RECOMPUTE_GOVERNANCE_LAMBDA_NAME: !Sub "devops-recompute-governance${EnvironmentSuffix}"
@@ -722,7 +724,7 @@ Resources:
           # Drop the pin at the governance flip, after the W3 delta for governance/.
           S3_GOVERNANCE_PREFIX: governance/live
           GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
-          GOVERNANCE_STORE_READ: legacy
+          GOVERNANCE_STORE_READ: auto  # DVP-TSK-B46: governance reads content-first (was legacy, B44)
           # DVP-TSK-B14 (isolation W4d): agent-documents/ writes go to the content bucket AND the legacy bucket
           # (conditional version puts legacy first) (DOC-EF4BC758CCC9). S3_PREFIX above carries the legacy-only env prefix
           # that S3_ENV_PREFIX strips.
@@ -8312,6 +8314,11 @@ Resources:
         - !Ref SharedLayerArn
       Environment:
         Variables:
+          # DVP-TSK-B46 (isolation W4i-3): governance/ reads go content-first (legacy fallback on a miss) from the SHARED
+          # prod content bucket (io 2026-10-13: one corpus, no env suffix, unprefixed keys). Preconditions: writers dual
+          # (B22), delta 5357/5357, governance/live keys + ChecksumSHA256 identical in both buckets.
+          CONTENT_STORE_MODE: dual
+          GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
           GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
       Tags:
         - Key: Project
@@ -8430,6 +8437,11 @@ Resources:
         - !Ref SharedLayerArn
       Environment:
         Variables:
+          # DVP-TSK-B46 (isolation W4i-3): governance/ reads go content-first (legacy fallback on a miss) from the SHARED
+          # prod content bucket (io 2026-10-13: one corpus, no env suffix, unprefixed keys). Preconditions: writers dual
+          # (B22), delta 5357/5357, governance/live keys + ChecksumSHA256 identical in both buckets.
+          CONTENT_STORE_MODE: dual
+          GOVERNANCE_CONTENT_BUCKET: !Sub "enceladus-content-${AWS::AccountId}-${AWS::Region}"
           GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
           GOVERNANCE_S3_BUCKET: jreese-net
           DRIFT_METRIC_NAMESPACE: Enceladus/Governance
