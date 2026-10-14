@@ -130,7 +130,7 @@ class TestContentFirstReads(_Base):
         self.assertIn({"n": 1}, events)
         self.assertEqual(self.s3.buckets_touched("get"), [CONTENT])
 
-    def test_the_cloudformation_pin_is_gone_for_document_api_only(self):
+    def test_the_cloudformation_pin_is_gone_for_document_api_and_memory_consolidation(self):
         yaml_path = os.path.abspath(os.path.join(HERE, "..", "..", "..", "infrastructure", "cloudformation", "02-compute.yaml"))
         with open(yaml_path, encoding="utf-8") as fh:
             text = fh.read()
@@ -143,7 +143,7 @@ class TestContentFirstReads(_Base):
         doc = block("DocumentApiFunction")
         self.assertIn("CONTENT_STORE_MODE: dual", doc)
         self.assertNotIn("CONTENT_STORE_READ: ", doc)
-        self.assertIn("CONTENT_STORE_READ: legacy", block("MemoryConsolidationFunction"))  # its only store call is a write
+        self.assertNotIn("CONTENT_STORE_READ: ", block("MemoryConsolidationFunction"))  # DVP-TSK-B53: body reads routed
 
 
 class TestGammaReads(_Base):

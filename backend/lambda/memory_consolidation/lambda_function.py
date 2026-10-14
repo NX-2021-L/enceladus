@@ -260,8 +260,13 @@ def _read_document_body(doc: Dict[str, Any]) -> str:
     if not key:
         return ""
     try:
-        # Raw on purpose (DVP-TSK-B14): bucket/key are the document record's own s3_bucket/s3_key, not a computed key.
-        resp = _get_s3().get_object(Bucket=bucket, Key=str(key))
+        # bucket/key are the document record's own s3_bucket/s3_key, not a computed key. DVP-TSK-B53 (isolation W4n):
+        # a record in the legacy bucket reads through the content store (content-first, legacy fallback on a miss);
+        # any other bucket stays raw.
+        if bucket == S3_BUCKET:
+            resp = _content_store().get_object(str(key))
+        else:
+            resp = _get_s3().get_object(Bucket=bucket, Key=str(key))
         return resp["Body"].read().decode("utf-8", errors="replace")
     except Exception as exc:  # pragma: no cover - network/permission edge
         logger.warning("could not read body for %s: %s", doc.get("document_id"), exc)

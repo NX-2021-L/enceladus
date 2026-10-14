@@ -201,7 +201,8 @@ def test_cloudformation_env_is_writer_first_for_every_rhythm_writer():
     for fn in ("RhythmCycleFunction", "HandoffConsolidationEngineFunction", "GraphHealthMetricsFunction",
                "PercolationMonitorFunction", "MemoryConsolidationFunction"):
         b = _block(text, fn)
-        assert "CONTENT_STORE_MODE: dual" in b and "CONTENT_STORE_READ: legacy" in b and content in b, fn
+        assert "CONTENT_STORE_MODE: dual" in b and content in b, fn
+        assert "CONTENT_STORE_READ: " not in b, fn  # DVP-TSK-B53: reads go content-first after the W3 delta
         assert "S3_ENV_PREFIX: !Ref S3EnvPrefix" in b, fn
         assert b.count("S3_ENV_PREFIX:") == 1 and b.count("CONTENT_STORE_MODE:") == 1, fn
     cee = _block(text, "CorpusEntropyEngineFunction")  # already dual (B17, content-first reads; its stanza is a write)
