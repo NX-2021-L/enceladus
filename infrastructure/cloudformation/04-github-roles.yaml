@@ -853,6 +853,9 @@ Resources:
               - appsync:DeleteChannelNamespace
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
+              # DVP-TSK-928: IAM evaluates CreateChannelNamespace against "apis/{id}/channelNamespace/{name}" (no /v1/),
+              # as the 2026-10-14 gamma apply AccessDenied showed; keep both forms.
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
 
           # DVP-TSK-928 (io ruling E41-R2): the PRODUCTION Events API (stack enceladus-appsync-events) does not exist
           # yet, so its id cannot be pinned the way the gamma one is, and a stack-output ImportValue would deadlock the
@@ -911,6 +914,7 @@ Resources:
               - appsync:DeleteChannelNamespace
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/*/channelNamespace/*"
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/*/channelNamespace/*"
 
   # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
   # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to
