@@ -275,6 +275,29 @@ def _get_s3():
     return _s3
 
 
+_CONTENT_STORE = None
+
+
+def _content_store(s3: Any = None):
+    """DVP-TSK-B51 (isolation W4l): every deploy-config/ access goes through content_store.
+
+    CONTENT_STORE_MODE=dual writes the content bucket AND CONFIG_BUCKET (legacy); CONTENT_STORE_READ=legacy keeps every
+    read on CONFIG_BUCKET until all writers are dual. legacy (default) is byte-identical to a raw s3 call. Bound to the
+    given client (default _get_s3()); rebuilt if the client changes.
+    """
+    global _CONTENT_STORE
+    client = s3 if s3 is not None else _get_s3()
+    if _CONTENT_STORE is None or _CONTENT_STORE.s3 is not client:
+        try:
+            from content_store import ContentStore  # shipped to the function root by .build_extras
+        except ImportError:  # local tests: the canonical shared-layer copy
+            from enceladus_shared.content_store import ContentStore
+        env = dict(os.environ)
+        env["LEGACY_BUCKET"] = CONFIG_BUCKET
+        _CONTENT_STORE = ContentStore.from_env(client, env)
+    return _CONTENT_STORE
+
+
 def _get_sqs():
     global _sqs
     if _sqs is None:
@@ -521,9 +544,8 @@ def _utc_now_compact() -> str:
 
 def _resolve_deploy_state(project_id: str) -> Tuple[Optional[str], Optional[Dict]]:
     try:
-        s3 = _get_s3()
         key = f"{CONFIG_PREFIX}/{project_id}/state.json"
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        resp = _content_store().get_object(key)
         state_data = json.loads(resp["Body"].read().decode("utf-8"))
         state = str(state_data.get("state", "ACTIVE")).strip().upper() or "ACTIVE"
         return state, None
@@ -869,9 +891,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     release_notes_required: Optional[bool] = None
     release_notes_guidance: Optional[str] = None
     try:
-        s3 = _get_s3()
         ver_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
-        ver_resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=ver_key)
+        ver_resp = _content_store().get_object(ver_key)
         ver_data = json.loads(ver_resp["Body"].read().decode("utf-8"))
         current_ver = ver_data.get("version", "")
         if current_ver:
@@ -929,9 +950,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
 
 def _handle_get_state(project_id: str) -> Dict:
     try:
-        s3 = _get_s3()
         key = f"{CONFIG_PREFIX}/{project_id}/state.json"
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        resp = _content_store().get_object(key)
         data = json.loads(resp["Body"].read().decode("utf-8"))
         return _ok({"project_id": project_id, **data})
     except ClientError as e:
@@ -968,11 +988,10 @@ def _handle_set_state(project_id: str, body: Dict) -> Dict:
         "paused_since": now if new_state == "PAUSED" else None,
     }
 
-    s3 = _get_s3()
     key = f"{CONFIG_PREFIX}/{project_id}/state.json"
-    s3.put_object(
-        Bucket=CONFIG_BUCKET, Key=key,
-        Body=json.dumps(data, indent=2).encode("utf-8"),
+    _content_store().put_object(
+        key,
+        json.dumps(data, indent=2).encode("utf-8"),
         ContentType="application/json",
     )
 

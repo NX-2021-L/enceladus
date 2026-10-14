@@ -1331,6 +1331,14 @@ Resources:
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
+          # DVP-TSK-B51 (isolation W4l): writer-first phase -- deploy-config/ (and the deploy-sources/ reads) go through
+          # content_store: writes go to the content bucket AND the legacy bucket, reads stay on legacy until every writer of
+          # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
+          # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1505,6 +1513,14 @@ Resources:
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
+          # DVP-TSK-B51 (isolation W4l): writer-first phase -- deploy-config/ (and the deploy-sources/ reads) go through
+          # content_store: writes go to the content bucket AND the legacy bucket, reads stay on legacy until every writer of
+          # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
+          # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           CODEBUILD_PROJECT: devops-ui-deploy-builder
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1555,6 +1571,14 @@ Resources:
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
+          # DVP-TSK-B51 (isolation W4l): writer-first phase -- deploy-config/ (and the deploy-sources/ reads) go through
+          # content_store: writes go to the content bucket AND the legacy bucket, reads stay on legacy until every writer of
+          # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
+          # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -1981,6 +2005,14 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
+          # DVP-TSK-B51 (isolation W4l): writer-first phase -- deploy-config/ (and the deploy-sources/ reads) go through
+          # content_store: writes go to the content bucket AND the legacy bucket, reads stay on legacy until every writer of
+          # the prefix is dual (DOC-EF4BC758CCC9). CONFIG_PREFIX above carries the legacy-only env prefix that S3_ENV_PREFIX
+          # strips. changelog_api only reads, so dual + read-legacy is a no-op there.
+          CONTENT_STORE_MODE: dual
+          CONTENT_STORE_READ: legacy
+          CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -5703,6 +5735,14 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net/deploy-config/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*"
+              # DVP-TSK-B51: without ListBucket a missing key answers 403, not 404, so the store's legacy fallback never fires
+              # once reads leave legacy (state.json absent means ACTIVE). Unconditional, like the other W4 content grants.
+              - Sid: S3ConfigContentList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
               - Sid: SQSSendMessage
                 Effect: Allow
                 Action:
@@ -6587,6 +6627,14 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net/deploy-config/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/deploy-config/*"
+              # DVP-TSK-B51: without ListBucket a missing current-version.json answers 403, not 404, so the store's legacy
+              # fallback never fires once reads leave legacy.
+              - Sid: S3VersionContentList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
