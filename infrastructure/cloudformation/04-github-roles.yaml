@@ -851,17 +851,29 @@ Resources:
               - appsync:CreateChannelNamespace
               - appsync:UpdateChannelNamespace
               - appsync:DeleteChannelNamespace
+              # DVP-TSK-928: the ChannelNamespace handler stamps the aws:cloudformation:* system tags with a separate
+              # TagResource call on the namespace ARN (2026-10-14 01:22Z gamma apply AccessDenied). No user tags.
+              - appsync:TagResource
+              - appsync:UntagResource
+              - appsync:ListTagsForResource
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
+              # DVP-TSK-928: IAM evaluates CreateChannelNamespace against "apis/{id}/channelNamespace/{name}" (no /v1/),
+              # as the 2026-10-14 gamma apply AccessDenied showed; keep both forms.
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
 
           # DVP-TSK-928 (io ruling E41-R2): the PRODUCTION Events API (stack enceladus-appsync-events) does not exist
           # yet, so its id cannot be pinned the way the gamma one is, and a stack-output ImportValue would deadlock the
           # first deploy (this policy must exist before that stack can export anything). The three statements below
           # are scoped by TAG instead: the template stamps Project=enceladus / Component=pwa-realtime on its API.
-          # * Create: CreateApi has no resource ARN to name, so it is "*" gated on the request carrying the tag.
+          # * Create: CreateApi has no resource ARN to name, so it is "*" gated on region only. The AppSync handlers
+          #   create untagged and tag in a separate TagResource call (CloudTrail, 2026-10-14 namespace create), so a
+          #   RequestTag condition on CreateApi would deny the create itself. An untagged new API is outside the
+          #   Manage scope until the tag-at-create statement labels it.
           # * Tag at create: only an API that has NO Component tag yet may be tagged pwa-realtime (Null condition),
           #   so the role cannot re-label somebody else's API into its own management scope.
-          # * Manage: Get/Update/Delete/Untag/ListTags only on APIs already carrying Component=pwa-realtime.
+          # * Manage: Get/Update/Delete/Tag/Untag/ListTags only on APIs already carrying Component=pwa-realtime
+          #   (Tag here covers the system-tag call that follows the labelled create, and later tag updates).
           # The gamma statements above stay pinned and untouched; if the tag conditions ever mis-evaluate, only the
           # production plane is affected, never gamma.
           - Sid: AppSyncEventsApiCreateTagged
@@ -871,7 +883,6 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals:
-                aws:RequestTag/Component: pwa-realtime
                 aws:RequestedRegion: us-west-2
           - Sid: AppSyncEventsApiTagAtCreate
             Effect: Allow
@@ -890,6 +901,7 @@ Resources:
               - appsync:GetApi
               - appsync:UpdateApi
               - appsync:DeleteApi
+              - appsync:TagResource
               - appsync:UntagResource
               - appsync:ListTagsForResource
             Resource:
@@ -909,8 +921,12 @@ Resources:
               - appsync:CreateChannelNamespace
               - appsync:UpdateChannelNamespace
               - appsync:DeleteChannelNamespace
+              - appsync:TagResource
+              - appsync:UntagResource
+              - appsync:ListTagsForResource
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/*/channelNamespace/*"
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/*/channelNamespace/*"
 
   # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
   # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to

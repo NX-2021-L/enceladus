@@ -75,6 +75,9 @@ artifact_version_ids: {}
 # governance_mart, recompute_governance). Keys mirror envs/v4-gamma.yaml minus
 # the -gamma suffix on values.
 function_name_map:
+  # DVP-TSK-928: prod Events publisher (06-appsync-events.yaml, stack enceladus-appsync-events). Without this
+  # entry the Gen2 deploy logs '[skip] appsync_feed_publisher' and the function keeps its CFN placeholder code.
+  appsync_feed_publisher: devops-appsync-feed-publisher
   arc_walk_metrics: enceladus-arc-walk-metrics
   auth_refresh: auth-refresh
   bedrock_agent_actions: enceladus-bedrock-agent-actions
