@@ -16,7 +16,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@io-kit/auth": "2.3.0",
+    "@io-kit/auth": "2.4.0",
     "@io-kit/feed": "1.1.1",
     "@io-kit/gates": "1.1.0",
     "@io-kit/md": "1.2.0",
