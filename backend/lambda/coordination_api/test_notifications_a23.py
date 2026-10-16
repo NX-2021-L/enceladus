@@ -106,70 +106,6 @@ def _claims(email=APPROVER):
     return {"email": email, "token_use": "id", "sub": "s"}
 
 
-class RouteTests(unittest.TestCase):
-    def setUp(self):
-        self.table = _FakeTable()
-        self.ua = _UA()
-        self.sub = {"endpoint": "https://fcm.googleapis.com/fcm/send/abc",
-                    "keys": {"p256dh": self.ua.keys[0], "auth": self.ua.keys[1]}}
-        patches = [
-            mock.patch.object(lf, "_get_ddb", return_value=self.table),
-            mock.patch.object(lf, "_is_cognito_session", return_value=True),
-            mock.patch.object(lf, "_is_human_cognito_principal", return_value=True),
-            mock.patch.object(lf, "_load_escalation_approver_allowlist", return_value={APPROVER}),
-            mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "route-key"}),
-        ]
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
-
-    def call(self, method, name, body=None, email=APPROVER):
-        path = f"/api/v1/coordination/notifications/{name}"
-        event = {"body": json.dumps(body) if body is not None else None, "headers": {}}
-        resp = lf._handle_notifications(method, path, event, _claims(email))
-        return resp["statusCode"], json.loads(resp["body"])
-
-    def test_non_approver_refused_on_every_route(self):
-        for method, name in (("GET", "vapid-public-key"), ("POST", "subscribe"),
-                             ("DELETE", "subscribe"), ("GET", "preferences"), ("PUT", "preferences")):
-            code, _ = self.call(method, name, {"subscription": self.sub}, email=OTHER)
-            self.assertEqual(403, code, (method, name))
-        self.assertEqual({}, self.table.items)
-
-    def test_vapid_public_key_matches_derivation(self):
-        code, body = self.call("GET", "vapid-public-key")
-        self.assertEqual(200, code)
-        self.assertEqual(wp.derive_vapid("route-key")["public"], body["public_key"])
-
-    def test_subscribe_unsubscribe_round_trip(self):
-        self.assertEqual(200, self.call("POST", "subscribe", {"subscription": self.sub})[0])
-        self.assertEqual(200, self.call("POST", "subscribe", self.sub)[0])  # idempotent, bare form
-        keys = [k for k in self.table.items if k[0] == f"PUSHSUB#{APPROVER}"]
-        self.assertEqual(1, len(keys))
-        self.assertEqual(64, len(keys[0][1]))
-        self.assertEqual(200, self.call("DELETE", "subscribe", {"endpoint": self.sub["endpoint"]})[0])
-        self.assertEqual([], [k for k in self.table.items if k[0].startswith("PUSHSUB#")])
-
-    def test_subscribe_validation(self):
-        bad = dict(self.sub, endpoint="https://evil.example.com/x")
-        self.assertEqual(400, self.call("POST", "subscribe", {"subscription": bad})[0])
-        self.assertEqual(400, self.call("POST", "subscribe", {"subscription": {"endpoint": self.sub["endpoint"]}})[0])
-        self.assertEqual(400, self.call("DELETE", "subscribe", {})[0])
-
-    def test_preferences_defaults_round_trip_and_validation(self):
-        code, body = self.call("GET", "preferences")
-        self.assertEqual((200, True, "low"), (code, body["enabled"], body["extra"]["min_risk"]))
-        put = {"enabled": True, "types": {"acceptance": {"enabled": False, "level": 0}},
-               "extra": {"min_risk": "high"}}
-        self.assertEqual(200, self.call("PUT", "preferences", put)[0])
-        _, body = self.call("GET", "preferences")
-        self.assertEqual({"enabled": False, "level": 0}, body["types"]["acceptance"])
-        self.assertEqual("high", body["extra"]["min_risk"])
-        for bad in ({"enabled": "yes"}, {"extra": {"min_risk": "nope"}},
-                    {"types": {"acceptance": {"level": 2}}}, {"types": {"Bad Kind": {}}}):
-            self.assertEqual(400, self.call("PUT", "preferences", bad)[0], bad)
-
-
 class SenderTests(unittest.TestCase):
     def setUp(self):
         self.table = _FakeTable()
@@ -219,62 +155,17 @@ class SenderTests(unittest.TestCase):
     def payloads(self):
         return [json.loads(self.uas[e].decrypt(b)) for e, b, _h in self.sent]
 
-    def test_lambda_handler_routes_sns_events_to_the_sender(self):
-        self.subscribe(APPROVER, 1)
-        resp = lf.lambda_handler(self.sns(), None)
-        self.assertEqual(1, resp["sent"])
 
-    def test_one_push_per_subscription_with_deep_link_and_level1_body(self):
-        self.subscribe(APPROVER, 1)
-        self.subscribe(APPROVER, 2)
-        self.subscribe("two@example.com", 1)
-        self.assertEqual(3, lf._handle_escalation_push_sns(self.sns())["sent"])
-        for p in self.payloads():
-            n = p["notification"]
-            self.assertEqual(8030, p["web_push"])
-            self.assertEqual("https://enceladus.jreese.net/escalations/ESC-1", n["navigate"])
-            self.assertEqual("ESC-1", n["tag"])
-            self.assertEqual(3, n["app_badge"])
-            self.assertEqual("Escalation · high", n["title"])
-            self.assertTrue(n["body"].startswith("enceladus: acceptance — Promote X to prod"))
-            self.assertLessEqual(len(n["body"].split(" — ", 1)[1]), 120)
 
-    def test_level0_is_generic(self):
-        self.subscribe(APPROVER, 1)
-        self.prefs(APPROVER, {"enabled": True, "types": {"acceptance": {"enabled": True, "level": 0}},
-                              "extra": {"min_risk": "low"}})
-        lf._handle_escalation_push_sns(self.sns())
-        self.assertEqual("A decision is waiting in Enceladus", self.payloads()[0]["notification"]["body"])
 
-    def test_preferences_gate_enabled_kind_and_min_risk(self):
-        self.subscribe(APPROVER, 1)
-        self.subscribe("two@example.com", 1)
-        self.prefs(APPROVER, {"enabled": False, "types": {}, "extra": {"min_risk": "low"}})
-        self.prefs("two@example.com", {"enabled": True, "types": {"acceptance": {"enabled": False, "level": 1}},
-                                       "extra": {"min_risk": "low"}})
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
-        self.prefs("two@example.com", {"enabled": True, "types": {}, "extra": {"min_risk": "critical"}})
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
-        self.prefs("two@example.com", {"enabled": True, "types": {}, "extra": {"min_risk": "high"}})
-        self.assertEqual(1, lf._handle_escalation_push_sns(self.sns())["sent"])
 
     def test_non_requested_events_and_non_pending_send_nothing(self):
-        self.subscribe(APPROVER, 1)
         for ev in ("applied", "failed", "expired"):
             self.assertEqual(0, lf._handle_escalation_push_sns(self.sns(event=ev))["sent"])
         self.escalation["status"] = "approved"
         self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
         self.assertEqual([], self.sent)
 
-    def test_dead_endpoints_pruned_and_failures_isolated(self):
-        dead = self.subscribe(APPROVER, 1)
-        gone = self.subscribe(APPROVER, 2)
-        boom = self.subscribe(APPROVER, 3)
-        ok = self.subscribe(APPROVER, 4)
-        self.status.update({dead: 410, gone: 404, boom: "raise"})
-        self.assertEqual(1, lf._handle_escalation_push_sns(self.sns())["sent"])
-        remaining = {v["endpoint"]["S"] for (p, _s), v in self.table.items.items() if p.startswith("PUSHSUB#")}
-        self.assertEqual({boom, ok}, remaining)
 
     def test_handler_never_raises(self):
         with mock.patch.object(lf, "_read_escalation_item", side_effect=RuntimeError("ddb down")):
@@ -282,6 +173,11 @@ class SenderTests(unittest.TestCase):
         with mock.patch.object(lf, "_load_escalation_approver_allowlist", side_effect=RuntimeError("s3")):
             self.assertTrue(lf._handle_escalation_push_sns(self.sns())["success"])
         self.assertTrue(lf._handle_escalation_push_sns({"Records": [{"EventSource": "aws:sns"}]})["success"])
+
+    def test_lambda_handler_routes_sns_events_to_the_sender(self):
+        # ENC-TSK-Q83: per-device sender coverage lives in test_notifications_v2_q83.py.
+        resp = lf.lambda_handler(self.sns(), None)
+        self.assertEqual(0, resp["sent"])
 
 
 if __name__ == "__main__":

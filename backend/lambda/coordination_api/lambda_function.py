@@ -18575,10 +18575,12 @@ def _handle_intent_classifier_training_rollback(event: Dict[str, Any]) -> Dict[s
 # ---------------------------------------------------------------------------
 # DVP-TSK-A23 (DVP-PLN-013 E4-W3.9, E4-R28..R32): escalation web push.
 #
-# Routes (/api/v1/coordination/notifications/...): vapid-public-key, subscribe
-# (POST/DELETE) and preferences (GET/PUT), all restricted to a human Cognito
-# principal on the escalation approver allow-list. The SNS-fed sender renders
-# one push per approver subscription per NEW escalation, honoring preferences.
+# ENC-TSK-Q83 notify v2 (contracts/notify/v2): per-device subscriptions stored
+# as PUSHDEV#<principal>/<device_id>. Routes (/api/v1/coordination/notifications/...):
+# vapid-public-key, subscribe, devices, devices/{id}[/preferences|/test], all
+# restricted to a human Cognito principal on the escalation approver allow-list.
+# The SNS-fed sender renders one push per opted-in approver DEVICE per NEW
+# escalation, honoring that device's preferences.
 # Publish/send failures never fail the escalation request (J72 s5.8): the
 # whole SNS handler swallows and logs.
 # ---------------------------------------------------------------------------
@@ -18588,52 +18590,41 @@ PUSH_TTL_SECONDS = 24 * 3600
 _NOTIFY_RISKS = ("low", "medium", "high", "critical")
 _NOTIFY_KIND_RE = re.compile(r"^[a-z0-9_\-]{1,40}$")
 _NOTIFY_MAX_KINDS = 32
-_NOTIFY_PATHS = {
-    "/api/v1/coordination/notifications/vapid-public-key",
-    "/api/v1/coordination/notifications/subscribe",
-    "/api/v1/coordination/notifications/preferences",
-}
+_NOTIFY_PATH_PREFIX = "/api/v1/coordination/notifications/"
+_NOTIFY_DETAILS = ("detailed", "generic")
+_NOTIFY_PLATFORMS = ("ios", "macos", "other")
+_NOTIFY_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{8,128}$")
+_NOTIFY_GENERIC_BODY = "New escalation awaiting your decision"
 
 
 def _notify_default_prefs() -> Dict[str, Any]:
-    return {"enabled": True, "types": {}, "extra": {"min_risk": "low"}}
+    """ES-R1: a new device receives nothing until it opts in per type (absent type == disabled)."""
+    return {"types": {}, "detail": "detailed"}
 
 
 def _notify_normalize_prefs(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Validate a preferences body; returns (prefs, '') or (None, reason)."""
-    if isinstance(raw, dict) and isinstance(raw.get("preferences"), dict):
-        raw = raw["preferences"]
+    """Validate a v2 devicePreferences body; returns (prefs, '') or (None, reason)."""
     if not isinstance(raw, dict):
         return None, "A JSON object body is required."
-    prefs = _notify_default_prefs()
-    if "enabled" in raw:
-        if not isinstance(raw["enabled"], bool):
-            return None, "enabled must be a boolean."
-        prefs["enabled"] = raw["enabled"]
-    types = raw.get("types", {})
+    if set(raw) - {"types", "detail"}:
+        return None, "Only types and detail are allowed."
+    types = raw.get("types")
     if not isinstance(types, dict) or len(types) > _NOTIFY_MAX_KINDS:
         return None, "types must be an object of at most 32 kinds."
+    out_types: Dict[str, Any] = {}
     for kind, cfg in types.items():
         if not isinstance(kind, str) or not _NOTIFY_KIND_RE.match(kind) or not isinstance(cfg, dict):
             return None, f"Invalid type entry {kind!r}."
-        entry: Dict[str, Any] = {"enabled": True, "level": 1}
-        if "enabled" in cfg:
-            if not isinstance(cfg["enabled"], bool):
-                return None, f"types.{kind}.enabled must be a boolean."
-            entry["enabled"] = cfg["enabled"]
-        if "level" in cfg:
-            if isinstance(cfg["level"], bool) or cfg["level"] not in (0, 1):
-                return None, f"types.{kind}.level must be 0 or 1."
-            entry["level"] = int(cfg["level"])
-        prefs["types"][kind] = entry
-    extra = raw.get("extra", {})
-    if not isinstance(extra, dict):
-        return None, "extra must be an object."
-    if "min_risk" in extra:
-        if extra["min_risk"] not in _NOTIFY_RISKS:
-            return None, f"extra.min_risk must be one of {list(_NOTIFY_RISKS)}."
-        prefs["extra"]["min_risk"] = extra["min_risk"]
-    return prefs, ""
+        if set(cfg) != {"enabled", "min_risk"}:
+            return None, f"types.{kind} requires exactly enabled and min_risk."
+        if not isinstance(cfg["enabled"], bool):
+            return None, f"types.{kind}.enabled must be a boolean."
+        if cfg["min_risk"] not in _NOTIFY_RISKS:
+            return None, f"types.{kind}.min_risk must be one of {list(_NOTIFY_RISKS)}."
+        out_types[kind] = {"enabled": cfg["enabled"], "min_risk": cfg["min_risk"]}
+    if raw.get("detail") not in _NOTIFY_DETAILS:
+        return None, f"detail must be one of {list(_NOTIFY_DETAILS)}."
+    return {"types": out_types, "detail": raw["detail"]}, ""
 
 
 def _notify_vapid() -> Dict[str, str]:
@@ -18643,23 +18634,12 @@ def _notify_vapid() -> Dict[str, str]:
     return _webpush.derive_vapid(key, os.environ.get("VAPID_SUBJECT") or "https://jreese.net")
 
 
-def _notify_load_prefs(email: str) -> Dict[str, Any]:
-    item = _get_ddb().get_item(
-        TableName=PUSH_SUBSCRIPTIONS_TABLE,
-        Key={"pk": {"S": f"PUSHPREF#{email}"}, "sk": {"S": "prefs"}},
-    ).get("Item")
-    if item and "doc" in item:
-        try:
-            prefs, _why = _notify_normalize_prefs(json.loads(item["doc"]["S"]))
-            if prefs is not None:
-                return prefs
-        except (ValueError, TypeError, KeyError):
-            pass
-    return _notify_default_prefs()
+def _notify_pk(email: str) -> str:
+    return f"PUSHDEV#{email}"
 
 
 def _notify_subscription_from_body(body: Any) -> Tuple[Optional[Dict[str, Any]], str]:
-    sub = body.get("subscription") if isinstance(body, dict) and isinstance(body.get("subscription"), dict) else body
+    sub = body.get("subscription") if isinstance(body, dict) else None
     if not isinstance(sub, dict):
         return None, "A JSON push subscription is required."
     endpoint = sub.get("endpoint")
@@ -18676,15 +18656,66 @@ def _notify_subscription_from_body(body: Any) -> Tuple[Optional[Dict[str, Any]],
     return {"endpoint": endpoint, "p256dh": p256dh, "auth": auth}, ""
 
 
+def _notify_device_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Wire `device` (no endpoint/keys/prefs ever leave the server)."""
+    return {
+        "device_id": item["device_id"]["S"], "label": item["label"]["S"],
+        "platform": item["platform"]["S"], "created_at": item["created_at"]["S"],
+        "last_sent_at": (item.get("last_sent_at") or {}).get("S") or None,
+    }
+
+
+def _notify_prefs_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        prefs, _why = _notify_normalize_prefs(json.loads(item["prefs"]["S"]))
+        if prefs is not None:
+            return prefs
+    except (ValueError, TypeError, KeyError):
+        pass
+    return _notify_default_prefs()
+
+
+def _purge_legacy_push_rows(email: str) -> int:
+    """Idempotent: delete this principal's v1 PUSHSUB#/PUSHPREF# rows. Returns rows deleted."""
+    ddb, deleted = _get_ddb(), 0
+    for prefix in ("PUSHSUB#", "PUSHPREF#"):
+        items = ddb.query(
+            TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+            ExpressionAttributeValues={":pk": {"S": f"{prefix}{email}"}}).get("Items", [])
+        for it in items:
+            ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": it["pk"], "sk": it["sk"]})
+            deleted += 1
+    return deleted
+
+
+def _notify_send_raw(item: Dict[str, Any], payload: Dict[str, Any], topic: str) -> int:
+    endpoint = item["endpoint"]["S"]
+    keys = item["keys"]["M"]
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = _webpush.encrypt_aes128gcm(data, keys["p256dh"]["S"], keys["auth"]["S"])
+    headers = {**_webpush.vapid_headers(endpoint, _notify_vapid()),
+               "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+               "TTL": str(PUSH_TTL_SECONDS), "Urgency": "high", "Topic": topic[:32]}
+    return int(_webpush.http_send(endpoint, body, headers))
+
+
+def _notify_mark_sent(item: Dict[str, Any]) -> None:
+    _get_ddb().update_item(
+        TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]},
+        UpdateExpression="SET last_sent_at = :t", ExpressionAttributeValues={":t": {"S": _gate_fmt(_gate_now())}})
+
+
 def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
-    """The five notification routes. Approver allow-list only; fails closed."""
+    """Notify v2 routes (contracts/notify/v2). Approver allow-list only; fails closed."""
     if _webpush is None:
         return _error(503, "Web push is unavailable.")
     if (not _is_cognito_session(claims) or not _is_human_cognito_principal(claims)
             or not _is_allowlisted_escalation_decider(claims)):
         return _error(403, "Notifications require an allow-listed escalation approver.")
     email = str(claims.get("email") or "").strip().lower()
-    if path.endswith("/vapid-public-key"):
+    rest = path[len(_NOTIFY_PATH_PREFIX):].strip("/") if path.startswith(_NOTIFY_PATH_PREFIX) else ""
+    parts = rest.split("/") if rest else []
+    if parts == ["vapid-public-key"]:
         if method != "GET":
             return _error(405, "Method not allowed.")
         try:
@@ -18692,70 +18723,133 @@ def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims:
         except Exception as exc:  # noqa: BLE001
             logger.error("vapid derivation failed: %s", exc)
             return _error(503, "Web push key unavailable.")
-        return _response(200, {"success": True, "public_key": public_key, "publicKey": public_key})
+        return _response(200, {"public_key": public_key})
+    # v1 principal-level routes are removed (x-removed).
+    if parts == ["preferences"] or (parts == ["subscribe"] and method == "DELETE"):
+        return _error(410, "Removed in notify v2: use /notifications/devices and "
+                           "/notifications/devices/{device_id}/preferences.", code="GONE")
     ddb = _get_ddb()
-    if path.endswith("/preferences"):
-        if method == "GET":
-            try:
-                prefs = _notify_load_prefs(email)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("notification preferences read failed: %s", exc)
-                return _error(500, "Failed to read preferences.")
-            return _response(200, {"success": True, **prefs, "preferences": prefs})
-        if method == "PUT":
-            try:
-                body = _json_body(event)
-            except Exception:  # noqa: BLE001
-                body = None
-            prefs, why = _notify_normalize_prefs(body)
-            if prefs is None:
-                return _error(400, why)
-            try:
-                ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item={
-                    "pk": {"S": f"PUSHPREF#{email}"}, "sk": {"S": "prefs"},
-                    "doc": {"S": json.dumps(prefs, separators=(",", ":"))},
-                    "updated_at": {"S": _gate_fmt(_gate_now())}})
-            except Exception as exc:  # noqa: BLE001
-                logger.error("notification preferences write failed: %s", exc)
-                return _error(500, "Failed to save preferences.")
-            return _response(200, {"success": True, **prefs, "preferences": prefs})
-        return _error(405, "Method not allowed.")
-    # /subscribe
-    try:
-        body = _json_body(event)
-    except Exception:  # noqa: BLE001
-        body = None
-    if method == "POST":
+    pk = _notify_pk(email)
+
+    def _body() -> Any:
+        try:
+            return _json_body(event)
+        except Exception:  # noqa: BLE001
+            return None
+
+    if parts == ["subscribe"]:
+        if method != "POST":
+            return _error(405, "Method not allowed.")
+        body = _body()
+        if not isinstance(body, dict):
+            return _error(400, "A JSON object body is required.")
+        device_id = body.get("device_id")
+        if not isinstance(device_id, str) or not _NOTIFY_DEVICE_ID_RE.match(device_id):
+            return _error(400, "device_id is required (8-128 chars).")
+        label, platform = body.get("label"), body.get("platform")
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 64:
+            return _error(400, "label is required (1-64 chars).")
+        if platform not in _NOTIFY_PLATFORMS:
+            return _error(400, f"platform must be one of {list(_NOTIFY_PLATFORMS)}.")
         sub, why = _notify_subscription_from_body(body)
         if sub is None:
             return _error(400, why)
-        sk = hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()
         try:
-            ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item={
-                "pk": {"S": f"PUSHSUB#{email}"}, "sk": {"S": sk},
-                "endpoint": {"S": sub["endpoint"]}, "p256dh": {"S": sub["p256dh"]},
-                "auth": {"S": sub["auth"]}, "created_at": {"S": _gate_fmt(_gate_now())}})
+            try:
+                _purge_legacy_push_rows(email)
+            except Exception as exc:  # noqa: BLE001 -- purge is best-effort and retried next subscribe
+                logger.warning("legacy push purge failed: %s", exc)
+            existing = ddb.get_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
+                                    Key={"pk": {"S": pk}, "sk": {"S": device_id}}).get("Item")
+            item = dict(existing) if existing else {
+                "pk": {"S": pk}, "sk": {"S": device_id}, "device_id": {"S": device_id},
+                "label": {"S": label.strip()}, "created_at": {"S": _gate_fmt(_gate_now())},
+                "prefs": {"S": json.dumps(_notify_default_prefs(), separators=(",", ":"))}}
+            # Re-subscribe replaces endpoint/keys (and platform); keeps prefs, label, created_at.
+            item.update({
+                "platform": {"S": platform}, "endpoint": {"S": sub["endpoint"]},
+                "keys": {"M": {"p256dh": {"S": sub["p256dh"]}, "auth": {"S": sub["auth"]}}},
+                "endpoint_hash": {"S": hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()}})
+            ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item=item)
         except Exception as exc:  # noqa: BLE001
-            logger.error("push subscription write failed: %s", exc)
-            return _error(500, "Failed to save subscription.")
-        return _response(200, {"success": True, "subscribed": True, "id": sk})
-    if method == "DELETE":
-        endpoint = None
-        if isinstance(body, dict):
-            nested = body.get("subscription") if isinstance(body.get("subscription"), dict) else body
-            endpoint = nested.get("endpoint")
-        endpoint = endpoint or (event.get("queryStringParameters") or {}).get("endpoint")
-        if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 2048:
-            return _error(400, "endpoint is required.")
+            logger.error("push device write failed: %s", exc)
+            return _error(500, "Failed to save device.")
+        return _response(200, _notify_device_from_item(item))
+
+    if parts == ["devices"]:
+        if method != "GET":
+            return _error(405, "Method not allowed.")
         try:
-            ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={
-                "pk": {"S": f"PUSHSUB#{email}"},
-                "sk": {"S": hashlib.sha256(endpoint.encode("utf-8")).hexdigest()}})
+            items = ddb.query(TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                              ExpressionAttributeValues={":pk": {"S": pk}}).get("Items", [])
         except Exception as exc:  # noqa: BLE001
-            logger.error("push subscription delete failed: %s", exc)
-            return _error(500, "Failed to remove subscription.")
-        return _response(200, {"success": True, "subscribed": False})
-    return _error(405, "Method not allowed.")
+            logger.error("push device list failed: %s", exc)
+            return _error(500, "Failed to list devices.")
+        return _response(200, {"devices": [_notify_device_from_item(i) for i in items]})
+
+    if len(parts) >= 2 and parts[0] == "devices" and (len(parts) == 2 or parts[2:] in (["preferences"], ["test"])):
+        device_id, sub_route = parts[1], (parts[2] if len(parts) == 3 else "")
+        try:
+            item = ddb.get_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
+                                Key={"pk": {"S": pk}, "sk": {"S": device_id}}).get("Item")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("push device read failed: %s", exc)
+            return _error(500, "Failed to read device.")
+        if not item:
+            return _error(404, "Device not found.")
+        try:
+            if sub_route == "preferences":
+                if method == "GET":
+                    return _response(200, _notify_prefs_from_item(item))
+                if method == "PUT":
+                    prefs, why = _notify_normalize_prefs(_body())
+                    if prefs is None:
+                        return _error(400, why)
+                    ddb.update_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]},
+                                    UpdateExpression="SET prefs = :p",
+                                    ExpressionAttributeValues={":p": {"S": json.dumps(prefs, separators=(",", ":"))}})
+                    return _response(200, prefs)
+                return _error(405, "Method not allowed.")
+            if sub_route == "test":
+                if method != "POST":
+                    return _error(405, "Method not allowed.")
+                payload = {"web_push": 8030, "notification": {
+                    "title": "Enceladus test notification",
+                    "body": "Notifications are working on this device.",
+                    "navigate": APP_BASE_URL}}
+                try:
+                    status = _notify_send_raw(item, payload, "test")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("test push failed device-hash=%s: %s",
+                                   hashlib.sha256(device_id.encode()).hexdigest()[:8], exc)
+                    return _response(200, {"sent": False, "status_code": None})
+                if status in (404, 410):
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
+                ok = 200 <= status < 300
+                if ok:
+                    _notify_mark_sent(item)
+                return _response(200, {"sent": ok, "status_code": status})
+            if method == "PATCH":
+                body = _body()
+                label = body.get("label") if isinstance(body, dict) else None
+                if (not isinstance(body, dict) or set(body) != {"label"} or not isinstance(label, str)
+                        or not 1 <= len(label.strip()) <= 64):
+                    return _error(400, "label is required (1-64 chars).")
+                item["label"] = {"S": label.strip()}
+                ddb.update_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]},
+                                UpdateExpression="SET #l = :l", ExpressionAttributeNames={"#l": "label"},
+                                ExpressionAttributeValues={":l": item["label"]})
+                return _response(200, _notify_device_from_item(item))
+            if method == "DELETE":
+                ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
+                resp = _response(204, None)
+                resp["body"] = ""
+                return resp
+        except Exception as exc:  # noqa: BLE001
+            logger.error("push device operation failed: %s", exc)
+            return _error(500, "Device operation failed.")
+        return _error(405, "Method not allowed.")
+    return _error(404, "Not found.")
 
 
 def _notify_pending_count(project_id: str) -> Optional[int]:
@@ -18780,7 +18874,7 @@ def _notify_render(escalation: Dict[str, Any], escalation_id: str, level: int,
     risk = str(escalation.get("risk") or "medium")
     kind = str(escalation.get("kind") or "escalation")
     if level == 0:
-        body = "A decision is waiting in Enceladus"
+        body = _NOTIFY_GENERIC_BODY
     else:
         payload = escalation.get("payload") if isinstance(escalation.get("payload"), dict) else {}
         summary = str(escalation.get("justification") or escalation.get("title")
@@ -18791,17 +18885,25 @@ def _notify_render(escalation: Dict[str, Any], escalation_id: str, level: int,
             summary = summary[:119].rstrip() + "…"
         body = f"{escalation.get('project_id') or ''}: {kind} — {summary}".strip()
     notification: Dict[str, Any] = {
-        "title": f"Escalation · {risk}", "body": body,
+        "title": f"Escalation · {risk}" if level else "Escalation", "body": body,
         "navigate": f"{APP_BASE_URL.rstrip('/')}/escalations/{escalation_id}",
-        "tag": escalation_id,
-    }
+    }  # no "tag": DeclarativePushPayload (notify v2) forbids extra keys
     if badge is not None:
         notification["app_badge"] = badge
     return {"web_push": 8030, "notification": notification}
 
 
 def _notify_push_one(escalation_id: str, project_id: str) -> int:
-    """Send the push for one new escalation. Returns the number accepted."""
+    """Send the push for one new escalation, per approver device. Returns the number accepted.
+
+    Attribute mapping (notify v2): the notification "type" is the escalation
+    record's ``kind`` and its "risk" is the record's ``risk`` (default medium),
+    both read from the escalation item the SNS message points at. A device
+    receives the push only if ``prefs.types[kind].enabled`` and
+    ``risk >= prefs.types[kind].min_risk``; a missing type is disabled (ES-R1).
+    ``prefs.detail`` selects detailed vs generic text. Legacy PUSHSUB#/PUSHPREF#
+    rows are never read.
+    """
     escalation = _read_escalation_item(project_id, escalation_id)
     if not escalation or str(escalation.get("status") or "requested") != "requested":
         return 0
@@ -18809,47 +18911,42 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
     escalation.setdefault("project_id", project_id)
     kind, risk = str(escalation.get("kind") or "escalation"), str(escalation.get("risk") or "medium")
     risk_rank = _NOTIFY_RISKS.index(risk) if risk in _NOTIFY_RISKS else 1
-    ddb, vapid = _get_ddb(), _notify_vapid()
+    ddb = _get_ddb()
     badge = _notify_pending_count(project_id)
     sent = 0
     for email in sorted(_load_escalation_approver_allowlist()):
         try:
-            prefs = _notify_load_prefs(email)
-            if not prefs["enabled"]:
-                continue
-            cfg = prefs["types"].get(kind, {"enabled": True, "level": 1})
-            if not cfg.get("enabled", True):
-                continue
-            if risk_rank < _NOTIFY_RISKS.index(prefs["extra"].get("min_risk", "low")):
-                continue
-            subs = ddb.query(
+            devices = ddb.query(
                 TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
-                ExpressionAttributeValues={":pk": {"S": f"PUSHSUB#{email}"}}).get("Items", [])
-            if not subs:
-                continue
-            data = json.dumps(_notify_render(escalation, escalation_id, int(cfg.get("level", 1)), badge),
-                              separators=(",", ":")).encode("utf-8")
+                ExpressionAttributeValues={":pk": {"S": _notify_pk(email)}}).get("Items", [])
         except Exception as exc:  # noqa: BLE001 -- one approver never stops the rest
             logger.warning("push prepare failed approver-hash=%s: %s",
                            hashlib.sha256(email.encode()).hexdigest()[:8], exc)
             continue
-        for item in subs:
+        for item in devices:
             try:
-                endpoint = item["endpoint"]["S"]
-                body = _webpush.encrypt_aes128gcm(data, item["p256dh"]["S"], item["auth"]["S"])
-                headers = {**_webpush.vapid_headers(endpoint, vapid),
-                           "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
-                           "TTL": str(PUSH_TTL_SECONDS), "Urgency": "high", "Topic": escalation_id[:32]}
-                status = _webpush.http_send(endpoint, body, headers)
+                prefs = _notify_prefs_from_item(item)
+                cfg = prefs["types"].get(kind)
+                if not cfg or not cfg.get("enabled"):
+                    continue
+                if risk_rank < _NOTIFY_RISKS.index(cfg.get("min_risk", "low")):
+                    continue
+                payload = _notify_render(escalation, escalation_id, 1 if prefs["detail"] == "detailed" else 0, badge)
+                status = _notify_send_raw(item, payload, escalation_id)
                 if status in (404, 410):
-                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
-                                    Key={"pk": item["pk"], "sk": item["sk"]})
-                elif 200 <= int(status) < 300:
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
+                elif 200 <= status < 300:
                     sent += 1
+                    try:
+                        _notify_mark_sent(item)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("push last_sent_at update failed: %s", exc)
                 else:
-                    logger.warning("push rejected status=%s", status)
-            except Exception as exc:  # noqa: BLE001 -- one subscription never stops the rest
-                logger.warning("push send failed: %s", exc)
+                    logger.warning("push rejected status=%s device-hash=%s", status,
+                                   hashlib.sha256(item["sk"]["S"].encode()).hexdigest()[:8])
+            except Exception as exc:  # noqa: BLE001 -- one device never stops the rest
+                logger.warning("push send failed device-hash=%s: %s",
+                               hashlib.sha256(str(item.get("sk", {}).get("S", "")).encode()).hexdigest()[:8], exc)
     return sent
 
 
@@ -19067,7 +19164,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return _handle_escalation_watch(event, claims or {})
 
     # DVP-TSK-A23 (E4-R29..R32): escalation web push — approver-only notification routes.
-    if path in _NOTIFY_PATHS:
+    if path.startswith(_NOTIFY_PATH_PREFIX):
         return _handle_notifications(method, path, event, claims or {})
 
     # ENC-FTR-121 Ph3 (ENC-TSK-J70): Escalations — io approval queue + decisions

@@ -1,0 +1,1 @@
+{"def":"devicePreferences","valid":true,"body":{"types":{"deploy":{"enabled":true,"min_risk":"high"},"tracker":{"enabled":false,"min_risk":"low"}},"detail":"detailed"}}
