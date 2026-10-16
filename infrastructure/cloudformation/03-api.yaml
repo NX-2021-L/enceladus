@@ -66,6 +66,10 @@ Resources:
           - Cookie
           - X-Coordination-Internal-Key
           - X-Checkout-Assistant-Key
+          # DVP-TSK-986: the @io-kit/gates decide call sends If-Match (card etag) and Idempotency-Key. Without them
+          # every cross-origin decide (vagamod shell on io.vagamod.com) failed its CORS preflight.
+          - If-Match
+          - Idempotency-Key
         AllowCredentials: true
 
   # NOTE: Production $default stage was created manually and cannot be imported
@@ -984,6 +988,29 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/auth/logout
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  # ENC-TSK-Q83: thin passkey routes on auth_refresh; same integration, no gateway authorizer
+  # as /auth/logout (session cookie + io-kit/Origin gate enforced in the Lambda).
+  RouteAuthPasskeysList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/auth/passkeys"
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteAuthPasskeysFreshAuth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/auth/passkeys/fresh-auth"
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteAuthPasskeysDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/auth/passkeys/{credentialId}"
       Target: !Sub integrations/${AuthRefreshIntegration}
 
   # DVP-TSK-B42: server half of the PWA's "App refresh". Public and stateless:
@@ -3059,25 +3086,47 @@ Resources:
       RouteKey: "POST /api/v1/coordination/notifications/subscribe"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteNotificationsUnsubscribe:
+  # ENC-TSK-Q83 notify v2: per-device routes (v1 unsubscribe/preferences routes removed).
+  RouteNotificationsDevices:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "DELETE /api/v1/coordination/notifications/subscribe"
+      RouteKey: "GET /api/v1/coordination/notifications/devices"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteNotificationsPrefsGet:
+  RouteNotificationsDevicePrefsGet:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "GET /api/v1/coordination/notifications/preferences"
+      RouteKey: "GET /api/v1/coordination/notifications/devices/{deviceId}/preferences"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
-  RouteNotificationsPrefsPut:
+  RouteNotificationsDevicePrefsPut:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "PUT /api/v1/coordination/notifications/preferences"
+      RouteKey: "PUT /api/v1/coordination/notifications/devices/{deviceId}/preferences"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsDevicePatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/notifications/devices/{deviceId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsDeviceDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/notifications/devices/{deviceId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteNotificationsDeviceTest:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/notifications/devices/{deviceId}/test"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
   # DVP-TSK-A17 (E4-R14): public hub token exchange. The credential is an allow-listed

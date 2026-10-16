@@ -526,18 +526,20 @@ Resources:
           # these, gamma agent.retire hits prod coordination_api while tracker
           # checkout state lives in devops-project-tracker-gamma — retirement
           # never releases gamma task checkouts.
+          # DVP-TSK-B59 (isolation W5a-2): prod loops back through enceladus.jreese.net, not jreese.net. These explicit
+          # values override the B15 code defaults, so they were the last enceladus-mcp-server traffic on jreese.net.
           ENCELADUS_COORDINATION_API_BASE: !If
             - IsGamma
             - "https://enceladus-gamma.jreese.net/api/v1/coordination"
-            - "https://jreese.net/api/v1/coordination"
+            - "https://enceladus.jreese.net/api/v1/coordination"
           ENCELADUS_TRACKER_API_BASE: !If
             - IsGamma
             - "https://enceladus-gamma.jreese.net/api/v1/tracker"
-            - "https://jreese.net/api/v1/tracker"
+            - "https://enceladus.jreese.net/api/v1/tracker"
           CHECKOUT_SERVICE_API_BASE: !If
             - IsGamma
             - "https://enceladus-gamma.jreese.net/api/v1/checkout"
-            - "https://jreese.net/api/v1/checkout"
+            - "https://enceladus.jreese.net/api/v1/checkout"
           # ENC-TSK-Q58 / ENC-ISS-838: the embedded MCP server's hybrid retrieval
           # defaults GRAPH_QUERY_API_BASE to the PROD graphsearch API Gateway, so
           # the gamma gateway ranked the prod corpus. Gamma points at its own

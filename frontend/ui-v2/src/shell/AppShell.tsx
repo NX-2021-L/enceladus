@@ -6,7 +6,6 @@ import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { ScrollRegion, ScrollTopZone, useScrollActivity, useScrollToTop, useVisualViewportFrame } from '@io-kit/shell/react'
 import { AppLayout, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
-import { redirectToAddPasskey } from '../auth/authConfig'
 import { PasskeyResultNotice } from '../auth/PasskeyResultNotice'
 import { useUiStore } from '../store/uiStore'
 import { refreshApp } from '../offline/swUpdate'
@@ -18,7 +17,6 @@ import enceladusMarkUrl from '../../../design-system-2/assets/logos/enceladus-ma
 import './shell.css'
 
 const LOGOUT_HREF = '__logout__'
-const ADD_PASSKEY_HREF = '__add_passkey__'
 const REFRESH_APP_HREF = '__refresh_app__'
 const DESKTOP_QUERY = '(min-width: 48.0625rem)'
 // DVP-TSK-A09 (R16): split routes that fill the height from 960px (the page scroller does not scroll there).
@@ -41,6 +39,8 @@ const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Deployment manager', href: '/deployments' },
   { type: 'link' as const, text: 'Access tokens', href: '/access-tokens' },
   { type: 'link' as const, text: 'Terminal sessions', href: '/terminal-sessions' },
+  // ENC-TSK-Q84: shared @io-kit/settings page (Notifications, Passkeys).
+  { type: 'link' as const, text: 'Settings', href: '/settings' },
   { type: 'divider' as const },
   {
     type: 'link' as const,
@@ -49,8 +49,6 @@ const SIDEBAR_ITEMS = [
     icon: <RefreshCw size={16} strokeWidth={1.7} />,
     spin: true,
   },
-  // DVP-TSK-B24: Cognito-native passkey enrolment on the managed-login v2 custom domain.
-  { type: 'link' as const, text: 'Add a passkey', href: ADD_PASSKEY_HREF },
   { type: 'link' as const, text: 'Log out', href: LOGOUT_HREF },
 ]
 
@@ -60,7 +58,6 @@ function resolveActiveHref(pathname: string): string {
     (item) =>
       item.type === 'link' &&
       item.href !== LOGOUT_HREF &&
-      item.href !== ADD_PASSKEY_HREF &&
       item.href !== REFRESH_APP_HREF &&
       pathname.startsWith(item.href ?? ''),
   )
@@ -146,10 +143,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       // DVP-TSK-B41: async -- awaits the server logout (revokes the HttpOnly
       // refresh cookie) before navigating away.
       void performLogout()
-      return
-    }
-    if (href === ADD_PASSKEY_HREF) {
-      redirectToAddPasskey()
       return
     }
     if (href === REFRESH_APP_HREF) {

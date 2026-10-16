@@ -155,7 +155,7 @@ describe('one page header component', () => {
     'routes/SkillLibraryRoute.tsx',
     'routes/ChangelogRoute.tsx',
     'routes/EscalationsRoute.tsx',
-    'routes/NotificationSettingsRoute.tsx',
+    'routes/SettingsRoute.tsx',
     'routes/HomeRoute.tsx',
     'routes/PlaceholderRoute.tsx',
     'search/SearchSplitPage.tsx',

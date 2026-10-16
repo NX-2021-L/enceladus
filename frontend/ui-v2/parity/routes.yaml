@@ -132,8 +132,8 @@ routes:
       - "GET /api/v1/projects"
     auth: "session"
     surface: "enceladus"
-  - path: "/settings/notifications"
-    component: "frontend/ui-v2/src/routes/NotificationSettingsRoute.tsx"
+  - path: "/settings"
+    component: "frontend/ui-v2/src/routes/SettingsRoute.tsx"
     handlers:
       - "GET /api/v1/feed/corpus"
       - "GET /api/v1/feed/delta"

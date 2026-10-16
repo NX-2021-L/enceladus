@@ -29,6 +29,8 @@ describe('authConfig (managed-login v2 custom domain)', () => {
     expect(url.pathname).toBe('/oauth2/authorize')
     expect(url.searchParams.get('client_id')).toBe(CLIENT)
     expect(url.searchParams.get('response_type')).toBe('code')
+    // ENC-TSK-Q84: passkey list/delete need the user-admin scope
+    expect(url.searchParams.get('scope')).toBe('openid email profile aws.cognito.signin.user.admin')
     expect(buildLoginUrl()).not.toContain(PREFIX)
   })
 
