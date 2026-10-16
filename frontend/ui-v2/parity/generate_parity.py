@@ -301,6 +301,9 @@ def parse_routes() -> list[dict]:
             cm = re.search(r"component:\s*(\w+)\s*[,}\n]", blk)
             if lm:
                 entry = resolve(ROUTER, lm.group(1))
+            elif cm is None and "redirect(" in blk:
+                # ENC-TSK-Q84: component-less redirect routes render nothing to parity-check.
+                continue
             else:
                 imp = re.search(rf"import \{{[^}}]*\b{cm.group(1)}\b[^}}]*\}} from '(\./[^']+)'", code)
                 entry = resolve(ROUTER, imp.group(1))

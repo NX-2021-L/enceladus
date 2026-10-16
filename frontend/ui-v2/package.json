@@ -16,15 +16,16 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@io-kit/auth": "2.3.0",
+    "@io-kit/auth": "2.4.0",
     "@io-kit/feed": "1.1.1",
     "@io-kit/gates": "1.1.0",
     "@io-kit/md": "1.2.0",
-    "@io-kit/notify": "0.3.1",
+    "@io-kit/notify": "0.7.0",
     "@io-kit/recipes": "1.0.0",
     "@io-kit/schema_form": "0.2.1",
     "@io-kit/search": "1.0.1",
     "@io-kit/search-ui": "1.0.11",
+    "@io-kit/settings": "0.1.0",
     "@io-kit/shell": "0.7.0",
     "@io-kit/tokens": "0.1.0",
     "@tanstack/react-form": "1.33.5",

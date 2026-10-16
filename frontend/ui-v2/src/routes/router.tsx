@@ -143,10 +143,19 @@ const escalationDeepRoute = createRoute({
   path: '/escalations/$escalationId',
   component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationDeepRoute'),
 })
-const notificationSettingsRoute = createRoute({
+// ENC-TSK-Q84: the shared @io-kit/settings page (Notifications + Passkeys sections).
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: lazyRouteComponent(() => import('./SettingsRoute'), 'SettingsRoute'),
+})
+// Legacy deep link: now a section of /settings.
+const notificationSettingsRedirectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings/notifications',
-  component: lazyRouteComponent(() => import('./NotificationSettingsRoute'), 'NotificationSettingsRoute'),
+  beforeLoad: () => {
+    throw redirect({ to: '/settings', hash: 'notifications', replace: true })
+  },
 })
 // DVP-TSK-974: recipes over the primitive (lazy chunks; the kits stay out of the initial bundle).
 const recipesRoute = createRoute({
@@ -226,7 +235,8 @@ const routeTree = rootRoute.addChildren([
   skillLibraryRoute,
   escalationsRoute,
   escalationDeepRoute,
-  notificationSettingsRoute,
+  settingsRoute,
+  notificationSettingsRedirectRoute,
   sessionRoute,
   agentDetailRoute,
   ...placeholderRoutes,
