@@ -94,7 +94,7 @@ def test_fresh_auth_fresh_and_stale(env):
 
 
 def test_delete_requires_fresh_auth(env):
-    assert _call("DELETE", "/api/v1/auth/passkeys/cred-1") == (401, {"error": "fresh_auth_required"})
+    assert _call("DELETE", "/api/v1/auth/passkeys/cred-1") == (401, {"error": "fresh_auth_required", "code": "fresh_auth_required"})
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": "1.deadbeef"})[0] == 401
     stale = lf._fresh_auth_proof(RT, "u1", env["auth_time"], int(time.time()) - 301)
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": stale})[0] == 401
@@ -106,7 +106,7 @@ def test_delete_requires_fresh_auth(env):
 def test_delete_last_passkey_409(env):
     env["cog"].creds = [_cred(1)]
     code, body = _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": _proof(env)})
-    assert (code, body) == (409, {"error": "last_passkey"})
+    assert (code, body) == (409, {"error": "last_passkey", "code": "last_passkey"})
     assert env["cog"].deleted == []
 
 

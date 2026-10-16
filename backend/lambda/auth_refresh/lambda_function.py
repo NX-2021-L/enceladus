@@ -829,13 +829,13 @@ def _handle_passkeys(event: Dict, method: str, path: str) -> Dict:
                 return _passkey_json(ctx, 400, {"error": "invalid_credential_id"})
             if not _fresh_auth_valid(_header(event, "x-fresh-auth"), ctx["refresh_token"], ctx["sub"],
                                      ctx["auth_time"], time.time()):
-                return _passkey_json(ctx, 401, {"error": "fresh_auth_required"})
+                return _passkey_json(ctx, 401, {"error": "fresh_auth_required", "code": "fresh_auth_required"})
             creds = _list_passkeys(ctx["access_token"])
             ids = [c.get("CredentialId") for c in creds]
             if credential_id not in ids:
                 return _passkey_json(ctx, 404, {"error": "passkey_not_found"})
             if len(ids) <= 1:
-                return _passkey_json(ctx, 409, {"error": "last_passkey"})
+                return _passkey_json(ctx, 409, {"error": "last_passkey", "code": "last_passkey"})
             _get_cognito().delete_web_authn_credential(AccessToken=ctx["access_token"], CredentialId=credential_id)
             out = _passkey_json(ctx, 204, None)
             out["body"] = ""
