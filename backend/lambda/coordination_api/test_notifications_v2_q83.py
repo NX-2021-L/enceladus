@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator, FormatChecker  # noqa: E402
 
 from test_notifications_a23 import APPROVER, OTHER, _UA, _claims, _FakeTable  # noqa: E402
 from test_escalation_decision_j70 import coordination_lambda as lf  # noqa: E402
+import notify_v2  # noqa: E402
 
 _SCHEMA_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "contracts", "notify", "v2", "notify.schema.json"))
@@ -68,7 +69,7 @@ class Base(unittest.TestCase):
     def call(self, method, name, body=None, email=APPROVER):
         path = f"/api/v1/coordination/notifications/{name}"
         event = {"body": json.dumps(body) if body is not None else None, "headers": {}}
-        resp = lf._handle_notifications(method, path, event, _claims(email))
+        resp = notify_v2.handle(lf, method, path, event, _claims(email))
         return resp["statusCode"], (json.loads(resp["body"]) if resp["body"] else None)
 
     def subscribe(self, **kw):
@@ -208,7 +209,7 @@ class RouteTests(Base):
         self.subscribe()
         left = {k[0] for k in self.table.items}
         self.assertEqual({f"PUSHDEV#{APPROVER}", "PUSHSUB#other@example.com"}, left)
-        self.assertEqual(0, lf._purge_legacy_push_rows(APPROVER))
+        self.assertEqual(0, notify_v2._purge_legacy_push_rows(APPROVER))
         # GET devices ignores legacy rows
         self.table.put_item("t", {"pk": {"S": f"PUSHSUB#{APPROVER}"}, "sk": {"S": "z"}})
         self.assertEqual(1, len(self.call("GET", "devices")[1]["devices"]))
@@ -220,7 +221,7 @@ class SenderTests(Base):
         self.escalation = {"escalation_id": "ESC-1", "project_id": "enceladus", "status": "requested",
                            "kind": "acceptance", "risk": "high", "justification": "Promote X to prod"}
         for p in (mock.patch.object(lf, "_read_escalation_item", side_effect=lambda p, e: dict(self.escalation)),
-                  mock.patch.object(lf, "_notify_pending_count", return_value=2)):
+                  mock.patch.object(notify_v2, "_notify_pending_count", return_value=2)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -238,7 +239,7 @@ class SenderTests(Base):
 
     def test_all_off_by_default(self):
         self.subscribe()
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         self.assertEqual([], self.sent)
 
     def test_per_device_isolation_and_detail(self):
@@ -246,7 +247,7 @@ class SenderTests(Base):
         c = self.subscribe(device_id="dev-cccccccc")
         self.optin("dev-aaaaaaaa", "detailed")
         self.optin("dev-cccccccc", "generic")
-        self.assertEqual(2, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(2, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         got = self.payloads()
         self.assertNotIn(b["subscription"]["endpoint"], got)
         da = got[a["subscription"]["endpoint"]]["notification"]
@@ -262,16 +263,16 @@ class SenderTests(Base):
     def test_other_kind_and_disabled_not_sent(self):
         self.subscribe()
         self.optin("dev-aaaaaaaa", kind="deploy")
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         self.optin("dev-aaaaaaaa", enabled=False)
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
 
     def test_min_risk_filter(self):
         self.subscribe()
         self.optin("dev-aaaaaaaa", min_risk="critical")
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         self.optin("dev-aaaaaaaa", min_risk="high")
-        self.assertEqual(1, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
 
     def test_410_and_404_pruned_failures_isolated(self):
         bodies = [self.subscribe(device_id=f"dev-{c}{c}{c}{c}{c}{c}{c}{c}") for c in "abcd"]
@@ -280,7 +281,7 @@ class SenderTests(Base):
         self.status[bodies[0]["subscription"]["endpoint"]] = 410
         self.status[bodies[1]["subscription"]["endpoint"]] = 404
         self.status[bodies[2]["subscription"]["endpoint"]] = "raise"
-        self.assertEqual(1, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         left = {k[1] for k in self.table.items if k[0].startswith("PUSHDEV#")}
         self.assertEqual({bodies[2]["device_id"], bodies[3]["device_id"]}, left)
 
@@ -289,7 +290,7 @@ class SenderTests(Base):
         ep = "https://fcm.googleapis.com/fcm/send/legacy"
         self.table.put_item("t", {"pk": {"S": f"PUSHSUB#{APPROVER}"}, "sk": {"S": hashlib.sha256(ep.encode()).hexdigest()},
                                   "endpoint": {"S": ep}, "p256dh": {"S": ua.keys[0]}, "auth": {"S": ua.keys[1]}})
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
 
 
 if __name__ == "__main__":

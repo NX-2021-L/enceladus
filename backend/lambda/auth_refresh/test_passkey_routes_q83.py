@@ -14,6 +14,7 @@ sys.path.insert(0, str(HERE.parent / "shared_layer" / "python"))
 sys.path.insert(0, str(HERE.parent / "shared_layer"))
 spec = importlib.util.spec_from_file_location("auth_refresh_lf_q83", HERE / "lambda_function.py")
 lf = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = lf  # the hook passes sys.modules[__name__] to passkeys.py
 spec.loader.exec_module(lf)
 
 ORIGIN = "https://enceladus.jreese.net"
@@ -96,9 +97,9 @@ def test_fresh_auth_fresh_and_stale(env):
 def test_delete_requires_fresh_auth(env):
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1") == (401, {"error": "fresh_auth_required", "code": "fresh_auth_required"})
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": "1.deadbeef"})[0] == 401
-    stale = lf._fresh_auth_proof(RT, "u1", env["auth_time"], int(time.time()) - 301)
+    stale = lf.passkeys._fresh_auth_proof(RT, "u1", env["auth_time"], int(time.time()) - 301)
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": stale})[0] == 401
-    other = lf._fresh_auth_proof("RT.other", "u1", env["auth_time"], int(time.time()))
+    other = lf.passkeys._fresh_auth_proof("RT.other", "u1", env["auth_time"], int(time.time()))
     assert _call("DELETE", "/api/v1/auth/passkeys/cred-1", headers={"x-fresh-auth": other})[0] == 401
     assert env["cog"].deleted == []
 

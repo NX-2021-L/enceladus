@@ -118,8 +118,8 @@ class SenderTests(unittest.TestCase):
             mock.patch.object(lf, "_get_ddb", return_value=self.table),
             mock.patch.object(lf, "_read_escalation_item", side_effect=lambda p, e: dict(self.escalation)),
             mock.patch.object(lf, "_load_escalation_approver_allowlist", return_value={APPROVER, "two@example.com"}),
-            mock.patch.object(lf, "_notify_pending_count", return_value=3),
-            mock.patch.object(lf, "APP_BASE_URL", "https://enceladus.jreese.net/"),
+            mock.patch.object(lf.notify_v2, "_notify_pending_count", return_value=3),
+            mock.patch.object(lf.notify_v2, "APP_BASE_URL", "https://enceladus.jreese.net/"),
             mock.patch.object(lf._webpush, "http_send", side_effect=self._http_send),
             mock.patch.dict(os.environ, {"COORDINATION_INTERNAL_API_KEY": "sender-key"}),
         ]
@@ -161,18 +161,18 @@ class SenderTests(unittest.TestCase):
 
     def test_non_requested_events_and_non_pending_send_nothing(self):
         for ev in ("applied", "failed", "expired"):
-            self.assertEqual(0, lf._handle_escalation_push_sns(self.sns(event=ev))["sent"])
+            self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns(event=ev))["sent"])
         self.escalation["status"] = "approved"
-        self.assertEqual(0, lf._handle_escalation_push_sns(self.sns())["sent"])
+        self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         self.assertEqual([], self.sent)
 
 
     def test_handler_never_raises(self):
         with mock.patch.object(lf, "_read_escalation_item", side_effect=RuntimeError("ddb down")):
-            self.assertTrue(lf._handle_escalation_push_sns(self.sns())["success"])
+            self.assertTrue(lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["success"])
         with mock.patch.object(lf, "_load_escalation_approver_allowlist", side_effect=RuntimeError("s3")):
-            self.assertTrue(lf._handle_escalation_push_sns(self.sns())["success"])
-        self.assertTrue(lf._handle_escalation_push_sns({"Records": [{"EventSource": "aws:sns"}]})["success"])
+            self.assertTrue(lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["success"])
+        self.assertTrue(lf.notify_v2.handle_escalation_push_sns(lf, {"Records": [{"EventSource": "aws:sns"}]})["success"])
 
     def test_lambda_handler_routes_sns_events_to_the_sender(self):
         # ENC-TSK-Q83: per-device sender coverage lives in test_notifications_v2_q83.py.
