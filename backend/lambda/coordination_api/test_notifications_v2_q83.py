@@ -131,6 +131,25 @@ class RouteTests(Base):
         self.assertEqual(again["subscription"]["endpoint"], row["endpoint"]["S"])
         self.assertEqual(prefs, self.call("GET", "devices/dev-aaaaaaaa/preferences")[1])
 
+    def test_same_endpoint_new_device_id_merges_and_keeps_prefs(self):
+        first = self.subscribe()
+        prefs = {"types": {"acceptance": {"enabled": True, "min_risk": "high"}}, "detail": "generic"}
+        self.assertEqual(200, self.call("PUT", "devices/dev-aaaaaaaa/preferences", prefs)[0])
+        again = self.sub_body(device_id="dev-zzzzzzzz")
+        again["subscription"] = first["subscription"]
+        code, out = self.call("POST", "subscribe", again)
+        self.assertEqual(200, code)
+        self.assertEqual("dev-aaaaaaaa", out["device_id"])  # canonical (existing) id returned
+        rows = [k for k in self.table.items if k[0] == f"PUSHDEV#{APPROVER}"]
+        self.assertEqual([(f"PUSHDEV#{APPROVER}", "dev-aaaaaaaa")], rows)
+        self.assertEqual(prefs, self.call("GET", "devices/dev-aaaaaaaa/preferences")[1])
+
+    def test_different_endpoints_untouched(self):
+        self.subscribe()
+        self.subscribe(device_id="dev-bbbbbbbb")
+        rows = {k[1] for k in self.table.items if k[0] == f"PUSHDEV#{APPROVER}"}
+        self.assertEqual({"dev-aaaaaaaa", "dev-bbbbbbbb"}, rows)
+
     def test_devices_list(self):
         self.subscribe()
         self.subscribe(device_id="dev-bbbbbbbb", label="Mac", platform="macos")
@@ -302,6 +321,16 @@ class SenderTests(Base):
         self.assertEqual(0, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
         self.optin("dev-aaaaaaaa", min_risk="high")
         self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
+
+    def test_sender_sends_once_per_shared_endpoint(self):
+        body = self.subscribe()
+        self.optin(body["device_id"])
+        row = dict(self.table.items[(f"PUSHDEV#{APPROVER}", body["device_id"])])
+        row["sk"] = {"S": "dev-dupdupdup"}
+        row["device_id"] = {"S": "dev-dupdupdup"}
+        self.table.items[(f"PUSHDEV#{APPROVER}", "dev-dupdupdup")] = row
+        self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
+        self.assertEqual(1, len(self.sent))
 
     def test_410_and_404_pruned_failures_isolated(self):
         bodies = [self.subscribe(device_id=f"dev-{c}{c}{c}{c}{c}{c}{c}{c}") for c in "abcd"]

@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 d: Any = None  # the hosting lambda_function module, bound by handle()/handle_escalation_push_sns()
 
@@ -147,6 +147,45 @@ def _notify_mark_sent(item: Dict[str, Any]) -> None:
         UpdateExpression="SET last_sent_at = :t", ExpressionAttributeValues={":t": {"S": d._gate_fmt(d._gate_now())}})
 
 
+_NOTIFY_GENERIC_LABELS = frozenset({"iphone", "ipad", "android", "this device", "browser", "ios", "macos", "windows", "web"})
+
+
+def _prefs_any_enabled(item: Dict[str, Any]) -> bool:
+    types = _notify_prefs_from_item(item).get("types") or {}
+    return any(isinstance(c, dict) and c.get("enabled") for c in types.values())
+
+
+def _canonical_same_endpoint(pk: str, device_id: str, ehash: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """ENC-TSK-Q94: the principal's existing row to keep for this endpoint, plus the other same-endpoint rows.
+
+    Preference: the row already under ``device_id`` (if it shares the endpoint), else the
+    oldest same-endpoint row (the id the client first registered). (None, []) when none match.
+    """
+    rows = d._get_ddb().query(TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                              ExpressionAttributeValues={":pk": {"S": pk}}).get("Items", [])
+    same = [r for r in rows if (r.get("endpoint_hash") or {}).get("S") == ehash]
+    if not same:
+        return None, []
+    keep = next((r for r in same if r["sk"]["S"] == device_id), None) or min(
+        same, key=lambda r: (r.get("created_at") or {}).get("S", ""))
+    return keep, [r for r in same if r["sk"]["S"] != keep["sk"]["S"]]
+
+
+def _inherit_prefs(item: Dict[str, Any], donors: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Default/all-off ``item`` takes the most recently used enabled prefs (and generic label) from donors."""
+    if _prefs_any_enabled(item):
+        return item
+    live = [r for r in donors if _prefs_any_enabled(r)]
+    if not live:
+        return item
+    donor = max(live, key=lambda r: (r.get("last_sent_at") or r.get("created_at") or {}).get("S", ""))
+    item = dict(item)
+    item["prefs"] = donor["prefs"]
+    if donor.get("label") and item["label"]["S"].strip().lower() in _NOTIFY_GENERIC_LABELS:
+        item["label"] = donor["label"]
+    return item
+
+
 def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """Notify v2 routes (contracts/notify/v2). Approver allow-list only; fails closed."""
     if d._webpush is None:
@@ -201,18 +240,31 @@ def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims:
                 _purge_legacy_push_rows(email)
             except Exception as exc:  # noqa: BLE001 -- purge is best-effort and retried next subscribe
                 d.logger.warning("legacy push purge failed: %s", exc)
-            existing = ddb.get_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
-                                    Key={"pk": {"S": pk}, "sk": {"S": device_id}}).get("Item")
+            ehash = hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()
+            keep, dupes = None, []
+            try:
+                keep, dupes = _canonical_same_endpoint(pk, device_id, ehash)
+            except Exception as exc:  # noqa: BLE001 -- dedupe is best-effort; sender also dedupes
+                d.logger.warning("same-endpoint lookup failed: %s", exc)
+            existing = keep or ddb.get_item(TableName=PUSH_SUBSCRIPTIONS_TABLE,
+                                            Key={"pk": {"S": pk}, "sk": {"S": device_id}}).get("Item")
             item = dict(existing) if existing else {
                 "pk": {"S": pk}, "sk": {"S": device_id}, "device_id": {"S": device_id},
                 "label": {"S": label.strip()}, "created_at": {"S": d._gate_fmt(d._gate_now())},
                 "prefs": {"S": json.dumps(_notify_default_prefs(), separators=(",", ":"))}}
             # Re-subscribe replaces endpoint/keys (and platform); keeps prefs, label, created_at.
+            # An existing same-endpoint row wins: its device_id is the canonical one returned.
             item.update({
                 "platform": {"S": platform}, "endpoint": {"S": sub["endpoint"]},
                 "keys": {"M": {"p256dh": {"S": sub["p256dh"]}, "auth": {"S": sub["auth"]}}},
-                "endpoint_hash": {"S": hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()}})
+                "endpoint_hash": {"S": ehash}})
+            item = _inherit_prefs(item, dupes)
             ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item=item)
+            for r in dupes:
+                try:
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": r["pk"], "sk": r["sk"]})
+                except Exception as exc:  # noqa: BLE001
+                    d.logger.warning("same-endpoint duplicate delete failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
             d.logger.error("push device write failed: %s", exc)
             return d._error(500, "Failed to save device.")
@@ -365,8 +417,12 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
             d.logger.warning("push prepare failed approver-hash=%s: %s",
                            hashlib.sha256(email.encode()).hexdigest()[:8], exc)
             continue
+        sent_endpoints: set = set()
         for item in devices:
             try:
+                ehash = (item.get("endpoint_hash") or {}).get("S")
+                if ehash and ehash in sent_endpoints:
+                    continue  # ENC-TSK-Q94: one push per physical endpoint
                 prefs = _notify_prefs_from_item(item)
                 cfg = prefs["types"].get(kind)
                 if not cfg or not cfg.get("enabled"):
@@ -379,6 +435,8 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
                     ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
                 elif 200 <= status < 300:
                     sent += 1
+                    if ehash:
+                        sent_endpoints.add(ehash)
                     try:
                         _notify_mark_sent(item)
                     except Exception as exc:  # noqa: BLE001
