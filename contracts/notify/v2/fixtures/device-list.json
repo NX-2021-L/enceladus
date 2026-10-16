@@ -1,0 +1,1 @@
+{"def":"deviceList","valid":true,"body":{"devices":[{"device_id":"dev-12345678","label":"io iPhone","platform":"ios","created_at":"2026-10-15T12:00:00Z","last_sent_at":null},{"device_id":"dev-87654321","label":"Mac","platform":"macos","created_at":"2026-10-14T08:00:00Z","last_sent_at":"2026-10-15T09:30:00Z"}]}}

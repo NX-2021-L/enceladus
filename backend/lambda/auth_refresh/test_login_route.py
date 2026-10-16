@@ -54,7 +54,7 @@ def test_redirects_to_hosted_ui_authorize_with_step_up_params():
     assert q["response_type"] == "code"
     assert q["client_id"] == lf.COGNITO_CLIENT_ID
     assert q["redirect_uri"] == lf.WEBUI_OAUTH_REDIRECT_URI
-    assert q["scope"] == "openid email profile"
+    assert q["scope"] == "openid email profile aws.cognito.signin.user.admin"
     assert q["prompt"] == "login"
     assert q["max_age"] == "0"
     assert set(q) == {"response_type", "client_id", "redirect_uri", "scope", "state", "prompt", "max_age"}

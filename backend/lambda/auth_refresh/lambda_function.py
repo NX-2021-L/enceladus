@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -47,6 +48,9 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling module when loaded by path (tests)
+import passkeys  # ENC-TSK-Q83: thin passkey routes (does not import this module)
 
 from enceladus_shared.github_app_auth import (
     GitHubAppConfig,
@@ -167,8 +171,8 @@ def _extract_refresh_token(event: Dict) -> Optional[str]:
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie, Authorization, X-Requested-With, X-Io-Mode",
+        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Cookie, Authorization, X-Requested-With, X-Io-Mode, X-Fresh-Auth",
         "Access-Control-Allow-Credentials": "true",
     }
 
@@ -506,7 +510,7 @@ def _handle_login(event: Dict) -> Dict:
         "response_type": "code",
         "client_id": COGNITO_CLIENT_ID,
         "redirect_uri": WEBUI_OAUTH_REDIRECT_URI,
-        "scope": "openid email profile",
+        "scope": "openid email profile aws.cognito.signin.user.admin",
         "state": state,
     }
     if params.get("prompt") == "login":
@@ -839,6 +843,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     # DVP-TSK-B42: server half of the PWA's "App refresh" reset.
     if method == "GET" and path.rstrip("/").endswith("/app/refresh"):
         return _handle_app_refresh(event)
+
+    # ENC-TSK-Q83: thin passkey management (list / fresh-auth / delete).
+    if "/auth/passkeys" in path and method in ("GET", "DELETE"):
+        return passkeys.handle(sys.modules[__name__], event, method, path)
 
     if method != "POST":
         return _error(405, "Method not allowed.")
