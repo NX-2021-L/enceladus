@@ -210,7 +210,7 @@ class TestHubPrincipal(HubBase):
         logged = _entries(ddb)
         self.assertTrue(logged)
         self.assertEqual("hub_exchange:vagamod-keycloak", logged[-1]["auth_method"])
-        self.assertEqual("aal2", logged[-1]["assurance"])
+        self.assertEqual("aal1", logged[-1]["assurance"])  # ES-R7
         self.assertEqual(coord._gate_epoch_to_ts(now - 90), logged[-1]["auth_time"])
 
     def test_decide_invariants_still_refuse_non_allow_listed_and_malformed_hub_claims(self):
@@ -224,21 +224,15 @@ class TestHubPrincipal(HubBase):
             self.assertEqual(403, resp["statusCode"], bad)
             invoke.assert_not_called()
 
-    def test_assurance_is_derived_from_the_source_auth_time(self):
+    def test_assurance_is_session_level_regardless_of_proof(self):
+        # ES-R7: no step-up; a supplied proof is ignored and never raises or blocks.
         now = dt.datetime.now(dt.timezone.utc)
         fresh = int(now.timestamp()) - 60
         claims = hx.principal_claims(hx.verify_hub_token(self.hub_token(auth_time=fresh)))
-        ev, err = coord._escalation_auth_evidence(claims, {}, now)
-        self.assertEqual(("aal1", "hub_exchange:vagamod-keycloak"), (ev["assurance"], ev["auth_method"]))
-        ev, err = coord._escalation_auth_evidence(claims, {"stepUp": {"method": "cognito_max_age", "auth_time": fresh}}, now)
-        self.assertEqual("", err)
-        self.assertEqual("aal2", ev["assurance"])
-        _, err = coord._escalation_auth_evidence(claims, {"stepUp": {"method": "cognito_max_age", "auth_time": fresh - 5}}, now)
-        self.assertIn("does not match", err)
-        stale = int(now.timestamp()) - 4000
-        old = hx.principal_claims(hx.verify_hub_token(self.hub_token(auth_time=stale)))
-        _, err = coord._escalation_auth_evidence(old, {"stepUp": {"method": "cognito_max_age", "auth_time": stale}}, now)
-        self.assertIn("stale", err)
+        for body in ({}, {"stepUp": {"method": "cognito_max_age", "auth_time": fresh - 5}}):
+            ev, err = coord._escalation_auth_evidence(claims, body, now)
+            self.assertEqual("", err)
+            self.assertEqual(("aal1", "hub_exchange:vagamod-keycloak"), (ev["assurance"], ev["auth_method"]))
 
     def test_list_and_decide_routes_accept_hub_authorization(self):
         auth = {"authorization": f"HubExchange {self.hub_token()}"}

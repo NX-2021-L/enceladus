@@ -43,7 +43,7 @@ def _fresh_proof(claims=None):
 
 
 def _decide(item, decision="approve", body=None, headers=None, claims=None, target=None, subject=None,
-            proof=True, now=None):
+            proof=False, now=None):
     body = dict(body or {})
     if proof and not any(k in body for k in ("stepUp", "step_up", "proof")):
         body["stepUp"] = _fresh_proof(claims)   # high-risk cards need a fresh proof (DVP-TSK-980)
@@ -260,7 +260,7 @@ class TestHashChainedLog(unittest.TestCase):
         for entry in log:
             self.assertEqual("interactive_human", entry["auth_method"])
             self.assertEqual("2026-07-02T04:58:00Z", entry["auth_time"])
-            self.assertEqual("aal2", entry["assurance"])   # default kind risk is high: proof required
+            self.assertEqual("aal1", entry["assurance"])   # ES-R7: session assurance for all risks
         self.assertEqual({"status": 200, "resultRef": "ENC-ESC-001"}, log[1]["result"])
 
     def test_chain_links_and_verifies_across_a_prior_entry(self):
@@ -307,37 +307,6 @@ class TestHashChainedLog(unittest.TestCase):
             coord._handle_escalation_decision("enceladus", "ENC-ESC-001", "approve",
                                               {"body": json.dumps({"stepUp": _fresh_proof()}), "headers": {}}, CLAIMS)
         self.assertEqual(["write", "apply", "write"], order)
-
-    def test_unverified_step_up_method_is_retired_everywhere(self):
-        for item in (_escalation_item(), _low_item()):
-            resp, ddb, invoke = _decide(item, body={"stepUp": {"method": "step_up"}})
-            self.assertEqual(403, resp["statusCode"])
-            self.assertEqual("step_up_unverified", json.loads(resp["body"])["reason"])
-            ddb.update_item.assert_not_called()
-            invoke.assert_not_called()
-
-    def test_valid_cognito_max_age_proof_raises_assurance(self):
-        proof = {"method": "cognito_max_age", "auth_time": AUTH_TIME}
-        resp, ddb, _inv = _decide(_escalation_item(), body={"stepUp": proof})
-        self.assertEqual(200, resp["statusCode"], resp["body"])
-        for entry in _entries(ddb):
-            self.assertEqual("aal2", entry["assurance"])
-            self.assertEqual("cognito_max_age", entry["proof_method"])
-
-    def test_stale_or_foreign_proofs_are_refused_not_downgraded(self):
-        stale = dict(CLAIMS, auth_time=AUTH_TIME - 3600)
-        cases = [
-            ({"method": "cognito_max_age", "auth_time": AUTH_TIME - 3600}, stale),
-            ({"method": "cognito_max_age", "auth_time": AUTH_TIME - 5}, CLAIMS),   # not the token's auth_time
-            ({"method": "webauthn", "auth_time": AUTH_TIME}, CLAIMS),               # unverifiable method
-        ]
-        for proof, claims in cases:
-            resp, ddb, invoke = _decide(_escalation_item(), body={"stepUp": proof}, claims=claims)
-            self.assertEqual(403, resp["statusCode"], proof)
-            self.assertIn(json.loads(resp["body"])["reason"],
-                          ("step_up_required", "method_not_enabled"), proof)
-            ddb.update_item.assert_not_called()
-            invoke.assert_not_called()
 
     def test_get_view_exposes_etag_and_the_verified_chain(self):
         item = _escalation_item()
@@ -400,53 +369,10 @@ def _low_item():
 
 
 class TestStepUpEnforcement(unittest.TestCase):
-    """DVP-TSK-980: high|critical (or requiredAuth step_up) verdicts need a fresh proof."""
+    """ES-R7: no step-up for any risk; an allow-listed approver decides with the session."""
 
     def _reason(self, resp):
         return json.loads(resp["body"]).get("reason")
-
-    def test_card_refused_without_proof_for_approve_and_deny(self):
-        for decision in ("approve", "deny"):
-            for item in (_escalation_item(), dict(_low_item(), requiredAuth="step_up"),
-                         dict(_low_item(), risk="critical")):
-                resp, ddb, invoke = _decide(item, decision=decision, proof=False)
-                self.assertEqual(403, resp["statusCode"], (decision, item.get("kind")))
-                self.assertEqual("step_up_required", self._reason(resp))
-                ddb.update_item.assert_not_called()
-                invoke.assert_not_called()
-
-    def test_stale_proof_refused(self):
-        stale = dict(CLAIMS, auth_time=AUTH_TIME - 3600)
-        resp, ddb, _inv = _decide(_escalation_item(), claims=stale, proof=False,
-                                  body={"stepUp": {"method": "cognito_max_age", "auth_time": AUTH_TIME - 3600}})
-        self.assertEqual(403, resp["statusCode"])
-        self.assertEqual("step_up_required", self._reason(resp))
-        ddb.update_item.assert_not_called()
-
-    def test_webauthn_is_a_reserved_slot(self):
-        resp, ddb, _inv = _decide(_escalation_item(), proof=False,
-                                  body={"stepUp": {"method": "webauthn", "auth_time": AUTH_TIME}})
-        self.assertEqual(403, resp["statusCode"])
-        self.assertEqual("method_not_enabled", self._reason(resp))
-        self.assertNotIn("webauthn", coord._STEP_UP_VERIFIERS)
-        ddb.update_item.assert_not_called()
-
-    def test_fresh_proof_accepted_for_cognito_and_hub_principal(self):
-        hub = coord._hub_exchange.principal_claims({
-            "sub": "hub-sub-1", "email": "io@jreese.net", "auth_time": AUTH_TIME, "src_name": "enceladus",
-            "src_iss": "https://idp.example", "iat": AUTH_TIME + 30, "exp": AUTH_TIME + 3600})
-        for claims in (CLAIMS, hub):
-            resp, ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False,
-                                      body={"stepUp": _fresh_proof(claims)})
-            self.assertEqual(200, resp["statusCode"], resp["body"])
-            entries = _entries(ddb)
-            self.assertTrue(entries)
-            for entry in entries:
-                self.assertEqual("aal2", entry["assurance"])
-                self.assertEqual("cognito_max_age", entry["proof_method"])
-                self.assertEqual(claims.get("auth_method") or "interactive_human", entry["auth_method"])
-                self.assertTrue(entry["auth_time"])
-                self.assertNotIn("degraded_mode", entry)
 
     def test_lower_assurance_card_unaffected_and_logs_the_three_fields(self):
         resp, ddb, _inv = _decide(_low_item(), proof=False)
@@ -492,47 +418,10 @@ class TestKeycloakAcrStepUp(unittest.TestCase):
     def _reason(self, resp):
         return json.loads(resp["body"]).get("reason")
 
-    def test_passkey_acr_on_a_vagamod_hub_principal_is_accepted_and_logged(self):
-        claims = _hub_principal()
-        resp, ddb, invoke = _decide(_escalation_item(), claims=claims, proof=False,
-                                    body={"stepUp": _kc_proof()})
-        self.assertEqual(200, resp["statusCode"], resp["body"])
-        invoke.assert_called()
-        entries = _entries(ddb)
-        self.assertTrue(entries)
-        for entry in entries:
-            self.assertEqual("aal2", entry["assurance"])
-            self.assertEqual("keycloak_acr", entry["proof_method"])
-            self.assertEqual("hub_exchange:vagamod-keycloak", entry["auth_method"])
-            self.assertEqual("passkey", entry["acr"])
-            self.assertEqual(["hwk", "user"], entry["amr"])
-
     def test_keycloak_acr_is_registered_and_webauthn_stays_reserved(self):
         self.assertIn("keycloak_acr", coord._STEP_UP_VERIFIERS)
         self.assertNotIn("webauthn", coord._STEP_UP_VERIFIERS)
         self.assertIn("webauthn", coord._STEP_UP_RESERVED_METHODS)
-
-    def test_keycloak_acr_is_refused_when_the_claims_do_not_qualify(self):
-        cases = {
-            "wrong acr pwd": (_hub_principal(acr="pwd"), _kc_proof()),
-            "wrong acr 1": (_hub_principal(acr="1"), _kc_proof()),
-            "empty acr": (_hub_principal(acr=""), _kc_proof()),
-            "stale auth_time": (_hub_principal(auth_time=AUTH_TIME - 3600), _kc_proof(AUTH_TIME - 3600)),
-            "mismatched auth_time": (_hub_principal(), _kc_proof(AUTH_TIME - 5)),
-            "no auth_time in proof": (_hub_principal(), {"method": "keycloak_acr"}),
-            "cognito principal even with acr": (dict(CLAIMS, acr="passkey"), _kc_proof()),
-            "unknown source": (_hub_principal(source="other-idp"), _kc_proof()),
-            "source only in auth_method": (_hub_principal(hub_source_name="", auth_method="hub_exchange:other-idp"),
-                                           _kc_proof()),
-        }
-        for label, (claims, proof) in cases.items():
-            with self.subTest(label):
-                resp, ddb, invoke = _decide(_escalation_item(), claims=claims, proof=False,
-                                            body={"stepUp": proof})
-                self.assertEqual(403, resp["statusCode"], label)
-                self.assertEqual("step_up_required", self._reason(resp), label)
-                ddb.update_item.assert_not_called()
-                invoke.assert_not_called()
 
     def test_source_name_falls_back_to_the_auth_method_suffix(self):
         claims = _hub_principal(hub_source_name="")
@@ -540,77 +429,12 @@ class TestKeycloakAcrStepUp(unittest.TestCase):
         resp, ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False, body={"stepUp": _kc_proof()})
         self.assertEqual(200, resp["statusCode"], resp["body"])
 
-    def test_acr_config_is_env_driven_and_fails_closed_when_malformed(self):
-        with mock.patch.dict(os.environ, {"HUB_PASSKEY_ACR_JSON": '{"vagamod-keycloak": ["mfa", "passkey"]}'}):
-            resp, _ddb, _inv = _decide(_escalation_item(), claims=_hub_principal(acr="mfa"), proof=False,
-                                       body={"stepUp": _kc_proof()})
-            self.assertEqual(200, resp["statusCode"], resp["body"])
-        with mock.patch.dict(os.environ, {"HUB_PASSKEY_ACR_JSON": '{"vagamod-keycloak": ["mfa"]}'}):
-            resp, _ddb, _inv = _decide(_escalation_item(), claims=_hub_principal(acr="passkey"), proof=False,
-                                       body={"stepUp": _kc_proof()})
-            self.assertEqual(403, resp["statusCode"])
-        for bad in ("not json", "[]", '{"vagamod-keycloak": 5}', '{"vagamod-keycloak": []}', '"x"'):
-            with mock.patch.dict(os.environ, {"HUB_PASSKEY_ACR_JSON": bad}):
-                resp, _ddb, _inv = _decide(_escalation_item(), claims=_hub_principal(), proof=False,
-                                           body={"stepUp": _kc_proof()})
-                self.assertEqual(403, resp["statusCode"], bad)
-        accepted, required = coord._hub_passkey_config()          # unset -> the default
-        self.assertEqual({"vagamod-keycloak": frozenset({"passkey"})}, accepted)
-        self.assertEqual(frozenset(), required)
-
-    def test_enforcement_refuses_every_other_method_for_a_required_source(self):
-        claims = _hub_principal()
-        with mock.patch.dict(os.environ, {"HUB_PASSKEY_REQUIRED_SOURCES": "vagamod-keycloak"}):
-            for method in ("cognito_max_age", "webauthn", "step_up", "bogus"):
-                with self.subTest(method):
-                    resp, ddb, invoke = _decide(_escalation_item(), claims=claims, proof=False,
-                                                body={"stepUp": _kc_proof(method=method)})
-                    self.assertEqual(403, resp["statusCode"], method)
-                    self.assertEqual("passkey_required", self._reason(resp), method)
-                    self.assertEqual("this source requires a passkey step-up (method keycloak_acr)",
-                                     json.loads(resp["body"]).get("message") or json.loads(resp["body"]).get("error"))
-                    ddb.update_item.assert_not_called()
-                    invoke.assert_not_called()
-            resp, _ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False,
-                                       body={"stepUp": _kc_proof()})
-            self.assertEqual(200, resp["statusCode"], resp["body"])
-
-    def test_enforcement_is_per_source_per_assurance_and_off_by_default(self):
-        claims = _hub_principal()
-        # default (empty env): cognito_max_age still accepted for the very same principal
-        resp, ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False,
-                                  body={"stepUp": _kc_proof(method="cognito_max_age")})
-        self.assertEqual(200, resp["statusCode"], resp["body"])
-        for entry in _entries(ddb):
-            self.assertEqual("cognito_max_age", entry["proof_method"])
-        with mock.patch.dict(os.environ, {"HUB_PASSKEY_REQUIRED_SOURCES": " vagamod-keycloak , "}):
-            # another hub source and a Cognito principal are unaffected
-            for other in (_hub_principal(source="think-iograph", acr="1"), CLAIMS):
-                resp, _ddb, _inv = _decide(_escalation_item(), claims=other, proof=False,
-                                           body={"stepUp": _fresh_proof(other)})
-                self.assertEqual(200, resp["statusCode"], resp["body"])
-            # an aal1 gate does not demand a passkey
-            resp, _ddb, _inv = _decide(_low_item(), claims=claims, proof=False)
-            self.assertEqual(200, resp["statusCode"], resp["body"])
-            resp, _ddb, _inv = _decide(_low_item(), claims=claims, proof=False,
-                                       body={"stepUp": _kc_proof(method="cognito_max_age")})
-            self.assertEqual(200, resp["statusCode"], resp["body"])
-
-    def test_hint_names_keycloak_acr_for_hub_principals_only(self):
-        for claims, expect in ((_hub_principal(), True), (CLAIMS, False)):
-            resp, _ddb, _inv = _decide(_escalation_item(), claims=claims, proof=False)
-            self.assertEqual(403, resp["statusCode"])
-            body = json.loads(resp["body"])
-            self.assertEqual("step_up_required", body.get("reason"))
-            self.assertEqual(expect, "keycloak_acr" in json.dumps(body), claims.get("auth_mode"))
-            self.assertIn("cognito_max_age", json.dumps(body))
-
     def test_evidence_records_acr_and_amr_when_present_and_never_fails_when_absent(self):
         now = coord._gate_now()
         ev, err = coord._escalation_auth_evidence(_hub_principal(), {"stepUp": _kc_proof()}, now,
                                                   _escalation_item())
-        self.assertEqual("", err)
-        self.assertEqual(("passkey", ["hwk", "user"], "keycloak_acr", "aal2"),
+        self.assertEqual("", err)   # ES-R7: proof ignored, assurance stays aal1
+        self.assertEqual(("passkey", ["hwk", "user"], "none", "aal1"),
                          (ev["acr"], ev["amr"], ev["proof_method"], ev["assurance"]))
         ev, err = coord._escalation_auth_evidence(CLAIMS, {}, now, _low_item())
         self.assertEqual("", err)
@@ -624,3 +448,23 @@ class TestKeycloakAcrStepUp(unittest.TestCase):
         dirty = _hub_principal(amr=["ok", "bad value", 3])         # evidence re-sanitizes whatever it is handed
         ev, _err = coord._escalation_auth_evidence(dirty, {}, now, _low_item())
         self.assertEqual(["ok"], ev["amr"])
+
+
+class TestEs7NoStepUp(unittest.TestCase):
+    def test_required_assurance_is_always_aal1(self):
+        for item in (_escalation_item(), dict(_low_item(), requiredAuth="step_up"), dict(_low_item(), risk="critical")):
+            self.assertEqual("aal1", coord._escalation_required_assurance(item))
+
+    def test_high_risk_decision_by_allow_listed_approver_without_proof_succeeds(self):
+        for decision in ("approve", "deny"):
+            for item in (_escalation_item(), dict(_low_item(), risk="critical"), dict(_low_item(), requiredAuth="step_up")):
+                resp, ddb, _inv = _decide(item, decision=decision)
+                self.assertEqual(200, resp["statusCode"], (decision, resp["body"]))
+                for entry in _entries(ddb):
+                    self.assertEqual("aal1", entry["assurance"])
+
+    def test_non_allow_listed_caller_is_still_403(self):
+        resp, ddb, invoke = _decide(_escalation_item(), claims=dict(CLAIMS, email="other@example.com"))
+        self.assertEqual(403, resp["statusCode"])
+        ddb.update_item.assert_not_called()
+        invoke.assert_not_called()

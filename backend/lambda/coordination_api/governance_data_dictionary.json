@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.26",
+  "version": "2026-10-13.27",
   "updated_at": "2026-10-16T18:00:00Z",
-  "last_change_summary": "ENC-TSK-Q94: notify v2 subscribe merges same-endpoint devices (copies prefs, deletes duplicate rows); sender pushes once per endpoint_hash. Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
+  "last_change_summary": "ES-R7: escalation decisions no longer require step-up re-authentication (session assurance aal1 for all risks; allow-list, no-self-review, idempotency and state checks kept). Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
   "owners": [
     "enceladus-platform"
   ],
@@ -9582,6 +9582,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.27",
+      "date": "2026-10-16",
+      "summary": "ES-R7: removed step-up re-authentication for escalation decisions; session assurance (aal1) for all risks, requiredAuth step_up normalized to interactive_human; step-up verifiers retained but unused"
+    },
     {
       "version": "2026-10-13.26",
       "date": "2026-10-16",
