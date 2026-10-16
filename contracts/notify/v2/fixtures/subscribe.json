@@ -1,0 +1,1 @@
+{"def":"subscribeRequest","valid":true,"body":{"device_id":"dev-12345678","label":"io iPhone","platform":"ios","subscription":{"endpoint":"https://web.push.apple.com/abc","keys":{"p256dh":"BPk","auth":"Aut"}}}}
