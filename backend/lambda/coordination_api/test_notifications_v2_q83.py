@@ -157,6 +157,19 @@ class RouteTests(Base):
         self.assertEqual(404, self.call("GET", "devices/dev-zzzzzzzz/preferences")[0])
         self.assertEqual(405, self.call("DELETE", "devices/dev-aaaaaaaa/preferences")[0])
 
+    def test_per_type_detail_roundtrip_and_validation(self):
+        self.subscribe()
+        put = {"types": {"acceptance": {"enabled": True, "min_risk": "low", "detail": "generic"}},
+               "detail": "detailed"}
+        validate("#/$defs/devicePreferences", put)
+        self.assertEqual((200, put), self.call("PUT", "devices/dev-aaaaaaaa/preferences", put))
+        self.assertEqual(put, self.call("GET", "devices/dev-aaaaaaaa/preferences")[1])
+        bad = {"types": {"acceptance": {"enabled": True, "min_risk": "low", "detail": "verbose"}},
+               "detail": "detailed"}
+        self.assertEqual(400, self.call("PUT", "devices/dev-aaaaaaaa/preferences", bad)[0])
+        extra = {"types": {"acceptance": {"enabled": True, "min_risk": "low", "x": 1}}, "detail": "detailed"}
+        self.assertEqual(400, self.call("PUT", "devices/dev-aaaaaaaa/preferences", extra)[0])
+
     def test_rename(self):
         self.subscribe()
         code, out = self.call("PATCH", "devices/dev-aaaaaaaa", {"label": "Work phone"})
@@ -259,6 +272,22 @@ class SenderTests(Base):
         self.assertNotIn("Promote", json.dumps(dc))
         self.assertNotIn("enceladus:", dc["body"])
         self.assertIsNotNone(self.call("GET", "devices")[1]["devices"][0]["last_sent_at"])
+
+    def test_per_type_detail_overrides_device_detail(self):
+        a = self.subscribe()
+        prefs = {"types": {"acceptance": {"enabled": True, "min_risk": "low", "detail": "generic"}},
+                 "detail": "detailed"}
+        self.assertEqual(200, self.call("PUT", "devices/dev-aaaaaaaa/preferences", prefs)[0])
+        self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
+        body = self.payloads()[a["subscription"]["endpoint"]]["notification"]["body"]
+        self.assertEqual("New escalation awaiting your decision", body)
+
+    def test_type_without_detail_falls_back_to_device_detail(self):
+        a = self.subscribe()
+        self.optin("dev-aaaaaaaa", "detailed")
+        self.assertEqual(1, lf.notify_v2.handle_escalation_push_sns(lf, self.sns())["sent"])
+        body = self.payloads()[a["subscription"]["endpoint"]]["notification"]["body"]
+        self.assertTrue(body.startswith("enceladus: acceptance"))
 
     def test_other_kind_and_disabled_not_sent(self):
         self.subscribe()
