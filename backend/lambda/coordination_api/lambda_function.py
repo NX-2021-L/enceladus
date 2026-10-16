@@ -10717,9 +10717,9 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
         ref = str(escalation.get("target_record_id") or escalation.get("item_id") or "")
         items = [{"label": "requested change", "ref": ref}]
     escalation["evidence"] = items
-    if escalation.get("requiredAuth") not in (None, "session", "interactive_human", "step_up"):
-        escalation["requiredAuth"] = ("step_up" if str(escalation.get("risk")) in ("high", "critical")
-                                      else "interactive_human")
+    # ES-R7: no step-up tier; any risk is decided with the approver's session.
+    if escalation.get("requiredAuth") not in (None, "session", "interactive_human"):
+        escalation["requiredAuth"] = "interactive_human"
 
 
 def _gate_list_project_ids() -> List[str]:
@@ -11270,17 +11270,9 @@ class _StepUpRefusal(str):
 
 
 def _escalation_required_assurance(escalation: Optional[Dict[str, Any]]) -> str:
-    """'aal2' (step-up proof required) or 'aal1'. requiredAuth wins when present;
-    otherwise risk high|critical (the kind default when risk is absent) needs aal2."""
-    if not isinstance(escalation, dict):
-        return "aal1"
-    required = str(escalation.get("requiredAuth") or escalation.get("required_auth") or "").strip().lower()
-    if required:
-        return "aal2" if required in ("step_up", "aal2") else "aal1"
-    kind = str(escalation.get("kind") or "escalation")
-    risk = str(escalation.get("risk") or
-               _GATE_KIND_DEFAULTS.get(kind, _GATE_KIND_DEFAULTS["escalation"])[2]).strip().lower()
-    return "aal2" if risk in ("high", "critical") else "aal1"
+    """ES-R7: always 'aal1'. A signed-in, allow-listed approver decides any risk with
+    the existing session; no step-up, fresh auth_time, max_age or passkey proof."""
+    return "aal1"
 
 
 def _step_up_auth_time_problem(claims: Dict[str, Any], proof: Dict[str, Any],
@@ -11440,6 +11432,8 @@ def _escalation_auth_evidence(claims: Dict[str, Any], body: Dict[str, Any],
     proof = body.get("stepUp")
     if proof is None:
         proof = body.get("step_up", body.get("proof"))
+    if required != "aal2":  # ES-R7: always taken; a supplied proof is ignored, an absent one never blocks
+        return evidence, ""
     if proof in (None, "", {}):
         if required == "aal2":
             return None, _StepUpRefusal(_step_up_required_hint(claims), "step_up_required")
