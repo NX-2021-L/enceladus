@@ -1,0 +1,1 @@
+{"def": "devicePreferences", "valid": false, "body": {"types": {"escalation": {"enabled": true, "min_risk": "low", "detail": "verbose"}}, "detail": "detailed"}}

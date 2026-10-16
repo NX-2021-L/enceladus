@@ -2,149 +2,491 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://io-kit/notify.schema.v2.json",
   "title": "io-kit notify wire contract v2 (per-device)",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Per-device notification contract. Supersedes v1 account-level subscribe/preferences routes. See x-routes and x-removed.",
   "x-routes": {
-    "GET /notifications/vapid-public-key": { "request": null, "response": "#/$defs/VapidPublicKeyResponse" },
-    "POST /notifications/subscribe": { "request": "#/$defs/subscribeRequest", "response": "#/$defs/device" },
-    "GET /notifications/devices": { "request": null, "response": "#/$defs/deviceList" },
-    "GET /notifications/devices/{device_id}/preferences": { "request": null, "response": "#/$defs/devicePreferences" },
-    "PUT /notifications/devices/{device_id}/preferences": { "request": "#/$defs/devicePreferences", "response": "#/$defs/devicePreferences" },
-    "PATCH /notifications/devices/{device_id}": { "request": "#/$defs/renameRequest", "response": "#/$defs/device" },
-    "DELETE /notifications/devices/{device_id}": { "request": null, "response": null },
-    "POST /notifications/devices/{device_id}/test": { "request": null, "response": "#/$defs/testResponse" }
+    "GET /notifications/vapid-public-key": {
+      "request": null,
+      "response": "#/$defs/VapidPublicKeyResponse"
+    },
+    "POST /notifications/subscribe": {
+      "request": "#/$defs/subscribeRequest",
+      "response": "#/$defs/device"
+    },
+    "GET /notifications/devices": {
+      "request": null,
+      "response": "#/$defs/deviceList"
+    },
+    "GET /notifications/devices/{device_id}/preferences": {
+      "request": null,
+      "response": "#/$defs/devicePreferences"
+    },
+    "PUT /notifications/devices/{device_id}/preferences": {
+      "request": "#/$defs/devicePreferences",
+      "response": "#/$defs/devicePreferences"
+    },
+    "PATCH /notifications/devices/{device_id}": {
+      "request": "#/$defs/renameRequest",
+      "response": "#/$defs/device"
+    },
+    "DELETE /notifications/devices/{device_id}": {
+      "request": null,
+      "response": null
+    },
+    "POST /notifications/devices/{device_id}/test": {
+      "request": null,
+      "response": "#/$defs/testResponse"
+    }
   },
-  "x-removed": ["GET /notifications/preferences", "PUT /notifications/preferences", "DELETE /notifications/subscribe"],
+  "x-removed": [
+    "GET /notifications/preferences",
+    "PUT /notifications/preferences",
+    "DELETE /notifications/subscribe"
+  ],
   "$defs": {
     "VapidPublicKeyResponse": {
-      "type": "object", "required": ["public_key"], "additionalProperties": true,
-      "properties": { "public_key": { "type": "string", "minLength": 1 } }
+      "type": "object",
+      "required": [
+        "public_key"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "public_key": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "pushSubscription": {
-      "type": "object", "required": ["endpoint", "keys"], "additionalProperties": true,
+      "type": "object",
+      "required": [
+        "endpoint",
+        "keys"
+      ],
+      "additionalProperties": true,
       "properties": {
-        "endpoint": { "type": "string", "minLength": 1 },
-        "expirationTime": { "type": ["number", "null"] },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expirationTime": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "keys": {
-          "type": "object", "required": ["p256dh", "auth"],
-          "properties": { "p256dh": { "type": "string", "minLength": 1 }, "auth": { "type": "string", "minLength": 1 } }
+          "type": "object",
+          "required": [
+            "p256dh",
+            "auth"
+          ],
+          "properties": {
+            "p256dh": {
+              "type": "string",
+              "minLength": 1
+            },
+            "auth": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       }
     },
     "subscribeRequest": {
-      "type": "object", "required": ["device_id", "label", "platform", "subscription"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "device_id",
+        "label",
+        "platform",
+        "subscription"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "device_id": { "type": "string", "minLength": 8, "maxLength": 128 },
-        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "platform": { "enum": ["ios", "macos", "other"] },
-        "subscription": { "$ref": "#/$defs/pushSubscription" }
+        "device_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "platform": {
+          "enum": [
+            "ios",
+            "macos",
+            "other"
+          ]
+        },
+        "subscription": {
+          "$ref": "#/$defs/pushSubscription"
+        }
       }
     },
     "devicePreferences": {
-      "description": "Per-device preferences. On device creation every notification type has enabled:false (ES-R1); a device receives nothing until it opts in per type.",
-      "type": "object", "required": ["types", "detail"], "additionalProperties": false,
+      "description": "Per-device preferences. On device creation every notification type has enabled:false (ES-R1); a device receives nothing until it opts in per type. v2.1 (ES-R6): each type may carry its own detail; the device-level detail is the fallback.",
+      "type": "object",
+      "required": [
+        "types",
+        "detail"
+      ],
+      "additionalProperties": false,
       "properties": {
         "types": {
           "type": "object",
           "additionalProperties": {
-            "type": "object", "required": ["enabled", "min_risk"], "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "enabled",
+              "min_risk"
+            ],
+            "additionalProperties": false,
             "properties": {
-              "enabled": { "type": "boolean" },
-              "min_risk": { "enum": ["low", "medium", "high", "critical"] }
+              "enabled": {
+                "type": "boolean"
+              },
+              "min_risk": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ]
+              },
+              "detail": {
+                "enum": [
+                  "detailed",
+                  "generic"
+                ],
+                "description": "ES-R6 (v2.1): per-type text level on this device. Absent = use the device-level detail."
+              }
             }
           }
         },
-        "detail": { "enum": ["detailed", "generic"] }
+        "detail": {
+          "enum": [
+            "detailed",
+            "generic"
+          ],
+          "description": "Device default text level, used for any type without its own detail (v2.1)."
+        }
       }
     },
     "device": {
-      "type": "object", "required": ["device_id", "label", "platform", "created_at", "last_sent_at"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "device_id",
+        "label",
+        "platform",
+        "created_at",
+        "last_sent_at"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "device_id": { "type": "string", "minLength": 8, "maxLength": 128 },
-        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "platform": { "enum": ["ios", "macos", "other"] },
-        "created_at": { "type": "string", "format": "date-time" },
-        "last_sent_at": { "type": ["string", "null"], "format": "date-time" }
+        "device_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "platform": {
+          "enum": [
+            "ios",
+            "macos",
+            "other"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_sent_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
       }
     },
     "deviceList": {
-      "type": "object", "required": ["devices"], "additionalProperties": false,
-      "properties": { "devices": { "type": "array", "items": { "$ref": "#/$defs/device" } } }
+      "type": "object",
+      "required": [
+        "devices"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/device"
+          }
+        }
+      }
     },
     "renameRequest": {
-      "type": "object", "required": ["label"], "additionalProperties": false,
-      "properties": { "label": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      "type": "object",
+      "required": [
+        "label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
     },
     "testResponse": {
-      "type": "object", "required": ["sent", "status_code"], "additionalProperties": false,
-      "properties": { "sent": { "type": "boolean" }, "status_code": { "type": ["integer", "null"] } }
+      "type": "object",
+      "required": [
+        "sent",
+        "status_code"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sent": {
+          "type": "boolean"
+        },
+        "status_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
     },
     "PushPayload": {
-      "type": "object", "required": ["title", "body", "navigate"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "title",
+        "body",
+        "navigate"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "title": { "type": "string" }, "body": { "type": "string" },
-        "navigate": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string" }, "app_badge": { "type": "integer", "minimum": 0 }
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "navigate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "app_badge": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "DeclarativePushPayload": {
-      "type": "object", "required": ["web_push", "notification"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "web_push",
+        "notification"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "web_push": { "const": 8030 },
+        "web_push": {
+          "const": 8030
+        },
         "notification": {
-          "type": "object", "required": ["title", "body", "navigate"], "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "title",
+            "body",
+            "navigate"
+          ],
+          "additionalProperties": false,
           "properties": {
-            "title": { "type": "string" }, "body": { "type": "string" },
-            "navigate": { "type": "string", "minLength": 1 },
-            "app_badge": { "type": "integer", "minimum": 0 }
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "navigate": {
+              "type": "string",
+              "minLength": 1
+            },
+            "app_badge": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       }
     },
     "InboxItem": {
-      "type": "object", "required": ["id", "type", "title", "body", "navigate", "created_at", "updated_at", "read", "count"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "title",
+        "body",
+        "navigate",
+        "created_at",
+        "updated_at",
+        "read",
+        "count"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
-        "type": { "type": "string", "minLength": 1 },
-        "title": { "type": "string", "description": "Plain text, not HTML or markdown. Render as text; the server does not escape angle brackets or ampersands." },
-        "body": { "type": "string", "description": "Plain text, not HTML or markdown. Render as text; the server does not escape angle brackets or ampersands." },
-        "detail": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "Plain text with line breaks kept, not HTML or markdown. Render as text." },
-        "navigate": { "type": "string", "pattern": "^/(?![/\\\\])" },
-        "created_at": { "type": "string", "format": "date-time" },
-        "updated_at": { "type": "string", "format": "date-time" },
-        "read": { "type": "boolean" },
-        "count": { "type": "integer", "minimum": 1 }
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "description": "Plain text, not HTML or markdown. Render as text; the server does not escape angle brackets or ampersands."
+        },
+        "body": {
+          "type": "string",
+          "description": "Plain text, not HTML or markdown. Render as text; the server does not escape angle brackets or ampersands."
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Plain text with line breaks kept, not HTML or markdown. Render as text."
+        },
+        "navigate": {
+          "type": "string",
+          "pattern": "^/(?![/\\\\])"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "InboxPage": {
-      "type": "object", "required": ["items", "next_cursor", "has_more"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "items",
+        "next_cursor",
+        "has_more"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "items": { "type": "array", "items": { "$ref": "#/$defs/InboxItem" } },
-        "next_cursor": { "type": ["string", "null"], "pattern": "^[ua]\\.[0-9A-HJKMNP-TV-Z]{26}$" },
-        "has_more": { "type": "boolean" }
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InboxItem"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[ua]\\.[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "has_more": {
+          "type": "boolean"
+        }
       }
     },
     "UnreadCount": {
-      "type": "object", "required": ["unread"], "additionalProperties": false,
-      "properties": { "unread": { "type": "integer", "minimum": 0 } }
+      "type": "object",
+      "required": [
+        "unread"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unread": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     },
     "MarkReadRequest": {
       "oneOf": [
         {
-          "type": "object", "required": ["ids"], "additionalProperties": false,
-          "properties": { "ids": { "type": "array", "description": "1 to 100 distinct ids. The server answers 400 for a duplicate.", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" } } }
+          "type": "object",
+          "required": [
+            "ids"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ids": {
+              "type": "array",
+              "description": "1 to 100 distinct ids. The server answers 400 for a duplicate.",
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+              }
+            }
+          }
         },
         {
-          "type": "object", "required": ["all"], "additionalProperties": false,
-          "properties": { "all": { "const": true }, "before": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" } }
+          "type": "object",
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "all": {
+              "const": true
+            },
+            "before": {
+              "type": "string",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+            }
+          }
         }
       ]
     },
     "MarkReadResponse": {
-      "type": "object", "required": ["updated", "unread"], "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "updated",
+        "unread"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "updated": { "type": "integer", "minimum": 0 }, "unread": { "type": "integer", "minimum": 0 },
-        "more": { "type": "boolean" }
+        "updated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unread": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "more": {
+          "type": "boolean"
+        }
       }
     }
   }
