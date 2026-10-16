@@ -52,13 +52,18 @@ def _notify_normalize_prefs(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
     for kind, cfg in types.items():
         if not isinstance(kind, str) or not _NOTIFY_KIND_RE.match(kind) or not isinstance(cfg, dict):
             return None, f"Invalid type entry {kind!r}."
-        if set(cfg) != {"enabled", "min_risk"}:
-            return None, f"types.{kind} requires exactly enabled and min_risk."
+        if not {"enabled", "min_risk"} <= set(cfg) or set(cfg) - {"enabled", "min_risk", "detail"}:
+            return None, f"types.{kind} requires enabled and min_risk, plus optional detail."
         if not isinstance(cfg["enabled"], bool):
             return None, f"types.{kind}.enabled must be a boolean."
         if cfg["min_risk"] not in _NOTIFY_RISKS:
             return None, f"types.{kind}.min_risk must be one of {list(_NOTIFY_RISKS)}."
-        out_types[kind] = {"enabled": cfg["enabled"], "min_risk": cfg["min_risk"]}
+        entry = {"enabled": cfg["enabled"], "min_risk": cfg["min_risk"]}
+        if "detail" in cfg:
+            if cfg["detail"] not in _NOTIFY_DETAILS:
+                return None, f"types.{kind}.detail must be one of {list(_NOTIFY_DETAILS)}."
+            entry["detail"] = cfg["detail"]
+        out_types[kind] = entry
     if raw.get("detail") not in _NOTIFY_DETAILS:
         return None, f"detail must be one of {list(_NOTIFY_DETAILS)}."
     return {"types": out_types, "detail": raw["detail"]}, ""
@@ -368,7 +373,7 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
                     continue
                 if risk_rank < _NOTIFY_RISKS.index(cfg.get("min_risk", "low")):
                     continue
-                payload = _notify_render(escalation, escalation_id, 1 if prefs["detail"] == "detailed" else 0, badge)
+                payload = _notify_render(escalation, escalation_id, 1 if (cfg.get("detail") or prefs["detail"]) == "detailed" else 0, badge)
                 status = _notify_send_raw(item, payload, escalation_id)
                 if status in (404, 410):
                     ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
