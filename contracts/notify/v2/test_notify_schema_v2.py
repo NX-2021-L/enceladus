@@ -30,7 +30,7 @@ def _validator(def_name):
 def test_schema_is_valid_draft_2020_12():
     Draft202012Validator.check_schema(SCHEMA)
     assert SCHEMA["$id"].endswith("notify.schema.v2.json")
-    assert SCHEMA["version"] == "2.0.0"
+    assert SCHEMA["version"] == "2.1.0"
 
 
 @pytest.mark.parametrize("path", FIXTURES, ids=lambda p: p.stem)

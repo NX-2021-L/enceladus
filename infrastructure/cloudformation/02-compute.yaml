@@ -4593,6 +4593,7 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
                   - dynamodb:DeleteItem
+                  - dynamodb:UpdateItem
                   - dynamodb:Query
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-push-subscriptions${EnvironmentSuffix}"
