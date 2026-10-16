@@ -2,7 +2,7 @@
 import { createFetchNotifyApi, ensureSubscription } from '@io-kit/notify'
 import { gateFetch } from '../routes/GateInboxPanel'
 
-export const notifyApi = createFetchNotifyApi('/api/v1/coordination', gateFetch as typeof fetch)
+export const notifyApi = createFetchNotifyApi('/api/v1/coordination', gateFetch as typeof fetch, { version: 2 })
 
 /** On app start: when permission is already granted, keep the subscription valid (VAPID key rotation resubscribes). */
 export function ensureNotifySubscription(): void {

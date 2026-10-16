@@ -4,6 +4,7 @@
 // the server stays the authority on every action.
 import { defineNavRegistry } from '@io-kit/shell'
 import type { CapsFile, NavItemInput, PermissionManifest } from '@io-kit/shell'
+import { settingsNavItem } from '@io-kit/settings'
 import capsSnapshot from './capsSnapshot.json'
 
 /** Group that may execute (write) Enceladus actions; the escalation decide
@@ -30,7 +31,8 @@ export const NAV_ITEMS: NavItemInput[] = [
   { id: 'escalations', label: 'Escalations', route: '/escalations' },
   // DVP-TSK-974: recipes on the recipe primitive.
   { id: 'recipes', label: 'Recipes', route: '/recipes' },
-  { id: 'notifications', label: 'Notifications', route: '/settings/notifications', placement: 'secondary' },
+  // ENC-TSK-Q84: shared @io-kit/settings entry (Notifications + Passkeys sections live on /settings).
+  settingsNavItem({ capabilities: [], placement: 'secondary' }) as NavItemInput,
   // Former PlaceholderRoute stubs: planned, with an owner, no route until built.
   { id: 'component-registry', label: 'Component registry', route: '/component-registry', placement: 'secondary', ...PLANNED },
   { id: 'deployments', label: 'Deployment manager', route: '/deployments', placement: 'secondary', ...PLANNED },

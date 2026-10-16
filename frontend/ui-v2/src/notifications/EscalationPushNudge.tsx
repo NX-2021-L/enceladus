@@ -1,16 +1,17 @@
 /**
  * DVP-TSK-B21: escalations push opt-in (io request 2026-10-13). The kit's PushNudge renders bare markup (a
  * paragraph, an unstyled button and a literal "x") that ignores the Enceladus design system, so
- * the cockpit renders its own: the same behaviour on the kit client (pushSupported /
- * currentSubscription / enablePush) and the kit's dismissal key, so a prior "x" still counts,
- * shown as a design-system Alert with a primary action, like every other notice on the page.
+ * the cockpit renders its own: eligibility on the kit client (pushSupported /
+ * currentSubscription) and the kit's dismissal key, so a prior "x" still counts,
+ * shown as a design-system Alert. ENC-TSK-Q84: it no longer subscribes itself; the action links to
+ * Settings > Notifications (/settings#notifications), where the kit's NotificationsSection owns enablement.
  */
 import { useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { currentSubscription, enablePush, pushSupported, type NotifyApi } from '@io-kit/notify'
+import { currentSubscription, pushSupported } from '@io-kit/notify'
 import { PUSH_NUDGE_DISMISS_KEY } from '@io-kit/notify/react'
 import { useDisplayMode } from '@io-kit/shell/react'
-import { Alert, Button, Link } from '../design-system'
+import { Alert, Link } from '../design-system'
 
 // 'check' = eligible, waiting on the async subscription lookup.
 type PushState = 'hidden' | 'check' | 'prompt' | 'blocked'
@@ -31,16 +32,16 @@ function wasDismissed(storage: Pick<Storage, 'getItem'>): boolean {
 }
 
 export interface EscalationPushNudgeProps {
-  api: NotifyApi
+  /** @deprecated unused since ENC-TSK-Q84 (enablement moved to Settings); kept so callers need not change. */
+  api?: unknown
   storage?: Pick<Storage, 'getItem' | 'setItem'>
   className?: string
 }
 
-export function EscalationPushNudge({ api, storage, className }: EscalationPushNudgeProps) {
+export function EscalationPushNudge({ storage, className }: EscalationPushNudgeProps) {
   const [dismissed, setDismissed] = useState(() => wasDismissed(storage ?? window.localStorage))
   const [state, setState] = useState<PushState>(() =>
     pushSupported() && Notification.permission === 'default' ? 'check' : 'hidden')
-  const [busy, setBusy] = useState(false)
   const navigate = useNavigate()
   const displayMode = useDisplayMode()
   const iosBrowser = isIosSafari() && displayMode === 'browser'
@@ -54,40 +55,19 @@ export function EscalationPushNudge({ api, storage, className }: EscalationPushN
     return () => { live = false }
   }, [dismissed, iosBrowser, state])
 
-  if (dismissed || (!iosBrowser && state !== 'prompt' && state !== 'blocked')) return null
+  if (dismissed || (!iosBrowser && state !== 'prompt')) return null
 
   const dismiss = () => {
     try { (storage ?? window.localStorage).setItem(PUSH_NUDGE_DISMISS_KEY, '1') } catch { /* private mode */ }
     setDismissed(true)
   }
 
-  const turnOn = async () => {
-    setBusy(true)
-    try {
-      const r = await enablePush(api)
-      setState(r.ok ? 'hidden' : 'blocked')
-    } catch {
-      setState('blocked')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const settings = (
-    <Link href="/settings/notifications" onFollow={() => void navigate({ to: '/settings/notifications' })}>notification settings</Link>
-  )
-
   return (
     <div className={className} data-testid="push-nudge" data-state={iosBrowser ? 'ios' : state}>
       {!iosBrowser && state === 'prompt' && (
         <Alert type="info" header="Get notified when a gate needs your verdict" dismissible onDismiss={dismiss}
-          action={<Button variant="primary" loading={busy} onClick={() => void turnOn()}>Turn on notifications</Button>}>
-          New escalations and deploy approvals reach this device even when Enceladus is closed. Choose which ones in {settings}.
-        </Alert>
-      )}
-      {!iosBrowser && state === 'blocked' && (
-        <Alert type="warning" header="Notifications are blocked for this site" dismissible onDismiss={dismiss}>
-          Allow notifications for this site in your browser settings, then reload the page.
+          action={<Link href="/settings#notifications" onFollow={() => void navigate({ to: '/settings', hash: 'notifications' })}>Turn on notifications in Settings</Link>}>
+          New escalations and deploy approvals reach this device even when Enceladus is closed.
         </Alert>
       )}
       {iosBrowser && (

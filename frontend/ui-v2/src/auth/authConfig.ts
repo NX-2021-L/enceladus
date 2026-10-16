@@ -23,7 +23,7 @@
 const COGNITO_HOSTED_UI_DOMAIN =
   import.meta.env.VITE_COGNITO_HOSTED_UI_DOMAIN || 'https://auth.enceladus.jreese.net'
 const COGNITO_CLIENT_ID = '6q607dk3liirhtecgps7hifmlk'
-const COGNITO_SCOPES = 'openid email profile'
+const COGNITO_SCOPES = 'openid email profile aws.cognito.signin.user.admin'
 // ENC-TSK-P51: per-plane redirect. The deploy lane bakes VITE_OAUTH_REDIRECT_URI
 // at build (prod -> https://enceladus.jreese.net/api/v1/auth/callback); the gamma
 // URI stays as the default so local/dev and gamma builds are unchanged. The value

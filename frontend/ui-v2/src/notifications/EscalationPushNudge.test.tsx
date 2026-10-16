@@ -6,14 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const kit = vi.hoisted(() => ({
   supported: true,
   subscription: null as unknown,
-  enable: vi.fn(async () => ({ ok: true })),
   displayMode: 'browser' as 'browser' | 'standalone' | 'fullscreen',
 }))
 vi.mock('@io-kit/shell/react', () => ({ useDisplayMode: () => kit.displayMode }))
 vi.mock('@io-kit/notify', () => ({
   pushSupported: () => kit.supported,
   currentSubscription: async () => kit.subscription,
-  enablePush: kit.enable,
 }))
 const navigate = vi.hoisted(() => vi.fn())
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigate }))
@@ -31,7 +29,6 @@ async function mount() {
   await act(async () => { root.render(<EscalationPushNudge api={api} storage={storage} className="ev2-esc__notice" />) })
 }
 const nudge = () => host.querySelector('[data-testid="push-nudge"]')
-const buttons = () => Array.from(host.querySelectorAll('button'))
 
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -39,7 +36,6 @@ beforeEach(() => {
   kit.supported = true
   kit.displayMode = 'browser'
   kit.subscription = null
-  kit.enable.mockReset().mockResolvedValue({ ok: true })
   store = new Map()
   host = document.createElement('div')
   root = createRoot(host)
@@ -62,28 +58,12 @@ describe('EscalationPushNudge', () => {
     expect(host.querySelector('.ev2-alert.ev2-alert--info')).not.toBeNull()
     expect(host.querySelector('.ev2-alert__header')?.textContent).toBe('Get notified when a gate needs your verdict')
     const link = host.querySelector('a.ev2-link')
-    expect(link?.getAttribute('href')).toBe('/settings/notifications')
+    expect(link?.getAttribute('href')).toBe('/settings#notifications')
+    expect(link?.textContent).toBe('Turn on notifications in Settings')
     act(() => { (link as HTMLAnchorElement).click() })
-    expect(navigate).toHaveBeenCalledWith({ to: '/settings/notifications' })
-    expect(buttons().map((b) => b.textContent?.trim())).toContain('Turn on notifications')
+    expect(navigate).toHaveBeenCalledWith({ to: '/settings', hash: 'notifications' })
     expect(host.querySelector('.ev2-alert__dismiss')?.getAttribute('aria-label')).toBe('Dismiss')
     expect(host.textContent).not.toMatch(/(^|\s)x(\s|$)/)
-  })
-
-  it('turns on push and disappears', async () => {
-    await mount()
-    const on = buttons().find((b) => b.textContent?.includes('Turn on notifications'))!
-    await act(async () => { on.click() })
-    expect(kit.enable).toHaveBeenCalledWith(api)
-    expect(nudge()).toBeNull()
-  })
-
-  it('explains a refused permission as a warning', async () => {
-    kit.enable.mockResolvedValue({ ok: false })
-    await mount()
-    await act(async () => { buttons().find((b) => b.textContent?.includes('Turn on'))!.click() })
-    expect(nudge()?.getAttribute('data-state')).toBe('blocked')
-    expect(host.querySelector('.ev2-alert--warning .ev2-alert__header')?.textContent).toBe('Notifications are blocked for this site')
   })
 
   it('remembers a dismissal under the kit key', async () => {
@@ -110,7 +90,7 @@ describe('EscalationPushNudge', () => {
     await mount()
     expect(nudge()?.getAttribute('data-state')).toBe('ios')
     expect(host.querySelector('.ev2-alert__header')?.textContent).toBe('Add Enceladus to your Home Screen for notifications')
-    expect(buttons().map((b) => b.textContent?.trim())).not.toContain('Turn on notifications')
+    expect(host.querySelector('a.ev2-link')).toBeNull()
   })
 
   it('offers the normal prompt inside the installed iOS app', async () => {
