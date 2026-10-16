@@ -1,14 +1,14 @@
 {
-  "version": "2026-10-13.25",
-  "updated_at": "2026-10-16T12:00:00Z",
-  "last_change_summary": "ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
+  "version": "2026-10-13.26",
+  "updated_at": "2026-10-16T18:00:00Z",
+  "last_change_summary": "ENC-TSK-Q94: notify v2 subscribe merges same-endpoint devices (copies prefs, deletes duplicate rows); sender pushes once per endpoint_hash. Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
     "notifications.v2": {
-      "description": "ENC-TSK-Q83 (contracts/notify/v2/notify.schema.json): per-device escalation web push. Approver-only routes under /api/v1/coordination/notifications: GET vapid-public-key; POST subscribe {device_id,label,platform,subscription}; GET devices; GET|PUT devices/{device_id}/preferences; PATCH devices/{device_id} {label}; DELETE devices/{device_id} (204); POST devices/{device_id}/test (one generic push to that device only -> {sent,status_code}). Removed (410 Gone): GET|PUT preferences and DELETE subscribe. Storage in enceladus-push-subscriptions: pk PUSHDEV#<principal>, sk <device_id>, attributes device_id,label,platform,endpoint,keys{p256dh,auth},endpoint_hash,created_at,last_sent_at,prefs (JSON {types:{<kind>:{enabled,min_risk,detail?}},detail}; v2.1 ES-R6: types.<kind>.detail (detailed|generic) overrides the device detail for that type). New devices have no enabled type (ES-R1: all off); re-subscribe of the same device_id replaces endpoint/keys and keeps prefs/label. Sender: for each approver, each PUSHDEV device is pushed once iff prefs.types[escalation.kind].enabled and escalation.risk >= min_risk; detail=detailed sends title+summary, generic sends 'New escalation awaiting your decision'; 404/410 prunes the device row; success updates last_sent_at; failures log a device-id hash only. Legacy PUSHSUB#/PUSHPREF# rows are ignored and purged lazily (_purge_legacy_push_rows) on the principal's first v2 subscribe.",
+      "description": "ENC-TSK-Q83 (contracts/notify/v2/notify.schema.json): per-device escalation web push. Approver-only routes under /api/v1/coordination/notifications: GET vapid-public-key; POST subscribe {device_id,label,platform,subscription}; GET devices; GET|PUT devices/{device_id}/preferences; PATCH devices/{device_id} {label}; DELETE devices/{device_id} (204); POST devices/{device_id}/test (one generic push to that device only -> {sent,status_code}). Removed (410 Gone): GET|PUT preferences and DELETE subscribe. Storage in enceladus-push-subscriptions: pk PUSHDEV#<principal>, sk <device_id>, attributes device_id,label,platform,endpoint,keys{p256dh,auth},endpoint_hash,created_at,last_sent_at,prefs (JSON {types:{<kind>:{enabled,min_risk,detail?}},detail}; v2.1 ES-R6: types.<kind>.detail (detailed|generic) overrides the device detail for that type). New devices have no enabled type (ES-R1: all off); re-subscribe of the same device_id replaces endpoint/keys and keeps prefs/label; subscribe also merges any other row of the principal with the same endpoint_hash into the subscribing row (ENC-TSK-Q94: default prefs inherit the most recent enabled prefs, then duplicates are deleted). Sender: for each approver, each PUSHDEV device is pushed once (and at most once per endpoint_hash) iff prefs.types[escalation.kind].enabled and escalation.risk >= min_risk; detail=detailed sends title+summary, generic sends 'New escalation awaiting your decision'; 404/410 prunes the device row; success updates last_sent_at; failures log a device-id hash only. Legacy PUSHSUB#/PUSHPREF# rows are ignored and purged lazily (_purge_legacy_push_rows) on the principal's first v2 subscribe.",
       "fields": {
         "device_id": {"type": "string", "definition": "Client-generated stable device identifier, 8-128 chars; sort key of the PUSHDEV# row."},
         "prefs.types": {"type": "object", "definition": "Map of escalation kind -> {enabled:boolean, min_risk:low|medium|high|critical, detail?:detailed|generic (v2.1, ES-R6)}; absent kind == disabled."},
@@ -9582,6 +9582,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-13.26",
+      "date": "2026-10-16",
+      "summary": "ENC-TSK-Q94: notify v2 subscribe merges same-endpoint devices; sender dedupes endpoints"
+    },
     {
       "version": "2026-10-13.25",
       "date": "2026-10-16",

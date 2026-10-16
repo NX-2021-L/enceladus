@@ -147,6 +147,45 @@ def _notify_mark_sent(item: Dict[str, Any]) -> None:
         UpdateExpression="SET last_sent_at = :t", ExpressionAttributeValues={":t": {"S": d._gate_fmt(d._gate_now())}})
 
 
+_NOTIFY_GENERIC_LABELS = frozenset({"iphone", "ipad", "android", "this device", "browser", "ios", "macos", "windows", "web"})
+
+
+def _prefs_any_enabled(item: Dict[str, Any]) -> bool:
+    types = _notify_prefs_from_item(item).get("types") or {}
+    return any(isinstance(c, dict) and c.get("enabled") for c in types.values())
+
+
+def _merge_same_endpoint_devices(pk: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-TSK-Q94: one physical endpoint == one device row.
+
+    After the subscribing row is written, any OTHER row of the principal with the
+    same endpoint_hash is folded into it (prefs/label carried over when the
+    subscribing row is still default) and deleted. Returns the (possibly updated) item.
+    """
+    ddb = d._get_ddb()
+    ehash = (item.get("endpoint_hash") or {}).get("S")
+    if not ehash:
+        return item
+    rows = ddb.query(TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                     ExpressionAttributeValues={":pk": {"S": pk}}).get("Items", [])
+    others = [r for r in rows if r["sk"]["S"] != item["sk"]["S"]
+              and (r.get("endpoint_hash") or {}).get("S") == ehash]
+    if not others:
+        return item
+    if not _prefs_any_enabled(item):
+        donors = [r for r in others if _prefs_any_enabled(r)]
+        if donors:
+            donor = max(donors, key=lambda r: (r.get("last_sent_at") or r.get("created_at") or {}).get("S", ""))
+            item = dict(item)
+            item["prefs"] = donor["prefs"]
+            if donor.get("label") and item["label"]["S"].strip().lower() in _NOTIFY_GENERIC_LABELS:
+                item["label"] = donor["label"]
+            ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item=item)
+    for r in others:
+        ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": r["pk"], "sk": r["sk"]})
+    return item
+
+
 def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """Notify v2 routes (contracts/notify/v2). Approver allow-list only; fails closed."""
     if d._webpush is None:
@@ -213,6 +252,10 @@ def _handle_notifications(method: str, path: str, event: Dict[str, Any], claims:
                 "keys": {"M": {"p256dh": {"S": sub["p256dh"]}, "auth": {"S": sub["auth"]}}},
                 "endpoint_hash": {"S": hashlib.sha256(sub["endpoint"].encode("utf-8")).hexdigest()}})
             ddb.put_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Item=item)
+            try:
+                item = _merge_same_endpoint_devices(pk, item)
+            except Exception as exc:  # noqa: BLE001 -- merge is best-effort; sender also dedupes
+                d.logger.warning("same-endpoint device merge failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
             d.logger.error("push device write failed: %s", exc)
             return d._error(500, "Failed to save device.")
@@ -365,8 +408,12 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
             d.logger.warning("push prepare failed approver-hash=%s: %s",
                            hashlib.sha256(email.encode()).hexdigest()[:8], exc)
             continue
+        sent_endpoints: set = set()
         for item in devices:
             try:
+                ehash = (item.get("endpoint_hash") or {}).get("S")
+                if ehash and ehash in sent_endpoints:
+                    continue  # ENC-TSK-Q94: one push per physical endpoint
                 prefs = _notify_prefs_from_item(item)
                 cfg = prefs["types"].get(kind)
                 if not cfg or not cfg.get("enabled"):
@@ -379,6 +426,8 @@ def _notify_push_one(escalation_id: str, project_id: str) -> int:
                     ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
                 elif 200 <= status < 300:
                     sent += 1
+                    if ehash:
+                        sent_endpoints.add(ehash)
                     try:
                         _notify_mark_sent(item)
                     except Exception as exc:  # noqa: BLE001
