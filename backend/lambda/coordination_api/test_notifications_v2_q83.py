@@ -139,9 +139,10 @@ class RouteTests(Base):
         again["subscription"] = first["subscription"]
         code, out = self.call("POST", "subscribe", again)
         self.assertEqual(200, code)
+        self.assertEqual("dev-aaaaaaaa", out["device_id"])  # canonical (existing) id returned
         rows = [k for k in self.table.items if k[0] == f"PUSHDEV#{APPROVER}"]
-        self.assertEqual([(f"PUSHDEV#{APPROVER}", "dev-zzzzzzzz")], rows)
-        self.assertEqual(prefs, self.call("GET", "devices/dev-zzzzzzzz/preferences")[1])
+        self.assertEqual([(f"PUSHDEV#{APPROVER}", "dev-aaaaaaaa")], rows)
+        self.assertEqual(prefs, self.call("GET", "devices/dev-aaaaaaaa/preferences")[1])
 
     def test_different_endpoints_untouched(self):
         self.subscribe()
