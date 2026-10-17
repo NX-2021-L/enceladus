@@ -24,7 +24,7 @@
     "@io-kit/recipes": "1.0.0",
     "@io-kit/schema_form": "0.2.1",
     "@io-kit/search": "1.0.1",
-    "@io-kit/search-ui": "1.0.11",
+    "@io-kit/search-ui": "1.0.13",
     "@io-kit/settings": "0.1.0",
     "@io-kit/shell": "0.7.0",
     "@io-kit/tokens": "0.1.0",
