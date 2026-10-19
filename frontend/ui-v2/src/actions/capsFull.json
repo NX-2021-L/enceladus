@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-11T22:13:17Z",
+  "generatedAt": "2026-10-19T19:25:44Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -3256,108 +3256,61 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "governance_hash": {
+            "type": "string",
+            "description": "Current governance hash; obtain from governance.hash (search)."
+          },
           "project_id": {
             "type": "string",
             "description": "The project name."
           },
           "record_type": {
             "type": "string",
-            "enum": [
-              "task",
-              "issue",
-              "feature"
-            ],
-            "description": "The type of record to create."
+            "const": "plan",
+            "description": "Optional; always 'plan'. Set server-side when omitted."
           },
           "title": {
             "type": "string",
-            "description": "Title for the new record."
+            "description": "Title for the new plan."
           },
           "priority": {
             "type": "string",
             "description": "Priority (e.g., P0, P1, P2)."
           },
-          "related": {
+          "description": {
             "type": "string",
-            "description": "Comma-separated related record IDs."
+            "description": "Plan description."
           },
-          "acceptance_criteria": {
+          "intent": {
+            "type": "string",
+            "description": "Free-text WHY this plan exists."
+          },
+          "category": {
+            "type": "string",
+            "description": "Classification category."
+          },
+          "objectives_set": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Ordered objective record IDs (tasks or plans)."
+          },
+          "related_feature_id": {
+            "type": "string",
+            "description": "Feature this plan delivers (e.g. ENC-FTR-058)."
+          },
+          "attached_documents": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Acceptance criteria. Required for tasks (min 1). Also accepted for features (governed field, min 1)."
+            "description": "Document IDs (DOC-...) attached to the plan."
           },
-          "user_story": {
+          "related": {
             "type": "string",
-            "description": "User story for feature records (governed field). Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'. Required when record_type is 'feature'."
-          },
-          "evidence": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "description": {
-                  "type": "string"
-                },
-                "steps_to_duplicate": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "observed_by": {
-                  "type": "string"
-                },
-                "timestamp": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "description",
-                "steps_to_duplicate"
-              ]
-            },
-            "description": "Structured evidence for issue records (governed field, min 1). Each entry must include description and steps_to_duplicate."
-          },
-          "category": {
-            "type": "string",
-            "description": "Classification category. Features: epic|capability|enhancement|infrastructure. Tasks: implementation|investigation|documentation|maintenance|validation. Issues: bug|debt|risk|security|performance."
-          },
-          "transition_type": {
-            "type": "string",
-            "enum": [
-              "github_pr_deploy",
-              "lambda_deploy",
-              "web_deploy",
-              "code_only",
-              "no_code"
-            ],
-            "description": "Lifecycle arc for task records (ENC-ISS-092). Defaults to github_pr_deploy if omitted. no_code and code_only are sealed by ENC-FTR-060 and MUST be set at create time \u2014 they cannot be set or changed via tracker_set after creation. Only valid for record_type=task."
-          },
-          "intent": {
-            "type": "string",
-            "description": "Free-text WHY this record exists."
-          },
-          "primary_task": {
-            "type": "string",
-            "description": "Task ID of the execution entry-point task for features/issues (\u00a75.5). Must reference a valid task ID (contains -TSK- segment). Only valid for feature and issue record types."
-          },
-          "hypothesis": {
-            "type": "string",
-            "description": "Root cause hypothesis (issues). Required if technical_notes not provided."
-          },
-          "technical_notes": {
-            "type": "string",
-            "description": "Technical investigation context (issues). Required if hypothesis not provided."
-          },
-          "location_hint": {
-            "type": "string",
-            "description": "Suspected code paths for investigation (issues). Required at issue creation."
-          },
-          "governance_hash": {
-            "type": "string",
-            "description": "Current governance hash for write authorization."
+            "description": "Comma-separated related record IDs."
           },
           "coordination_request_id": {
             "type": "string",
@@ -3373,10 +3326,9 @@
           }
         },
         "required": [
+          "governance_hash",
           "project_id",
-          "record_type",
-          "title",
-          "governance_hash"
+          "title"
         ]
       },
       "outputSchema": {
@@ -4493,9 +4445,41 @@
             "enum": [
               "task",
               "issue",
-              "feature"
+              "feature",
+              "plan"
             ],
             "description": "The type of record to create."
+          },
+          "parent": {
+            "not": {},
+            "description": "Not accepted at create (ENC-ISS-855: it was silently dropped). For a hierarchical child task pass is_child=true + parent_task_id; for a flat parent link set it after create with tracker.set field=parent."
+          },
+          "is_child": {
+            "type": "boolean",
+            "description": "Task only: create a hierarchical child ID under parent_task_id (requires parent_task_id)."
+          },
+          "parent_task_id": {
+            "type": "string",
+            "description": "Task only: parent task ID for a hierarchical child (requires is_child=true)."
+          },
+          "objectives_set": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Plan only: ordered objective record IDs."
+          },
+          "related_feature_id": {
+            "type": "string",
+            "description": "Plan only: feature the plan delivers."
+          },
+          "attached_documents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Plan only: document IDs (DOC-...) attached to the plan."
           },
           "title": {
             "type": "string",
@@ -5161,7 +5145,8 @@
             "enum": [
               "task",
               "issue",
-              "feature"
+              "feature",
+              "plan"
             ],
             "description": "Filter by record type."
           },

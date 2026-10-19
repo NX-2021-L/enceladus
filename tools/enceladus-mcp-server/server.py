@@ -3798,7 +3798,7 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "record_type": {
                         "type": "string",
-                        "enum": ["task", "issue", "feature"],
+                        "enum": ["task", "issue", "feature", "plan"],
                         "description": "Filter by record type.",
                     },
                     "status": {
@@ -3941,7 +3941,10 @@ def _raw_tool_definitions() -> list[Tool]:
         ),
         Tool(
             name="tracker_create",
-            description="Creates a new tracker record (task, issue, or feature) in a project.",
+            description=(
+                "Creates a new tracker record (task, issue, feature, or plan) in a project. "
+                "Plans take objectives_set / related_feature_id / attached_documents."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3951,8 +3954,38 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "record_type": {
                         "type": "string",
-                        "enum": ["task", "issue", "feature"],
+                        "enum": ["task", "issue", "feature", "plan"],
                         "description": "The type of record to create.",
+                    },
+                    "parent": {
+                        "not": {},
+                        "description": (
+                            "Not accepted at create (ENC-ISS-855: it was silently dropped). For a "
+                            "hierarchical child task pass is_child=true + parent_task_id; for a flat "
+                            "parent link set it after create with tracker.set field=parent."
+                        ),
+                    },
+                    "is_child": {
+                        "type": "boolean",
+                        "description": "Task only: create a hierarchical child ID under parent_task_id (requires parent_task_id).",
+                    },
+                    "parent_task_id": {
+                        "type": "string",
+                        "description": "Task only: parent task ID for a hierarchical child (requires is_child=true).",
+                    },
+                    "objectives_set": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "description": "Plan only: ordered objective record IDs.",
+                    },
+                    "related_feature_id": {
+                        "type": "string",
+                        "description": "Plan only: feature the plan delivers.",
+                    },
+                    "attached_documents": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Plan only: document IDs (DOC-...) attached to the plan.",
                     },
                     "title": {
                         "type": "string",
@@ -6515,6 +6548,26 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
         return _result_text({"error": governance_error})
+
+    # ENC-ISS-855: the tracker API reads is_child + parent_task_id and ignored 'parent', so a
+    # create "succeeded" while discarding the caller's parent. Reject it instead.
+    if args.get("parent") not in (None, ""):
+        message = (
+            "'parent' is not accepted by tracker.create. For a hierarchical child task pass "
+            "is_child=true + parent_task_id; for a flat parent link use tracker.set field=parent "
+            "after create."
+        )
+        return _result_text(_error_payload(
+            "invalid_argument",
+            message,
+            details={"problem": {
+                "type": "urn:enceladus:problem:validation",
+                "title": "Validation failed",
+                "status": 422,
+                "detail": message,
+                "errors": [{"pointer": "/parent", "detail": message, "code": "not"}],
+            }},
+        ))
 
     project_id = args["project_id"]
     record_type = args["record_type"]

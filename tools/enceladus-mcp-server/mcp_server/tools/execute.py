@@ -123,7 +123,11 @@ def validate_step_arguments(contract: Optional[Dict[str, Any]], step_args: Dict[
                 if name not in step_args:
                     errors.append({"pointer": _pointer(path + [name]), "detail": f"'{name}' is a required property", "code": "required"})
             continue
-        errors.append({"pointer": _pointer(path), "detail": err.message, "code": str(err.validator)})
+        detail = err.message
+        if err.validator == "not" and isinstance(err.schema, dict) and err.schema.get("description"):
+            # A forbidden property (``"not": {}``) explains itself in its description.
+            detail = err.schema["description"]
+        errors.append({"pointer": _pointer(path), "detail": detail, "code": str(err.validator)})
     return errors
 
 
@@ -338,6 +342,32 @@ async def _execute_steps(args: dict, idempotency_key: str = "") -> list[TextCont
         step_args = {}
         if isinstance(raw_step.get("arguments"), dict):
             step_args.update(raw_step["arguments"])
+        # ENC-ISS-855: server-fixed argument values (plan.create -> record_type=plan). A
+        # conflicting caller value is rejected on BOTH the dry-run and the real path, since
+        # schema validation only runs on dry runs.
+        inject_errors = [
+            {"pointer": _pointer([key]), "detail": f"'{action}' fixes {key} to {value!r}; got {step_args[key]!r}", "code": "const"}
+            for key, value in (entry.get("inject") or {}).items()
+            if key in step_args and step_args[key] != value
+        ]
+        if inject_errors:
+            error_message = f"Arguments for action '{action}' failed validation"
+            failed_steps.append({"step": index, "action": action, "error": error_message, "error_code": "validation_failed"})
+            summary = {"tool": entry["tool"], "arguments": step_args, "status": "invalid", "error_code": "validation_failed"}
+            underlying_calls.append(summary)
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "invalid",
+                "error": error_message,
+                "resolved_calls": [summary],
+                "problem": problem_details(422, "Validation failed", error_message, errors=inject_errors),
+            })
+            problem_errors.extend({"step": index, **e} for e in inject_errors)
+            if on_error != "continue":
+                break
+            continue
+        step_args.update(entry.get("inject") or {})
         step_dry_run = overall_dry_run or bool(raw_step.get("dry_run", False))
         summary = {
             "tool": entry["tool"],
