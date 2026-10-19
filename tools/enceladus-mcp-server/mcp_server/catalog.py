@@ -129,6 +129,8 @@ def build_action_catalog(
     for via, name, entry in _registry_items(search_actions, coordination_actions, execute_actions):
         if entry.get("builtin"):
             input_schema: Optional[Dict[str, Any]] = _builtin_input_schema(name)
+        elif entry.get("input_schema") is not None:
+            input_schema = copy.deepcopy(entry["input_schema"])
         else:
             input_schema = resolve_input_schema(entry["tool"], raw_input_schemas)
         if input_schema is not None and entry.get("requires_governance_hash"):

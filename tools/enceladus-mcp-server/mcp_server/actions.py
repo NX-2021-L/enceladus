@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+from .action_schemas import PLAN_CREATE_INPUT_SCHEMA
+
 # Annotation presets: (readOnlyHint, destructiveHint, idempotentHint).
 # MCP semantics: destructiveHint is only meaningful when readOnlyHint is false;
 # we still emit all three explicitly so consumers never apply the spec defaults
@@ -63,7 +65,11 @@ def _entry(
     gov: bool = False,
     flag: Optional[str] = None,
     output: Optional[Dict[str, Any]] = None,
+    input_schema: Optional[Dict[str, Any]] = None,
+    inject: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """``input_schema`` overrides the tool's schema for this action only; ``inject``
+    fixes argument values that execute() sets server-side (ENC-ISS-855)."""
     read_only, destructive, idempotent = preset
     entry: Dict[str, Any] = {"tool": tool}
     if gov:
@@ -78,6 +84,10 @@ def _entry(
         entry["output"] = output
     if flag:
         entry["flag"] = flag
+    if input_schema is not None:
+        entry["input_schema"] = input_schema
+    if inject:
+        entry["inject"] = dict(inject)
     return entry
 
 
@@ -368,8 +378,11 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
 
     # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
     search_actions["plan.objectives_status"] = _entry("plan_objectives_status", "Get plan objectives status", READ)
+    # ENC-ISS-855 / ENC-TSK-R44: plan.create has its own plan contract and always creates
+    # a plan; it was a bare alias of tracker.create (enum task|issue|feature).
     execute_actions["plan.create"] = _entry(
         "tracker_create", "Create plan", CREATE, gov=True, output=_minted("record_id"),
+        input_schema=PLAN_CREATE_INPUT_SCHEMA, inject={"record_type": "plan"},
     )
     execute_actions["plan.checkout"] = _entry("plan_checkout", "Check out plan", TRANSITION, gov=True)
     execute_actions["plan.advance"] = _entry("plan_advance", "Advance plan status", TRANSITION, gov=True)

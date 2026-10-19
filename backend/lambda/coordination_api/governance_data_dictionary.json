@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-13.27",
-  "updated_at": "2026-10-16T18:00:00Z",
-  "last_change_summary": "ES-R7: escalation decisions no longer require step-up re-authentication (session assurance aal1 for all risks; allow-list, no-self-review, idempotency and state checks kept). Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
+  "version": "2026-10-19.1",
+  "updated_at": "2026-10-19T19:45:00Z",
+  "last_change_summary": "ENC-TSK-R44 (ENC-ISS-855): MCP contract change only, no new/renamed/removed dictionary fields. Code-mode plan.create now has its own plan input schema (record_type const plan; plan fields objectives_set, related_feature_id, attached_documents) and execute injects record_type=plan server-side, so it can no longer create a task; tracker.create and tracker.list record_type enums add plan; tracker.create rejects 'parent' with a 422 (/parent) instead of dropping it -- use is_child + parent_task_id, or tracker.set field=parent. Prior: ES-R7: escalation decisions no longer require step-up re-authentication (session assurance aal1 for all risks; allow-list, no-self-review, idempotency and state checks kept). Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
   "owners": [
     "enceladus-platform"
   ],
@@ -9582,6 +9582,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-19.1",
+      "date": "2026-10-19",
+      "summary": "ENC-TSK-R44 (ENC-ISS-855): MCP contract change only, no new/renamed/removed dictionary fields. Code-mode plan.create now has its own plan input schema (record_type const plan; plan fields objectives_set, related_feature_id, attached_documents) and execute injects record_type=plan server-side, so it can no longer create a task; tracker.create and tracker.list record_type enums add plan; tracker.create rejects 'parent' with a 422 (/parent) instead of dropping it -- use is_child + parent_task_id, or tracker.set field=parent."
+    },
     {
       "version": "2026-10-13.27",
       "date": "2026-10-16",
