@@ -710,3 +710,35 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
         ["record_id", "objective_ids"],
     ),
 }
+
+
+# ENC-ISS-855 / ENC-TSK-R44: plan.create is an execute action over tracker_create, which
+# HAS a raw Tool definition, so it cannot live in ACTION_INPUT_SCHEMAS (keyed by tool).
+# It is a per-action override: the plan fields tracker_mutation accepts for
+# record_type=plan, and record_type pinned to "plan" (execute() injects it).
+PLAN_CREATE_INPUT_SCHEMA: Dict[str, Any] = _governed(
+    {
+        "project_id": _str("The project name."),
+        "record_type": {
+            "type": "string",
+            "const": "plan",
+            "description": "Optional; always 'plan'. Set server-side when omitted.",
+        },
+        "title": _str("Title for the new plan."),
+        "priority": _str("Priority (e.g., P0, P1, P2)."),
+        "description": _str("Plan description."),
+        "intent": _str("Free-text WHY this plan exists."),
+        "category": _str("Classification category."),
+        "objectives_set": _arr(
+            "Ordered objective record IDs (tasks or plans).",
+            {"type": "string", "minLength": 1},
+        ),
+        "related_feature_id": _str("Feature this plan delivers (e.g. ENC-FTR-058)."),
+        "attached_documents": _arr("Document IDs (DOC-...) attached to the plan."),
+        "related": _str("Comma-separated related record IDs."),
+        "coordination_request_id": _str("Coordination request ID for write audit traceability."),
+        "dispatch_id": _str("Dispatch identifier associated with this write."),
+        "provider": _str("Provider name associated with this write."),
+    },
+    ["project_id", "title"],
+)
