@@ -329,6 +329,13 @@
       "class": "inert",
       "notes": "ENC-TSK-Q21 FR-8: relay -- fires on merge of an auto/promote-v4main-to-main-* PR to main and dispatches _deploy.yml (target_environment=v3-prod) whose v3-prod lane is environment-gated; also deletes the merged promote branch (a contents write, not a runtime mutation). Performs no AWS mutation itself."
     },
+    "s3-lifecycle-apply.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-R18/R19/R20 (ENC-PLN-100, ruling P100-R16): environment: v3-prod on the apply job; applies repo-declared, merge-preserving lifecycle specs (infrastructure/s3-lifecycle/*.json) to unmanaged prod buckets via the shared CFN deploy role. The plan job is read-only."
+    },
     "s3-governance-notification-wire.yml": {
       "class": "conditional",
       "gated_jobs": [
