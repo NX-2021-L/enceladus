@@ -124,6 +124,10 @@
       "class": "inert",
       "notes": "guard"
     },
+    "cost-resource-guard.yml": {
+      "class": "inert",
+      "notes": "guard (ENC-TSK-R31 / BRD FR-34): static diff of infrastructure/** CloudFormation templates between PR base and head; fails PRs that add persistent-cost resources without the cost-approved label. No AWS access."
+    },
     "ddb-add-deployment-manager-gsis.yml": {
       "class": "prod-mutating",
       "gated_jobs": [

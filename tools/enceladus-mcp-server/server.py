@@ -158,6 +158,14 @@ GOVERNANCE_RESOURCE_BODY_TTL_SECONDS = float(
     os.environ.get("ENCELADUS_GOVERNANCE_RESOURCE_BODY_TTL_SECONDS", "30")
 )
 S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
+# ENC-TSK-R32 (C2.8): cost digest surfaced by connection_health. Producer is ENC-TSK-R24, which writes this S3 object;
+# the MCP path only ever READS it (no Cost Explorer call anywhere on the MCP path). The bucket lives in us-west-1, so the
+# digest read uses its own client rather than the us-west-2 _get_s3() client.
+COST_DIGEST_BUCKET = os.environ.get("ENCELADUS_COST_DIGEST_BUCKET", "jreese-net")
+COST_DIGEST_KEY = os.environ.get("ENCELADUS_COST_DIGEST_KEY", "governance/cost-digest/latest.json")
+COST_DIGEST_REGION = os.environ.get("ENCELADUS_COST_DIGEST_REGION", "us-west-1")
+COST_DIGEST_TTL_SECONDS = float(os.environ.get("ENCELADUS_COST_DIGEST_TTL_SECONDS", "3600"))
+COST_DIGEST_UNAVAILABLE_TTL_SECONDS = float(os.environ.get("ENCELADUS_COST_DIGEST_UNAVAILABLE_TTL_SECONDS", "60"))
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
 # ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
 GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
@@ -5277,7 +5285,7 @@ def _raw_tool_definitions() -> list[Tool]:
         # --- System ---
         Tool(
             name="connection_health",
-            description="Reports connectivity to DynamoDB and S3 and returns the computed governance hash.",
+            description="Reports connectivity to DynamoDB and S3, returns the computed governance hash, and a compact cost_digest (cached S3 object; never a Cost Explorer call).",
             inputSchema={"type": "object", "properties": {}},
         ),
         # --- Dispatch Plan Generation (6.1.2) ---
@@ -9427,6 +9435,88 @@ def _graph_health_check() -> Dict[str, Any]:
     return {"status": "unreachable"}
 
 
+# ENC-TSK-R32 (C2.8): per-Lambda-container cache of the cost digest (module-level dict + monotonic timestamp).
+_cost_digest_s3_client = None
+_cost_digest_cache: Dict[str, Any] = {"value": None, "fetched_at": 0.0, "ttl": 0.0}
+_COST_DIGEST_FIELDS = (
+    "date",
+    "prior_day_spend",
+    "median_7d",
+    "regression",
+    "top_deltas",
+    "feed_publisher_invocations",
+    "invalidation_paths_mtd",
+)
+_COST_DIGEST_MAX_TOP_DELTAS = 5
+
+
+def _get_cost_digest_s3():
+    global _cost_digest_s3_client
+    if _cost_digest_s3_client is None:
+        if not _BOTO_AVAILABLE:
+            raise RuntimeError("boto3 is not installed. Run: pip install boto3")
+        _cost_digest_s3_client = boto3.client(
+            "s3",
+            region_name=COST_DIGEST_REGION,
+            config=Config(connect_timeout=2, read_timeout=3, retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    return _cost_digest_s3_client
+
+
+def _cost_digest_unavailable(reason: str) -> Dict[str, Any]:
+    return {"status": "unavailable", "reason": reason}
+
+
+def _compact_cost_digest(raw: Any) -> Dict[str, Any]:
+    """Pass through only the top-level summary fields the producer (ENC-TSK-R24) writes; ignore unknown fields."""
+    if not isinstance(raw, dict):
+        return _cost_digest_unavailable("invalid_digest_shape")
+    digest: Dict[str, Any] = {"status": "ok"}
+    for field in _COST_DIGEST_FIELDS:
+        if field not in raw:
+            continue
+        value = raw[field]
+        if field == "regression":
+            value = bool(value)
+        elif field == "top_deltas":
+            value = list(value)[:_COST_DIGEST_MAX_TOP_DELTAS] if isinstance(value, (list, tuple)) else []
+        digest[field] = value
+    return digest
+
+
+def _fetch_cost_digest() -> Dict[str, Any]:
+    """One S3 GetObject of the cost-digest object. Never raises; failures become status=unavailable."""
+    try:
+        obj = _get_cost_digest_s3().get_object(Bucket=COST_DIGEST_BUCKET, Key=COST_DIGEST_KEY)
+        body = obj["Body"].read()
+        return _compact_cost_digest(json.loads(body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body))
+    except json.JSONDecodeError:
+        return _cost_digest_unavailable("invalid_json")
+    except Exception as exc:  # noqa: BLE001 - connection_health must never fail on the digest
+        code = ""
+        response = getattr(exc, "response", None)
+        if isinstance(response, dict):
+            code = str((response.get("Error") or {}).get("Code") or "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return _cost_digest_unavailable("not_found")
+        return _cost_digest_unavailable(f"read_error:{code or type(exc).__name__}")
+
+
+def _get_cost_digest() -> Dict[str, Any]:
+    """Cost digest for connection_health: S3 read cached per container for 1h (failures are re-tried after 60s)."""
+    try:
+        now = time.monotonic()
+        cached = _cost_digest_cache.get("value")
+        if cached is not None and (now - float(_cost_digest_cache["fetched_at"])) < float(_cost_digest_cache["ttl"]):
+            return cached
+        value = _fetch_cost_digest()
+        ttl = COST_DIGEST_TTL_SECONDS if value.get("status") == "ok" else COST_DIGEST_UNAVAILABLE_TTL_SECONDS
+        _cost_digest_cache.update(value=value, fetched_at=now, ttl=ttl)
+        return value
+    except Exception as exc:  # noqa: BLE001
+        return _cost_digest_unavailable(f"read_error:{type(exc).__name__}")
+
+
 async def _connection_health(args: dict) -> list[TextContent]:
     # --- Phase 2d: HTTP API migration ---
     resp = _health_api_request()
@@ -9448,6 +9538,8 @@ async def _connection_health(args: dict) -> list[TextContent]:
         "history": "documents.history" in _SEARCH_ACTIONS,
         "prefix_map": "projects.prefix_map" in _SEARCH_ACTIONS,
     }
+    # ENC-TSK-R32 (C2.8): compact cost digest from S3 (cached 1h per container); never a Cost Explorer call.
+    resp["cost_digest"] = _get_cost_digest()
     return _result_text(resp)
 
 
