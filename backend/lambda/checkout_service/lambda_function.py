@@ -4553,10 +4553,13 @@ def handler_auto_checkout(event: dict, context: Any) -> dict:
     # We rely on a list endpoint; fall back to a targeted project scan.
     checked_out = []
     errors = []
+    breaker_tripped = False  # ENC-TSK-R29: stop the run on the first failed checkout
 
     # Fetch open tasks from enceladus project
     # Future: iterate over all active projects via project_service
     for project_id in ["enceladus", "devops", "harrisonfamily"]:
+        if breaker_tripped:
+            break
         status, result = _tracker_request("GET", f"/{project_id}?record_type=task&status=open")
         if status != 200:
             continue
@@ -4564,6 +4567,9 @@ def handler_auto_checkout(event: dict, context: Any) -> dict:
         tasks = result.get("items") or result.get("records") or []
         cutoff = time.time() - AUTO_CHECKOUT_WINDOW_MINUTES * 60
 
+        # Candidate filter (unchanged semantics); materialised so the circuit
+        # breaker can report how many candidates remain.
+        candidates = []
         for task in tasks:
             if task.get("active_agent_session", False):
                 continue  # Already checked out
@@ -4581,7 +4587,9 @@ def handler_auto_checkout(event: dict, context: Any) -> dict:
 
             if updated_ts > cutoff:
                 continue  # Too recent
+            candidates.append(task_id)
 
+        for idx, task_id in enumerate(candidates):
             # Auto-checkout
             co_status, co_result = _checkout_task(project_id, task_id, AUTO_CHECKOUT_PROVIDER)
             if co_status in (200, 201):
@@ -4596,6 +4604,15 @@ def handler_auto_checkout(event: dict, context: Any) -> dict:
             else:
                 errors.append(f"{project_id}/{task_id}: {co_result.get('error', 'unknown')}")
                 logger.warning("[WARN] Auto-checkout failed for %s/%s: %s", project_id, task_id, co_result)
+                # ENC-TSK-R29 circuit breaker: a non-2xx (e.g. the 405 since 94c990fa)
+                # means every remaining POST would fail the same way. Log once, stop.
+                logger.error(
+                    "[ERROR] Auto-checkout circuit breaker tripped: status=%s on %s/%s; "
+                    "skipping %d remaining candidate(s) in %s for this run",
+                    co_status, project_id, task_id, len(candidates) - idx - 1, project_id,
+                )
+                breaker_tripped = True
+                break
 
     logger.info("[END] Auto-checkout: checked_out=%d, errors=%d", len(checked_out), len(errors))
     return {
