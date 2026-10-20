@@ -27,6 +27,26 @@ included -- a NextPageToken follow-up consumes budget like any other call):
 
 Every CloudWatch/S3-size section is best-effort: a failure there becomes a null field plus a
 `warnings` entry, never a missing digest. A Cost Explorer failure raises (Lambda error alarm).
+
+Weekly persistent-cost compliance scan (ENC-TSK-R38, BRD FR-37) -- REPORT ONLY, no new schedule
+and no new resource (cost class C1). On Mondays (UTC weekday 0) or when the invocation event is
+{"compliance_scan": true}, a `compliance` object is added to the digest (latest.json AND the dated
+key; absent on every other day). It is NOT one of the top-level fields consumers read. Four
+read-only sections, each isolated (a failure becomes {"error": ...} plus a `warnings` entry, never
+a raise), each list capped at 50 entries with the full count alongside:
+
+    s3_noncurrent_expiration  Enceladus-owned buckets (name prefix enceladus-/devops-/jreese-net/
+                              support-lambda-artifacts) whose versioning is Enabled or Suspended and
+                              that have no ENABLED lifecycle rule with NoncurrentVersionExpiration.
+                              Never-versioned buckets have no noncurrent versions and are only counted.
+    log_group_retention       /aws/lambda/enceladus-*, /aws/lambda/devops-*, /aws/codebuild/enceladus*
+                              log groups with no retentionInDays (scan cap 1000).
+    ecr_lifecycle             ECR repositories with no lifecycle policy.
+    metric_dimensions         custom namespaces with > 50 distinct dimension sets (unbounded-dimension
+                              candidates; list_metrics page-capped, `truncated` flags a lower bound).
+
+A wall-clock budget (COMPLIANCE_BUDGET_SECONDS, split across the sections) keeps the scan inside the
+Lambda timeout; a section that runs out reports `partial: true`.
 """
 from __future__ import annotations
 
@@ -35,6 +55,7 @@ import logging
 import os
 import re
 import statistics
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -295,12 +316,297 @@ def collect_bucket_bytes(cw: Any, bucket: str, today_start: datetime) -> Dict[st
 
 
 # ---------------------------------------------------------------------------
+# Weekly persistent-cost compliance scan (ENC-TSK-R38, BRD FR-37) -- REPORT ONLY, never mutates
+# ---------------------------------------------------------------------------
+COMPLIANCE_WEEKDAY = 0  # Monday (datetime.weekday(), UTC)
+COMPLIANCE_LIST_CAP = 50
+COMPLIANCE_LOG_GROUP_SCAN_CAP = 1000
+COMPLIANCE_ECR_SCAN_CAP = 500
+COMPLIANCE_METRIC_PAGE_CAP = 10  # list_metrics pages (<= 500 metrics each) per namespace
+COMPLIANCE_DIMENSION_SET_LIMIT = 50
+COMPLIANCE_BUDGET_SECONDS = float(os.environ.get("COMPLIANCE_BUDGET_SECONDS", "75"))
+COMPLIANCE_ITEM_ERROR_SAMPLES = 5
+COMPLIANCE_BUCKET_PREFIXES = ("enceladus-", "devops-", "jreese-net", "support-lambda-artifacts")
+COMPLIANCE_LOG_GROUP_PREFIXES = ("/aws/lambda/enceladus-", "/aws/lambda/devops-", "/aws/codebuild/enceladus")
+COMPLIANCE_METRIC_NAMESPACES = [
+    s.strip()
+    for s in os.environ.get(
+        "COMPLIANCE_METRIC_NAMESPACES",
+        "Enceladus/Prod,Enceladus/Docstore,Enceladus/SnapStart,Enceladus/OpenSearch,"
+        "Enceladus/Synthetic,Enceladus/GraphHealth,EnceladusBackup",
+    ).split(",")
+    if s.strip()
+]
+
+ClientFor = Callable[[str, str], Any]  # (service, region) -> boto3 client
+
+
+class _Deadline:
+    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._end = clock() + seconds
+
+    def expired(self) -> bool:
+        return self._clock() >= self._end
+
+
+def compliance_due(now: datetime, event: Any) -> Optional[str]:
+    """Return the trigger ("event" | "weekly") when a compliance scan should run, else None."""
+    if isinstance(event, dict) and event.get("compliance_scan") is True:
+        return "event"
+    if now.weekday() == COMPLIANCE_WEEKDAY:
+        return "weekly"
+    return None
+
+
+def _error_code(exc: BaseException) -> str:
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        return str(resp.get("Error", {}).get("Code", ""))
+    return ""
+
+
+def _describe_error(exc: BaseException) -> str:
+    code = _error_code(exc)
+    return f"{type(exc).__name__}{':' + code if code else ''}"
+
+
+def _capped(names: List[Any]) -> Dict[str, Any]:
+    return {
+        "entries": names[:COMPLIANCE_LIST_CAP],
+        "entries_truncated": len(names) > COMPLIANCE_LIST_CAP,
+    }
+
+
+def _has_noncurrent_expiration(rules: List[Dict[str, Any]]) -> bool:
+    return any(r.get("Status") == "Enabled" and r.get("NoncurrentVersionExpiration") for r in rules or [])
+
+
+def scan_s3_noncurrent_expiration(client_for: ClientFor, deadline: _Deadline) -> Dict[str, Any]:
+    s3 = client_for("s3", DIGEST_S3_REGION)
+    owned = sorted(
+        (b["Name"], b.get("BucketRegion"))
+        for b in s3.list_buckets().get("Buckets", [])
+        if str(b.get("Name", "")).startswith(COMPLIANCE_BUCKET_PREFIXES)
+    )
+    versioned = unversioned = item_errors = 0
+    partial = False
+    noncompliant: List[Dict[str, Any]] = []
+    error_samples: List[str] = []
+    for name, region in owned:
+        if deadline.expired():
+            partial = True
+            break
+        bucket_client = client_for("s3", region) if region else s3
+        try:
+            status = bucket_client.get_bucket_versioning(Bucket=name).get("Status")
+            if status not in ("Enabled", "Suspended"):
+                unversioned += 1  # never versioned -> no noncurrent versions to expire
+                continue
+            versioned += 1
+            try:
+                rules = bucket_client.get_bucket_lifecycle_configuration(Bucket=name).get("Rules", [])
+            except Exception as exc:  # noqa: BLE001
+                if _error_code(exc) != "NoSuchLifecycleConfiguration":
+                    raise
+                rules = []
+            if not _has_noncurrent_expiration(rules):
+                noncompliant.append({"bucket": name, "versioning": status, "lifecycle_rules": len(rules)})
+        except Exception as exc:  # noqa: BLE001 -- one unreadable bucket must not lose the section
+            item_errors += 1
+            if len(error_samples) < COMPLIANCE_ITEM_ERROR_SAMPLES:
+                error_samples.append(f"{name}: {_describe_error(exc)}")
+    out: Dict[str, Any] = {
+        "checked": versioned + unversioned,
+        "versioned": versioned,
+        "unversioned": unversioned,
+        "noncompliant": len(noncompliant),
+        **_capped(noncompliant),
+        "item_errors": item_errors,
+        "partial": partial,
+    }
+    if error_samples:
+        out["item_error_samples"] = error_samples
+    return out
+
+
+def scan_log_group_retention(client_for: ClientFor, deadline: _Deadline) -> Dict[str, Any]:
+    logs = client_for("logs", WORKLOAD_REGION)
+    checked = 0
+    scan_capped = partial = False
+    missing: List[str] = []
+    for prefix in COMPLIANCE_LOG_GROUP_PREFIXES:
+        token: Optional[str] = None
+        while True:
+            if deadline.expired():
+                partial = True
+                break
+            kwargs: Dict[str, Any] = {"logGroupNamePrefix": prefix}
+            if token:
+                kwargs["nextToken"] = token
+            resp = logs.describe_log_groups(**kwargs)
+            for group in resp.get("logGroups", []):
+                if checked >= COMPLIANCE_LOG_GROUP_SCAN_CAP:
+                    scan_capped = True
+                    break
+                checked += 1
+                if group.get("retentionInDays") is None:
+                    missing.append(group["logGroupName"])
+            token = resp.get("nextToken")
+            if scan_capped or not token:
+                break
+        if scan_capped or partial:
+            break
+    return {
+        "region": WORKLOAD_REGION,
+        "checked": checked,
+        "noncompliant": len(missing),
+        **_capped(missing),
+        "scan_capped": scan_capped,
+        "partial": partial,
+    }
+
+
+def scan_ecr_lifecycle(client_for: ClientFor, deadline: _Deadline) -> Dict[str, Any]:
+    ecr = client_for("ecr", WORKLOAD_REGION)
+    checked = item_errors = 0
+    scan_capped = partial = False
+    missing: List[str] = []
+    error_samples: List[str] = []
+    token: Optional[str] = None
+    while not (scan_capped or partial):
+        if deadline.expired():
+            partial = True
+            break
+        kwargs: Dict[str, Any] = {"maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        resp = ecr.describe_repositories(**kwargs)
+        for repo in resp.get("repositories", []):
+            if checked >= COMPLIANCE_ECR_SCAN_CAP:
+                scan_capped = True
+                break
+            checked += 1
+            name = repo["repositoryName"]
+            try:
+                ecr.get_lifecycle_policy(repositoryName=name)
+            except Exception as exc:  # noqa: BLE001
+                if _error_code(exc) == "LifecyclePolicyNotFoundException":
+                    missing.append(name)
+                else:
+                    item_errors += 1
+                    if len(error_samples) < COMPLIANCE_ITEM_ERROR_SAMPLES:
+                        error_samples.append(f"{name}: {_describe_error(exc)}")
+        token = resp.get("nextToken")
+        if not token:
+            break
+    out: Dict[str, Any] = {
+        "region": WORKLOAD_REGION,
+        "checked": checked,
+        "noncompliant": len(missing),
+        **_capped(missing),
+        "item_errors": item_errors,
+        "scan_capped": scan_capped,
+        "partial": partial,
+    }
+    if error_samples:
+        out["item_error_samples"] = error_samples
+    return out
+
+
+def scan_metric_dimensions(client_for: ClientFor, deadline: _Deadline) -> Dict[str, Any]:
+    cw = client_for("cloudwatch", WORKLOAD_REGION)
+    checked = item_errors = 0
+    partial = False
+    candidates: List[Dict[str, Any]] = []
+    error_samples: List[str] = []
+    for namespace in COMPLIANCE_METRIC_NAMESPACES:
+        if deadline.expired():
+            partial = True
+            break
+        try:
+            dim_sets: set = set()
+            metrics = pages = 0
+            truncated = False
+            token: Optional[str] = None
+            while True:
+                kwargs: Dict[str, Any] = {"Namespace": namespace}
+                if token:
+                    kwargs["NextToken"] = token
+                resp = cw.list_metrics(**kwargs)
+                pages += 1
+                for metric in resp.get("Metrics", []):
+                    metrics += 1
+                    dim_sets.add(tuple(sorted((d["Name"], d["Value"]) for d in metric.get("Dimensions", []))))
+                token = resp.get("NextToken")
+                if not token:
+                    break
+                if pages >= COMPLIANCE_METRIC_PAGE_CAP:
+                    truncated = True  # distinct count below is a lower bound
+                    break
+        except Exception as exc:  # noqa: BLE001
+            item_errors += 1
+            if len(error_samples) < COMPLIANCE_ITEM_ERROR_SAMPLES:
+                error_samples.append(f"{namespace}: {_describe_error(exc)}")
+            continue
+        checked += 1
+        if len(dim_sets) > COMPLIANCE_DIMENSION_SET_LIMIT:
+            candidates.append({
+                "namespace": namespace,
+                "distinct_dimension_sets": len(dim_sets),
+                "metrics": metrics,
+                "truncated": truncated,
+            })
+    candidates.sort(key=lambda c: (-c["distinct_dimension_sets"], c["namespace"]))
+    out: Dict[str, Any] = {
+        "region": WORKLOAD_REGION,
+        "dimension_set_limit": COMPLIANCE_DIMENSION_SET_LIMIT,
+        "checked": checked,
+        "noncompliant": len(candidates),
+        **_capped(candidates),
+        "item_errors": item_errors,
+        "partial": partial,
+    }
+    if error_samples:
+        out["item_error_samples"] = error_samples
+    return out
+
+
+COMPLIANCE_SECTIONS: List[Tuple[str, Callable[[ClientFor, _Deadline], Dict[str, Any]]]] = [
+    ("s3_noncurrent_expiration", scan_s3_noncurrent_expiration),
+    ("log_group_retention", scan_log_group_retention),
+    ("ecr_lifecycle", scan_ecr_lifecycle),
+    ("metric_dimensions", scan_metric_dimensions),
+]
+
+
+def collect_compliance(
+    client_for: ClientFor,
+    trigger: str,
+    budget_seconds: float = COMPLIANCE_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> Dict[str, Any]:
+    """Run every section in isolation; a failing section yields {"error": ...}, never a raise."""
+    compliance: Dict[str, Any] = {"mode": "report_only", "trigger": trigger}
+    share = budget_seconds / len(COMPLIANCE_SECTIONS)
+    for key, fn in COMPLIANCE_SECTIONS:
+        try:
+            compliance[key] = fn(client_for, _Deadline(share, clock))
+        except Exception as exc:  # noqa: BLE001
+            compliance[key] = {"error": f"{_describe_error(exc)}: {str(exc)[:200]}"}
+            LOGGER.warning(json.dumps({"event": "cost_digest_compliance_section_failed", "section": key, "error": str(exc)}))
+    return compliance
+
+
+# ---------------------------------------------------------------------------
 # Digest assembly
 # ---------------------------------------------------------------------------
 def build_digest(
     ce: _CostExplorerBudget,
     cw_for_region: Callable[[str], Any],
     now: datetime,
+    client_for: Optional[ClientFor] = None,
+    event: Any = None,
 ) -> Dict[str, Any]:
     today = now.date()
     prior_day = today - timedelta(days=1)
@@ -369,6 +675,15 @@ def build_digest(
         if digest[field]["current"] is not None and digest[field]["noncurrent"] is None:
             warnings.append(f"{field}.noncurrent: null -- CloudWatch AWS/S3 has no noncurrent storage type")
 
+    # ENC-TSK-R38: weekly report-only compliance scan (Mondays UTC or event {"compliance_scan": true}).
+    trigger = compliance_due(now, event) if client_for is not None else None
+    if trigger and client_for is not None:
+        scan_client_for = client_for
+        _best_effort("compliance", lambda: digest.update(compliance=collect_compliance(scan_client_for, trigger)))
+        for key, section in digest.get("compliance", {}).items():
+            if isinstance(section, dict) and "error" in section:
+                warnings.append(f"compliance.{key}: {str(section['error']).split(':', 1)[0]}")
+
     if ce.truncated:
         warnings.append("ce_truncated: usage-type pagination dropped to honor the 3-call budget")
     digest["generated_at"] = now.isoformat().replace("+00:00", "Z")
@@ -391,9 +706,13 @@ def publish_digest(s3: Any, digest: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
     event = event if isinstance(event, dict) else {}
-    now = datetime.now(timezone.utc)
+    now = _utcnow()
     LOGGER.info(json.dumps({"event": "cost_digest_start", "dry_run": bool(event.get("dry_run"))}))
 
     ce = _CostExplorerBudget(boto3.client("ce", region_name=CE_REGION))
@@ -404,7 +723,16 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             cw_clients[region] = boto3.client("cloudwatch", region_name=region)
         return cw_clients[region]
 
-    digest = build_digest(ce, cw_for_region, now)
+    clients: Dict[Tuple[str, str], Any] = {}
+
+    def client_for(service: str, region: str) -> Any:
+        if service == "cloudwatch":
+            return cw_for_region(region)
+        if (service, region) not in clients:
+            clients[(service, region)] = boto3.client(service, region_name=region)
+        return clients[(service, region)]
+
+    digest = build_digest(ce, cw_for_region, now, client_for=client_for, event=event)
     if event.get("dry_run"):
         keys: List[str] = []
     else:
@@ -414,10 +742,17 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         "date": digest["date"],
         "ce_calls": digest["ce_calls"],
         "regression": digest["regression"],
+        "compliance": digest.get("compliance", {}).get("trigger"),
         "keys": keys,
         "warnings": digest.get("warnings", []),
     }))
-    return {"date": digest["date"], "ce_calls": digest["ce_calls"], "regression": digest["regression"], "keys": keys}
+    return {
+        "date": digest["date"],
+        "ce_calls": digest["ce_calls"],
+        "regression": digest["regression"],
+        "compliance_scanned": "compliance" in digest,
+        "keys": keys,
+    }
 
 
 # EventBridge target convention parity.

@@ -3046,6 +3046,20 @@ Resources:
                   - cloudwatch:GetMetricData
                   - cloudwatch:GetMetricStatistics
                 Resource: "*"
+              # ENC-TSK-R38 (BRD FR-37): weekly REPORT-ONLY persistent-cost compliance scan. Read-only
+              # List/Describe/Get grants; none of these support resource-level scoping for the
+              # account-wide enumeration the scan performs. No mutating action is granted.
+              - Sid: ComplianceScanRead
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketVersioning
+                  - s3:GetLifecycleConfiguration
+                  - logs:DescribeLogGroups
+                  - ecr:DescribeRepositories
+                  - ecr:GetLifecyclePolicy
+                  - cloudwatch:ListMetrics
+                Resource: "*"
               - Sid: DigestWrite
                 Effect: Allow
                 Action:
