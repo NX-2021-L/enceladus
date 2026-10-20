@@ -2947,6 +2947,119 @@ def _add_checkout_state_ne_filter(checkout_state_ne: str, filter_parts: List[str
     expr_values[":csne"] = _ser_s(checkout_state_ne)
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-R35 (ENC-PLN-100 C3.2 / BRD FR-24 / ruling A11): compact default
+# projection for the list route.
+#
+# Behind TRACKER_LIST_COMPACT ("false" == today's behavior; "true" on v4-gamma
+# via 02-compute.yaml). When ON and the caller passes no `fields=`, each list
+# row carries only the _LIST_COMPACT_FIELDS summary attributes -- description,
+# every *evidence* field, history/worklog, technical_notes etc. are NOT read
+# into the response. A11 (no silent data loss to any consumer) is honored by:
+#   * `fields=a,b,c` -> EXACTLY those fields (key attrs needed for the cursor
+#     are fetched but stripped from the row); `fields=full` -> whole item.
+#     An explicit `fields=` is honored regardless of the flag (new opt-in
+#     param; no pre-existing caller sends it).
+#   * a projected response is always labelled (`projection`: "compact" |
+#     "fields"); a full response carries no marker (flag-off bytes unchanged).
+#   * every in-repo caller that reads an excluded field passes `fields=`
+#     (contract test: test_list_compact_projection_r35.py).
+# RRU NOTE: DynamoDB bills Query RRU on the size of the item *as stored in the
+# table/index*, before ProjectionExpression. project-type-index is
+# ProjectionType ALL (01-data.yaml) and the base-table branch reads whole
+# items, so ProjectionExpression cuts Lambda<->DDB transfer, deserialization
+# and the response/API-Gateway payload (the 6MB 413 risk) but NOT RRU. Cutting
+# RRU needs a new KEYS_ONLY/INCLUDE GSI (CFN: one GSI per update, projection
+# immutable) -- out of scope here, reported on the task.
+# ---------------------------------------------------------------------------
+_LIST_DEFAULT_PAGE_SIZE = 50
+_LIST_MAX_PAGE_SIZE = 200
+_LIST_KEY_FIELDS = ("project_id", "record_id", "record_type")  # cursor + counter filter
+_LIST_FIELDS_MAX = 64
+_LIST_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_LIST_COMPACT_FIELDS = (
+    # identity / keys
+    "project_id", "record_id", "item_id", "id", "record_type", "subtype",
+    # summary
+    "title", "status", "priority", "severity", "category", "provenance",
+    "created_at", "updated_at", "created_by", "assigned_to", "owners",
+    "last_update_note", "update", "components", "transition_type",
+    # lineage / relationships (ids only)
+    "parent", "parent_task_id", "is_child", "subtask_ids", "primary_task",
+    "related_task_ids", "related_issue_ids", "related_feature_ids",
+    # checkout / liveness
+    "checkout_state", "checked_out_by", "checked_out_at",
+    "active_agent_session", "active_agent_session_id",
+    # versioning
+    "sync_version", "version_seq",
+    # scoring summaries
+    "resonance_score", "confidence", "compliance_score",
+)
+
+
+def _list_compact_enabled() -> bool:
+    """Read at request time so the flag toggles (and rolls back) without a redeploy."""
+    return os.environ.get("TRACKER_LIST_COMPACT", "false").strip().lower() == "true"
+
+
+def _is_list_count_request(query_params: Dict, compact_on: bool) -> bool:
+    """Count-style requests route to the bounded census (mode=census) walk.
+
+    `count=true` is a new opt-in param (always honored). `limit=0` /
+    `page_size=0` previously clamped to a 1-row page, so routing them to the
+    census is a behavior change and is gated on the flag.
+    """
+    if str(query_params.get("count") or "").strip().lower() in ("true", "1", "yes"):
+        return True
+    if compact_on:
+        for key in ("limit", "page_size"):
+            if str(query_params.get(key) if query_params.get(key) is not None else "").strip() == "0":
+                return True
+    return False
+
+
+def _resolve_list_projection(query_params: Dict, compact_on: bool):
+    """Return (mode, fetch_attrs, response_fields, error_response).
+
+    mode: "full" (no projection), "compact", or "fields". `fetch_attrs` is the
+    ProjectionExpression attribute list (None for full); `response_fields` is
+    the exact key set rows are trimmed to (only for mode "fields").
+    """
+    raw = str(query_params.get("fields") or "").strip()
+    if raw:
+        if raw.lower() == "full":
+            return "full", None, None, None
+        requested: List[str] = []
+        for name in (p.strip() for p in raw.split(",")):
+            if not name:
+                continue
+            if not _LIST_FIELD_NAME_RE.match(name):
+                return None, None, None, _error(400, f"Invalid fields entry '{name}'.")
+            if name not in requested:
+                requested.append(name)
+        if not requested:
+            return None, None, None, _error(400, "fields must name at least one attribute (or 'full').")
+        if len(requested) > _LIST_FIELDS_MAX:
+            return None, None, None, _error(400, f"fields accepts at most {_LIST_FIELDS_MAX} attributes.")
+        fetch = list(requested) + [k for k in _LIST_KEY_FIELDS if k not in requested]
+        return "fields", fetch, requested, None
+    if compact_on:
+        return "compact", list(_LIST_COMPACT_FIELDS), None, None
+    return "full", None, None, None
+
+
+def _apply_list_projection(kwargs: Dict[str, Any], attrs: List[str]) -> None:
+    """Attach a ProjectionExpression (every attr aliased -> no reserved-word risk)."""
+    names = dict(kwargs.get("ExpressionAttributeNames") or {})
+    aliases = []
+    for idx, attr in enumerate(attrs):
+        alias = f"#pj{idx}"
+        names[alias] = attr
+        aliases.append(alias)
+    kwargs["ProjectionExpression"] = ", ".join(aliases)
+    kwargs["ExpressionAttributeNames"] = names
+
+
 _LIST_RECORDS_MAX_RAW_PAGES = 10  # ENC-TSK-Q13: bounded per-invocation raw-page
 # budget (was the old max_pages=10 loop bound) -- caps DynamoDB cost when a
 # FilterExpression rejects most of a raw page. Unlike the pre-Q13 code, hitting
@@ -3549,6 +3662,15 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     if mode == "census":
         return _handle_list_census(project_id, query_params)
 
+    # ENC-TSK-R35 (C3.2 / A11): count-style requests need no rows -> census;
+    # then resolve the row projection (compact default behind the flag).
+    compact_on = _list_compact_enabled()
+    if _is_list_count_request(query_params, compact_on):
+        return _handle_list_census(project_id, query_params)
+    proj_mode, proj_attrs, proj_fields, proj_err = _resolve_list_projection(query_params, compact_on)
+    if proj_err is not None:
+        return proj_err
+
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
@@ -3559,9 +3681,12 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
     # see that helper's docstring for the exact clause and rationale.
     checkout_state_ne = query_params.get("checkout_state_ne", "")
     try:
-        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+        page_size = max(1, min(
+            int(query_params.get("page_size", str(_LIST_DEFAULT_PAGE_SIZE))),
+            _LIST_MAX_PAGE_SIZE,
+        ))
     except (TypeError, ValueError):
-        page_size = 50
+        page_size = _LIST_DEFAULT_PAGE_SIZE
     cursor = query_params.get("next_cursor", "")
 
     try:
@@ -3625,6 +3750,9 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if expr_names:
                 kwargs["ExpressionAttributeNames"] = expr_names
 
+        if proj_attrs:
+            _apply_list_projection(kwargs, proj_attrs)
+
         if cursor:
             try:
                 decoded_cursor = _decode_list_cursor(cursor, branch, record_type)
@@ -3680,6 +3808,10 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             item = _deser_item(raw)
             if item.get("record_type") == "counter":
                 continue
+            if proj_fields is not None:
+                # A11 explicit-fields-exact: key attrs fetched only for the
+                # cursor/counter logic are dropped unless requested.
+                item = {k: item[k] for k in proj_fields if k in item}
             records.append(item)
 
         payload: Dict[str, Any] = {
@@ -3688,6 +3820,11 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             "count": len(records),
             "page_size": page_size,
         }
+        if proj_mode != "full":
+            # A11: a projected response is never silent about being projected.
+            payload["projection"] = proj_mode
+            if proj_fields is not None:
+                payload["fields"] = proj_fields
         if next_cursor:
             payload["next_cursor"] = next_cursor
         if page_truncated:

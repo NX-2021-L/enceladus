@@ -2496,11 +2496,18 @@ def _extract_documentation_evidence_doc_ids(record: Dict[str, Any]) -> set[str]:
     return doc_ids
 
 
+_CLOSED_DOC_EVIDENCE_LIST_FIELDS = (
+    "id,record_id,task_id,item_id,documentation_evidence,transition_evidence"
+)
+
+
 def _closed_documentation_evidence_doc_ids(project_id: str, current_task_id: str) -> set[str]:
     used: set[str] = set()
     cursor = ""
     for _ in range(25):
-        path = f"/{project_id}?type=task&status=closed&page_size=200"
+        # ENC-TSK-R35 (A11): reads evidence fields the compact list projection
+        # excludes -> request them explicitly (exact fields, not fields=full).
+        path = f"/{project_id}?type=task&status=closed&page_size=200&fields={_CLOSED_DOC_EVIDENCE_LIST_FIELDS}"
         if cursor:
             path += "&next_cursor=" + urllib.parse.quote(cursor, safe="")
         status, body = _tracker_request("GET", path)
