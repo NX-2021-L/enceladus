@@ -12,6 +12,16 @@ name: Promote merged -> v3-prod dispatch
 # was cut from (gamma_sha) so _deploy.yml's promote_preflight job (FR-8) can
 # assert the merge didn't smuggle in anything beyond what gamma validated.
 #
+# ENC-ISS-842 / ENC-TSK-R25: the v3-prod dispatch runs the prod Gen2 Lambda
+# deploy (_deploy.yml, "Deploy Lambda Artifacts (Gen2)"), and every dispatch
+# costs an io-approved prod redeploy. A promote whose diff
+# (git diff --name-only HEAD^1 HEAD on the merge commit) touches no Lambda
+# code -- docs, UI-only, CFN-only other than the cross-cutting templates --
+# therefore skips the dispatch. The decision reuses
+# tools/compute_affected_targets.py (compute_from_changed_files), the same
+# arbiter _deploy.yml uses, so "deployable" never drifts between the two; it
+# fails OPEN (dispatch) on any ambiguity, matching that script's contract.
+#
 # Any OTHER PR merged to main (not a promote PR) is a no-op here -- main
 # accepts ordinary PRs (docs, governance, this very workflow's own changes)
 # that never touch v4/main or v3-prod.
@@ -33,7 +43,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # ENC-ISS-842: pull_request events check out refs/pull/N/merge by default,
+      # which is NOT the commit that landed on main. Check out the real merge
+      # commit with depth 2 so both parents are present for HEAD^1..HEAD.
+      - name: Checkout promote merge commit (depth 2)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Detect Lambda-affecting changes in promote diff (ENC-ISS-842)
+        id: lambda_diff
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+
+          # Fail open: any doubt -> dispatch (an unneeded prod redeploy is
+          # recoverable; a silently skipped Lambda promote is not).
+          dispatch() {
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "Lambda diff gate: $1 -- dispatching v3-prod deploy."
+            exit 0
+          }
+
+          [ -n "$MERGE_SHA" ] || dispatch "no merge_commit_sha on PR #$PR_NUMBER (dispatch step will refuse)"
+          [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] || dispatch "checked-out HEAD is not $MERGE_SHA"
+          CHANGED_FILE="$RUNNER_TEMP/promote-changed-files.txt"
+          git diff --name-only HEAD^1 HEAD > "$CHANGED_FILE" || dispatch "git diff HEAD^1 HEAD failed"
+          [ -f tools/compute_affected_targets.py ] || dispatch "tools/compute_affected_targets.py missing on merge commit"
+
+          python3 - "$CHANGED_FILE" <<'PY'
+          import importlib.util, os, sys
+
+          def emit(deploy, msg):
+              with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+                  fh.write("deploy=%s\n" % ("true" if deploy else "false"))
+              print(msg)
+
+          try:
+              spec = importlib.util.spec_from_file_location(
+                  "compute_affected_targets", "tools/compute_affected_targets.py")
+              mod = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mod)
+              changed = [l.strip() for l in open(sys.argv[1]) if l.strip()]
+              result = mod.compute_from_changed_files(changed)
+          except Exception as exc:  # fail open
+              emit(True, "Lambda diff gate: could not evaluate (%s: %s) -- dispatching v3-prod deploy." % (type(exc).__name__, exc))
+              sys.exit(0)
+
+          if result["full_scope"]:
+              emit(True, "Lambda diff gate: %s -- dispatching v3-prod deploy (full scope)." % result["reason"])
+          elif result["affected_functions"]:
+              emit(True, "Lambda diff gate: Lambda code changed in %d file(s) -- affected: %s -- dispatching v3-prod deploy." % (len(changed), ", ".join(result["affected_functions"])))
+          else:
+              emit(False, "skipped: no lambda paths changed (%d file(s) in HEAD^1..HEAD, none under backend/lambda/**, shared layer, MCP server sources or other deployable paths) -- NOT dispatching prod Gen2 Lambda deploy." % len(changed))
+          PY
+
       - name: Dispatch v3-prod deploy (ENC-TSK-Q21 FR-8/FR-10)
+        if: steps.lambda_diff.outputs.deploy == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}

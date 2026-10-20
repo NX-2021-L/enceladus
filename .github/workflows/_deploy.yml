@@ -10,7 +10,8 @@ name: Deploy Lambda Artifacts (Gen2)
 #         post-gamma promotion + required-reviewer gate).
 #       workflow_dispatch → deploy a pre-built SHA to the specified target_environment.
 #       workflow_call → reusable entry point for programmatic callers.
-#       Concurrency group keyed per-environment with cancel-in-progress=false.
+#       Concurrency group keyed per-environment; cancel-in-progress only for
+#       v4/main (gamma) runs, prod stays queued (ENC-TSK-R25).
 #
 # AC-2: GitHub Deployments API is the deploy-state store.
 #       POST /deployments on entry; POST /deployments/N/statuses for
@@ -22,6 +23,33 @@ name: Deploy Lambda Artifacts (Gen2)
 on:
   push:
     branches: [main, v4/main]
+    # ENC-TSK-R25 (ENC-PLN-100 C1.8): a docs-only merge (*.md, docs/**, AGENTS.md,
+    # CLAUDE.md, ...) must not trigger a build + deploy run. List only what this
+    # workflow (and _build.yml, which it calls) actually packages, deploys, or
+    # executes: Lambda sources, the MCP server runtime copied into the
+    # mcp_code/coordination_api/mcp_streamable* zips, the env manifests and
+    # architecture declaration, the Lambda fleet declarations (02-compute /
+    # 04-github-roles, which compute_affected_targets.py treats as cross-cutting),
+    # and the CI tools these workflows invoke. Keep in step with
+    # CROSS_CUTTING_PATTERNS / EXTRA_SOURCE_MAP in tools/compute_affected_targets.py.
+    paths:
+      - "backend/lambda/**"
+      - "tools/enceladus-mcp-server/**"
+      - "envs/**"
+      - "infrastructure/lambda_workflow_manifest.json"
+      - "infrastructure/cloudformation/02-compute.yaml"
+      - "infrastructure/cloudformation/04-github-roles.yaml"
+      - "tools/arch_declaration.py"
+      - "tools/assert_*.py"
+      - "tools/compute_affected_targets.py"
+      - "tools/promote_preflight.py"
+      - "tools/verify_lambda_package_arch.py"
+      - "tools/post_deploy_smoke.py"
+      - "tools/gateway_mcp_probe.py"
+      - "tools/mcp_runtime_functions.txt"
+      - "tools/cfn-guard/lambda-architecture.guard"
+      - ".github/workflows/_deploy.yml"
+      - ".github/workflows/_build.yml"
   workflow_dispatch:
     inputs:
       target_environment:
@@ -75,7 +103,9 @@ permissions:
 
 concurrency:
   group: deploy-${{ inputs.target_environment || 'v4-gamma' }}
-  cancel-in-progress: false
+  # ENC-TSK-R25: gamma (v4/main push) runs are superseded by the newest merge;
+  # prod (main / v3-prod dispatches) stay queued and never cancel in flight.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/v4/main' && (inputs.target_environment || 'v4-gamma') == 'v4-gamma' }}
 
 env:
   AWS_REGION: us-west-2
