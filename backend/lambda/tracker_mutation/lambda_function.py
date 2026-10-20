@@ -5298,6 +5298,129 @@ def _apply_user_initiated_advance(
     })
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-R28 (ENC-PLN-100 C2.3 / ruling A10): no-op write suppression.
+#
+# A generic single-field PATCH whose value already equals the stored value still
+# costs a DynamoDB UpdateItem + a version_seq counter allocation and re-surfaces
+# the record in the feed. When TRACKER_NOOP_SUPPRESSION=true such a write is
+# answered 200 {"no_op": true} with ZERO DynamoDB writes.
+#
+# CARDINAL RULE: a suppressed write must NEVER cause a valid governance gate to
+# fail. Suppression is therefore an allow-list-by-exclusion applied only at the
+# very end of the generic path (after every validator / gate has already run, so
+# no rejection is ever masked), and it never applies to:
+#   * worklog / history appends, evidence appends (acceptance, transition,
+#     documentation, deploy, merge, live-validation ... any *evidence* field),
+#   * status writes (closed_count / checkout_count counters, transition
+#     evidence, and the updated_at liveness read by stale_checkout_monitor),
+#   * explicit touch / freshness fields (updated_at, sync_version, version_seq ..)
+#     or a request carrying touch/force/transition_evidence/If-Match,
+#   * documentation_evidence (read by the checkout_service P7 novelty-or-freshness
+#     close gate),
+#   * open / in-progress / checked-out tasks, whose updated_at IS the liveness
+#     signal read by stale_checkout_monitor and checkout_service auto-checkout.
+# Flag off (default) => today's behavior, byte for byte.
+# ---------------------------------------------------------------------------
+_NOOP_METRIC_NAMESPACE = "Enceladus/Tracker"
+_NOOP_METRIC_NAME = "TrackerNoOpSuppressed"
+_NOOP_NEVER_SUPPRESS_FIELDS = frozenset({
+    # lifecycle / counters / checkout state
+    "status", "closed_count", "checkout_count", "active_agent_session",
+    "active_agent_session_id", "checkout_state", "checked_out_by", "checked_out_at",
+    "checked_in_by", "checked_in_at",
+    # append-only logs and their sidecars
+    "history", "worklog", "last_update_note", "write_source", "extensions", "evidence_chain",
+    # evidence carriers (also caught by the "evidence" substring rule below)
+    "acceptance_criteria", "evidence", "documentation_evidence", "transition_evidence",
+    "commit_sha", "deployment_ref",
+    # explicit touch / freshness / revision fields
+    "updated_at", "created_at", "touch", "last_touched_at", "last_activity_at",
+    "sync_version", "version_seq", "feed_scope",
+    # arc-walker circuit breaker: explicit sets record a governed history marker + event
+    "auto_walk_opt_out",
+})
+_NOOP_NEVER_SUPPRESS_BODY_FLAGS = (
+    "transition_evidence", "touch", "force", "remove_objective", "replace_objectives",
+    "user_initiated",
+)
+_NOOP_LIVENESS_TASK_STATUSES = frozenset({"open", "in-progress"})
+
+
+def _noop_suppression_enabled() -> bool:
+    """Read at request time so the flag toggles (and rolls back) without a redeploy."""
+    return os.environ.get("TRACKER_NOOP_SUPPRESSION", "false").strip().lower() == "true"
+
+
+def _is_suppressible_noop(
+    *,
+    field: str,
+    value: Any,
+    raw_item: Dict[str, Any],
+    item_data: Dict[str, Any],
+    record_type: str,
+    body: Dict[str, Any],
+    if_match: Optional[str] = None,
+) -> bool:
+    """Pure decision: True only when writing ``value`` to ``field`` would be a
+    provable no-op AND none of the never-suppress carve-outs apply.
+
+    Equality is judged in DynamoDB typed form against the consistently-read stored
+    attribute: exactly what the generic path would write (``_ser_value(value)``) must
+    already be stored, and the attribute must already exist. Any type difference
+    (e.g. "1" vs 1) or missing attribute therefore falls through to a real write.
+    """
+    fname = str(field or "").strip()
+    if not fname or fname in _NOOP_NEVER_SUPPRESS_FIELDS or fname in _RELATION_ID_FIELDS:
+        return False
+    if "evidence" in fname.lower() or fname.startswith("_"):
+        return False
+    if if_match is not None:
+        return False
+    if isinstance(body, dict):
+        for flag in _NOOP_NEVER_SUPPRESS_BODY_FLAGS:
+            if body.get(flag):
+                return False
+    if record_type == "task":
+        if item_data.get("active_agent_session"):
+            return False
+        if str(item_data.get("status", "") or "").strip().lower() in _NOOP_LIVENESS_TASK_STATUSES:
+            return False
+    if fname not in raw_item:
+        return False
+    try:
+        return _ser_value(value) == raw_item[fname]
+    except Exception:  # noqa: BLE001 - any doubt means "write"
+        return False
+
+
+def _emit_noop_suppressed_metric(project_id: str, record_type: str, field: str) -> None:
+    """Emit CloudWatch metric TrackerNoOpSuppressed as an EMF log line on stdout.
+
+    EMF (not put_metric_data): TrackerMutationRole holds no cloudwatch:PutMetricData
+    and a synchronous API call would add latency to the very path being made cheaper.
+    Only RecordType is a dimension (bounded cardinality); ProjectId/Field ride along
+    as searchable properties. Never raises.
+    """
+    try:
+        print(json.dumps({
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [{
+                    "Namespace": _NOOP_METRIC_NAMESPACE,
+                    "Dimensions": [["RecordType"]],
+                    "Metrics": [{"Name": _NOOP_METRIC_NAME, "Unit": "Count"}],
+                }],
+            },
+            "RecordType": str(record_type or "unknown"),
+            _NOOP_METRIC_NAME: 1,
+            "ProjectId": str(project_id or "unknown"),
+            "Field": str(field or "unknown"),
+        }, separators=(",", ":")))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-R28] %s metric emit failed (non-fatal): %s", _NOOP_METRIC_NAME, exc)
+
+
 def _handle_update_field(
     project_id: str,
     record_type: str,
@@ -6193,6 +6316,29 @@ def _handle_update_field(
                 "success": True, "record_id": record_id,
                 "checkout": False, "checkout_state": "checked_in", "updated_at": now,
             })
+
+    # --- ENC-TSK-R28 (ENC-PLN-100 C2.3 / ruling A10): no-op write suppression ---
+    # Runs AFTER every validator/gate above (nothing is masked) and BEFORE the
+    # version_seq allocation + UpdateItem below. Flag-gated, default off.
+    if (
+        _optout_latch is None
+        and _noop_suppression_enabled()
+        and _is_suppressible_noop(
+            field=field, value=value, raw_item=raw_item, item_data=item_data,
+            record_type=record_type, body=body, if_match=_if_match,
+        )
+    ):
+        _emit_noop_suppressed_metric(project_id, record_type, field)
+        noop_result: Dict[str, Any] = {
+            "success": True, "record_id": record_id,
+            "field": field, "value": value,
+            "updated_at": item_data.get("updated_at", ""),
+            "sync_version": _current_rev,
+            "no_op": True,
+        }
+        if warnings:
+            noop_result["warnings"] = warnings
+        return _response(200, noop_result)
 
     # --- Generic field update ---
     note_val = value if len(str(value)) <= 100 else str(value)[:100] + "..."
