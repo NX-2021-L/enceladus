@@ -715,6 +715,11 @@ Resources:
           # resolves AppConfig-first with default=False, so this fallback is load-bearing
           # whenever AppConfig is unreachable.
           ENABLE_LESSON_PRIMITIVE: "true"
+          # ENC-TSK-R28 (ENC-PLN-100 C2.3 / ruling A10): no-op write suppression. A PATCH whose value
+          # equals the stored value returns {"no_op": true} with no DynamoDB write (never for
+          # worklog/evidence/touch/freshness fields). Gamma only; production stays "false" until
+          # soak evidence promotes it (flag off == today's behavior).
+          TRACKER_NOOP_SUPPRESSION: !If [IsProduction, "false", "true"]
           # DVP-TSK-A17 part 2 (E4-R18): HubExchange principals may create producer escalations.
           HUB_EXCHANGE_ISSUERS: !Ref HubExchangeIssuers
           HUB_SHELL_ORIGINS: !Ref HubShellOrigins
