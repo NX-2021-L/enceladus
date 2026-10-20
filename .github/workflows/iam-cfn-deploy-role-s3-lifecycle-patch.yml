@@ -15,7 +15,7 @@ on:
         description: "Why this patch is needed"
         type: string
         required: false
-        default: "Grant s3:Get/PutLifecycleConfiguration on jreese-net to CFN deploy role (ENC-TSK-N49 unblock)"
+        default: "Grant s3:Get/PutLifecycleConfiguration on jreese-net and ENC-PLN-100 lifecycle target buckets to CFN deploy role (ENC-TSK-N49 / ENC-TSK-R18)"
 
 permissions:
   contents: read
@@ -60,18 +60,48 @@ jobs:
                   "s3:PutLifecycleConfiguration"
                 ],
                 "Resource": "arn:aws:s3:::jreese-net"
+              },
+              {
+                "Sid": "S3LifecycleConfigPln100",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetLifecycleConfiguration",
+                  "s3:PutLifecycleConfiguration"
+                ],
+                "Resource": [
+                  "arn:aws:s3:::devops-agentcli-compute",
+                  "arn:aws:s3:::enceladus-356364570033-us-west-2-an",
+                  "arn:aws:s3:::enceladus-content-356364570033-us-west-2",
+                  "arn:aws:s3:::enceladus-ui-v2",
+                  "arn:aws:s3:::enceladus-ui-v2-gamma",
+                  "arn:aws:s3:::support-lambda-artifacts-356364570033"
+                ]
               }
             ]
           }
           JSON
 
           if aws iam get-policy --policy-arn "arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1" >/dev/null 2>&1; then
-            echo "Managed policy already exists, skipping create-policy."
+            # ENC-TSK-R18/R19/R20 (ENC-PLN-100): the policy document above now also covers the
+            # tools/apply_s3_lifecycle.py target buckets, so an existing policy must receive it as
+            # a new default version (IAM keeps at most 5 versions; prune the oldest non-default).
+            echo "Managed policy exists; publishing the document above as a new default version."
+            POLICY_ARN="arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-s3-lifecycle-v1"
+            COUNT=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'length(Versions)' --output text)
+            if [ "$COUNT" -ge 5 ]; then
+              OLDEST=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
+                --query 'sort_by(Versions[?IsDefaultVersion==`false`], &CreateDate)[0].VersionId' --output text)
+              aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$OLDEST"
+            fi
+            aws iam create-policy-version \
+              --policy-arn "$POLICY_ARN" \
+              --policy-document "file:///tmp/cfn-deploy-role-s3-lifecycle-policy.json" \
+              --set-as-default
           else
             aws iam create-policy \
               --policy-name "enceladus-cfn-deploy-s3-lifecycle-v1" \
               --policy-document "file:///tmp/cfn-deploy-role-s3-lifecycle-policy.json" \
-              --description "s3:Get/PutLifecycleConfiguration on jreese-net for the CFN deploy role (ENC-TSK-N70 / ENC-TSK-N49 rhythm-cycle unblock)"
+              --description "s3:Get/PutLifecycleConfiguration on jreese-net and the ENC-PLN-100 lifecycle target buckets for the CFN deploy role (ENC-TSK-N70 / ENC-TSK-N49 / ENC-TSK-R18)"
           fi
 
           aws iam attach-role-policy \

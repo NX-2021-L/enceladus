@@ -1,5 +1,7 @@
 # Enceladus Workspace — Agent Bootstrap
 
+> **Cost rules (binding):** governance `agents.md` §cost, rule-block v1 (sha256 `e44e51efbd6592b99f401fb58b4351644642075399f5831e11d850a164775587`, ENC-TSK-R21 / ENC-PLN-100). Paste the block verbatim into every subagent prompt; every dispatched task carries a cost class (C0 read-only, C1 per-activity, C2 per-event runtime path, C3 persistent monthly-billed resource). Read it with `governance.get("agents.md")`; do not copy it here.
+
 MCP server `enceladus` is configured via remote HTTP gateway.
 - **Cursor Cloud Agents**: configured by `.cursor/mcp.json` (HTTP, proxied through backend — requires `ENCELADUS_COORDINATION_INTERNAL_API_KEY` secret in Cursor Dashboard).
 - **Local/Codex sessions**: configured in `~/.codex/config.toml` (run `tools/enceladus-mcp-server/install_profile.sh` to install).
