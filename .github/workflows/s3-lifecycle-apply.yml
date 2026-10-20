@@ -1,0 +1,116 @@
+name: S3 Lifecycle Apply
+
+# ENC-TSK-R18 / R19 / R20 (ENC-PLN-100): applies the declarative, merge-preserving S3 lifecycle
+# specs in infrastructure/s3-lifecycle/<bucket>.json with tools/apply_s3_lifecycle.py.
+# The target buckets are not CloudFormation-managed (ruling P100-R16), so this workflow is the
+# governed write path. Rules owned by the tool all have IDs starting "enc-pln100-"; every other
+# live rule (ENC-TSK-Q20, RhythmArtifact-*, adhoc-*, ...) is preserved verbatim, and nothing
+# under jreese-net agent-documents/ can ever be matched by a managed rule.
+#
+#   push to main / v4/main on infrastructure/s3-lifecycle/**  -> validate + tests + plan (read-only)
+#   workflow_dispatch mode=plan   (default)                   -> same, optionally for one bucket
+#   workflow_dispatch mode=apply  (main / v4/main only)        -> pauses on the v3-prod Environment
+#                                                                 (io approval), then apply + verify
+#
+# Prerequisite: the CFN deploy role needs s3:Get/PutLifecycleConfiguration on the target buckets
+# (iam-cfn-deploy-role-s3-lifecycle-patch.yml, managed policy enceladus-cfn-deploy-s3-lifecycle-v1).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = read-only diff; apply = merge + put + verify (requires v3-prod approval)"
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+      bucket:
+        description: "Bucket name (must have a spec) or 'all'"
+        type: string
+        required: false
+        default: all
+  push:
+    branches:
+      - main
+      - v4/main
+    paths:
+      - "infrastructure/s3-lifecycle/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: s3-lifecycle-apply
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  TARGET_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.bucket || 'all' }}
+
+jobs:
+  plan:
+    name: Validate specs, run tests, plan (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet boto3 pytest
+
+      - name: Unit tests and spec validation
+        run: |
+          set -euo pipefail
+          python3 -m pytest tools/test_apply_s3_lifecycle.py -q
+          python3 tools/apply_s3_lifecycle.py --validate
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan (read-only diff against live lifecycle configuration)
+        run: python3 tools/apply_s3_lifecycle.py --plan --bucket "${TARGET_BUCKET}"
+
+  apply:
+    name: Apply and verify (v3-prod approval)
+    needs: plan
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v4/main')
+    # Live mutation of bucket lifecycle configuration: pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Apply (merge-preserving)
+        run: python3 tools/apply_s3_lifecycle.py --apply --bucket "${TARGET_BUCKET}"
+
+      - name: Verify (exit 1 on drift)
+        run: python3 tools/apply_s3_lifecycle.py --verify --bucket "${TARGET_BUCKET}"

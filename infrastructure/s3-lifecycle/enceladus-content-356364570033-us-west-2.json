@@ -1,0 +1,9 @@
+{
+  "bucket": "enceladus-content-356364570033-us-west-2",
+  "region": "us-west-2",
+  "tracker": "ENC-TSK-R20 (ENC-PLN-100 C1.3, ruling P100-R16b)",
+  "note": "mobile/ noncurrent 7 d: 99.97% of this bucket is noncurrent mobile/v1 feed output (R13). Existing noncurrent-rollback-window (90 d, whole bucket) and expired-delete-markers rules are preserved verbatim; agent-documents/ and governance/ keep the 90 d window.",
+  "rules": [
+    {"ID": "enc-pln100-mobile-noncurrent-7d", "Status": "Enabled", "Filter": {"Prefix": "mobile/"}, "NoncurrentVersionExpiration": {"NoncurrentDays": 7}}
+  ]
+}

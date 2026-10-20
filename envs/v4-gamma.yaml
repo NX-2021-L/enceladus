@@ -76,6 +76,7 @@ function_name_map:
   coordination_monitor_api: devops-coordination-monitor-api-gamma
   corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
   corpus_entropy_gdmp_remediation: enceladus-corpus-entropy-gdmp-remediation-gamma
+  cost_digest: enceladus-cost-digest-gamma
   deploy_decide: devops-deploy-decide-gamma
   deploy_finalize: devops-deploy-finalize-gamma
   deploy_intake: devops-deploy-intake-gamma

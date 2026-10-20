@@ -19,9 +19,16 @@ This module is intentionally standalone with no dependency on project_json_sync.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import hashlib
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
+import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -149,11 +156,29 @@ class FeedProjectEntry:
 # ---------------------------------------------------------------------------
 
 
-def write_json(path: Path, payload: Any) -> None:
-    """Write payload to JSON with deterministic formatting."""
+def write_json(path: Path, payload: Any, minify: bool = False) -> None:
+    """Write payload to JSON with deterministic formatting.
+
+    ``minify`` (ENC-TSK-R34, FEED_GZIP path only) writes the compact form with ``generated_at`` FIRST
+    (see dumps_minified); the default is the indent=2 layout every other caller has always got."""
+    if minify:
+        path.write_text(dumps_minified(payload), encoding="utf-8")
+        return
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
         fh.write("\n")
+
+
+def dumps_minified(payload: Any) -> str:
+    """Compact, sorted-key JSON (ensure_ascii as everywhere else) with a top-level ``generated_at``
+    moved to the very front, so object_content_digest can exclude it with a prefix match instead of
+    parsing a 25 MB document inside a 512 MB Lambda."""
+    if not isinstance(payload, dict) or "generated_at" not in payload:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    rest = {k: v for k, v in payload.items() if k != "generated_at"}
+    body = json.dumps(rest, sort_keys=True, separators=(",", ":"))
+    stamp = json.dumps(payload["generated_at"])
+    return '{"generated_at":' + stamp + ("," + body[1:] if rest else "}")
 
 
 def require_boto3() -> None:
@@ -320,6 +345,149 @@ def _ddb_item_to_yaml_record(item: Dict) -> Dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-R41 (ENC-PLN-100 C4.1, FR-22): incremental tracker re-read building blocks.
+#
+# The SWEEP keeps a per-project snapshot of the RAW DynamoDB items (lossless: no Decimal/set
+# round-trip) in S3 and, instead of re-querying the whole project, strongly-consistently BatchGets
+# only the record keys the DynamoDB stream reported changed, then merges them in. A key that comes
+# back absent is a deletion. Everything here is pure mechanics; the policy (when to trust a snapshot,
+# how ids are tracked and cleared) lives in lambda_function.py.
+# ---------------------------------------------------------------------------
+
+_READ_UNITS: Dict[str, float] = {"total": 0.0}
+SNAPSHOT_VERSION = 1
+BATCH_GET_CHUNK = 100
+BATCH_GET_MAX_ATTEMPTS = 6
+
+
+def _note_consumed(resp: Any) -> None:
+    """Accumulate ConsumedCapacity from a Query page / BatchGetItem response (best effort)."""
+    try:
+        cc = resp.get("ConsumedCapacity") if isinstance(resp, dict) else None
+        if cc is None:
+            return
+        for entry in cc if isinstance(cc, list) else [cc]:
+            _READ_UNITS["total"] += float(entry.get("CapacityUnits") or 0.0)
+    except Exception:  # noqa: BLE001 - metrics must never break a publish
+        pass
+
+
+def reset_read_units() -> None:
+    _READ_UNITS["total"] = 0.0
+
+
+def read_units_total() -> float:
+    return float(_READ_UNITS["total"])
+
+
+def group_project_items(raw_items: List[Dict]) -> Dict[str, Any]:
+    """Raw DynamoDB items of one project -> the artifact_payloads dict fetch_from_dynamodb returns.
+    Reference rows (and any unknown record_type) are skipped - they are metadata only."""
+    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": [], "lesson": [], "plan": []}
+    for raw in raw_items:
+        item = _ddb_deserialize_item(raw)
+        rtype = item.get("record_type")
+        if rtype in grouped:
+            if rtype in ("task", "issue", "feature"):
+                grouped[rtype].append(_ddb_item_to_yaml_record(item))
+            else:
+                # lessons and plans: store raw deserialized item directly
+                grouped[rtype].append(item)
+    return {
+        "tasks": grouped["task"],
+        "issues": grouped["issue"],
+        "features": grouped["feature"],
+        "lessons": grouped["lesson"],
+        "plans": grouped["plan"],
+    }
+
+
+def query_project_items(project_name: str, table: str, region: str) -> Dict[str, Dict]:
+    """Full per-project read of the tracker table as {record_id: raw item}. Unlike
+    fetch_from_dynamodb this RAISES on a failed read: a snapshot must never be built from a partial or
+    empty read."""
+    require_boto3()
+    ddb = boto3.client("dynamodb", region_name=region, config=Config(retries={"max_attempts": 3, "mode": "standard"}))
+    items: Dict[str, Dict] = {}
+    for page in ddb.get_paginator("query").paginate(
+        TableName=table,
+        IndexName=TRACKER_GSI_PROJECT_TYPE,
+        KeyConditionExpression="project_id = :pid",
+        ExpressionAttributeValues={":pid": {"S": project_name}},
+        ReturnConsumedCapacity="TOTAL",
+    ):
+        _note_consumed(page)
+        for raw in page.get("Items", []):
+            rid = (raw.get("record_id") or {}).get("S")
+            if rid:
+                items[rid] = raw
+    return items
+
+
+def batch_get_tracker_items(
+    project_name: str,
+    record_ids: List[str],
+    table: str,
+    region: str,
+    sleep: Any = time.sleep,
+) -> Dict[str, Dict]:
+    """Strongly consistent BatchGetItem of exactly ``record_ids`` (chunks of 100, UnprocessedKeys
+    retried with backoff). Returns {record_id: raw item} for the keys that EXIST; a missing key is
+    absent from the result. Raises if keys are still unprocessed after the retries (the caller falls
+    back to a full re-read)."""
+    require_boto3()
+    ddb = boto3.client("dynamodb", region_name=region, config=Config(retries={"max_attempts": 3, "mode": "standard"}))
+    found: Dict[str, Dict] = {}
+    ordered = sorted(set(record_ids))
+    for start in range(0, len(ordered), BATCH_GET_CHUNK):
+        pending = {table: {
+            "Keys": [{"project_id": {"S": project_name}, "record_id": {"S": rid}} for rid in ordered[start:start + BATCH_GET_CHUNK]],
+            "ConsistentRead": True,
+        }}
+        for attempt in range(BATCH_GET_MAX_ATTEMPTS):
+            resp = ddb.batch_get_item(RequestItems=pending, ReturnConsumedCapacity="TOTAL")
+            _note_consumed(resp)
+            for raw in (resp.get("Responses") or {}).get(table, []):
+                rid = (raw.get("record_id") or {}).get("S")
+                if rid:
+                    found[rid] = raw
+            pending = resp.get("UnprocessedKeys") or {}
+            if not pending:
+                break
+            sleep(min(2.0, 0.05 * (2 ** attempt)))
+        else:
+            raise RuntimeError(f"BatchGetItem left unprocessed keys for project={project_name}")
+    return found
+
+
+def snapshot_encode(project: str, items: Dict[str, Dict], full_read_at: float, saved_at: float) -> bytes:
+    """gzip JSON of the raw items. Raises (TypeError) on a non-JSON attribute (e.g. binary): the
+    caller then simply has no snapshot and keeps doing full re-reads."""
+    payload = {
+        "v": SNAPSHOT_VERSION, "project": project, "full_read_at": float(full_read_at),
+        "saved_at": float(saved_at), "items": items,
+    }
+    return gzip.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), compresslevel=6)
+
+
+def snapshot_decode(blob: bytes, project: str) -> Optional[Dict[str, Any]]:
+    """Inverse of snapshot_encode; None for anything that is not a valid snapshot of ``project``."""
+    try:
+        payload = json.loads(gzip.decompress(blob).decode("utf-8"))
+        if payload.get("v") != SNAPSHOT_VERSION or payload.get("project") != project:
+            return None
+        if not isinstance(payload.get("items"), dict):
+            return None
+        return {
+            "items": payload["items"],
+            "full_read_at": float(payload.get("full_read_at") or 0.0),
+            "saved_at": float(payload.get("saved_at") or 0.0),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fetch_from_dynamodb(
     project_entry: FeedProjectEntry,
     table: str = DEFAULT_TRACKER_TABLE,
@@ -351,30 +519,19 @@ def fetch_from_dynamodb(
             IndexName=TRACKER_GSI_PROJECT_TYPE,
             KeyConditionExpression="project_id = :pid",
             ExpressionAttributeValues={":pid": {"S": project_entry.name}},
+            ReturnConsumedCapacity="TOTAL",
         ):
             raw_items.extend(page.get("Items", []))
+            _note_consumed(page)
     except (BotoCoreError, ClientError) as exc:  # type: ignore[misc]
         log("ERROR", f"{LOG_PREFIX}: DynamoDB query failed for project={project_entry.name}: {exc}")
         return {"tasks": [], "issues": [], "features": []}
 
-    # Group by record_type (skip reference rows — those are metadata only)
-    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": [], "lesson": [], "plan": []}
-    for raw in raw_items:
-        item = _ddb_deserialize_item(raw)
-        rtype = item.get("record_type")
-        if rtype in grouped:
-            if rtype in ("task", "issue", "feature"):
-                grouped[rtype].append(_ddb_item_to_yaml_record(item))
-            else:
-                # lessons and plans: store raw deserialized item directly
-                grouped[rtype].append(item)
-
-    artifact_payloads: Dict[str, Any] = {
-        "tasks": grouped["task"],
-        "issues": grouped["issue"],
-        "features": grouped["feature"],
-        "lessons": grouped["lesson"],
-        "plans": grouped["plan"],
+    artifact_payloads = group_project_items(raw_items)
+    grouped = {
+        "task": artifact_payloads["tasks"], "issue": artifact_payloads["issues"],
+        "feature": artifact_payloads["features"], "lesson": artifact_payloads["lessons"],
+        "plan": artifact_payloads["plans"],
     }
 
     log(
@@ -416,8 +573,10 @@ def fetch_documents_from_dynamodb(
             KeyConditionExpression="project_id = :pid",
             ExpressionAttributeValues={":pid": {"S": project_entry.name}},
             ScanIndexForward=False,  # newest first
+            ReturnConsumedCapacity="TOTAL",
         ):
             raw_items.extend(page.get("Items", []))
+            _note_consumed(page)
     except (BotoCoreError, ClientError) as exc:  # type: ignore[misc]
         log("ERROR", f"{LOG_PREFIX}: DynamoDB documents query failed for project={project_entry.name}: {exc}")
         return []
@@ -945,13 +1104,70 @@ def _filter_stale_closed(
 # ---------------------------------------------------------------------------
 
 
+def _write_split_tasks(
+    tasks_by_project: List[tuple],
+    generated_at: str,
+    output_dir: Path,
+    key_prefix: str,
+    minify: bool,
+) -> Dict[str, Any]:
+    """Write tasks/<project_id>.json for every project; return the tasks.json index manifest payload."""
+    tasks_dir = output_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    projects: List[Dict[str, Any]] = []
+    for project_id, tasks in tasks_by_project:
+        name = urllib.parse.quote(str(project_id), safe="")
+        rel = f"tasks/{name}.json"
+        path = output_dir / rel
+        write_json(
+            path,
+            {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "project_id": project_id, "tasks": tasks},
+            minify=minify,
+        )
+        projects.append({
+            "project_id": project_id,
+            "key": f"{key_prefix.rstrip('/')}/{rel}" if key_prefix else rel,
+            "count": len(tasks),
+            "sha256": object_content_digest(path),
+            "bytes": path.stat().st_size,
+        })
+    return {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "split": True, "projects": projects}
+
+
+def load_tasks_feed(read_bytes: Any, tasks_key: str) -> Dict[str, Any]:
+    """Reader helper for BOTH tasks.json shapes (ENC-TSK-R34 / FR-21).
+
+    ``read_bytes(key) -> bytes`` must return DECODED bytes (ContentStore.read_bytes, or
+    read_s3_object_bytes over a get_object response). A monolithic tasks.json is returned as is; a split
+    manifest is expanded by reading every ``projects[].key`` and concatenating the tasks, so callers
+    always get ``{"generated_at", "version", "tasks": [...]}``."""
+    doc = json.loads(read_bytes(tasks_key))
+    if not (isinstance(doc, dict) and doc.get("split") is True):
+        return doc
+    tasks: List[Any] = []
+    for project in doc.get("projects", []):
+        tasks.extend(json.loads(read_bytes(project["key"])).get("tasks", []))
+    return {"generated_at": doc.get("generated_at"), "version": doc.get("version"), "tasks": tasks}
+
+
 def generate_mobile_feeds(
     project_entries: List[FeedProjectEntry],
     all_project_data: Dict[str, Dict[str, Any]],
     generated_at: str,
     output_dir: Path,
+    minify: bool = False,
+    split_tasks: bool = False,
+    key_prefix: str = "",
 ) -> Dict[str, Path]:
     """Generate aggregated mobile-optimized JSON feeds across all projects.
+
+    ENC-TSK-R34 (FEED_GZIP path only; the defaults are today's output):
+      * ``minify`` - compact JSON (see write_json).
+      * ``split_tasks`` - BRD FR-21 / ruling A7: the full tasks.json compressed above 5 MB, so write
+        ``tasks/<project_id>.json`` per project and make ``tasks.json`` an index manifest
+        ``{generated_at, version, split: true, projects: [{project_id, key, count, sha256, bytes}]}``.
+        ``key`` is ``<key_prefix>/tasks/<project_id>.json``; ``sha256`` is object_content_digest of that
+        file (generated_at excluded) and ``bytes`` its size, so the manifest only changes when a project does.
 
     Args:
         project_entries: List of FeedProjectEntry for all projects to include.
@@ -966,6 +1182,7 @@ def generate_mobile_feeds(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_tasks: List[Dict[str, Any]] = []
+    tasks_by_project: List[tuple] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
     all_lessons: List[Dict[str, Any]] = []
@@ -1008,6 +1225,7 @@ def generate_mobile_feeds(
         _add_children_ids_to_items(features, feature_children, "feature_id")
 
         all_tasks.extend(tasks)
+        tasks_by_project.append((entry.name, tasks))
         all_issues.extend(issues)
         all_features.extend(features)
         all_lessons.extend(lessons)
@@ -1027,10 +1245,12 @@ def generate_mobile_feeds(
     }
 
     output_paths: Dict[str, Path] = {}
+    if split_tasks:
+        feeds["tasks"] = _write_split_tasks(tasks_by_project, generated_at, output_dir, key_prefix, minify)
     for feed_name, payload in feeds.items():
         out_path = output_dir / f"{feed_name}.json"
-        write_json(out_path, payload)
-        item_count = len(payload[feed_name])
+        write_json(out_path, payload, minify=minify)
+        item_count = len(payload["projects"]) if (split_tasks and feed_name == "tasks") else len(payload[feed_name])
         feed_bytes = out_path.stat().st_size
         feed_kb = feed_bytes / 1024
         log("INFO", f"{LOG_PREFIX}: wrote mobile feed {feed_name}.json ({item_count} items, {feed_kb:.1f}KB) -> {out_path}")
@@ -1064,6 +1284,7 @@ def generate_documents_feed(
     all_documents_data: Dict[str, List[Dict[str, Any]]],
     generated_at: str,
     output_dir: Path,
+    minify: bool = False,
 ) -> Path:
     """Generate a ``documents.json`` mobile feed from pre-fetched document data.
 
@@ -1108,7 +1329,7 @@ def generate_documents_feed(
     }
 
     out_path = output_dir / "documents.json"
-    write_json(out_path, payload)
+    write_json(out_path, payload, minify=minify)
     feed_bytes = out_path.stat().st_size
     feed_kb = feed_bytes / 1024
     log("INFO", f"{LOG_PREFIX}: wrote documents feed documents.json ({len(all_documents)} items, {feed_kb:.1f}KB) -> {out_path}")
@@ -1212,6 +1433,85 @@ def generate_reference_docs(
     return output_paths
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-R34 (ENC-PLN-100 C3.1, BRD FR-20 / FR-21): content-hash diffing + gzip payloads
+# ---------------------------------------------------------------------------
+
+# BRD FR-21 / ruling A7: gzip first, split tasks.json by project (with an index manifest) ONLY if it is
+# still larger than this when compressed. Measured against a real-generator fixture: not needed
+# (see test_content_diff_r34); the publisher logs a WARNING and reports ``split_required`` if it ever is.
+FEED_GZIP_SPLIT_THRESHOLD_BYTES = 5 * 1024 * 1024
+_GZIP_LEVEL = 6
+# write_json() emits indent=2 with sorted keys, so the top-level ``generated_at`` is the only key that
+# begins a line with exactly two spaces. Nested keys sit at >= 4 spaces, and a raw newline can never occur
+# inside a JSON string, so this needle cannot match anything else.
+_GENERATED_AT_NEEDLE = b'\n  "generated_at": "'
+_COMPACT_PARSE_LIMIT_BYTES = 1024 * 1024
+_MINIFIED_STAMP = re.compile(rb'\{"generated_at":"[^"]*",?')
+
+
+def object_content_digest(path: Path) -> str:
+    """SHA-256 of an object's CONTENT, ignoring the per-run ``generated_at`` stamp.
+
+    Every feed JSON carries a top-level ``generated_at`` that changes on every publish, so a raw hash
+    would never match and FR-20 would never skip anything. For the indent=2 JSON that write_json()
+    produces the ``generated_at`` line is excluded from the hash without parsing (the 25 MB tasks.json
+    must not be parsed inside a 512 MB Lambda); small compact JSON (deploy-pending.json) is parsed and
+    re-dumped canonically; anything else (reference/*.md) is hashed raw."""
+    raw = path.read_bytes()
+    h = hashlib.sha256()
+    if path.suffix.lower() == ".json":
+        m = _MINIFIED_STAMP.match(raw)
+        if m:  # dumps_minified layout: the stamp is the first member
+            h.update(b"{")
+            h.update(memoryview(raw)[m.end():])
+            return h.hexdigest()
+        start = raw.find(_GENERATED_AT_NEEDLE)
+        if start >= 0:
+            end = raw.find(b"\n", start + 1)
+            end = len(raw) if end < 0 else end
+            view = memoryview(raw)
+            h.update(view[: start + 1])
+            h.update(view[end + 1:])
+            return h.hexdigest()
+        if len(raw) <= _COMPACT_PARSE_LIMIT_BYTES:
+            try:
+                doc = json.loads(raw)
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict):
+                doc.pop("generated_at", None)
+                h.update(json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+                return h.hexdigest()
+    h.update(raw)
+    return h.hexdigest()
+
+
+def gzip_file(src: Path, dst: Path, level: int = _GZIP_LEVEL) -> int:
+    """Stream-compress ``src`` to ``dst`` (mtime=0 -> deterministic bytes). Returns the stored size."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with src.open("rb") as fin, dst.open("wb") as raw_out:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_out, compresslevel=level, mtime=0) as gz:
+            shutil.copyfileobj(fin, gz, 1024 * 1024)
+    return dst.stat().st_size
+
+
+def decode_s3_body(body: bytes, content_encoding: Optional[str]) -> bytes:
+    """gunzip ``body`` when the object carries ``Content-Encoding: gzip`` (boto3 does NOT do this)."""
+    if content_encoding and "gzip" in str(content_encoding).lower():
+        return gzip.decompress(body)
+    return body
+
+
+def read_s3_object_bytes(resp: Dict[str, Any]) -> bytes:
+    """The decoded bytes of a ``get_object`` response: honors ``ContentEncoding`` (ENC-TSK-R34 / FR-21).
+
+    Every S3-API reader of a feed object must read through this (or ContentStore.read_bytes, which
+    applies the same rule) once FEED_GZIP stores the JSON objects gzip-encoded."""
+    return decode_s3_body(resp["Body"].read(), resp.get("ContentEncoding"))
+
+
+
 def generate_reference_docs_from_s3(
     project_entries: List[FeedProjectEntry],
     output_dir: Path,
@@ -1262,7 +1562,7 @@ def generate_reference_docs_from_s3(
                 s3_resp = store.get_object(s3_key)
             else:
                 s3_resp = s3.get_object(Bucket=s3_bucket, Key=s3_key)
-            body = s3_resp["Body"].read()
+            body = read_s3_object_bytes(s3_resp)  # ENC-TSK-R34: honors Content-Encoding: gzip
         except Exception as exc:
             log("ERROR", f"{LOG_PREFIX}: S3 download failed for {entry.name}: {exc}")
             continue
@@ -1306,6 +1606,10 @@ def publish_mobile_feeds_to_s3(
     bucket: str = DEFAULT_MOBILE_S3_BUCKET,
     s3_prefix: str = DEFAULT_MOBILE_S3_PREFIX,
     dry_run: bool = False,
+    cache_control: Optional[str] = None,
+    previous_hashes: Optional[Dict[str, str]] = None,
+    gzip_json: bool = False,
+    report: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Upload mobile feed JSON/MD files from feed_dir to s3://bucket/s3_prefix/.
 
@@ -1313,43 +1617,104 @@ def publish_mobile_feeds_to_s3(
     Browsers always revalidate (max-age=0) while CloudFront edge caches serve the
     object for up to 30 seconds (s-maxage=30), reduced from 300s to improve feed
     freshness SLA. Returns the list of S3 keys uploaded.
+
+    ENC-TSK-R26: ``cache_control`` overrides that header (the coalesced publisher passes
+    "max-age=60" so freshness rides a 60 s TTL instead of a CloudFront invalidation).
+    None keeps the header above, byte-identical to before.
+
+    ENC-TSK-R34 (all three default to today's behavior):
+      * ``previous_hashes`` (FR-20) - the {s3_key: content digest} map of the last publish. When given,
+        an object whose digest (generated_at excluded) is unchanged is NOT put; the returned list is only
+        the keys actually written. None = no diffing, every object is put.
+      * ``gzip_json`` (FR-21) - JSON objects are stored gzip-compressed with ``Content-Encoding: gzip``;
+        reference/*.md are never compressed.
+      * ``report`` - filled in place: ``hashes`` (the new map, only objects confirmed written or
+        confirmed unchanged - safe to persist even when a later put raises), ``changed``, ``skipped``,
+        ``raw_bytes``/``stored_bytes`` per gzipped key and ``split_required`` (compressed > 5 MB).
     """
+    object_cache_control = cache_control or _MOBILE_FEED_CACHE_CONTROL
     require_boto3()
     s3_client = boto3.client("s3", region_name="us-east-1")
     store = _feed_content_store(s3_client, bucket)
 
     uploaded: List[str] = []
+    diffing = previous_hashes is not None
+    new_hashes: Dict[str, str] = {}
+    skipped: List[str] = []
+    gz_sizes: Dict[str, Dict[str, int]] = {}
+    split_required: List[str] = []
+    gz_dir: Optional[Path] = None
+    if report is not None:
+        report.update(hashes=new_hashes, changed=uploaded, skipped=skipped, gzip=gz_sizes, split_required=split_required)
     # Walk the feed directory recursively to catch reference/*.md too
-    for local_path in sorted(feed_dir.rglob("*")):
-        if not local_path.is_file():
-            continue
-        rel = local_path.relative_to(feed_dir)
-        s3_key = f"{s3_prefix}/{rel.as_posix()}"
-        suffix = local_path.suffix.lower()
+    try:
+        # A split index manifest (tasks.json beside a tasks/ dir) goes LAST, so a reader never sees a
+        # manifest that points at a project file which has not been written yet (ENC-TSK-R34).
+        ordered = sorted(feed_dir.rglob("*"))
+        ordered.sort(key=lambda q: q.suffix.lower() == ".json" and q.is_file() and (q.parent / q.stem).is_dir())
+        for local_path in ordered:
+            if not local_path.is_file():
+                continue
+            rel = local_path.relative_to(feed_dir)
+            s3_key = f"{s3_prefix}/{rel.as_posix()}"
+            suffix = local_path.suffix.lower()
 
-        if suffix == ".json":
-            content_type = "application/json"
-        elif suffix == ".md":
-            content_type = "text/markdown; charset=utf-8"
-        else:
-            log("INFO", f"{LOG_PREFIX}: skipping non-feed file {rel}")
-            continue
+            if suffix == ".json":
+                content_type = "application/json"
+            elif suffix == ".md":
+                content_type = "text/markdown; charset=utf-8"
+            else:
+                log("INFO", f"{LOG_PREFIX}: skipping non-feed file {rel}")
+                continue
 
-        if dry_run:
-            log("INFO", f"{LOG_PREFIX}: [DRY-RUN] s3 upload {local_path.name} -> s3://{bucket}/{s3_key}")
-            uploaded.append(s3_key)
-            continue
+            digest: Optional[str] = None
+            if diffing:
+                digest = object_content_digest(local_path)
+                if previous_hashes.get(s3_key) == digest:
+                    new_hashes[s3_key] = digest
+                    skipped.append(s3_key)
+                    continue
 
-        store.upload_file(
-            str(local_path),
-            s3_key,
-            {
-                "CacheControl": _MOBILE_FEED_CACHE_CONTROL,
+            if dry_run:
+                log("INFO", f"{LOG_PREFIX}: [DRY-RUN] s3 upload {local_path.name} -> s3://{bucket}/{s3_key}")
+                uploaded.append(s3_key)
+                continue
+
+            extra_args: Dict[str, Any] = {
+                "CacheControl": object_cache_control,
                 "ContentType": content_type,
-            },
-        )
-        log("INFO", f"{LOG_PREFIX}: uploaded {rel} -> s3://{bucket}/{s3_key}")
-        uploaded.append(s3_key)
+            }
+            upload_path = local_path
+            if gzip_json and suffix == ".json":
+                if gz_dir is None:
+                    gz_dir = Path(tempfile.mkdtemp(prefix="feed-gz-"))
+                upload_path = gz_dir / (rel.as_posix().replace("/", "__") + ".gz")
+                raw_size = local_path.stat().st_size
+                stored_size = gzip_file(local_path, upload_path)
+                extra_args["ContentEncoding"] = "gzip"
+                gz_sizes[s3_key] = {"raw_bytes": raw_size, "stored_bytes": stored_size}
+                log("INFO", f"{LOG_PREFIX}: gzip {rel} {raw_size} -> {stored_size} bytes")
+                if stored_size > FEED_GZIP_SPLIT_THRESHOLD_BYTES:
+                    split_required.append(s3_key)
+                    log(
+                        "WARNING",
+                        f"{LOG_PREFIX}: {rel} is {stored_size} bytes gzipped (> {FEED_GZIP_SPLIT_THRESHOLD_BYTES}); "
+                        "BRD FR-21 / ruling A7 requires splitting it by project with an index manifest",
+                    )
+
+            store.upload_file(str(upload_path), s3_key, extra_args)
+            log("INFO", f"{LOG_PREFIX}: uploaded {rel} -> s3://{bucket}/{s3_key}")
+            uploaded.append(s3_key)
+            if upload_path is not local_path:
+                try:
+                    upload_path.unlink()
+                except OSError:
+                    pass
+            if digest is not None:
+                new_hashes[s3_key] = digest  # recorded only after the put returned
+    finally:
+        if gz_dir is not None:
+            shutil.rmtree(gz_dir, ignore_errors=True)
 
     log(
         "SUCCESS",

@@ -132,6 +132,70 @@ class SendTests(unittest.TestCase):
         self.assertIn("feed: 1 messages", out.getvalue())
 
 
+class MarkDirtyTests(unittest.TestCase):
+    """ENC-TSK-R26: in coalesced mode the resync converges by setting dirty, not by publishing."""
+
+    def test_mark_projects_dirty_one_conditional_update_per_project(self):
+        ddb = mock.Mock()
+        failed = R.mark_projects_dirty(ddb, "enceladus-feed-publish-state", ["b", "a", "a"], now_us=1_800_000_000_000_000)
+        self.assertEqual(failed, [])
+        calls = ddb.update_item.call_args_list
+        self.assertEqual([c.kwargs["Key"]["project_id"]["S"] for c in calls], ["a", "b"])
+        kw = calls[0].kwargs
+        self.assertEqual(kw["TableName"], "enceladus-feed-publish-state")
+        self.assertEqual(kw["ConditionExpression"], "attribute_not_exists(last_write_at) OR last_write_at <= :ts")
+        self.assertTrue(kw["ExpressionAttributeValues"][":t"]["BOOL"])
+
+    def test_condition_failure_is_success_other_errors_are_reported(self):
+        from botocore.exceptions import ClientError
+        def err(code):
+            return ClientError({"Error": {"Code": code, "Message": "x"}}, "UpdateItem")
+        ddb = mock.Mock()
+        ddb.update_item.side_effect = [err("ConditionalCheckFailedException"), err("AccessDeniedException")]
+        self.assertEqual(R.mark_projects_dirty(ddb, "t", ["a", "b"]), ["b"])
+
+    def _ids_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"ids": [{"table": "tracker", "project_id": "p", "record_id": "task#ENC-TSK-1"}]}, fh)
+        return fh.name
+
+    def test_dry_run_with_mark_dirty_writes_nothing_and_says_so(self):
+        ddb = mock.Mock()
+        ddb.get_item.return_value = {"Item": trk("p", "ENC-TSK-1")}
+        sess = mock.Mock()
+        sess.client.return_value = ddb
+        with mock.patch.object(R, "_sessions", return_value=sess), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = R.main(["replay", "--ids-file", self._ids_file(), "--dry-run", "--mark-dirty"])
+        self.assertEqual(rc, 0)
+        ddb.update_item.assert_not_called()
+        self.assertIn("would mark dirty in enceladus-feed-publish-state: ['p']", out.getvalue())
+        self.assertIn("next sweep", out.getvalue())
+
+    def test_replay_with_mark_dirty_uses_the_mark_profile(self):
+        read_ddb = mock.Mock()
+        read_ddb.get_item.return_value = {"Item": trk("p", "ENC-TSK-1")}
+        mark_ddb = mock.Mock()
+        sqs = mock.Mock()
+        sqs.get_queue_url.return_value = {"QueueUrl": "u"}
+        sqs.send_message_batch.return_value = {"Failed": []}
+        by_profile = {"product-lead": read_ddb, "enceladus-agent": sqs, "marker": mark_ddb}
+
+        def sessions(_args, profile):
+            sess = mock.Mock()
+            sess.client.side_effect = lambda name: mark_ddb if (name == "dynamodb" and profile == "marker") \
+                else (read_ddb if name == "dynamodb" else sqs)
+            return sess
+
+        with mock.patch.object(R, "_sessions", side_effect=sessions), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = R.main(["replay", "--ids-file", self._ids_file(), "--mark-dirty", "--mark-profile", "marker"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(mark_ddb.update_item.call_count, 1)
+        self.assertEqual(mark_ddb.update_item.call_args.kwargs["Key"], {"project_id": {"S": "p"}})
+        self.assertIn("mark-dirty: 1 project(s)", out.getvalue())
+
+
 class Neo4jTests(unittest.TestCase):
     def test_uri_conversion(self):
         self.assertEqual(R.neo4j_https_base("neo4j+s://abc123.databases.neo4j.io"),

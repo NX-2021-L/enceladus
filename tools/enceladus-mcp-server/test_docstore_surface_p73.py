@@ -237,7 +237,8 @@ def test_execute_core_byte_growth_bounded_by_patch_section_definition_only():
 def test_connection_health_docstore_capabilities_computed_from_registry():
     server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
     with patch.object(server, "_health_api_request", return_value={"dynamodb": "ok", "s3": "ok"}), \
-            patch.object(server, "_graph_health_check", return_value={"status": "ok"}):
+            patch.object(server, "_graph_health_check", return_value={"status": "ok"}), \
+            patch.object(server, "_get_cost_digest", return_value={"status": "unavailable", "reason": "test"}):
         payload = json.loads(_run(server._connection_health({}))[0].text)
     assert payload["docstore_capabilities"] == {
         "patch_section": True, "manifest": True, "history": True, "prefix_map": True,
@@ -251,6 +252,7 @@ def test_connection_health_docstore_capabilities_reflects_missing_action():
     }
     with patch.object(server, "_health_api_request", return_value={"dynamodb": "ok", "s3": "ok"}), \
             patch.object(server, "_graph_health_check", return_value={"status": "ok"}), \
+            patch.object(server, "_get_cost_digest", return_value={"status": "unavailable", "reason": "test"}), \
             patch.object(server, "_SEARCH_ACTIONS", search_actions_without_history):
         payload = json.loads(_run(server._connection_health({}))[0].text)
     assert payload["docstore_capabilities"]["history"] is False

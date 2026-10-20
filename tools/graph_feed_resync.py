@@ -13,6 +13,12 @@ Usage:
     python3 tools/graph_feed_resync.py replay --ids-file drift.json --dry-run
     python3 tools/graph_feed_resync.py replay --ids-file drift.json \
         --targets graph,feed --send-profile enceladus-agent
+
+ENC-TSK-R26: when feed_publisher runs FEED_PUBLISH_MODE=coalesced, the replayed feed messages
+only MARK their projects dirty and the publish lands on the next scheduled sweep (rate 5 min),
+not immediately. ``--mark-dirty`` also sets the dirty flag directly in the feed-publish-state
+table (needs a profile with dynamodb:UpdateItem on it, ``--mark-profile``), so the sweep
+converges even if the queue leg is skipped (``--targets graph``) or lags.
 """
 from __future__ import annotations
 
@@ -329,6 +335,38 @@ def send_entries(sqs, queue_url: str, entries: List[Dict[str, Any]]) -> List[Dic
     return failed
 
 
+# ENC-TSK-R26: same expressions as backend/lambda/feed_publisher MARK (kept in step by hand; this
+# tool is stdlib + boto3 only and must not import the lambda package).
+FEED_STATE_TABLE = "enceladus-feed-publish-state"
+_MARK_UPDATE = "SET dirty = :t, dirty_since = if_not_exists(dirty_since, :iso), last_write_at = :ts"
+_MARK_CONDITION = "attribute_not_exists(last_write_at) OR last_write_at <= :ts"
+
+
+def mark_projects_dirty(ddb, table: str, project_ids: Iterable[str], now_us: Optional[int] = None) -> List[str]:
+    """Set dirty (monotonic last_write_at) for each project. Returns the project ids that FAILED."""
+    import time
+    from botocore.exceptions import ClientError
+
+    failed: List[str] = []
+    for pid in sorted(set(project_ids)):
+        ts = now_us if now_us is not None else int(time.time() * 1_000_000)
+        iso = dt.datetime.fromtimestamp(ts / 1_000_000, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            ddb.update_item(
+                TableName=table,
+                Key={"project_id": {"S": pid}},
+                UpdateExpression=_MARK_UPDATE,
+                ConditionExpression=_MARK_CONDITION,
+                ExpressionAttributeValues={":t": {"BOOL": True}, ":iso": {"S": iso}, ":ts": {"N": str(ts)}},
+            )
+        except ClientError as exc:
+            # A newer mark already stored a later last_write_at (and set dirty): success.
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                logger.error("[ERROR] mark-dirty failed project=%s: %s", pid, exc)
+                failed.append(pid)
+    return failed
+
+
 def _key_for(ent: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     if ent.get("table") == "documents":
         return "documents", {"document_id": {"S": ent["document_id"]}}
@@ -354,10 +392,21 @@ def cmd_replay(args) -> int:
     queues = {"graph": f"devops-graph-sync-queue{sfx}.fifo", "feed": f"devops-feed-publish-queue{sfx}.fifo"}
     for t, es in entries.items():
         print(f"[INFO] {t}: {len(es)} messages -> {queues[t]}")
+    if "feed" in targets:
+        print(
+            "[INFO] feed: if feed_publisher runs FEED_PUBLISH_MODE=coalesced these messages only MARK "
+            "their projects dirty; the publish lands on the next sweep (rate 5 min), not immediately"
+        )
+    mark_projects = {
+        item["project_id"]["S"] for _ent, _key, item in resolved if item.get("project_id", {}).get("S")
+    }
+    mark_table = f"{FEED_STATE_TABLE}{sfx}"
     if args.dry_run:
         for t, es in entries.items():
             if es:
                 print(f"[INFO] sample {t} body: {es[0]['MessageBody']}")
+        if args.mark_dirty:
+            print(f"[INFO] would mark dirty in {mark_table}: {sorted(mark_projects)}")
         return 0
     sqs = _sessions(args, args.send_profile).client("sqs")
     failed_total = 0
@@ -368,6 +417,14 @@ def cmd_replay(args) -> int:
         print(f"[{'ERROR' if failed else 'SUCCESS'}] {t}: sent {len(es) - len(failed)}, failed {len(failed)}")
         for f in failed:
             print(f"  failed: {json.dumps(f)}")
+    if args.mark_dirty:
+        mark_ddb = _sessions(args, args.mark_profile).client("dynamodb")
+        mark_failed = mark_projects_dirty(mark_ddb, mark_table, mark_projects)
+        print(
+            f"[{'ERROR' if mark_failed else 'SUCCESS'}] mark-dirty: {len(mark_projects) - len(mark_failed)} "
+            f"project(s) in {mark_table}, failed {len(mark_failed)}"
+        )
+        failed_total += len(mark_failed)
     return 1 if failed_total else 0
 
 
@@ -392,6 +449,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--send-profile", default="enceladus-agent")
     r.add_argument("--targets", default="graph,feed")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument(
+        "--mark-dirty",
+        action="store_true",
+        help="ENC-TSK-R26: also set dirty directly in the feed-publish-state table (coalesced mode)",
+    )
+    r.add_argument("--mark-profile", default="product-lead")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     return cmd_compare(args) if args.cmd == "compare" else cmd_replay(args)

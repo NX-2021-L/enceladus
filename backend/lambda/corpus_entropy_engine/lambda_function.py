@@ -175,7 +175,9 @@ def _fetch_tracker_records(record_type: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     cursor = ""
     for _ in range(_MAX_PAGES):
-        url = f"{TRACKER_API_BASE}/{PROJECT_ID}?type={record_type}&page_size=200"
+        # ENC-TSK-R35 (A11): the entropy core reads history/related ids, which the
+        # compact list projection excludes -> opt out explicitly (fields=full).
+        url = f"{TRACKER_API_BASE}/{PROJECT_ID}?type={record_type}&page_size=200&fields=full"
         if cursor:
             url += "&next_cursor=" + urllib.parse.quote(cursor, safe="")
         try:

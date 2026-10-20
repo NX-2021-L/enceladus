@@ -1,0 +1,3 @@
+# TOMBSTONE: see .github/workflows/_deploy.yml matrix build
+# ENC-TSK-R24 cost_digest — no third-party deps.
+# boto3 is provided by the Lambda runtime; stdlib covers the rest.
