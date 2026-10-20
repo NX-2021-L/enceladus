@@ -27,6 +27,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -344,6 +345,149 @@ def _ddb_item_to_yaml_record(item: Dict) -> Dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-R41 (ENC-PLN-100 C4.1, FR-22): incremental tracker re-read building blocks.
+#
+# The SWEEP keeps a per-project snapshot of the RAW DynamoDB items (lossless: no Decimal/set
+# round-trip) in S3 and, instead of re-querying the whole project, strongly-consistently BatchGets
+# only the record keys the DynamoDB stream reported changed, then merges them in. A key that comes
+# back absent is a deletion. Everything here is pure mechanics; the policy (when to trust a snapshot,
+# how ids are tracked and cleared) lives in lambda_function.py.
+# ---------------------------------------------------------------------------
+
+_READ_UNITS: Dict[str, float] = {"total": 0.0}
+SNAPSHOT_VERSION = 1
+BATCH_GET_CHUNK = 100
+BATCH_GET_MAX_ATTEMPTS = 6
+
+
+def _note_consumed(resp: Any) -> None:
+    """Accumulate ConsumedCapacity from a Query page / BatchGetItem response (best effort)."""
+    try:
+        cc = resp.get("ConsumedCapacity") if isinstance(resp, dict) else None
+        if cc is None:
+            return
+        for entry in cc if isinstance(cc, list) else [cc]:
+            _READ_UNITS["total"] += float(entry.get("CapacityUnits") or 0.0)
+    except Exception:  # noqa: BLE001 - metrics must never break a publish
+        pass
+
+
+def reset_read_units() -> None:
+    _READ_UNITS["total"] = 0.0
+
+
+def read_units_total() -> float:
+    return float(_READ_UNITS["total"])
+
+
+def group_project_items(raw_items: List[Dict]) -> Dict[str, Any]:
+    """Raw DynamoDB items of one project -> the artifact_payloads dict fetch_from_dynamodb returns.
+    Reference rows (and any unknown record_type) are skipped - they are metadata only."""
+    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": [], "lesson": [], "plan": []}
+    for raw in raw_items:
+        item = _ddb_deserialize_item(raw)
+        rtype = item.get("record_type")
+        if rtype in grouped:
+            if rtype in ("task", "issue", "feature"):
+                grouped[rtype].append(_ddb_item_to_yaml_record(item))
+            else:
+                # lessons and plans: store raw deserialized item directly
+                grouped[rtype].append(item)
+    return {
+        "tasks": grouped["task"],
+        "issues": grouped["issue"],
+        "features": grouped["feature"],
+        "lessons": grouped["lesson"],
+        "plans": grouped["plan"],
+    }
+
+
+def query_project_items(project_name: str, table: str, region: str) -> Dict[str, Dict]:
+    """Full per-project read of the tracker table as {record_id: raw item}. Unlike
+    fetch_from_dynamodb this RAISES on a failed read: a snapshot must never be built from a partial or
+    empty read."""
+    require_boto3()
+    ddb = boto3.client("dynamodb", region_name=region, config=Config(retries={"max_attempts": 3, "mode": "standard"}))
+    items: Dict[str, Dict] = {}
+    for page in ddb.get_paginator("query").paginate(
+        TableName=table,
+        IndexName=TRACKER_GSI_PROJECT_TYPE,
+        KeyConditionExpression="project_id = :pid",
+        ExpressionAttributeValues={":pid": {"S": project_name}},
+        ReturnConsumedCapacity="TOTAL",
+    ):
+        _note_consumed(page)
+        for raw in page.get("Items", []):
+            rid = (raw.get("record_id") or {}).get("S")
+            if rid:
+                items[rid] = raw
+    return items
+
+
+def batch_get_tracker_items(
+    project_name: str,
+    record_ids: List[str],
+    table: str,
+    region: str,
+    sleep: Any = time.sleep,
+) -> Dict[str, Dict]:
+    """Strongly consistent BatchGetItem of exactly ``record_ids`` (chunks of 100, UnprocessedKeys
+    retried with backoff). Returns {record_id: raw item} for the keys that EXIST; a missing key is
+    absent from the result. Raises if keys are still unprocessed after the retries (the caller falls
+    back to a full re-read)."""
+    require_boto3()
+    ddb = boto3.client("dynamodb", region_name=region, config=Config(retries={"max_attempts": 3, "mode": "standard"}))
+    found: Dict[str, Dict] = {}
+    ordered = sorted(set(record_ids))
+    for start in range(0, len(ordered), BATCH_GET_CHUNK):
+        pending = {table: {
+            "Keys": [{"project_id": {"S": project_name}, "record_id": {"S": rid}} for rid in ordered[start:start + BATCH_GET_CHUNK]],
+            "ConsistentRead": True,
+        }}
+        for attempt in range(BATCH_GET_MAX_ATTEMPTS):
+            resp = ddb.batch_get_item(RequestItems=pending, ReturnConsumedCapacity="TOTAL")
+            _note_consumed(resp)
+            for raw in (resp.get("Responses") or {}).get(table, []):
+                rid = (raw.get("record_id") or {}).get("S")
+                if rid:
+                    found[rid] = raw
+            pending = resp.get("UnprocessedKeys") or {}
+            if not pending:
+                break
+            sleep(min(2.0, 0.05 * (2 ** attempt)))
+        else:
+            raise RuntimeError(f"BatchGetItem left unprocessed keys for project={project_name}")
+    return found
+
+
+def snapshot_encode(project: str, items: Dict[str, Dict], full_read_at: float, saved_at: float) -> bytes:
+    """gzip JSON of the raw items. Raises (TypeError) on a non-JSON attribute (e.g. binary): the
+    caller then simply has no snapshot and keeps doing full re-reads."""
+    payload = {
+        "v": SNAPSHOT_VERSION, "project": project, "full_read_at": float(full_read_at),
+        "saved_at": float(saved_at), "items": items,
+    }
+    return gzip.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), compresslevel=6)
+
+
+def snapshot_decode(blob: bytes, project: str) -> Optional[Dict[str, Any]]:
+    """Inverse of snapshot_encode; None for anything that is not a valid snapshot of ``project``."""
+    try:
+        payload = json.loads(gzip.decompress(blob).decode("utf-8"))
+        if payload.get("v") != SNAPSHOT_VERSION or payload.get("project") != project:
+            return None
+        if not isinstance(payload.get("items"), dict):
+            return None
+        return {
+            "items": payload["items"],
+            "full_read_at": float(payload.get("full_read_at") or 0.0),
+            "saved_at": float(payload.get("saved_at") or 0.0),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fetch_from_dynamodb(
     project_entry: FeedProjectEntry,
     table: str = DEFAULT_TRACKER_TABLE,
@@ -375,30 +519,19 @@ def fetch_from_dynamodb(
             IndexName=TRACKER_GSI_PROJECT_TYPE,
             KeyConditionExpression="project_id = :pid",
             ExpressionAttributeValues={":pid": {"S": project_entry.name}},
+            ReturnConsumedCapacity="TOTAL",
         ):
             raw_items.extend(page.get("Items", []))
+            _note_consumed(page)
     except (BotoCoreError, ClientError) as exc:  # type: ignore[misc]
         log("ERROR", f"{LOG_PREFIX}: DynamoDB query failed for project={project_entry.name}: {exc}")
         return {"tasks": [], "issues": [], "features": []}
 
-    # Group by record_type (skip reference rows — those are metadata only)
-    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": [], "lesson": [], "plan": []}
-    for raw in raw_items:
-        item = _ddb_deserialize_item(raw)
-        rtype = item.get("record_type")
-        if rtype in grouped:
-            if rtype in ("task", "issue", "feature"):
-                grouped[rtype].append(_ddb_item_to_yaml_record(item))
-            else:
-                # lessons and plans: store raw deserialized item directly
-                grouped[rtype].append(item)
-
-    artifact_payloads: Dict[str, Any] = {
-        "tasks": grouped["task"],
-        "issues": grouped["issue"],
-        "features": grouped["feature"],
-        "lessons": grouped["lesson"],
-        "plans": grouped["plan"],
+    artifact_payloads = group_project_items(raw_items)
+    grouped = {
+        "task": artifact_payloads["tasks"], "issue": artifact_payloads["issues"],
+        "feature": artifact_payloads["features"], "lesson": artifact_payloads["lessons"],
+        "plan": artifact_payloads["plans"],
     }
 
     log(
@@ -440,8 +573,10 @@ def fetch_documents_from_dynamodb(
             KeyConditionExpression="project_id = :pid",
             ExpressionAttributeValues={":pid": {"S": project_entry.name}},
             ScanIndexForward=False,  # newest first
+            ReturnConsumedCapacity="TOTAL",
         ):
             raw_items.extend(page.get("Items", []))
+            _note_consumed(page)
     except (BotoCoreError, ClientError) as exc:  # type: ignore[misc]
         log("ERROR", f"{LOG_PREFIX}: DynamoDB documents query failed for project={project_entry.name}: {exc}")
         return []
