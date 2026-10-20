@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-20.6",
-  "updated_at": "2026-10-20T01:38:06Z",
-  "last_change_summary": "ENC-TSK-R38-weekly-compliance-scan (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
+  "version": "2026-10-20.7",
+  "updated_at": "2026-10-20T01:41:40Z",
+  "last_change_summary": "ENC-TSK-R34-feed-diff-gzip (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
   "owners": [
     "enceladus-platform"
   ],
