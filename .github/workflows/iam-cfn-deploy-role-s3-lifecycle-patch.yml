@@ -76,6 +76,21 @@ jobs:
                   "arn:aws:s3:::enceladus-ui-v2-gamma",
                   "arn:aws:s3:::support-lambda-artifacts-356364570033"
                 ]
+              },
+              {
+                "Sid": "Pln100CostDigestLogGroupLifecycle",
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:DeleteLogGroup",
+                  "logs:PutRetentionPolicy",
+                  "logs:TagResource",
+                  "logs:ListTagsForResource"
+                ],
+                "Resource": [
+                  "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/enceladus-cost-digest",
+                  "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/enceladus-cost-digest-gamma"
+                ]
               }
             ]
           }
