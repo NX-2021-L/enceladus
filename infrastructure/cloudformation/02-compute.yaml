@@ -2929,7 +2929,7 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       Name: !Sub "enceladus-stale-checkout-monitor-schedule${EnvironmentSuffix}"
-      ScheduleExpression: rate(30 minutes)
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(30 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 30m
       State: ENABLED
       Targets:
         - Arn: !GetAtt StaleCheckoutMonitorFunction.Arn
@@ -3994,7 +3994,7 @@ Resources:
     Properties:
       Name: !Sub "devops-coordination-batch-poller${EnvironmentSuffix}"
       Description: "ENC-TSK-G19: poll Anthropic Message Batches every 60s until ended"
-      ScheduleExpression: rate(1 minute)
+      ScheduleExpression: !If [IsGamma, "rate(5 minutes)", "rate(1 minute)"]  # ENC-TSK-R30: gamma 5m, prod 1m
       State: ENABLED
       Targets:
         - Arn: !GetAtt CoordinationApiFunction.Arn
@@ -4071,7 +4071,7 @@ Resources:
     Properties:
       Name: !Sub "devops-agent-session-unclaim-sweep${EnvironmentSuffix}"
       Description: "ENC-ISS-441/ENC-TSK-J94: reap never-claimed (ghost) agent sessions after the 10-min unclaim TTL and revoke their SCIs"
-      ScheduleExpression: rate(10 minutes)
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(10 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 10m
       State: ENABLED
       Targets:
         - Arn: !GetAtt CoordinationApiFunction.Arn
@@ -4986,7 +4986,7 @@ Resources:
       # prefix and failed the prod pre-deploy drift gate (ENC-ISS-455 / ENC-TSK-J12).
       Name: !Sub "enceladus-recipe-run-sweep${EnvironmentSuffix}"
       Description: Recipe-run sweeper for TrackerMutationFunction (DVP-TSK-968)
-      ScheduleExpression: rate(15 minutes)
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(15 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 15m
       State: !If [HasRecipeMcpSecret, ENABLED, DISABLED]
       Targets:
         - Id: recipe-run-sweep
@@ -5008,7 +5008,7 @@ Resources:
       # Explicit suffixed name, as RecipeRunSweepRule (ENC-ISS-455 / ENC-TSK-J12 drift gate).
       Name: !Sub "enceladus-escalation-expiry-sweep${EnvironmentSuffix}"
       Description: Escalation expiry sweeper for TrackerMutationFunction (DVP-TSK-B33)
-      ScheduleExpression: rate(15 minutes)
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(15 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 15m
       State: ENABLED
       Targets:
         - Id: escalation-expiry-sweep

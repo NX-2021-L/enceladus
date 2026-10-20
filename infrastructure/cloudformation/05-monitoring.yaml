@@ -158,7 +158,7 @@ Resources:
     Properties:
       Name: !Sub "enceladus-health-probe-schedule${EnvironmentSuffix}"
       Description: Triggers production health monitor Lambda every 15 minutes
-      ScheduleExpression: "rate(15 minutes)"
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(15 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 15m
       State: ENABLED
       Targets:
         - Id: ProdHealthMonitorTarget
@@ -184,7 +184,7 @@ Resources:
       Description: >
         Triggers graph_query_api publish_graph_health (Fiedler lambda2 ->
         Enceladus/GraphHealth) every 15 minutes (ENC-TSK-K43)
-      ScheduleExpression: "rate(15 minutes)"
+      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(15 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 15m
       State: ENABLED
       Targets:
         - Id: GraphHealthMetricTarget
@@ -648,9 +648,9 @@ Resources:
     Properties:
       Name: !Sub "enceladus-mcp-gamma-synthetic-schedule${EnvironmentSuffix}"
       Description: >
-        Triggers the gamma MCP edge synthetic canary every 5 minutes
+        Triggers the gamma MCP edge synthetic canary every 30 minutes
         (ENC-TSK-K78 / ENC-PLN-067)
-      ScheduleExpression: "rate(5 minutes)"
+      ScheduleExpression: "rate(30 minutes)"  # ENC-TSK-R30: gamma-only rule, 5m -> 30m
       State: ENABLED
       Targets:
         - Id: McpGammaSyntheticTarget
