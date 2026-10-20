@@ -1,0 +1,54 @@
+name: Cost Resource Guard
+
+# ENC-TSK-R31 (C2.7 / BRD FR-34): persistent-cost CI guard. Fails a PR that ADDS
+# a billed-while-idle CloudFormation resource (see tools/cost_resource_guard.py
+# for the rule list) unless the PR carries the `cost-approved` label. Re-runs on
+# label changes so adding/removing the label flips the check without a new push.
+# No AWS access: pure static diff of infrastructure/** templates (class: inert).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches:
+      - v4/main
+      - main
+    paths:
+      - "infrastructure/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Persistent-cost resource guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Computed by the Actions expression engine from the event payload; never
+      # interpolated into a shell command line.
+      COST_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'cost-approved') }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+    steps:
+      - name: Checkout PR head (full history for merge-base)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Guard self-tests
+        run: python3 -m unittest tools.test_cost_resource_guard
+
+      - name: Diff templates for persistent-cost additions
+        run: |
+          set -euo pipefail
+          python3 tools/cost_resource_guard.py --base "$BASE_SHA" --head "$HEAD_SHA"

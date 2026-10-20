@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-19.2",
-  "updated_at": "2026-10-20T00:57:53Z",
-  "last_change_summary": "ENC-TSK-R44 (ENC-ISS-855): MCP contract change only, no new/renamed/removed dictionary fields. Code-mode plan.create now has its own plan input schema (record_type const plan; plan fields objectives_set, related_feature_id, attached_documents) and execute injects record_type=plan server-side, so it can no longer create a task; tracker.create and tracker.list record_type enums add plan; tracker.create rejects 'parent' with a 422 (/parent) instead of dropping it -- use is_child + parent_task_id, or tracker.set field=parent. Prior: ES-R7: escalation decisions no longer require step-up re-authentication (session assurance aal1 for all risks; allow-list, no-self-review, idempotency and state checks kept). Prior: ENC-TSK-Q89: notify v2.1 -- optional per-type detail (types.<kind>.detail detailed|generic, ES-R6; falls back to device detail); push-subscriptions UpdateItem grant. Prior: ENC-TSK-Q83: notify v2 -- per-device push subscriptions (PUSHDEV#<principal>/<device_id>), per-device preferences, test route, per-device sender; v1 principal-level preferences/DELETE subscribe removed (410); auth_refresh thin passkey routes GET /auth/passkeys, GET /auth/passkeys/fresh-auth, DELETE /auth/passkeys/{id}",
+  "version": "2026-10-20.3",
+  "updated_at": "2026-10-20T01:19:46Z",
+  "last_change_summary": "ENC-TSK-R32-connection-health-cost-digest (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
   "owners": [
     "enceladus-platform"
   ],
