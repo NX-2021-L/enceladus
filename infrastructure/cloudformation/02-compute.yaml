@@ -2954,6 +2954,130 @@ Resources:
       SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-R24 (ENC-PLN-100 C1.7, BRD FR-2, rulings A4/A13): Daily Cost Digest producer.
+  # Writes s3://jreese-net/governance/cost-digest/{latest,YYYY-MM-DD}.json once a day
+  # (cron 15 13 * * ? * UTC). Ruling A13: <= 3 Cost Explorer calls per invocation, enforced
+  # in code (_CostExplorerBudget) -- and the account-wide CE budget is one invocation/day,
+  # so the gamma twin's schedule is DISABLED (the function is still created for parity and
+  # can be invoked ad hoc with {"dry_run": true}, which skips the S3 writes).
+  # Code managed out-of-band (matrix-build / _deploy.yml); cost class C3 (new Lambda +
+  # daily schedule) -- activation of this block is gated by the io `cost-approved` label.
+  # ---------------------------------------------------------------------------
+  # Explicit log group (cost rule 5: every log group carries a retention). Retain so a stack
+  # rollback never deletes the logs. The name MUST equal the function-name expression below.
+  CostDigestLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-cost-digest${EnvironmentSuffix}"
+      RetentionInDays: 30
+
+  CostDigestFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    DependsOn: CostDigestLogGroup
+    Properties:
+      # ENC-TSK-O91: structured JSON logging, gamma-only (prod keeps Text).
+      LoggingConfig: !If
+        - IsGamma
+        - LogFormat: JSON
+          ApplicationLogLevel: INFO
+          SystemLogLevel: WARN
+        - !Ref "AWS::NoValue"
+      FunctionName: !Sub "enceladus-cost-digest${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - arm64
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt CostDigestRole.Arn
+      Environment:
+        Variables:
+          COST_DIGEST_BUCKET: jreese-net
+          COST_DIGEST_PREFIX: governance/cost-digest/
+          COST_DIGEST_S3_REGION: us-west-1
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: cost-digest
+
+  CostDigestRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-cost-digest-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cost-digest-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              # Cost Explorer and CloudWatch metric reads do not support resource-level scoping.
+              - Sid: CostExplorerRead
+                Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                Resource: "*"
+              - Sid: CloudWatchMetricsRead
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                Resource: "*"
+              - Sid: DigestWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: arn:aws:s3:::jreese-net/governance/cost-digest/*
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: cost-digest
+
+  CostDigestSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-cost-digest-schedule${EnvironmentSuffix}"
+      ScheduleExpression: cron(15 13 * * ? *)
+      # A13: the account makes <= 3 CE calls/day -> only the production schedule fires.
+      State: !If [IsGamma, DISABLED, ENABLED]
+      Targets:
+        - Arn: !GetAtt CostDigestFunction.Arn
+          Id: cost-digest-target
+
+  CostDigestPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CostDigestFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CostDigestSchedule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-K44 / ENC-FTR-071 (B66 Ph5): Production Health Monitor Lambda.
   # Moved from infrastructure/cloudformation/05-monitoring.yaml so the Lambda
   # Workflow Coverage Guard recognizes it as a coverage-tracked function (the

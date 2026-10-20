@@ -234,6 +234,13 @@
       "deploy_script": "backend/lambda/corpus_entropy_gdmp_remediation/deploy.sh"
     },
     {
+      "function_name": "enceladus-cost-digest",
+      "lambda_dir": "backend/lambda/cost_digest",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/cost_digest/deploy.sh",
+      "cfn_managed": true
+    },
+    {
       "function_name": "enceladus-deploy-capability-auditor",
       "lambda_dir": "backend/lambda/deploy_capability_auditor",
       "workflow_file": ".github/workflows/_deploy.yml",
