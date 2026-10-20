@@ -17,24 +17,30 @@ name: Deploy UI (ui-v2 PWA)
 # The BUILD job is env-agnostic (no AWS, no environment) and produces dist/ as
 # an artifact. The DEPLOY job is the ONLY environment-scoped, AWS-mutating job:
 # it resolves the S3 bucket + CloudFront distribution id from the T1 stack's
-# CFN exports at runtime (never hardcoded), syncs dist/ with a cache-control
-# split (immutable hashed assets vs no-cache app shell), then invalidates the
-# whole distribution with a single "/*" path (ENC-TSK-R25: one wildcard path
-# replaces the former 3-path app-shell list) and WAITS for invalidation completion before reporting success
-# (ENC-TSK-M88 — a green deploy is not evidence users receive the build until
-# CloudFront serves fresh index.html). record_deploy writes a DPL telemetry record (ENC-ISS-451
-# mechanism) after a successful deploy, and never blocks it.
+# CFN exports at runtime (never hardcoded) and syncs dist/ with a cache-control
+# split: content-hashed assets (assets/*, workbox-*.js) are immutable for a year;
+# the app shell (index.html and every other non-hashed file: sw.js,
+# manifest.webmanifest, notify-sw.js, ...) is "public,max-age=0,must-revalidate".
+# ENC-TSK-R37 (C3.4): there is NO CloudFront invalidation. The distribution uses
+# the managed CachingOptimized policy (MinTTL 1s), which honors the origin
+# Cache-Control, so a revalidating index.html reaches viewers within seconds of
+# the S3 put. The deploy then WAITS on the viewer path (ENC-TSK-M88 — a green
+# deploy is not evidence users receive the build until the edge serves the
+# fresh index.html): the gate polls /index.html until it references the deployed
+# entry bundle, which is the proof that no invalidation is needed. record_deploy
+# writes a DPL telemetry record (ENC-ISS-451 mechanism) after a successful
+# deploy, and never blocks it.
 #
 # Escalated prereq (deploy role): this workflow assumes AWS_UI_DEPLOY_ROLE_TO_ASSUME
 # when present, else falls back to AWS_CLOUDFORMATION_ROLE_TO_ASSUME. The
 # UI-deploy role needs, scoped to the UI bucket + distribution:
 #   s3:PutObject, s3:DeleteObject, s3:ListBucket  (on enceladus-ui-v2${suffix} + /*)
 #   s3:GetObject                                   (for --delete diffing)
-#   cloudfront:CreateInvalidation                  (on the ui-v2 distribution)
 #   cloudformation:DescribeStacks                  (to read the T1 stack exports)
-# Invalidation completion is gated on the VIEWER path (index.html contains the
-# deployed commit sha) rather than cloudfront:GetInvalidation — the deploy role
-# carries CreateInvalidation only (04-github-roles.yaml).
+# ENC-TSK-R37: cloudfront:CreateInvalidation is no longer used by this workflow
+# (the IAM grant in 04-github-roles.yaml is left in place; removing it is a
+# separate IAM change). Freshness is gated on the VIEWER path (index.html
+# references the deployed entry bundle), not on any CloudFront API.
 # These are io-gated to add as an ATTACHED managed policy (the CFN deploy role's
 # inline quota is exhausted — J85 / PR #733 pattern) BEFORE the first deploy if
 # the fallback CFN role is used, or the s3 sync AccessDenies.
@@ -287,7 +293,7 @@ jobs:
             echo "Using dedicated AWS_UI_DEPLOY_ROLE_TO_ASSUME."
           elif [ -n "${CFN_ROLE}" ]; then
             echo "role_arn=${CFN_ROLE}" >> "${GITHUB_OUTPUT}"
-            echo "::warning::AWS_UI_DEPLOY_ROLE_TO_ASSUME unset — falling back to AWS_CLOUDFORMATION_ROLE_TO_ASSUME. It needs s3:PutObject/DeleteObject/ListBucket/GetObject on the UI bucket + cloudfront:CreateInvalidation + cloudformation:DescribeStacks."
+            echo "::warning::AWS_UI_DEPLOY_ROLE_TO_ASSUME unset — falling back to AWS_CLOUDFORMATION_ROLE_TO_ASSUME. It needs s3:PutObject/DeleteObject/ListBucket/GetObject on the UI bucket + cloudformation:DescribeStacks."
           else
             echo "::error::Neither AWS_UI_DEPLOY_ROLE_TO_ASSUME nor AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set. Cannot assume an AWS role for the UI deploy."
             exit 1
@@ -357,53 +363,78 @@ jobs:
           echo "expected_entry=${EXPECTED_ENTRY}" >> "${GITHUB_OUTPUT}"
           echo "Expected viewer entry bundle: ${EXPECTED_ENTRY}"
 
-          # 1. Full sync (mirrors the bucket, --delete removes stale objects).
-          #    Default cache-control here is conservative; the app-shell files
-          #    are re-put with no-cache below, and hashed assets/ are re-put
-          #    immutable below, so the ordering does not matter for those.
-          #    ENC-TSK-K69: mobile/* is EXCLUDED from the delete-mirror — the
-          #    gamma feed publisher (devops-feed-publisher-gamma) writes the
-          #    /mobile/v1 snapshot JSON into this bucket for same-origin
-          #    serving; a UI deploy must never wipe it.
-          aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" --delete \
+          # ENC-TSK-R37 (C3.4, BRD FR-35): two cache classes, no CloudFront
+          # invalidation.
+          #   IMMUTABLE — content-addressed files whose name changes with their
+          #     bytes: everything Vite emits under assets/ ([name]-[hash]) and
+          #     the vite-plugin-pwa workbox runtime (workbox-[hash].js, at the
+          #     bucket root). Safe to cache for a year.
+          #   NOCACHE   — everything else: index.html (and any other *.html),
+          #     the service worker (sw.js), the manifest, and the un-hashed
+          #     root scripts the worker importScripts() (notify-sw.js,
+          #     sw-feed-cache-cleanup.js), icons, favicons. A stale copy of any
+          #     of these pins a client to an old asset graph, so the origin
+          #     tells every cache (browser + CloudFront, CachingOptimized
+          #     honors origin Cache-Control above its 1s MinTTL) to revalidate.
+          IMMUTABLE_CC="public,max-age=31536000,immutable"
+          NOCACHE_CC="public,max-age=0,must-revalidate"
+
+          # NOTE: `aws s3 sync` SKIPS objects whose size is unchanged and whose
+          # destination is newer than the source, and never rewrites metadata
+          # on a skipped object. The former full-sync-then-immutable-re-sync
+          # ordering therefore left hashed assets with the first pass's
+          # no-cache header. Each class is now uploaded exactly once, with its
+          # own header, in a pass that selects only that class.
+
+          # 1. Immutable class (hashed assets + hashed workbox runtime).
+          aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" \
+            --exclude "*" \
+            --include "assets/*" \
+            --include "workbox-*.js" \
+            --cache-control "${IMMUTABLE_CC}"
+
+          # 2. Revalidating class: everything else. ENC-TSK-K69: mobile/* is
+          #    EXCLUDED — the gamma feed publisher (devops-feed-publisher-gamma)
+          #    writes the /mobile/v1 snapshot JSON into this bucket for
+          #    same-origin serving; a UI deploy must never touch or wipe it.
+          aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" \
             --exclude "mobile/*" \
-            --cache-control "public,max-age=0,must-revalidate"
+            --exclude "assets/*" \
+            --exclude "workbox-*.js" \
+            --cache-control "${NOCACHE_CC}"
 
-          # 2. Hashed, content-addressed build output under assets/ — safe to
-          #    cache forever (a new build gets new filenames).
-          if [ -d "${DIST_DIR}/assets" ]; then
-            aws s3 sync "${DIST_DIR}/assets/" "s3://${BUCKET}/assets/" \
-              --cache-control "public,max-age=31536000,immutable"
-          fi
-
-          # 3. App-shell entry points MUST NOT be cached (a stale index.html
-          #    would pin the browser to an old asset graph). Re-put each with
-          #    no-cache; skip any that a given build did not emit.
-          for f in index.html sw.js manifest.webmanifest; do
+          # 3. Authoritative re-put of the app shell + service worker so their
+          #    header never depends on sync skip semantics (a stale index.html
+          #    or sw.js would pin the browser to an old asset graph). Covers
+          #    every root-level *.html in addition to the named files; skips
+          #    anything a given build did not emit.
+          SHELL_FILES="sw.js manifest.webmanifest notify-sw.js sw-feed-cache-cleanup.js registerSW.js"
+          for f in $(cd "${DIST_DIR}" && ls -1 *.html 2>/dev/null) ${SHELL_FILES}; do
             if [ -f "${DIST_DIR}/${f}" ]; then
               aws s3 cp "${DIST_DIR}/${f}" "s3://${BUCKET}/${f}" \
-                --cache-control "max-age=0,no-cache,no-store,must-revalidate" \
+                --cache-control "${NOCACHE_CC}" \
                 --metadata-directive REPLACE
             else
               echo "note: ${f} not present in build output — skipping no-cache re-put."
             fi
           done
 
-      - name: Invalidate CloudFront app shell (single /* path, viewer-path gate)
-        id: invalidate
+          # 4. Mirror deletions only (stale objects from earlier builds).
+          #    --size-only: every local file was already uploaded above, so
+          #    this pass must NOT re-upload anything (it would stamp the wrong
+          #    header on assets if a clock skew made sync think a file was
+          #    newer). mobile/* stays excluded from the delete-mirror.
+          aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" --delete --size-only \
+            --exclude "mobile/*" \
+            --cache-control "${NOCACHE_CC}"
+
+      - name: Gate on viewer path (zero-invalidation proof, ENC-TSK-R37)
+        id: viewer_gate
         env:
-          DIST: ${{ steps.resolve.outputs.distribution_id }}
           STACK: ${{ steps.resolve.outputs.stack_name }}
           EXPECTED_ENTRY: ${{ steps.sync.outputs.expected_entry }}
         run: |
           set -euo pipefail
-          INVALIDATION_ID=$(aws cloudfront create-invalidation \
-            --distribution-id "${DIST}" \
-            --paths "/*" \
-            --query 'Invalidation.Id' \
-            --output text)
-          echo "invalidation_id=${INVALIDATION_ID}" >> "${GITHUB_OUTPUT}"
-
           DOMAIN=$(aws cloudformation describe-stacks \
             --stack-name "${STACK}" --region "${AWS_REGION}" \
             --query "Stacks[0].Outputs[?OutputKey=='UiDistributionDomainName'].OutputValue" \
@@ -413,16 +444,24 @@ jobs:
             exit 1
           fi
 
-          MAX_ATTEMPTS=60
-          SLEEP_SEC=10
-          echo "Created invalidation ${INVALIDATION_ID}; gating on viewer index.html referencing ${EXPECTED_ENTRY} (ENC-TSK-M88)."
+          # No CloudFront invalidation is issued (ENC-TSK-R37). index.html is
+          # revalidating at the origin and the CachingOptimized policy honors
+          # it (MinTTL 1s), so the edge converges within seconds. This gate is
+          # the proof: it must observe the new entry bundle on the viewer path
+          # without any purge. A timeout here means the origin/edge cache
+          # headers regressed, not that an invalidation is missing.
+          # Caveat: this gates the *.cloudfront.net domain. A Cloudflare proxy
+          # in front of the custom hostname is not exercised by this check.
+          MAX_ATTEMPTS=36
+          SLEEP_SEC=5
+          echo "No invalidation; gating on viewer index.html referencing ${EXPECTED_ENTRY} (ENC-TSK-M88 / ENC-TSK-R37)."
           for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
             INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
             VIEWER_ENTRY=$(echo "${INDEX_BODY}" | grep -oE '/assets/index-[^" ]+\.js' | head -1 || true)
             if [ "${VIEWER_ENTRY}" = "${EXPECTED_ENTRY}" ]; then
               ENTRY_CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}${EXPECTED_ENTRY}" || true)
               if [ "${ENTRY_CODE}" = "200" ]; then
-                echo "Viewer path gate PASS: index.html references ${EXPECTED_ENTRY} (HTTP ${ENTRY_CODE}) after ${attempt} attempt(s)."
+                echo "Viewer path gate PASS: index.html references ${EXPECTED_ENTRY} (HTTP ${ENTRY_CODE}) after ${attempt} attempt(s), no invalidation."
                 exit 0
               fi
               echo "Attempt ${attempt}/${MAX_ATTEMPTS}: index.html fresh but entry bundle returned ${ENTRY_CODE}; sleeping ${SLEEP_SEC}s..."
@@ -431,7 +470,7 @@ jobs:
             fi
             sleep "${SLEEP_SEC}"
           done
-          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not reference ${EXPECTED_ENTRY} within $((MAX_ATTEMPTS * SLEEP_SEC))s after invalidation ${INVALIDATION_ID}."
+          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not reference ${EXPECTED_ENTRY} within $((MAX_ATTEMPTS * SLEEP_SEC))s with no invalidation. Check the Cache-Control on index.html at the S3 origin and the distribution's cache policy."
           exit 1
 
       # Post-deploy smoke test against the live distribution. Proves three
@@ -445,7 +484,6 @@ jobs:
         env:
           STACK: ${{ steps.resolve.outputs.stack_name }}
           EXPECTED_ENTRY: ${{ steps.sync.outputs.expected_entry }}
-          INVALIDATION_ID: ${{ steps.invalidate.outputs.invalidation_id }}
         run: |
           set -euo pipefail
           DOMAIN=$(aws cloudformation describe-stacks \
@@ -457,7 +495,7 @@ jobs:
             exit 1
           fi
           echo "LIVE_UI_URL=https://${DOMAIN}/"
-          echo "Invalidation gate passed: ${INVALIDATION_ID}"
+          echo "Viewer path gate passed (no CloudFront invalidation, ENC-TSK-R37)"
 
           # Capture each result defensively so a curl failure surfaces as a
           # 000 code under set -e rather than aborting the step early.
@@ -485,6 +523,21 @@ jobs:
           case "${INDEX_CACHE}" in
             *no-cache*|*max-age=0*) cache_ok="PASS" ;;
           esac
+          # ENC-TSK-R37: the hashed entry bundle must be immutable and the
+          # service worker must revalidate (a cached sw.js blocks app updates).
+          ENTRY_CACHE=$(curl -sSI "https://${DOMAIN}${EXPECTED_ENTRY}" | awk -F': ' 'tolower($1)=="cache-control"{print $2; exit}' | tr -d '\r' || true)
+          immutable_ok="FAIL"
+          case "${ENTRY_CACHE}" in
+            *max-age=31536000*immutable*) immutable_ok="PASS" ;;
+          esac
+          SW_CACHE="n/a"; sw_ok="PASS"
+          if [ -f frontend/ui-v2/dist/sw.js ]; then
+            SW_CACHE=$(curl -sSI "https://${DOMAIN}/sw.js" | awk -F': ' 'tolower($1)=="cache-control"{print $2; exit}' | tr -d '\r' || true)
+            sw_ok="FAIL"
+            case "${SW_CACHE}" in
+              *no-cache*|*max-age=0*) sw_ok="PASS" ;;
+            esac
+          fi
 
           {
             echo "## UI live-distribution validation — ${STACK}"
@@ -496,6 +549,8 @@ jobs:
             echo "| Shell | \`/\` | \`${SHELL_CODE} ${SHELL_CT}\` | 200 + text/html | ${shell_ok} |"
             echo "| Viewer build | \`/index.html\` entry | \`${VIEWER_ENTRY:-(missing)}\` | \`${EXPECTED_ENTRY}\` | ${version_ok} |"
             echo "| App-shell cache | \`/index.html\` | \`${INDEX_CACHE:-(missing)}\` | no-cache / max-age=0 | ${cache_ok} |"
+            echo "| Hashed-asset cache | entry bundle | \`${ENTRY_CACHE:-(missing)}\` | max-age=31536000, immutable | ${immutable_ok} |"
+            echo "| Service-worker cache | \`/sw.js\` | \`${SW_CACHE:-(missing)}\` | no-cache / max-age=0 | ${sw_ok} |"
             echo "| Health | \`/api/v1/health\` | \`${HEALTH}\` | 200 | ${health_ok} |"
             echo "| API routing/auth | \`/api/v1/projects\` | \`${PROJ}\` | 401 (auth enforced) | ${proj_ok} |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -517,11 +572,19 @@ jobs:
             fatal=1
           fi
           if [ "${version_ok}" != "PASS" ]; then
-            echo "::error::Viewer path /index.html entry '${VIEWER_ENTRY:-(missing)}' != expected '${EXPECTED_ENTRY}' — CloudFront may still be serving a stale app shell."
+            echo "::error::Viewer path /index.html entry '${VIEWER_ENTRY:-(missing)}' != expected '${EXPECTED_ENTRY}' — the edge may still be serving a stale app shell (no invalidation is issued; check origin Cache-Control)."
             fatal=1
           fi
           if [ "${cache_ok}" != "PASS" ]; then
             echo "::error::Viewer path /index.html Cache-Control '${INDEX_CACHE:-(missing)}' is not no-cache/max-age=0."
+            fatal=1
+          fi
+          if [ "${immutable_ok}" != "PASS" ]; then
+            echo "::error::Entry bundle ${EXPECTED_ENTRY} Cache-Control '${ENTRY_CACHE:-(missing)}' is not max-age=31536000,immutable."
+            fatal=1
+          fi
+          if [ "${sw_ok}" != "PASS" ]; then
+            echo "::error::Viewer path /sw.js Cache-Control '${SW_CACHE:-(missing)}' is not no-cache/max-age=0."
             fatal=1
           fi
           if [ "${health_ok}" != "PASS" ]; then
