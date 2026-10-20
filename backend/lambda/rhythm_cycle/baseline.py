@@ -127,7 +127,9 @@ def _tracker_list(record_type: str, page_size: int = _LIST_PAGE_SIZE) -> Dict[st
     GET-by-id route has been confirmed live.
     """
     url = f"{TRACKER_API_BASE}/records"
-    return get_json(url, {"project_id": PROJECT_ID, "record_type": record_type, "page_size": page_size})
+    # ENC-TSK-R35 (A11): callers read description/related_*_ids, which the compact
+    # list projection excludes -> opt out explicitly.
+    return get_json(url, {"project_id": PROJECT_ID, "record_type": record_type, "page_size": page_size, "fields": "full"})
 
 
 # ---------------------------------------------------------------------------

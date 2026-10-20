@@ -9202,7 +9202,9 @@ async def _telemetry_rank(args: dict) -> list[TextContent]:
             return _result_text(payload)
 
         # Compute-on-read from the governed tracker records via the service API.
-        resp = _tracker_api_request("GET", f"/{project_id}", query={"type": record_type})
+        # ENC-TSK-R35 (A11): telemetry ranking reads an arbitrary caller-named attribute
+        # (+ write_source) -> opt out of the compact list projection.
+        resp = _tracker_api_request("GET", f"/{project_id}", query={"type": record_type, "fields": "full"})
         if not isinstance(resp, dict) or resp.get("error"):
             return _result_text(telemetry_rank.degraded_payload("tracker_read_failed"))
         records = resp.get("records", []) or []
@@ -10678,7 +10680,9 @@ async def _tracker_list_lessons(args: dict) -> list[TextContent]:
     if not project_id:
         return _result_text({"error": "project_id is required"})
 
-    query_params: Dict[str, str] = {"type": "lesson"}
+    # ENC-TSK-R35 (A11): the lessons tool returns the raw rows verbatim to the agent
+    # (description/insight/observation/evidence_chain...) -> opt out of the compact projection.
+    query_params: Dict[str, str] = {"type": "lesson", "fields": "full"}
     for key in ("status", "category", "page_size", "cursor"):
         if args.get(key):
             query_params[key] = str(args[key])
