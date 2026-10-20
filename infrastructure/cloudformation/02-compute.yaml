@@ -43,7 +43,7 @@ Parameters:
   # give gamma and prod the same mode. "auto" resolves per plane in the Conditions below
   # (gamma: coalesced / no invalidation = the UAT target; prod: per_batch / invalidate = today's
   # behavior). Passing an explicit value (--parameter-overrides FeedPublishMode=coalesced) is how
-  # a plane is flipped; prod flips FeedPublishMode first, FeedInvalidate one day later (AC5).
+  # a plane is flipped. ENC-TSK-R48 (P100-R30): auto = ON in both planes since 2026-10-20 (io directive).
   FeedPublishMode:
     Type: String
     Default: auto
@@ -408,33 +408,24 @@ Conditions:
   HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
-  # ENC-TSK-R26: effective feed-publisher flags. IsGamma is inlined (not referenced via
-  # !Condition) for the cfn_env_resolver.py reason documented on RhythmAbsorbed below.
+  # ENC-TSK-R26: effective feed-publisher flags. ENC-TSK-R48 / ruling P100-R30 (io directive
+  # 2026-10-20, no gamma soak): "auto" now resolves ON in BOTH planes; an explicit per_batch /
+  # "true" / "false" parameter override is the per-plane rollback switch.
   FeedCoalesced: !Or
     - !Equals [!Ref FeedPublishMode, "coalesced"]
-    - !And
-      - !Equals [!Ref FeedPublishMode, "auto"]
-      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref FeedPublishMode, "auto"]
   FeedInvalidateOff: !Or
     - !Equals [!Ref FeedInvalidate, "false"]
-    - !And
-      - !Equals [!Ref FeedInvalidate, "auto"]
-      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref FeedInvalidate, "auto"]
   FeedContentDiffOn: !Or
     - !Equals [!Ref FeedContentDiff, "true"]
-    - !And
-      - !Equals [!Ref FeedContentDiff, "auto"]
-      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref FeedContentDiff, "auto"]
   FeedGzipOn: !Or
     - !Equals [!Ref FeedGzip, "true"]
-    - !And
-      - !Equals [!Ref FeedGzip, "auto"]
-      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref FeedGzip, "auto"]
   FeedIncrementalOn: !Or
     - !Equals [!Ref FeedIncremental, "true"]
-    - !And
-      - !Equals [!Ref FeedIncremental, "auto"]
-      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref FeedIncremental, "auto"]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
   # plane is arm64 now, so all former conditional sites below are literal arm64/python3.12.
   # Architecture declaration lives in envs/architecture.yaml.
@@ -759,7 +750,7 @@ Resources:
           # equals the stored value returns {"no_op": true} with no DynamoDB write (never for
           # worklog/evidence/touch/freshness fields). Gamma only; production stays "false" until
           # soak evidence promotes it (flag off == today's behavior).
-          TRACKER_NOOP_SUPPRESSION: !If [IsProduction, "false", "true"]
+          TRACKER_NOOP_SUPPRESSION: "true"  # ENC-TSK-R48 (P100-R30): on in prod and gamma
           # ENC-TSK-R35 (ENC-PLN-100 C3.2 / ruling A11): compact default projection for tracker list
           # reads (project-type-index / base-table Query ProjectionExpression; `fields=` is exact,
           # `fields=full` opts out; count-style requests route to mode=census). Gamma only;
