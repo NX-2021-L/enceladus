@@ -37,6 +37,27 @@ Parameters:
     Description: >
       Appended to every resource name. Production uses "" (zero drift),
       gamma uses "-gamma" for parallel deployment.
+  # ENC-TSK-R26 (ENC-PLN-100 C2.1): feed-publisher trailing-edge coalescing flags.
+  # WHY "auto" AND NOT A PER-ENVIRONMENT DEFAULT: `aws cloudformation deploy` reuses a stored
+  # parameter value and a template Default can only be one value, so a literal default would
+  # give gamma and prod the same mode. "auto" resolves per plane in the Conditions below
+  # (gamma: coalesced / no invalidation = the UAT target; prod: per_batch / invalidate = today's
+  # behavior). Passing an explicit value (--parameter-overrides FeedPublishMode=coalesced) is how
+  # a plane is flipped; prod flips FeedPublishMode first, FeedInvalidate one day later (AC5).
+  FeedPublishMode:
+    Type: String
+    Default: auto
+    AllowedValues: [auto, per_batch, coalesced]
+    Description: >
+      ENC-TSK-R26 FEED_PUBLISH_MODE for devops-feed-publisher. auto = coalesced on gamma,
+      per_batch on production. coalesced also enables the sweep rule (single-sweeper is the conditional-write lease, not reserved concurrency).
+  FeedInvalidate:
+    Type: String
+    Default: auto
+    AllowedValues: [auto, "true", "false"]
+    Description: >
+      ENC-TSK-R26 FEED_INVALIDATE for devops-feed-publisher (runtime CloudFront CreateInvalidation).
+      auto = false on gamma, true on production.
   # DVP-TSK-A17 (E4-R14): hub token exchange issuer / origin allow-list. Fail closed:
   # an empty issuer list means nothing can be exchanged or accepted.
   HubExchangeIssuers:
@@ -362,6 +383,18 @@ Conditions:
   HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-R26: effective feed-publisher flags. IsGamma is inlined (not referenced via
+  # !Condition) for the cfn_env_resolver.py reason documented on RhythmAbsorbed below.
+  FeedCoalesced: !Or
+    - !Equals [!Ref FeedPublishMode, "coalesced"]
+    - !And
+      - !Equals [!Ref FeedPublishMode, "auto"]
+      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  FeedInvalidateOff: !Or
+    - !Equals [!Ref FeedInvalidate, "false"]
+    - !And
+      - !Equals [!Ref FeedInvalidate, "auto"]
+      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
   # plane is arm64 now, so all former conditional sites below are literal arm64/python3.12.
   # Architecture declaration lives in envs/architecture.yaml.
@@ -1815,6 +1848,11 @@ Resources:
             - IsGamma
             - "false"
             - !Ref "AWS::NoValue"
+          # ENC-TSK-R26: coalesced MARK/SWEEP publish + invalidation flag (see FeedPublishMode).
+          FEED_PUBLISH_MODE: !If [FeedCoalesced, "coalesced", "per_batch"]
+          FEED_INVALIDATE: !If [FeedInvalidateOff, "false", "true"]
+          FEED_PUBLISH_STATE_TABLE: !Sub "enceladus-feed-publish-state${EnvironmentSuffix}"
+          FEED_PUBLISH_STATE_REGION: !Ref AWS::Region
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -3654,6 +3692,31 @@ Resources:
       FunctionResponseTypes:
         - ReportBatchItemFailures
       Enabled: true
+
+  # ENC-TSK-R26 (ENC-PLN-100 C2.1): the SWEEP half of the coalesced publish (ruling A1: 5 min).
+  # Always created so flipping FeedPublishMode is a parameter change, but only ENABLED in
+  # coalesced mode (a per_batch plane sees zero invocations; the handler also ignores the event
+  # in per_batch). Targets the unqualified function ARN like CoordinationBatchPollerRule.
+  FeedPublisherSweepRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-feed-publisher-sweep${EnvironmentSuffix}"
+      Description: "ENC-TSK-R26: publish dirty projects (trailing-edge coalesced feed publish)"
+      ScheduleExpression: rate(5 minutes)
+      State: !If [FeedCoalesced, ENABLED, DISABLED]
+      Targets:
+        - Arn: !GetAtt FeedPublisherFunction.Arn
+          Id: feed-publisher-sweep
+          Input: '{"action": "feed_sweep"}'
+
+  FeedPublisherSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FeedPublisherFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FeedPublisherSweepRule.Arn
 
   # ENC-TSK-L85: TrackerToGraphPipe/DocumentsToGraphPipe (EventBridge Pipes,
   # DynamoDB Streams source) were confirmed account-wide non-functional
@@ -6284,6 +6347,20 @@ Resources:
                 Effect: Allow
                 Action: dynamodb:UpdateItem
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        # ENC-TSK-R26: MARK/SWEEP state (dirty flags, sweep lease). The one new table only, no index/*
+        # (it has none). Inert in per_batch.
+        - PolicyName: FeedPublishStateAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: FeedPublishStateTable
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-feed-publish-state${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

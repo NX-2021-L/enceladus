@@ -1306,6 +1306,7 @@ def publish_mobile_feeds_to_s3(
     bucket: str = DEFAULT_MOBILE_S3_BUCKET,
     s3_prefix: str = DEFAULT_MOBILE_S3_PREFIX,
     dry_run: bool = False,
+    cache_control: Optional[str] = None,
 ) -> List[str]:
     """Upload mobile feed JSON/MD files from feed_dir to s3://bucket/s3_prefix/.
 
@@ -1313,7 +1314,12 @@ def publish_mobile_feeds_to_s3(
     Browsers always revalidate (max-age=0) while CloudFront edge caches serve the
     object for up to 30 seconds (s-maxage=30), reduced from 300s to improve feed
     freshness SLA. Returns the list of S3 keys uploaded.
+
+    ENC-TSK-R26: ``cache_control`` overrides that header (the coalesced publisher passes
+    "max-age=60" so freshness rides a 60 s TTL instead of a CloudFront invalidation).
+    None keeps the header above, byte-identical to before.
     """
+    object_cache_control = cache_control or _MOBILE_FEED_CACHE_CONTROL
     require_boto3()
     s3_client = boto3.client("s3", region_name="us-east-1")
     store = _feed_content_store(s3_client, bucket)
@@ -1344,7 +1350,7 @@ def publish_mobile_feeds_to_s3(
             str(local_path),
             s3_key,
             {
-                "CacheControl": _MOBILE_FEED_CACHE_CONTROL,
+                "CacheControl": object_cache_control,
                 "ContentType": content_type,
             },
         )
