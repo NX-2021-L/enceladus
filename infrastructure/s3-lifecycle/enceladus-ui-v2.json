@@ -1,0 +1,9 @@
+{
+  "bucket": "enceladus-ui-v2",
+  "region": "us-west-2",
+  "tracker": "ENC-TSK-R20 (ENC-PLN-100 C1.3, FR-14)",
+  "note": "Bucket-wide noncurrent-version retention (FR-14): expire noncurrent versions after 30 d, always keeping the 10 newest noncurrent versions. Bucket is not CloudFormation-managed for lifecycle.",
+  "rules": [
+    {"ID": "enc-pln100-bucket-wide-noncurrent-30d-keep10", "Status": "Enabled", "Filter": {"Prefix": ""}, "NoncurrentVersionExpiration": {"NoncurrentDays": 30, "NewerNoncurrentVersions": 10}}
+  ]
+}
