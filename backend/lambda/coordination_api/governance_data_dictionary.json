@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-20.4",
-  "updated_at": "2026-10-20T01:30:00Z",
-  "last_change_summary": "ENC-TSK-R35-compact-list-projection (ENC-PLN-100): bundled dictionary lockstep bump; tracker list route gains fields=/count=true params and TRACKER_LIST_COMPACT compact default projection (flag-gated).",
+  "version": "2026-10-20.5",
+  "updated_at": "2026-10-20T01:35:43Z",
+  "last_change_summary": "ENC-TSK-R24-cost-digest-producer (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
   "owners": [
     "enceladus-platform"
   ],
