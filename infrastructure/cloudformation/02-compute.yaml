@@ -74,6 +74,15 @@ Parameters:
     Description: >
       ENC-TSK-R34 FEED_GZIP for devops-feed-publisher (JSON feed objects stored with Content-Encoding: gzip).
       auto = true on gamma, false on production. Flip production only after every S3-API reader decodes gzip.
+  # ENC-TSK-R41 (ENC-PLN-100 C4.1, FR-22, ruling P100-R28): same "auto" idiom. Inert unless FEED_PUBLISH_MODE=coalesced.
+  FeedIncremental:
+    Type: String
+    Default: auto
+    AllowedValues: [auto, "true", "false"]
+    Description: >
+      ENC-TSK-R41 FEED_INCREMENTAL for devops-feed-publisher (SWEEP BatchGets only the stream-reported changed
+      record keys and merges them into a per-project S3 snapshot; full re-read every 24 h and on any overflow,
+      missing snapshot or merge error). auto = true on gamma, false on production.
   # DVP-TSK-A17 (E4-R14): hub token exchange issuer / origin allow-list. Fail closed:
   # an empty issuer list means nothing can be exchanged or accepted.
   HubExchangeIssuers:
@@ -420,6 +429,11 @@ Conditions:
     - !Equals [!Ref FeedGzip, "true"]
     - !And
       - !Equals [!Ref FeedGzip, "auto"]
+      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  FeedIncrementalOn: !Or
+    - !Equals [!Ref FeedIncremental, "true"]
+    - !And
+      - !Equals [!Ref FeedIncremental, "auto"]
       - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
   # plane is arm64 now, so all former conditional sites below are literal arm64/python3.12.
@@ -1890,6 +1904,8 @@ Resources:
           # ENC-TSK-R34: content-hash diffing + gzip payloads (inert unless FEED_PUBLISH_MODE=coalesced).
           FEED_CONTENT_DIFF: !If [FeedContentDiffOn, "true", "false"]
           FEED_GZIP: !If [FeedGzipOn, "true", "false"]
+          # ENC-TSK-R41: incremental tracker re-read (inert unless FEED_PUBLISH_MODE=coalesced).
+          FEED_INCREMENTAL: !If [FeedIncrementalOn, "true", "false"]
           FEED_PUBLISH_STATE_TABLE: !Sub "enceladus-feed-publish-state${EnvironmentSuffix}"
           FEED_PUBLISH_STATE_REGION: !Ref AWS::Region
           EVENT_BUS: default
@@ -6439,6 +6455,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:BatchGetItem  # ENC-TSK-R41: incremental SWEEP re-reads exactly the changed keys
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource:
@@ -6465,6 +6482,15 @@ Resources:
                   - !Sub "arn:aws:s3:::enceladus-ui-v2${EnvironmentSuffix}/mobile/v1/*"
                   - - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
                     - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/*"
+              # ENC-TSK-R41: private per-project raw-item snapshots for the incremental SWEEP. Deliberately the
+              # content bucket (never the public mobile/v1 prefix, on gamma that is the ui-v2 origin). Unconditional;
+              # a denied or missing snapshot just means a full re-read.
+              - Sid: S3FeedSnapshots
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/feed-snapshots/*"
               # DVP-TSK-B53: reference-doc reads go content-first; without ListBucket a missing key answers 403, not 404, and
               # the store's legacy fallback never fires. Unconditional, like the other W4 content grants.
               - Sid: S3MobileFeedsContentList

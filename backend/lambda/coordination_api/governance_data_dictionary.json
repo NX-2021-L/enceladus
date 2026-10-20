@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-20.7",
-  "updated_at": "2026-10-20T01:41:40Z",
-  "last_change_summary": "ENC-TSK-R34-feed-diff-gzip (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
+  "version": "2026-10-20.8",
+  "updated_at": "2026-10-20T03:10:00Z",
+  "last_change_summary": "ENC-TSK-R41 (ENC-PLN-100 C4.1, BRD FR-22, ruling P100-R28): feed_publisher incremental tracker re-read behind FEED_INCREMENTAL (false default; CFN FeedIncremental auto = true on gamma; coalesced mode only), no dictionary field changes. MARK ADDs changed_ids/removed_ids string sets (or SETs full_reread) on the project row of enceladus-feed-publish-state in the same conditional UpdateItem; SWEEP BatchGets exactly those keys and merges them into a per-project raw-item snapshot at s3://<content bucket>/feed-snapshots/v1/<project>.json.gz, with a full re-read every 24 h and on overflow (1000 ids), missing snapshot or merge error; the clear adds read_watermark and last_full_reread_at and DELETEs only the processed ids. Emits EMF FeedPublishBytes, FeedPublishReadUnits and FeedPublishMode per sweep (namespace Enceladus/FeedPublisher). Sweep rate unchanged.",
   "owners": [
     "enceladus-platform"
   ],

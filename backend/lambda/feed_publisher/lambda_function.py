@@ -37,6 +37,10 @@ Environment variables:
                      CloudFront CreateInvalidation (ENC-TSK-R26)
   FEED_PUBLISH_STATE_TABLE   MARK/SWEEP state table (default: enceladus-feed-publish-state)
   FEED_PUBLISH_STATE_REGION  region of that table (default: us-west-2)
+  FEED_INCREMENTAL   "false" (default) | "true": SWEEP re-reads only the record keys the DynamoDB stream
+                     reported changed (strongly consistent BatchGetItem) and merges them into a per-project
+                     raw-item snapshot in S3, with a full re-read every FEED_FULL_REREAD_SECONDS (default
+                     86400) and on any overflow / missing snapshot / merge error (ENC-TSK-R41, FR-22)
   FEED_CLAIM_GRACE_SECONDS   safety margin subtracted from a sweep's claim time before the
                      clear-dirty comparison (default: 5; covers GSI propagation lag)
 """
@@ -83,6 +87,13 @@ try:
         publish_sync_message,
         publish_eventbridge_event,
         write_analytics_sync_stage,
+        group_project_items,
+        query_project_items,
+        batch_get_tracker_items,
+        snapshot_encode,
+        snapshot_decode,
+        reset_read_units,
+        read_units_total,
         DEFAULT_TRACKER_TABLE,
         DEFAULT_TRACKER_REGION,
         DEFAULT_DOCUMENTS_TABLE,
@@ -189,6 +200,44 @@ def _content_diff_active() -> bool:
 
 def _gzip_active() -> bool:
     return FEED_GZIP and FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED
+
+# ENC-TSK-R41 (ENC-PLN-100 C4.1, BRD FR-22, ruling P100-R28). Incremental tracker re-read, coalesced SWEEP only,
+# default "false" (today's behavior byte-for-byte).
+#   MARK   adds the stream record keys to the project's state row in the SAME conditional UpdateItem:
+#          ADD changed_ids (string set) and, for REMOVE events, removed_ids; more than FEED_INCREMENTAL_MAX_IDS
+#          members (or a stream record whose key cannot be read) -> SET full_reread = true instead.
+#   SWEEP  FEED_INCREMENTAL=true + a fresh snapshot + no full_reread -> BatchGetItem exactly the changed ids,
+#          merge into the snapshot (a key that comes back absent is a deletion); otherwise a full re-read.
+#          After a successful publish ONE conditional UpdateItem DELETEs only the ids it processed plus the
+#          existing trailing-edge dirty clear, so an id a MARK adds during the publish survives.
+#   The snapshot (raw DynamoDB items, gzip JSON) lives in the content bucket under feed-snapshots/v1/ and
+#   carries its own full_read_at; a full re-read is forced when it is older than FEED_FULL_REREAD_SECONDS.
+FEED_INCREMENTAL = _env_true("FEED_INCREMENTAL")
+try:
+    FEED_INCREMENTAL_MAX_IDS = max(1, int(os.environ.get("FEED_INCREMENTAL_MAX_IDS", "1000")))
+except ValueError:
+    FEED_INCREMENTAL_MAX_IDS = 1000
+try:
+    FEED_FULL_REREAD_SECONDS = max(0.0, float(os.environ.get("FEED_FULL_REREAD_SECONDS", "86400")))
+except ValueError:
+    FEED_FULL_REREAD_SECONDS = 86400.0
+SNAPSHOT_BUCKET = os.environ.get("FEED_SNAPSHOT_BUCKET") or os.environ.get("CONTENT_BUCKET", "")
+SNAPSHOT_PREFIX = "feed-snapshots/v1/"
+# A snapshot whose saved_at is older than the state row's last_published_at by more than this was NOT
+# refreshed by the latest publish (FEED_INCREMENTAL was off, a save failed, another writer published):
+# the change ids it would merge are incomplete, so the SWEEP does a full re-read instead of trusting it.
+SNAPSHOT_STALE_GRACE_SECONDS = 5.0
+METRIC_NAMESPACE = "Enceladus/FeedPublisher"
+
+
+def _incremental_active() -> bool:
+    return (
+        FEED_INCREMENTAL
+        and FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED
+        and not DRY_RUN
+        and bool(SNAPSHOT_BUCKET)
+    )
+
 
 # Local temp directory for generated feed files (Lambda has /tmp writable)
 FEED_TEMP_DIR = Path("/tmp/mobile-feeds/v1")
@@ -591,6 +640,31 @@ def _is_condition_failure(exc: ClientError) -> bool:
     return exc.response.get("Error", {}).get("Code", "") == "ConditionalCheckFailedException"
 
 
+def _stream_record_key(body: Dict[str, Any], ddb_record: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    """(record_id, is_remove) of one stream record. record_id is "" for a row that is not a tracker
+    row (a documents-table event: documents are always fully re-read, so no id is needed) and None
+    when the key cannot be determined (the caller then forces a full re-read)."""
+    keys = ddb_record.get("Keys")
+    rid = (keys.get("record_id") or {}).get("S") if isinstance(keys, dict) else None
+    if not rid:
+        for image_key in ("NewImage", "OldImage"):
+            image = ddb_record.get(image_key) or {}
+            rid = (image.get("record_id") or {}).get("S") if isinstance(image, dict) else None
+            if rid:
+                break
+    event_name = body.get("eventName") or ddb_record.get("eventName")
+    is_remove = event_name == "REMOVE" or (not ddb_record.get("NewImage") and bool(ddb_record.get("OldImage")))
+    if rid:
+        return rid, is_remove
+    if isinstance(keys, dict) and "document_id" in keys:
+        return "", False
+    for image_key in ("NewImage", "OldImage"):
+        image = ddb_record.get(image_key) or {}
+        if isinstance(image, dict) and "document_id" in image and "record_id" not in image:
+            return "", False
+    return None, False
+
+
 def _extract_mark_work(event: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Parse an SQS batch for MARK: project_id -> {"message_ids": [...], "event_ts": newest
     event updated_at in canonical form or None}, plus message ids with no resolvable project.
@@ -610,9 +684,14 @@ def _extract_mark_work(event: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]]
             continue
         project_id = None
         event_ts = None
+        record_key: Optional[str] = None
+        is_remove = False
+        track_ids = _incremental_active()
         if isinstance(body, dict):
             ddb_record = body.get("dynamodb", body)
             if isinstance(ddb_record, dict):
+                if track_ids:
+                    record_key, is_remove = _stream_record_key(body, ddb_record)
                 # NewImage first; REMOVE events carry only OldImage and must mark dirty too.
                 for image_key in ("NewImage", "OldImage"):
                     image = ddb_record.get(image_key) or {}
@@ -629,11 +708,79 @@ def _extract_mark_work(event: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]]
                 failed.append(message_id)
             continue
         entry = work.setdefault(project_id, {"message_ids": [], "event_ts": None})
+        if track_ids:
+            entry.setdefault("changed_ids", set())
+            entry.setdefault("removed_ids", set())
+            entry.setdefault("full", False)
+            if record_key is None:
+                entry["full"] = True  # an unreadable key must never become a silently missed record
+            elif record_key:
+                entry["changed_ids"].add(record_key)
+                if is_remove:
+                    entry["removed_ids"].add(record_key)
         if message_id:
             entry["message_ids"].append(message_id)
         if event_ts and (entry["event_ts"] is None or event_ts > entry["event_ts"]):
             entry["event_ts"] = event_ts
     return work, failed
+
+
+_MARK_FALLBACK_UPDATE = "SET dirty = :t, dirty_since = if_not_exists(dirty_since, :iso)"
+
+
+def _mark_with_ids(client: Any, project_id: str, entry: Dict[str, Any], now_us: int, ts_us: int) -> None:
+    """The MARK of _mark_projects_dirty plus the change log (ENC-TSK-R41): still ONE conditional
+    UpdateItem per project per batch on the happy path.
+
+    * over FEED_INCREMENTAL_MAX_IDS ids in this batch, or an unreadable stream key -> SET full_reread
+      (no ids added);
+    * a MARK that loses the monotonic last_write_at condition is superseded for dirty, but its ids must
+      still land, so it is re-applied unconditionally without touching last_write_at;
+    * the set can also grow across batches, so the post-update size is checked and, if it crossed the cap,
+      the sets are dropped in favour of full_reread."""
+    changed = set(entry.get("changed_ids") or ())
+    removed = set(entry.get("removed_ids") or ())
+    full = bool(entry.get("full")) or len(changed | removed) > FEED_INCREMENTAL_MAX_IDS
+    if full:
+        changed, removed = set(), set()
+    adds: List[str] = []
+    values: Dict[str, Any] = {":t": {"BOOL": True}, ":iso": {"S": _iso_from_us(now_us)}}
+    if changed:
+        adds.append("changed_ids :ids")
+        values[":ids"] = {"SS": sorted(changed)}
+    if removed:
+        adds.append("removed_ids :rids")
+        values[":rids"] = {"SS": sorted(removed)}
+    suffix = (", full_reread = :t" if full else "")
+    add_clause = (" ADD " + ", ".join(adds)) if adds else ""
+    kwargs: Dict[str, Any] = {
+        "TableName": FEED_PUBLISH_STATE_TABLE,
+        "Key": {"project_id": {"S": project_id}},
+        "UpdateExpression": _MARK_UPDATE + suffix + add_clause,
+        "ConditionExpression": _MARK_CONDITION,
+        "ExpressionAttributeValues": dict(values, **{":ts": {"N": str(ts_us)}}),
+    }
+    if adds:
+        kwargs["ReturnValues"] = "UPDATED_NEW"
+    try:
+        resp = client.update_item(**kwargs)
+    except ClientError as exc:
+        if not _is_condition_failure(exc) or not (adds or full):
+            raise
+        logger.debug("feed_publisher: MARK project=%s superseded; re-applying its change ids", project_id)
+        kwargs.pop("ConditionExpression")
+        kwargs["UpdateExpression"] = _MARK_FALLBACK_UPDATE + suffix + add_clause
+        kwargs["ExpressionAttributeValues"] = dict(values)
+        resp = client.update_item(**kwargs)
+    attrs = (resp or {}).get("Attributes") or {}
+    size = len((attrs.get("changed_ids") or {}).get("SS", [])) + len((attrs.get("removed_ids") or {}).get("SS", []))
+    if size > FEED_INCREMENTAL_MAX_IDS:
+        client.update_item(
+            TableName=FEED_PUBLISH_STATE_TABLE,
+            Key={"project_id": {"S": project_id}},
+            UpdateExpression="SET full_reread = :t REMOVE changed_ids, removed_ids",
+            ExpressionAttributeValues={":t": {"BOOL": True}},
+        )
 
 
 def _mark_projects_dirty(work: Dict[str, Dict[str, Any]], ddb: Any = None) -> List[str]:
@@ -654,17 +801,20 @@ def _mark_projects_dirty(work: Dict[str, Dict[str, Any]], ddb: Any = None) -> Li
         if event_us is not None:
             ts_us = max(now_us, min(event_us, now_us + _FUTURE_EVENT_CLAMP_US))
         try:
-            client.update_item(
-                TableName=FEED_PUBLISH_STATE_TABLE,
-                Key={"project_id": {"S": project_id}},
-                UpdateExpression=_MARK_UPDATE,
-                ConditionExpression=_MARK_CONDITION,
-                ExpressionAttributeValues={
-                    ":t": {"BOOL": True},
-                    ":iso": {"S": _iso_from_us(now_us)},
-                    ":ts": {"N": str(ts_us)},
-                },
-            )
+            if "changed_ids" in entry and _incremental_active():
+                _mark_with_ids(client, project_id, entry, now_us, ts_us)
+            else:
+                client.update_item(
+                    TableName=FEED_PUBLISH_STATE_TABLE,
+                    Key={"project_id": {"S": project_id}},
+                    UpdateExpression=_MARK_UPDATE,
+                    ConditionExpression=_MARK_CONDITION,
+                    ExpressionAttributeValues={
+                        ":t": {"BOOL": True},
+                        ":iso": {"S": _iso_from_us(now_us)},
+                        ":ts": {"N": str(ts_us)},
+                    },
+                )
         except ClientError as exc:
             if _is_condition_failure(exc):
                 # A newer MARK already stored a later last_write_at (and set dirty).
@@ -779,7 +929,20 @@ def _release_sweep_lease(ddb: Any, owner: str) -> None:
         logger.warning("feed_publisher: sweep lease release skipped: %s", exc)
 
 
-def _claim_dirty_projects(ddb: Any, dirty_projects: List[str], owner: str) -> Dict[str, int]:
+def _parse_state_row(attrs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not attrs:
+        # No row came back with the claim: the change log is unknown, so the only safe plan is a full re-read.
+        return {"changed": set(), "removed": set(), "full": True}
+    return {
+        "changed": set((attrs.get("changed_ids") or {}).get("SS") or []),
+        "removed": set((attrs.get("removed_ids") or {}).get("SS") or []),
+        "full": bool((attrs.get("full_reread") or {}).get("BOOL")),
+    }
+
+
+def _claim_dirty_projects(
+    ddb: Any, dirty_projects: List[str], owner: str, rows_out: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, int]:
     """Stamp claimed_at on each still-dirty project. Returns project_id -> claimed_at (us).
 
     A project whose dirty flag was cleared since the scan is skipped (condition fails). Any
@@ -787,8 +950,11 @@ def _claim_dirty_projects(ddb: Any, dirty_projects: List[str], owner: str) -> Di
     claims: Dict[str, int] = {}
     for project_id in dirty_projects:
         claimed_at = _now_us()
+        claim_kwargs: Dict[str, Any] = {}
+        if rows_out is not None:
+            claim_kwargs["ReturnValues"] = "ALL_NEW"  # the change ids as of the claim = what this sweep owns
         try:
-            ddb.update_item(
+            resp = ddb.update_item(
                 TableName=FEED_PUBLISH_STATE_TABLE,
                 Key={"project_id": {"S": project_id}},
                 UpdateExpression=_CLAIM_UPDATE,
@@ -798,7 +964,10 @@ def _claim_dirty_projects(ddb: Any, dirty_projects: List[str], owner: str) -> Di
                     ":c": {"N": str(claimed_at)},
                     ":owner": {"S": owner},
                 },
+                **claim_kwargs,
             )
+            if rows_out is not None:
+                rows_out[project_id] = _parse_state_row((resp or {}).get("Attributes"))
         except ClientError as exc:
             if _is_condition_failure(exc):
                 continue
@@ -807,8 +976,62 @@ def _claim_dirty_projects(ddb: Any, dirty_projects: List[str], owner: str) -> Di
     return claims
 
 
+def _clear_with_ids(
+    ddb: Any, project_id: str, claimed_at: int, grace_us: int, generated_at: str, plan: Dict[str, Any],
+) -> bool:
+    """The trailing-edge clear of _clear_published as ONE conditional UpdateItem that also DELETEs only
+    the change ids this sweep processed and REMOVEs full_reread when a full re-read honored it. Ids a MARK
+    added after the claim are not in the processed set, so they survive (and that MARK also bumped
+    last_write_at, so dirty stays). Raises ClientError on a lost condition exactly like the plain clear.
+
+    Returns False when the clear succeeded but ids/full_reread remain (a late MARK whose last_write_at
+    predates the cutoff): dirty is set again so the next sweep picks them up."""
+    values: Dict[str, Any] = {
+        ":t": {"BOOL": True},
+        ":cutoff": {"N": str(claimed_at - grace_us)},
+        ":pub": {"S": generated_at},
+        ":wm": {"N": str(claimed_at)},
+    }
+    sets = ["last_published_at = :pub", "read_watermark = :wm"]
+    removes = ["dirty", "dirty_since"]
+    deletes: List[str] = []
+    if plan.get("mode") == "full":
+        sets.append("last_full_reread_at = :fr")
+        values[":fr"] = {"N": str(int(plan.get("full_read_at") or time.time()))}
+    if plan.get("full_honored"):
+        removes.append("full_reread")
+    if plan.get("processed_changed"):
+        deletes.append("changed_ids :pc")
+        values[":pc"] = {"SS": sorted(plan["processed_changed"])}
+    if plan.get("processed_removed"):
+        deletes.append("removed_ids :pr")
+        values[":pr"] = {"SS": sorted(plan["processed_removed"])}
+    expr = "REMOVE " + ", ".join(removes) + " SET " + ", ".join(sets)
+    if deletes:
+        expr += " DELETE " + ", ".join(deletes)
+    resp = ddb.update_item(
+        TableName=FEED_PUBLISH_STATE_TABLE,
+        Key={"project_id": {"S": project_id}},
+        UpdateExpression=expr,
+        ConditionExpression=_CLEAR_CONDITION,
+        ExpressionAttributeValues=values,
+        ReturnValues="ALL_NEW",
+    )
+    attrs = (resp or {}).get("Attributes") or {}
+    if attrs.get("changed_ids") or attrs.get("removed_ids") or attrs.get("full_reread"):
+        logger.info("feed_publisher: project=%s has change ids left after the clear; marking dirty again", project_id)
+        ddb.update_item(
+            TableName=FEED_PUBLISH_STATE_TABLE,
+            Key={"project_id": {"S": project_id}},
+            UpdateExpression=_MARK_FALLBACK_UPDATE,
+            ExpressionAttributeValues={":t": {"BOOL": True}, ":iso": {"S": _iso_from_us(_now_us())}},
+        )
+        return False
+    return True
+
+
 def _clear_published(
-    ddb: Any, claims: Dict[str, int], result: "PublishResult",
+    ddb: Any, claims: Dict[str, int], result: "PublishResult", ctx: Optional["SweepContext"] = None,
 ) -> Tuple[List[str], List[str]]:
     """Trailing-edge clear. Returns (cleared, retained).
 
@@ -822,18 +1045,24 @@ def _clear_published(
             logger.warning("feed_publisher: project=%s published degraded; staying dirty", project_id)
             retained.append(project_id)
             continue
+        plan = ctx.plans.get(project_id) if (ctx is not None and ctx.incremental) else None
         try:
-            ddb.update_item(
-                TableName=FEED_PUBLISH_STATE_TABLE,
-                Key={"project_id": {"S": project_id}},
-                UpdateExpression=_CLEAR_UPDATE,
-                ConditionExpression=_CLEAR_CONDITION,
-                ExpressionAttributeValues={
-                    ":t": {"BOOL": True},
-                    ":cutoff": {"N": str(claimed_at - grace_us)},
-                    ":pub": {"S": result.generated_at},
-                },
-            )
+            if plan is not None and plan.get("mode"):
+                if not _clear_with_ids(ddb, project_id, claimed_at, grace_us, result.generated_at, plan):
+                    retained.append(project_id)
+                    continue
+            else:
+                ddb.update_item(
+                    TableName=FEED_PUBLISH_STATE_TABLE,
+                    Key={"project_id": {"S": project_id}},
+                    UpdateExpression=_CLEAR_UPDATE,
+                    ConditionExpression=_CLEAR_CONDITION,
+                    ExpressionAttributeValues={
+                        ":t": {"BOOL": True},
+                        ":cutoff": {"N": str(claimed_at - grace_us)},
+                        ":pub": {"S": result.generated_at},
+                    },
+                )
             cleared.append(project_id)
         except ClientError as exc:
             if _is_condition_failure(exc):
@@ -851,6 +1080,220 @@ def _clear_published(
             logger.error("feed_publisher: clear failed project=%s: %s; staying dirty", project_id, exc)
             retained.append(project_id)
     return cleared, retained
+
+
+class SweepContext:
+    """State shared between _handle_sweep and _publish_all for one SWEEP (set as the module-level
+    _sweep_ctx so _publish_all keeps its single-argument signature). ``plans`` holds, per claimed
+    project, the change ids owned by this sweep and what was done with them."""
+
+    __slots__ = ("incremental", "plans", "modes", "snapshots", "bytes_published", "published_at")
+
+    def __init__(self, incremental: bool) -> None:
+        self.incremental = incremental
+        # project_id -> epoch seconds of the state row's last_published_at; None = could not be read
+        # (then no snapshot is trusted this sweep).
+        self.published_at: Optional[Dict[str, float]] = None
+        self.plans: Dict[str, Dict[str, Any]] = {}
+        self.modes: Dict[str, str] = {}
+        self.snapshots: Dict[str, Dict[str, Any]] = {}
+        self.bytes_published = 0
+
+
+_sweep_ctx: Optional[SweepContext] = None
+
+
+def _scan_last_published(ddb: Any) -> Optional[Dict[str, float]]:
+    """last_published_at (epoch seconds) of every project row, from one strongly consistent Scan of the
+    small state table. None on any failure: an unreadable stamp means no snapshot can be vouched for."""
+    out: Dict[str, float] = {}
+    kwargs: Dict[str, Any] = {
+        "TableName": FEED_PUBLISH_STATE_TABLE,
+        "ProjectionExpression": "project_id, last_published_at",
+        "ConsistentRead": True,
+    }
+    try:
+        while True:
+            resp = ddb.scan(**kwargs)
+            for item in resp.get("Items", []):
+                pid = (item.get("project_id") or {}).get("S")
+                us = _ts_to_us((item.get("last_published_at") or {}).get("S"))
+                if pid and us is not None:
+                    out[pid] = us / 1_000_000
+            if not resp.get("LastEvaluatedKey"):
+                return out
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: last_published_at scan failed (%s); every project gets a full re-read", exc)
+        return None
+
+
+def _snapshot_s3():
+    return boto3.client("s3", region_name=TRACKER_REGION)
+
+
+def _snapshot_key(project: str) -> str:
+    return f"{SNAPSHOT_PREFIX}{project}.json.gz"
+
+
+def _load_snapshot(project: str) -> Optional[Dict[str, Any]]:
+    """Prior per-project snapshot, or None (missing / unreadable / wrong project -> full re-read)."""
+    try:
+        body = _snapshot_s3().get_object(Bucket=SNAPSHOT_BUCKET, Key=_snapshot_key(project))["Body"].read()
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code", "") not in ("NoSuchKey", "404"):
+            logger.warning("feed_publisher: snapshot read failed project=%s: %s; full re-read", project, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: snapshot read failed project=%s: %s; full re-read", project, exc)
+        return None
+    snap = snapshot_decode(body, project)
+    if snap is None:
+        logger.warning("feed_publisher: snapshot for project=%s is invalid; full re-read", project)
+    return snap
+
+
+def _save_snapshot(project: str, items: Dict[str, Dict], full_read_at: float) -> bool:
+    try:
+        blob = snapshot_encode(project, items, full_read_at, time.time())
+        _snapshot_s3().put_object(
+            Bucket=SNAPSHOT_BUCKET, Key=_snapshot_key(project), Body=blob, ContentType="application/gzip",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - the project then stays dirty and keeps its ids
+        logger.error("feed_publisher: snapshot save failed project=%s: %s; project stays dirty", project, exc)
+        return False
+
+
+def _apply_delta(items: Dict[str, Dict], changed: Set[str], removed: Set[str], project: str) -> bool:
+    """Merge the current state of exactly the changed keys into ``items`` (in place): a key that
+    exists is inserted/replaced, a key that comes back absent is a deletion. A record removed and then
+    re-created inside the window therefore survives. True when anything actually changed."""
+    wanted = set(changed) | set(removed)
+    found = batch_get_tracker_items(project, sorted(wanted), TRACKER_TABLE, TRACKER_REGION)
+    mutated = False
+    for rid in wanted:
+        raw = found.get(rid)
+        if raw is None:
+            if items.pop(rid, None) is not None:
+                mutated = True
+        elif items.get(rid) != raw:
+            items[rid] = raw
+            mutated = True
+    return mutated
+
+
+def _build_project_model(entry: FeedProjectEntry, ctx: SweepContext) -> Dict[str, Any]:
+    """Per-project record model for one SWEEP when FEED_INCREMENTAL is on. Same shape as
+    fetch_from_dynamodb returns. Records are ordered by record_id in every mode so an incremental merge and
+    a full re-read of the same data are byte-identical."""
+    name = entry.name
+    plan = ctx.plans.get(name)
+    changed: Set[str] = plan["changed"] if plan else set()
+    removed: Set[str] = plan["removed"] if plan else set()
+    overflow = len(changed | removed) > FEED_INCREMENTAL_MAX_IDS
+    snap = _load_snapshot(name)
+    now = time.time()
+    fresh = snap is not None and (now - snap["full_read_at"]) < FEED_FULL_REREAD_SECONDS
+    if snap is not None and fresh:
+        published = ctx.published_at.get(name) if ctx.published_at is not None else None
+        if ctx.published_at is None or (published is not None and snap["saved_at"] < published - SNAPSHOT_STALE_GRACE_SECONDS):
+            logger.info(
+                "feed_publisher: project=%s snapshot saved_at=%s predates last_published_at=%s; full re-read",
+                name, snap["saved_at"], published,
+            )
+            fresh = False
+    trusted = fresh and not (plan is not None and (plan["full"] or overflow))
+    items: Optional[Dict[str, Dict]] = None
+    mode = "full"
+    full_read_at = now
+    save = True
+    if trusted:
+        items = dict(snap["items"])
+        full_read_at = snap["full_read_at"]
+        if changed or removed:
+            try:
+                save = _apply_delta(items, changed, removed, name)
+                mode = "incremental"
+            except Exception as exc:  # noqa: BLE001 - any merge error self-heals with a full re-read
+                logger.warning("feed_publisher: incremental merge failed project=%s: %s; full re-read", name, exc)
+                items = None
+        else:
+            mode, save = "reuse", False
+    if items is None:
+        mode, full_read_at, save = "full", now, True
+        items = query_project_items(name, TRACKER_TABLE, TRACKER_REGION)
+        if plan is not None and not plan["full"] and not overflow and (changed or removed):
+            # The GSI is eventually consistent; overlay the keys the stream reported with a strong read so
+            # the snapshot a later incremental run trusts is never older than the writes it clears.
+            try:
+                _apply_delta(items, changed, removed, name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("feed_publisher: change-id overlay failed project=%s: %s", name, exc)
+    # A project this sweep publishes (claimed -> its clear advances last_published_at) ALWAYS refreshes its
+    # snapshot, even when the merge changed nothing, or the next sweep would see a stale saved_at.
+    save = save or plan is not None
+    ctx.modes[name] = mode
+    ctx.snapshots[name] = {"items": items, "full_read_at": full_read_at, "save": save}
+    if plan is not None:
+        plan.update(
+            mode=mode, full_read_at=full_read_at, processed_changed=set(changed), processed_removed=set(removed),
+            full_honored=bool(mode == "full" and plan["full"]),
+        )
+    logger.info("feed_publisher: project=%s tracker model mode=%s records=%d ids=%d", name, mode, len(items), len(changed | removed))
+    return group_project_items([items[k] for k in sorted(items)])
+
+
+def _save_snapshots(ctx: SweepContext, degraded_projects: Set[str]) -> None:
+    """Persist the snapshots the publish was built from. A failed save leaves the project dirty with
+    its ids (the OLD snapshot plus those ids is still a correct merge input), never cleared."""
+    for name, snap in sorted(ctx.snapshots.items()):
+        if snap["save"] and not _save_snapshot(name, snap["items"], snap["full_read_at"]):
+            degraded_projects.add(name)
+
+
+def _emit_sweep_metrics(ctx: SweepContext) -> None:
+    """One CloudWatch EMF record per published sweep so the median per-publish cost can be computed
+    from production data (FR-9 N=2 decision). Always emitted in coalesced mode, flag on or off."""
+    try:
+        mode = "incremental" if (ctx.incremental and ctx.modes and "full" not in ctx.modes.values()) else "full"
+        record = {
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [{
+                    "Namespace": METRIC_NAMESPACE,
+                    "Dimensions": [["Mode"], []],
+                    "Metrics": [
+                        {"Name": "FeedPublishBytes", "Unit": "Bytes"},
+                        {"Name": "FeedPublishReadUnits", "Unit": "Count"},
+                        {"Name": "FeedPublishMode", "Unit": "Count"},
+                    ],
+                }],
+            },
+            "Mode": mode,
+            "FeedPublishBytes": int(ctx.bytes_published),
+            "FeedPublishReadUnits": round(read_units_total(), 2),
+            "FeedPublishMode": 1,
+            "ProjectModes": dict(sorted(ctx.modes.items())),
+        }
+        print(json.dumps(record, separators=(",", ":")), flush=True)
+    except Exception as exc:  # noqa: BLE001 - metrics never fail a sweep
+        logger.warning("feed_publisher: EMF metric emission skipped: %s", exc)
+
+
+def _uploaded_bytes(feed_dir: Path, prefix: str, keys: List[str], report: Dict[str, Any]) -> int:
+    stored = report.get("stored_bytes") or {}
+    total = 0
+    for key in keys:
+        try:
+            if key in stored:
+                total += int(stored[key])
+                continue
+            rel = key[len(prefix):].lstrip("/") if key.startswith(prefix) else key
+            total += (feed_dir / rel).stat().st_size
+        except Exception:  # noqa: BLE001
+            continue
+    return total
 
 
 def _handle_sweep(context: Any) -> Dict[str, Any]:
@@ -871,13 +1314,28 @@ def _handle_sweep(context: Any) -> Dict[str, Any]:
     if not _acquire_sweep_lease(ddb, owner, context):
         logger.info("feed_publisher: sweep skipped (lease held by another sweep)")
         return {"status": "skipped", "reason": "lease_held"}
+    global _sweep_ctx
+    incremental = _incremental_active()
     try:
-        claims = _claim_dirty_projects(ddb, dirty_projects, owner)
+        rows: Dict[str, Dict[str, Any]] = {}
+        claims = _claim_dirty_projects(ddb, dirty_projects, owner, rows if incremental else None)
         if not claims:
             return {"status": "idle", "dirty": 0}
+        ctx = SweepContext(incremental)
+        if incremental:
+            ctx.published_at = _scan_last_published(ddb)
+            for pid in claims:
+                row = rows.get(pid) or _parse_state_row(None)
+                ctx.plans[pid] = {
+                    "changed": row["changed"], "removed": row["removed"], "full": row["full"],
+                    "mode": None, "processed_changed": set(), "processed_removed": set(),
+                    "full_honored": False, "full_read_at": None,
+                }
         # Fresh project list: a project registered since the warm-container cache was filled
         # must be in the publish, or clearing its dirty flag would drop its first writes.
         _reset_projects_cache()
+        reset_read_units()
+        _sweep_ctx = ctx
         try:
             result = _publish_all(set(claims))
         except Exception as exc:
@@ -885,7 +1343,10 @@ def _handle_sweep(context: Any) -> Dict[str, Any]:
             logger.error("feed_publisher: sweep publish failed, projects stay dirty %s: %s",
                          sorted(claims), exc, exc_info=True)
             raise
-        cleared, retained = _clear_published(ddb, claims, result)
+        finally:
+            _sweep_ctx = None
+        cleared, retained = _clear_published(ddb, claims, result, ctx)
+        _emit_sweep_metrics(ctx)
         logger.info(
             "feed_publisher: sweep complete generated_at=%s cleared=%s retained=%s",
             result.generated_at, cleared, retained,
@@ -1040,14 +1501,20 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
     # feed for them, as per_batch always has). The SWEEP must not clear dirty for these.
     degraded_projects: Set[str] = set()
     global_degraded = False
+    # ENC-TSK-R41: set only by a coalesced SWEEP (None for per_batch and direct calls -> unchanged path).
+    sweep = _sweep_ctx
+    model_ctx = sweep if (sweep is not None and sweep.incremental) else None
 
     for entry in all_entries:
         try:
-            all_project_data[entry.name] = fetch_from_dynamodb(
-                entry,
-                table=TRACKER_TABLE,
-                region=TRACKER_REGION,
-            )
+            if model_ctx is not None:
+                all_project_data[entry.name] = _build_project_model(entry, model_ctx)
+            else:
+                all_project_data[entry.name] = fetch_from_dynamodb(
+                    entry,
+                    table=TRACKER_TABLE,
+                    region=TRACKER_REGION,
+                )
         except Exception as exc:
             logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
             degraded_projects.add(entry.name)
@@ -1152,6 +1619,8 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
             if diff_active and s3_report.get("hashes") is not None:
                 # Persisted even when a later put raised: only confirmed objects are in the map.
                 _save_hash_state(state_ddb, hashes=s3_report["hashes"], fingerprint=mobile_fp, **refreshed_at_kw)
+        if sweep is not None:
+            sweep.bytes_published += _uploaded_bytes(feed_dir, FEED_PREFIX, uploaded_keys, s3_report)
         logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
         if diff_active:
             logger.info(
@@ -1262,6 +1731,9 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
         except Exception as exc:
             logger.error("feed_publisher: EventBridge publish failed for project=%s: %s", project_name, exc)
             # Non-fatal: continue with remaining projects
+
+    if model_ctx is not None:
+        _save_snapshots(model_ctx, degraded_projects)
 
     return PublishResult(
         generated_at=generated_at,
