@@ -58,6 +58,22 @@ Parameters:
     Description: >
       ENC-TSK-R26 FEED_INVALIDATE for devops-feed-publisher (runtime CloudFront CreateInvalidation).
       auto = false on gamma, true on production.
+  # ENC-TSK-R34 (ENC-PLN-100 C3.1, FR-20 / FR-21): same "auto" idiom as FeedInvalidate. Both only take
+  # effect with FEED_PUBLISH_MODE=coalesced; prod keeps today's behavior until a parameter override flips it.
+  FeedContentDiff:
+    Type: String
+    Default: auto
+    AllowedValues: [auto, "true", "false"]
+    Description: >
+      ENC-TSK-R34 FEED_CONTENT_DIFF for devops-feed-publisher (SWEEP hash-diffs the generated objects and
+      skips unchanged PUTs and sync-stage writes). auto = true on gamma, false on production.
+  FeedGzip:
+    Type: String
+    Default: auto
+    AllowedValues: [auto, "true", "false"]
+    Description: >
+      ENC-TSK-R34 FEED_GZIP for devops-feed-publisher (JSON feed objects stored with Content-Encoding: gzip).
+      auto = true on gamma, false on production. Flip production only after every S3-API reader decodes gzip.
   # DVP-TSK-A17 (E4-R14): hub token exchange issuer / origin allow-list. Fail closed:
   # an empty issuer list means nothing can be exchanged or accepted.
   HubExchangeIssuers:
@@ -394,6 +410,16 @@ Conditions:
     - !Equals [!Ref FeedInvalidate, "false"]
     - !And
       - !Equals [!Ref FeedInvalidate, "auto"]
+      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  FeedContentDiffOn: !Or
+    - !Equals [!Ref FeedContentDiff, "true"]
+    - !And
+      - !Equals [!Ref FeedContentDiff, "auto"]
+      - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  FeedGzipOn: !Or
+    - !Equals [!Ref FeedGzip, "true"]
+    - !And
+      - !Equals [!Ref FeedGzip, "auto"]
       - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   # ENC-TSK-Q22 (DOC-5368FE6515ED FR-12): the arm64-selector condition is retired -- every
   # plane is arm64 now, so all former conditional sites below are literal arm64/python3.12.
@@ -1861,6 +1887,9 @@ Resources:
           # ENC-TSK-R26: coalesced MARK/SWEEP publish + invalidation flag (see FeedPublishMode).
           FEED_PUBLISH_MODE: !If [FeedCoalesced, "coalesced", "per_batch"]
           FEED_INVALIDATE: !If [FeedInvalidateOff, "false", "true"]
+          # ENC-TSK-R34: content-hash diffing + gzip payloads (inert unless FEED_PUBLISH_MODE=coalesced).
+          FEED_CONTENT_DIFF: !If [FeedContentDiffOn, "true", "false"]
+          FEED_GZIP: !If [FeedGzipOn, "true", "false"]
           FEED_PUBLISH_STATE_TABLE: !Sub "enceladus-feed-publish-state${EnvironmentSuffix}"
           FEED_PUBLISH_STATE_REGION: !Ref AWS::Region
           EVENT_BUS: default

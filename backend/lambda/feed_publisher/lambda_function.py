@@ -44,6 +44,7 @@ Environment variables:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -155,6 +156,39 @@ except ValueError:
 # per_batch keeps feed_utils' existing header.
 COALESCED_CACHE_CONTROL = "max-age=60"
 SWEEP_ACTION = "feed_sweep"
+
+# ENC-TSK-R34 (ENC-PLN-100 C3.1, BRD FR-20 / FR-21). Both flags default to "false" (today's behavior)
+# and take effect ONLY in coalesced mode, so per_batch stays byte-identical whatever they say.
+#   FEED_CONTENT_DIFF  SWEEP hashes every generated object (generated_at excluded) against a stored map
+#                      and PUTs only what changed; analytics sync-stage writes (and their SNS/EventBridge
+#                      signals) are skipped for a project whose records did not change.
+#   FEED_GZIP          the JSON feed objects are stored gzip-compressed with Content-Encoding: gzip
+#                      (reference/*.md are not). Every S3-API reader must decode (feed_utils.read_s3_object_bytes
+#                      / ContentStore.read_bytes); HTTP readers via CloudFront decode transparently.
+# The hash map lives on the existing FEED_PUBLISH_STATE_TABLE as one item (no new table).
+OBJECT_HASHES_KEY = "__object_hashes__"
+
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "false").strip().lower() == "true"
+
+
+FEED_CONTENT_DIFF = _env_true("FEED_CONTENT_DIFF")
+FEED_GZIP = _env_true("FEED_GZIP")
+try:
+    # Self-healing: even when every hash matches, republish everything this often (out-of-band
+    # object deletion/overwrite, a bucket restored from versioning). Mirrors FR-22's 24 h reconciliation.
+    FEED_DIFF_REFRESH_SECONDS = max(0.0, float(os.environ.get("FEED_DIFF_REFRESH_SECONDS", "86400")))
+except ValueError:
+    FEED_DIFF_REFRESH_SECONDS = 86400.0
+
+
+def _content_diff_active() -> bool:
+    return FEED_CONTENT_DIFF and FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED
+
+
+def _gzip_active() -> bool:
+    return FEED_GZIP and FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED
 
 # Local temp directory for generated feed files (Lambda has /tmp writable)
 FEED_TEMP_DIR = Path("/tmp/mobile-feeds/v1")
@@ -873,6 +907,107 @@ def _reset_projects_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-R34: object hash map (FR-20)
+#
+#   project_id  S   "__object_hashes__"          (the existing key schema; the dirty Scan filters it out)
+#   hashes          M   {s3 key -> sha256}          mobile/v1 objects confirmed written or unchanged
+#   fingerprint     S   publish target/encoding the hashes are valid for (bucket, prefix, store mode,
+#                       gzip, cache-control): a change republishes everything
+#   stage_hashes    M   {project -> sha256}         analytics sync-stage records last staged
+#   stage_fingerprint S analytics bucket/region
+#   refreshed_at    N   epoch seconds of the last FULL publish (forces one every 24 h)
+#
+# A hash is recorded only after its write returned, so a failed or partial publish leaves the missing
+# entries absent and the next sweep rewrites them. Any failure reading the map degrades to "everything
+# changed" (a full publish), never to a skipped write.
+# ---------------------------------------------------------------------------
+
+
+def _sha256_text(*parts: str) -> str:
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _mobile_fingerprint(cache_control: Optional[str], gzip_on: bool) -> str:
+    return _sha256_text(
+        FEED_BUCKET,
+        FEED_PREFIX,
+        os.environ.get("CONTENT_STORE_MODE", "legacy"),
+        os.environ.get("CONTENT_BUCKET", ""),
+        os.environ.get("S3_ENV_PREFIX", ""),
+        "gzip" if gzip_on else "identity",
+        cache_control or "",
+    )
+
+
+def _stage_fingerprint() -> str:
+    return _sha256_text(ANALYTICS_BUCKET, ANALYTICS_REGION)
+
+
+def _stage_digest(project_data: Dict[str, Any]) -> Optional[str]:
+    """Digest of the records a project's sync-stage write would contain; None if not computable."""
+    try:
+        payload = {a: project_data.get(a, []) for a in ("tasks", "issues", "features")}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    except Exception as exc:  # noqa: BLE001 - an unhashable record means "changed", never "skip"
+        logger.warning("feed_publisher: sync-stage digest unavailable: %s", exc)
+        return None
+
+
+def _load_hash_state(ddb: Any) -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "hashes": {}, "fingerprint": None, "stage_hashes": {}, "stage_fingerprint": None, "refreshed_at": None,
+    }
+    try:
+        resp = ddb.get_item(
+            TableName=FEED_PUBLISH_STATE_TABLE, Key={"project_id": {"S": OBJECT_HASHES_KEY}}, ConsistentRead=True
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: object hash map unreadable, publishing everything: %s", exc)
+        return state
+    item = resp.get("Item") or {}
+    for attr in ("hashes", "stage_hashes"):
+        state[attr] = {k: v.get("S") for k, v in (item.get(attr, {}).get("M") or {}).items() if v.get("S")}
+    for attr in ("fingerprint", "stage_fingerprint"):
+        state[attr] = (item.get(attr) or {}).get("S")
+    raw_ts = (item.get("refreshed_at") or {}).get("N")
+    try:
+        state["refreshed_at"] = float(raw_ts) if raw_ts is not None else None
+    except ValueError:
+        state["refreshed_at"] = None
+    return state
+
+
+def _save_hash_state(ddb: Any, *, refreshed_at: Optional[float] = None, **maps_and_fingerprints: Any) -> None:
+    """SET only the supplied attributes (hashes/stage_hashes maps, fingerprint strings). Best effort:
+    a failed save just means the next sweep republishes."""
+    attrs: Dict[str, Dict[str, Any]] = {}
+    for name, value in maps_and_fingerprints.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            attrs[name] = {"M": {str(k): {"S": str(v)} for k, v in value.items()}}
+        else:
+            attrs[name] = {"S": str(value)}
+    if refreshed_at is not None:
+        attrs["refreshed_at"] = {"N": str(int(refreshed_at))}
+    if not attrs:
+        return
+    names = {f"#a{i}": k for i, k in enumerate(attrs)}
+    values = {f":v{i}": attrs[k] for i, k in enumerate(attrs)}
+    expr = "SET " + ", ".join(f"#a{i} = :v{i}" for i in range(len(attrs)))
+    try:
+        ddb.update_item(
+            TableName=FEED_PUBLISH_STATE_TABLE,
+            Key={"project_id": {"S": OBJECT_HASHES_KEY}},
+            UpdateExpression=expr,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: object hash map not saved (next sweep republishes): %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Full publish (shared by per_batch and SWEEP)
 # ---------------------------------------------------------------------------
 
@@ -934,11 +1069,19 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
 
     # 3. Generate mobile feeds locally in /tmp
     feed_dir = FEED_TEMP_DIR
-    generate_mobile_feeds(all_entries, all_project_data, generated_at, feed_dir)
+    # ENC-TSK-R34: FEED_GZIP (coalesced only) also minifies the JSON and splits tasks.json per project
+    # behind an index manifest (tasks.json compressed is still > 5 MB, ruling A7). Off -> the exact
+    # pre-R34 call, no extra kwargs.
+    gzip_on = _gzip_active()
+    mobile_gen_kwargs: Dict[str, Any] = (
+        {"minify": True, "split_tasks": True, "key_prefix": FEED_PREFIX} if gzip_on else {}
+    )
+    documents_gen_kwargs: Dict[str, Any] = {"minify": True} if gzip_on else {}
+    generate_mobile_feeds(all_entries, all_project_data, generated_at, feed_dir, **mobile_gen_kwargs)
 
     # 3a. Generate documents feed (separate from tracker feeds)
     try:
-        generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir)
+        generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir, **documents_gen_kwargs)
     except Exception as exc:
         logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
         global_degraded = True
@@ -962,6 +1105,20 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
         logger.error("feed_publisher: generate_reference_docs_from_s3 failed: %s", exc)
         # Non-fatal: continue without reference docs
 
+    # ENC-TSK-R34: content-hash diffing state (coalesced SWEEP only; flags default off).
+    diff_active = _content_diff_active() and not DRY_RUN
+    state_ddb: Any = None
+    hash_state: Dict[str, Any] = {}
+    full_refresh = False
+    if diff_active:
+        state_ddb = _ddb_client(FEED_PUBLISH_STATE_REGION)
+        hash_state = _load_hash_state(state_ddb)
+        last_full = hash_state.get("refreshed_at")
+        full_refresh = last_full is None or (time.time() - last_full) >= FEED_DIFF_REFRESH_SECONDS
+        if full_refresh:
+            logger.info("feed_publisher: content-diff full refresh (no hash map or older than %ss)", FEED_DIFF_REFRESH_SECONDS)
+    refreshed_at_kw: Dict[str, Any] = {"refreshed_at": time.time()} if full_refresh else {}
+
     # 5. Publish feed files to S3
     #
     # ENC-TSK-K98: skip on gamma (FEED_S3_PUBLISH_ENABLED=false) — the
@@ -974,14 +1131,35 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
             # ENC-TSK-R26 (ruling A3): a 60 s TTL replaces invalidation; per_batch keeps
             # feed_utils' existing header (no kwarg passed -> identical call).
             publish_kwargs["cache_control"] = COALESCED_CACHE_CONTROL
-        uploaded_keys = publish_mobile_feeds_to_s3(
-            feed_dir=feed_dir,
-            bucket=FEED_BUCKET,
-            s3_prefix=FEED_PREFIX,
-            dry_run=DRY_RUN,
-            **publish_kwargs,
-        )
+        s3_report: Dict[str, Any] = {}
+        mobile_fp = _mobile_fingerprint(publish_kwargs.get("cache_control"), gzip_on)
+        if diff_active:
+            same_target = hash_state.get("fingerprint") == mobile_fp
+            publish_kwargs["previous_hashes"] = {} if (full_refresh or not same_target) else dict(hash_state["hashes"])
+        if gzip_on:
+            publish_kwargs["gzip_json"] = True
+        if diff_active or gzip_on:
+            publish_kwargs["report"] = s3_report
+        try:
+            uploaded_keys = publish_mobile_feeds_to_s3(
+                feed_dir=feed_dir,
+                bucket=FEED_BUCKET,
+                s3_prefix=FEED_PREFIX,
+                dry_run=DRY_RUN,
+                **publish_kwargs,
+            )
+        finally:
+            if diff_active and s3_report.get("hashes") is not None:
+                # Persisted even when a later put raised: only confirmed objects are in the map.
+                _save_hash_state(state_ddb, hashes=s3_report["hashes"], fingerprint=mobile_fp, **refreshed_at_kw)
         logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
+        if diff_active:
+            logger.info(
+                "feed_publisher: content-diff wrote %d object(s), skipped %d unchanged",
+                len(uploaded_keys), len(s3_report.get("skipped", [])),
+            )
+        if s3_report.get("split_required"):
+            logger.warning("feed_publisher: gzipped object(s) over the 5 MB split threshold: %s", s3_report["split_required"])
     else:
         uploaded_keys = []
         logger.info(
@@ -991,9 +1169,21 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
 
     # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
     analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
+    stage_fp = _stage_fingerprint()
+    stage_prev: Dict[str, str] = (
+        dict(hash_state.get("stage_hashes") or {})
+        if diff_active and not full_refresh and hash_state.get("stage_fingerprint") == stage_fp
+        else {}
+    )
+    new_stage_hashes: Dict[str, str] = {}
     try:
         for entry in all_entries:
             project_data = all_project_data.get(entry.name, {})
+            digest = _stage_digest(project_data) if diff_active else None
+            if digest is not None and stage_prev.get(entry.name) == digest:
+                # ENC-TSK-R34 (FR-20): nothing in this project's records changed -> no sync-stage write.
+                new_stage_hashes[entry.name] = digest
+                continue
             stage_prefixes = write_analytics_sync_stage(
                 project_name=entry.name,
                 project_data=project_data,
@@ -1003,6 +1193,8 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
             )
             if stage_prefixes:
                 analytics_stage_prefixes[entry.name] = stage_prefixes
+            if digest is not None:
+                new_stage_hashes[entry.name] = digest
         logger.info(
             "feed_publisher: wrote analytics sync-stage for %d projects",
             len(analytics_stage_prefixes),
@@ -1010,6 +1202,10 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
     except Exception as exc:
         logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
         # Non-fatal: mobile feeds are already published
+    finally:
+        if diff_active:
+            # Only projects whose stage write returned (or was unchanged) are in the map.
+            _save_hash_state(state_ddb, stage_hashes=new_stage_hashes, stage_fingerprint=stage_fp, **refreshed_at_kw)
 
     # 6. CloudFront invalidation (only when we actually published — K98).
     # ENC-TSK-R26: FEED_INVALIDATE=false drops the call; freshness then rides the object TTL.
@@ -1029,7 +1225,9 @@ def _publish_all(affected_projects: Set[str]) -> PublishResult:
     # 7. SNS signal for Trino/Superset pipeline
     try:
         today = dt.date.today()
-        for entry in all_entries:
+        # ENC-TSK-R34: with diffing on, signal only the projects that were actually (re)staged.
+        sns_entries = [e for e in all_entries if e.name in analytics_stage_prefixes] if diff_active else all_entries
+        for entry in sns_entries:
             publish_sync_message(
                 project_name=entry.name,
                 sync_date=today,
