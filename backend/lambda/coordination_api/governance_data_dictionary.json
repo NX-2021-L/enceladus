@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-20.1",
-  "updated_at": "2026-10-20T01:10:00Z",
-  "last_change_summary": "ENC-TSK-R29 (ENC-PLN-100 C2.4): auto-checkout circuit breaker in checkout_service handler_auto_checkout; no schema change.",
+  "version": "2026-10-20.3",
+  "updated_at": "2026-10-20T01:19:46Z",
+  "last_change_summary": "ENC-TSK-R32-connection-health-cost-digest (ENC-PLN-100): bundled dictionary lockstep bump on rebase; no schema change.",
   "owners": [
     "enceladus-platform"
   ],
