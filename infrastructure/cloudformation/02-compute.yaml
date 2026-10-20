@@ -583,7 +583,7 @@ Resources:
             - "https://hi0dzmvqrc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch"
             - !Ref "AWS::NoValue"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -692,7 +692,7 @@ Resources:
           RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"  # ENC-TSK-R36 (ruling A5): tracker_mutation is the sole kill-switch consumer -- keeps 45s
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -790,7 +790,7 @@ Resources:
           # ENC-TSK-I63 / ENC-TSK-I62: needed so the governance sync path can propagate a
           # governance_data_dictionary.json change into the governance-policies record.
           GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1197,7 +1197,7 @@ Resources:
           # DVP-TSK-B53 (W4n): CONTENT_STORE_READ=legacy removed -- reads go content-first, legacy fallback on a miss.
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1259,7 +1259,7 @@ Resources:
           # DOC-499FA089EC30 freezes all PLN-006 work to gamma anyway.
           GRAPH_QUERY_API_FUNCTION: !If [IsGamma, !Sub "devops-graph-query-api${EnvironmentSuffix}", !Ref "AWS::NoValue"]
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1308,7 +1308,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1376,7 +1376,7 @@ Resources:
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1429,7 +1429,7 @@ Resources:
           CONTENT_STORE_MODE: dual
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1481,7 +1481,7 @@ Resources:
           GITHUB_APP_ID: !Ref GitHubAppId
           GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
           GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1559,7 +1559,7 @@ Resources:
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CODEBUILD_PROJECT: devops-ui-deploy-builder
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1617,7 +1617,7 @@ Resources:
           # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1672,7 +1672,7 @@ Resources:
           GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
           ALLOWED_REPOS: NX-2021-L/enceladus
           GAMMA_INTEGRATION_BRANCH: v4/main
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1725,7 +1725,7 @@ Resources:
           GITHUB_TOKEN_SECRET: devops/github-app/private-key
           DOCUMENT_API_URL: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1
           TRACKER_API_URL: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1855,7 +1855,7 @@ Resources:
           FEED_PUBLISH_STATE_REGION: !Ref AWS::Region
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1898,7 +1898,7 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1946,7 +1946,7 @@ Resources:
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -1997,7 +1997,7 @@ Resources:
           S3_BUCKET: !Ref S3Bucket
           GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
           AGENT_COMPLIANCE_TABLE: !Sub "agent-compliance-violations${EnvironmentSuffix}"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2058,7 +2058,7 @@ Resources:
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
           CORS_ORIGIN: !Ref CorsOrigin
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2248,7 +2248,7 @@ Resources:
           # secret so graph_sync can recompute + verify item_id_provenance before MERGE
           # (warning-only on mismatch/absence — never blocks the sync pipeline).
           ID_SERVICE_HMAC_SECRET_ARN: !Ref IdServiceHmacSecret
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2392,7 +2392,7 @@ Resources:
           # both values via --parameter-overrides.
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2499,7 +2499,7 @@ Resources:
           CONVERGENCE_TTL_DAYS: "90"
           CONVERGENCE_CAP: "10000"
           DYNAMODB_REGION: !Ref AWS::Region
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2562,7 +2562,7 @@ Resources:
           BACKUP_PREFIX: neo4j-backups/
           BACKUP_ENV: !If [IsGamma, gamma, prod]
           SECRETS_REGION: !Ref "AWS::Region"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2635,7 +2635,7 @@ Resources:
           # alongside this -- N47 proved those correct.
           CONSOLIDATION_LOOKBACK_HOURS: "168"
           CONSOLIDATION_MIN_WAVES: "2"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2700,7 +2700,7 @@ Resources:
           HCE_LOOKBACK_DAYS: "90"
           HCE_PROPOSER_ID: ENC-FTR-064
           HCE_GDMP_PROVENANCE_ENABLED: "true"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2773,7 +2773,7 @@ Resources:
           UNLEARNING_LOOKBACK_HOURS: "24"
           UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD: "0.5"
           UNLEARNING_MIN_MISS_COUNT: "3"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -2830,7 +2830,7 @@ Resources:
           ISSUE_PROJECT_ID: enceladus
           DRIFT_SEVERITY: P0
           DRY_RUN: "false"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -3141,7 +3141,7 @@ Resources:
           DEDUP_FLOW_WINDOW_DAYS: "7"
           DEDUP_WALKBACK_WINDOW_DAYS: "30"
           DEDUP_VECTOR_TOP_K: "25"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -3231,7 +3231,7 @@ Resources:
           MC_NUM_P: "30"
           MC_P_MIN: "0.02"
           MC_P_MAX: "0.60"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -3345,7 +3345,7 @@ Resources:
           # REVERT to "0" once the heavy window captures the true/false pair; a
           # follow-up task restores CEE cognition (do not leave CEE disabled).
           CEE_HARD_DISABLED: "1"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -3470,7 +3470,7 @@ Resources:
           # Re-enable is io's explicit call post-soak -- do NOT flip back to "0"
           # without io go after 3 nights of persisted candidate reports.
           CEE_GDMP_HARD_DISABLED: "1"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
@@ -8364,7 +8364,7 @@ Resources:
           ENABLE_HANDOFF_PRIMITIVE: "true"
           ENABLE_LESSON_PRIMITIVE: "true"
           ENABLE_TYPED_RELATIONSHIPS: "true"
-          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           # ENC-TSK-J31 / ENC-ISS-462: this function is a GAMMA function but is prod-stack-owned
           # (Condition: IsProduction, H29/ISS-386 name-collision guard), so it inherits the PROD
           # stack's AppConfigApplicationId param. Hardcode the GAMMA AppConfig ids so a prod compute
@@ -8946,6 +8946,7 @@ Resources:
           # tenants.yaml) — ships with zero enabled tenants.
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): extension-carrying fn that did not set it (default 45)
           RHYTHM_TENANTS_APPCONFIG_CONFIGURATION: rhythm-tenants
       Tags:
         - Key: Project
