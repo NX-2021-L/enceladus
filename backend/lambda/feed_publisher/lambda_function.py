@@ -30,6 +30,15 @@ Environment variables:
   PROJECTS_TABLE     DynamoDB table for project registry (default: projects)
   PROJECTS_REGION    AWS region for projects table (default: us-west-2)
   DRY_RUN            Set to "true" to skip S3/CF/SNS/EB writes (for testing)
+  FEED_PUBLISH_MODE  per_batch (default; publish on every SQS batch) | coalesced
+                     (ENC-TSK-R26: SQS batches only MARK the project dirty in
+                     FEED_PUBLISH_STATE_TABLE; an EventBridge-driven SWEEP publishes)
+  FEED_INVALIDATE    "true" (default) | "false": whether a publish ends with a
+                     CloudFront CreateInvalidation (ENC-TSK-R26)
+  FEED_PUBLISH_STATE_TABLE   MARK/SWEEP state table (default: enceladus-feed-publish-state)
+  FEED_PUBLISH_STATE_REGION  region of that table (default: us-west-2)
+  FEED_CLAIM_GRACE_SECONDS   safety margin subtracted from a sweep's claim time before the
+                     clear-dirty comparison (default: 5; covers GSI propagation lag)
 """
 
 from __future__ import annotations
@@ -39,6 +48,8 @@ import json
 import logging
 import os
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -111,6 +122,39 @@ ANALYTICS_REGION = os.environ.get("ANALYTICS_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 PROJECTS_REGION = os.environ.get("PROJECTS_REGION", "us-west-2")
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in {"1", "true", "yes"}
+
+# ENC-TSK-R26 (ENC-PLN-100 C2.1): trailing-edge coalescing of the snapshot publish.
+#   per_batch  -> today's behavior, byte-identical: every SQS batch regenerates + publishes.
+#   coalesced  -> the SQS path only MARKs projects dirty (feed-publish-state); a scheduled
+#                 SWEEP performs the (existing, full) publish and clears dirty only if no
+#                 write arrived after it claimed the project (trailing edge).
+# Anything other than the literal "coalesced" resolves to per_batch (fail safe).
+FEED_PUBLISH_MODE_PER_BATCH = "per_batch"
+FEED_PUBLISH_MODE_COALESCED = "coalesced"
+
+
+def _normalize_publish_mode(raw: Optional[str]) -> str:
+    value = (raw or "").strip().lower()
+    if value == FEED_PUBLISH_MODE_COALESCED:
+        return FEED_PUBLISH_MODE_COALESCED
+    if value and value != FEED_PUBLISH_MODE_PER_BATCH:
+        logger.warning("feed_publisher: unknown FEED_PUBLISH_MODE=%r; using per_batch", raw)
+    return FEED_PUBLISH_MODE_PER_BATCH
+
+
+FEED_PUBLISH_MODE = _normalize_publish_mode(os.environ.get("FEED_PUBLISH_MODE"))
+# Default true (today's behavior). Only the literal "false" disables the runtime invalidation.
+FEED_INVALIDATE = os.environ.get("FEED_INVALIDATE", "true").strip().lower() != "false"
+FEED_PUBLISH_STATE_TABLE = os.environ.get("FEED_PUBLISH_STATE_TABLE", "enceladus-feed-publish-state")
+FEED_PUBLISH_STATE_REGION = os.environ.get("FEED_PUBLISH_STATE_REGION", TRACKER_REGION)
+try:
+    FEED_CLAIM_GRACE_SECONDS = max(0.0, float(os.environ.get("FEED_CLAIM_GRACE_SECONDS", "5")))
+except ValueError:
+    FEED_CLAIM_GRACE_SECONDS = 5.0
+# ruling A3: plain max-age, no stale-while-revalidate. Applied only in coalesced mode;
+# per_batch keeps feed_utils' existing header.
+COALESCED_CACHE_CONTROL = "max-age=60"
+SWEEP_ACTION = "feed_sweep"
 
 # Local temp directory for generated feed files (Lambda has /tmp writable)
 FEED_TEMP_DIR = Path("/tmp/mobile-feeds/v1")
@@ -445,16 +489,615 @@ def _generate_deploy_pending_feed(
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-R26: MARK / SWEEP (coalesced publish)
+# ---------------------------------------------------------------------------
+#
+# State lives in ONE stream-less on-demand table (ruling A2; it must never be a table whose
+# stream feeds the pipe, or a MARK write would re-enter the queue and re-trigger MARK):
+#
+#   project item  pk project_id
+#       dirty            BOOL   present only while the project owes a publish
+#       dirty_since      S      ISO time of the first unpublished MARK
+#       last_write_at    N      epoch microseconds, MONOTONIC max of MARK arrival times
+#       claimed_at       N      epoch microseconds of the sweep claim that last took it
+#       last_published_at S     ISO time of the last successful clear
+#   lease item    pk "__sweep_lease__"  (lease_expires_at N, lease_owner S)
+#
+# Trailing-edge guarantee (the property ENC-ISS-543 taught us to protect): dirty is cleared
+# ONLY by a conditional write that requires last_write_at <= (claimed_at - grace). A MARK that
+# lands at any time after the claim bumps last_write_at past that cutoff, so the clear fails and
+# the project stays dirty for the next sweep. last_write_at is the MARK's *processing* time
+# (max'd with the event's own updated_at, clamped), which is always >= the write's commit time:
+# a write is therefore either visible to the publish (its MARK preceded the claim, and the
+# publish reads after the claim) or it keeps the project dirty.
+
+_LEASE_KEY = "__sweep_lease__"
+_LEASE_MARGIN_SECONDS = 30.0
+_FUTURE_EVENT_CLAMP_US = 60 * 1_000_000
+
+_MARK_UPDATE = (
+    "SET dirty = :t, dirty_since = if_not_exists(dirty_since, :iso), last_write_at = :ts"
+)
+# Monotonic max: an out-of-order MARK must never move last_write_at backwards. A failed
+# condition means a newer-or-equal MARK already landed (and set dirty), so it is a success.
+_MARK_CONDITION = "attribute_not_exists(last_write_at) OR last_write_at <= :ts"
+
+_LEASE_UPDATE = "SET lease_expires_at = :exp, lease_owner = :owner"
+_LEASE_CONDITION = "attribute_not_exists(lease_expires_at) OR lease_expires_at < :now"
+_LEASE_RELEASE_UPDATE = "REMOVE lease_expires_at, lease_owner"
+_LEASE_RELEASE_CONDITION = "lease_owner = :owner"
+
+_CLAIM_UPDATE = "SET claimed_at = :c, claim_owner = :owner"
+_CLAIM_CONDITION = "dirty = :t"
+
+_CLEAR_UPDATE = "REMOVE dirty, dirty_since SET last_published_at = :pub"
+_CLEAR_CONDITION = "dirty = :t AND last_write_at <= :cutoff"
+
+
+def _now_us() -> int:
+    return int(time.time() * 1_000_000)
+
+
+def _iso_from_us(us: int) -> str:
+    return dt.datetime.fromtimestamp(us / 1_000_000, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ts_to_us(ts: Optional[str]) -> Optional[int]:
+    """Canonical 'YYYY-MM-DDTHH:MM:SSZ' (see _normalize_activity_ts) -> epoch microseconds."""
+    if not ts:
+        return None
+    try:
+        parsed = dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+    return int(parsed.timestamp() * 1_000_000)
+
+
+def _is_condition_failure(exc: ClientError) -> bool:
+    return exc.response.get("Error", {}).get("Code", "") == "ConditionalCheckFailedException"
+
+
+def _extract_mark_work(event: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """Parse an SQS batch for MARK: project_id -> {"message_ids": [...], "event_ts": newest
+    event updated_at in canonical form or None}, plus message ids with no resolvable project.
+
+    Every record resolves to a project or is reported failed, exactly like per_batch: a record is
+    never silently consumed without leaving a dirty mark."""
+    work: Dict[str, Dict[str, Any]] = {}
+    failed: List[str] = []
+    for record in event.get("Records", []):
+        message_id = record.get("messageId")
+        try:
+            body = json.loads(record.get("body", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Could not parse SQS record body as JSON")
+            if message_id:
+                failed.append(message_id)
+            continue
+        project_id = None
+        event_ts = None
+        if isinstance(body, dict):
+            ddb_record = body.get("dynamodb", body)
+            if isinstance(ddb_record, dict):
+                # NewImage first; REMOVE events carry only OldImage and must mark dirty too.
+                for image_key in ("NewImage", "OldImage"):
+                    image = ddb_record.get(image_key) or {}
+                    attr = image.get("project_id") or {}
+                    candidate = attr.get("S") or attr.get("s") if isinstance(attr, dict) else None
+                    if candidate:
+                        project_id = candidate
+                        updated = image.get("updated_at") or {}
+                        event_ts = _normalize_activity_ts(updated.get("S") if isinstance(updated, dict) else None)
+                        break
+        if not project_id:
+            logger.warning("Could not resolve project_id from SQS record body")
+            if message_id:
+                failed.append(message_id)
+            continue
+        entry = work.setdefault(project_id, {"message_ids": [], "event_ts": None})
+        if message_id:
+            entry["message_ids"].append(message_id)
+        if event_ts and (entry["event_ts"] is None or event_ts > entry["event_ts"]):
+            entry["event_ts"] = event_ts
+    return work, failed
+
+
+def _mark_projects_dirty(work: Dict[str, Dict[str, Any]], ddb: Any = None) -> List[str]:
+    """ONE conditional UpdateItem per distinct project in the batch (FR-16).
+
+    Returns the message ids whose MARK did NOT land, so the caller can hand them back to SQS
+    (batchItemFailures). A MARK that cannot be recorded must be retried, never swallowed: a
+    swallowed failure deletes the queue message and the write is gone (ENC-ISS-543)."""
+    failed_ids: List[str] = []
+    if not work:
+        return failed_ids
+    client = ddb if ddb is not None else _ddb_client(FEED_PUBLISH_STATE_REGION)
+    for project_id in sorted(work):
+        entry = work[project_id]
+        now_us = _now_us()
+        ts_us = now_us
+        event_us = _ts_to_us(entry.get("event_ts"))
+        if event_us is not None:
+            ts_us = max(now_us, min(event_us, now_us + _FUTURE_EVENT_CLAMP_US))
+        try:
+            client.update_item(
+                TableName=FEED_PUBLISH_STATE_TABLE,
+                Key={"project_id": {"S": project_id}},
+                UpdateExpression=_MARK_UPDATE,
+                ConditionExpression=_MARK_CONDITION,
+                ExpressionAttributeValues={
+                    ":t": {"BOOL": True},
+                    ":iso": {"S": _iso_from_us(now_us)},
+                    ":ts": {"N": str(ts_us)},
+                },
+            )
+        except ClientError as exc:
+            if _is_condition_failure(exc):
+                # A newer MARK already stored a later last_write_at (and set dirty).
+                logger.debug("feed_publisher: MARK project=%s superseded by a newer mark", project_id)
+                continue
+            logger.error(
+                "feed_publisher: MARK failed project=%s code=%s; returning %d message(s) to the queue",
+                project_id, exc.response.get("Error", {}).get("Code", ""), len(entry["message_ids"]),
+            )
+            failed_ids.extend(entry["message_ids"])
+        except Exception as exc:  # noqa: BLE001 - any MARK failure must return the messages
+            logger.error(
+                "feed_publisher: MARK failed project=%s: %s; returning %d message(s) to the queue",
+                project_id, exc, len(entry["message_ids"]),
+            )
+            failed_ids.extend(entry["message_ids"])
+    return failed_ids
+
+
+def _handle_mark(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Coalesced SQS path: record dirty per project and return. No S3, no CloudFront, no
+    re-read; the queue delivers (and FeedQueueLossAlarm counts) exactly as in per_batch."""
+    records = event.get("Records", [])
+    record_message_ids = [r.get("messageId") for r in records if r.get("messageId")]
+    logger.info("feed_publisher: MARK invoked records=%d dry_run=%s", len(records), DRY_RUN)
+
+    work, failed_message_ids = _extract_mark_work(event)
+    logger.info("feed_publisher: MARK affected project IDs: %s", sorted(work))
+
+    # DVP-TSK-A83: this consumer is the only thing stamping projects.last_activity_at, and the
+    # MARK path consumes the same records, so the stamp must keep running here.
+    try:
+        _record_project_activity(_extract_project_activity_from_sqs_event(event))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: last_activity_at stamping skipped: %s", exc)
+
+    if DRY_RUN:
+        logger.info("feed_publisher: DRY_RUN mode — MARK state writes suppressed")
+        return _batch_failure_response(failed_message_ids)
+    try:
+        failed_message_ids = failed_message_ids + _mark_projects_dirty(work)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed_publisher: MARK batch failed, marking all records for retry: %s", exc, exc_info=True)
+        return _batch_failure_response(record_message_ids)
+    return _batch_failure_response(failed_message_ids)
+
+
+def _scan_dirty_projects(ddb: Any) -> List[str]:
+    """project_ids currently dirty. A strongly consistent Scan of a table with one item per
+    project (tens of items); the lease item has no `dirty` attribute and is filtered out."""
+    dirty: List[str] = []
+    kwargs: Dict[str, Any] = {
+        "TableName": FEED_PUBLISH_STATE_TABLE,
+        "FilterExpression": "dirty = :t",
+        "ExpressionAttributeValues": {":t": {"BOOL": True}},
+        "ProjectionExpression": "project_id",
+        "ConsistentRead": True,
+    }
+    while True:
+        resp = ddb.scan(**kwargs)
+        for item in resp.get("Items", []):
+            pid = (item.get("project_id") or {}).get("S")
+            if pid:
+                dirty.append(pid)
+        if not resp.get("LastEvaluatedKey"):
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return sorted(set(dirty))
+
+
+def _acquire_sweep_lease(ddb: Any, owner: str, context: Any) -> bool:
+    """Conditional claim of the sweep lease. False when another live sweep holds it."""
+    remaining_s = 600.0
+    getter = getattr(context, "get_remaining_time_in_millis", None)
+    if callable(getter):
+        try:
+            remaining_s = float(getter()) / 1000.0
+        except (TypeError, ValueError):
+            pass
+    now_us = _now_us()
+    expires_us = now_us + int((remaining_s + _LEASE_MARGIN_SECONDS) * 1_000_000)
+    try:
+        ddb.update_item(
+            TableName=FEED_PUBLISH_STATE_TABLE,
+            Key={"project_id": {"S": _LEASE_KEY}},
+            UpdateExpression=_LEASE_UPDATE,
+            ConditionExpression=_LEASE_CONDITION,
+            ExpressionAttributeValues={
+                ":exp": {"N": str(expires_us)},
+                ":owner": {"S": owner},
+                ":now": {"N": str(now_us)},
+            },
+        )
+        return True
+    except ClientError as exc:
+        if _is_condition_failure(exc):
+            return False
+        raise
+
+
+def _release_sweep_lease(ddb: Any, owner: str) -> None:
+    """Best effort: an unreleased lease just expires with the invocation's own deadline."""
+    try:
+        ddb.update_item(
+            TableName=FEED_PUBLISH_STATE_TABLE,
+            Key={"project_id": {"S": _LEASE_KEY}},
+            UpdateExpression=_LEASE_RELEASE_UPDATE,
+            ConditionExpression=_LEASE_RELEASE_CONDITION,
+            ExpressionAttributeValues={":owner": {"S": owner}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: sweep lease release skipped: %s", exc)
+
+
+def _claim_dirty_projects(ddb: Any, dirty_projects: List[str], owner: str) -> Dict[str, int]:
+    """Stamp claimed_at on each still-dirty project. Returns project_id -> claimed_at (us).
+
+    A project whose dirty flag was cleared since the scan is skipped (condition fails). Any
+    other error propagates BEFORE anything is published, leaving every project dirty."""
+    claims: Dict[str, int] = {}
+    for project_id in dirty_projects:
+        claimed_at = _now_us()
+        try:
+            ddb.update_item(
+                TableName=FEED_PUBLISH_STATE_TABLE,
+                Key={"project_id": {"S": project_id}},
+                UpdateExpression=_CLAIM_UPDATE,
+                ConditionExpression=_CLAIM_CONDITION,
+                ExpressionAttributeValues={
+                    ":t": {"BOOL": True},
+                    ":c": {"N": str(claimed_at)},
+                    ":owner": {"S": owner},
+                },
+            )
+        except ClientError as exc:
+            if _is_condition_failure(exc):
+                continue
+            raise
+        claims[project_id] = claimed_at
+    return claims
+
+
+def _clear_published(
+    ddb: Any, claims: Dict[str, int], result: "PublishResult",
+) -> Tuple[List[str], List[str]]:
+    """Trailing-edge clear. Returns (cleared, retained).
+
+    Cleared only when the publish was clean for the project AND no MARK arrived after the claim
+    (minus grace). Anything else stays dirty and is retried by the next sweep."""
+    cleared: List[str] = []
+    retained: List[str] = []
+    grace_us = int(FEED_CLAIM_GRACE_SECONDS * 1_000_000)
+    for project_id, claimed_at in sorted(claims.items()):
+        if result.global_degraded or project_id in result.degraded_projects:
+            logger.warning("feed_publisher: project=%s published degraded; staying dirty", project_id)
+            retained.append(project_id)
+            continue
+        try:
+            ddb.update_item(
+                TableName=FEED_PUBLISH_STATE_TABLE,
+                Key={"project_id": {"S": project_id}},
+                UpdateExpression=_CLEAR_UPDATE,
+                ConditionExpression=_CLEAR_CONDITION,
+                ExpressionAttributeValues={
+                    ":t": {"BOOL": True},
+                    ":cutoff": {"N": str(claimed_at - grace_us)},
+                    ":pub": {"S": result.generated_at},
+                },
+            )
+            cleared.append(project_id)
+        except ClientError as exc:
+            if _is_condition_failure(exc):
+                logger.info(
+                    "feed_publisher: project=%s written during/after claim; staying dirty for next sweep",
+                    project_id,
+                )
+            else:
+                logger.error(
+                    "feed_publisher: clear failed project=%s code=%s; staying dirty",
+                    project_id, exc.response.get("Error", {}).get("Code", ""),
+                )
+            retained.append(project_id)
+        except Exception as exc:  # noqa: BLE001 - a failed clear only costs an extra publish
+            logger.error("feed_publisher: clear failed project=%s: %s; staying dirty", project_id, exc)
+            retained.append(project_id)
+    return cleared, retained
+
+
+def _handle_sweep(context: Any) -> Dict[str, Any]:
+    """Scheduled SWEEP: publish once for every dirty project, then clear dirty on the trailing edge."""
+    if FEED_PUBLISH_MODE != FEED_PUBLISH_MODE_COALESCED:
+        logger.info("feed_publisher: sweep ignored (FEED_PUBLISH_MODE=%s)", FEED_PUBLISH_MODE)
+        return {"status": "skipped", "reason": "per_batch_mode"}
+    ddb = _ddb_client(FEED_PUBLISH_STATE_REGION)
+    dirty_projects = _scan_dirty_projects(ddb)
+    if not dirty_projects:
+        logger.info("feed_publisher: sweep idle (no dirty projects)")
+        return {"status": "idle", "dirty": 0}
+    if DRY_RUN:
+        logger.info("feed_publisher: DRY_RUN sweep — would publish for %s", dirty_projects)
+        return {"status": "dry_run", "dirty": len(dirty_projects)}
+
+    owner = getattr(context, "aws_request_id", None) or f"sweep-{uuid.uuid4().hex[:12]}"
+    if not _acquire_sweep_lease(ddb, owner, context):
+        logger.info("feed_publisher: sweep skipped (lease held by another sweep)")
+        return {"status": "skipped", "reason": "lease_held"}
+    try:
+        claims = _claim_dirty_projects(ddb, dirty_projects, owner)
+        if not claims:
+            return {"status": "idle", "dirty": 0}
+        # Fresh project list: a project registered since the warm-container cache was filled
+        # must be in the publish, or clearing its dirty flag would drop its first writes.
+        _reset_projects_cache()
+        try:
+            result = _publish_all(set(claims))
+        except Exception as exc:
+            # Nothing is cleared: every claimed project stays dirty for the next sweep.
+            logger.error("feed_publisher: sweep publish failed, projects stay dirty %s: %s",
+                         sorted(claims), exc, exc_info=True)
+            raise
+        cleared, retained = _clear_published(ddb, claims, result)
+        logger.info(
+            "feed_publisher: sweep complete generated_at=%s cleared=%s retained=%s",
+            result.generated_at, cleared, retained,
+        )
+        return {
+            "status": "published",
+            "generated_at": result.generated_at,
+            "cleared": cleared,
+            "retained": retained,
+        }
+    finally:
+        _release_sweep_lease(ddb, owner)
+
+
+def _reset_projects_cache() -> None:
+    global _projects_cache, _projects_cache_at
+    _projects_cache = None
+    _projects_cache_at = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Full publish (shared by per_batch and SWEEP)
+# ---------------------------------------------------------------------------
+
+
+class PublishResult:
+    """Outcome of one full publish. A plain class, not a dataclass: the test loaders exec this
+    module without registering it in sys.modules, which breaks dataclass under
+    `from __future__ import annotations`."""
+
+    __slots__ = ("generated_at", "degraded_projects", "global_degraded")
+
+    def __init__(self, generated_at: str, degraded_projects: Set[str], global_degraded: bool) -> None:
+        self.generated_at = generated_at
+        self.degraded_projects = degraded_projects
+        self.global_degraded = global_degraded
+
+
+def _publish_all(affected_projects: Set[str]) -> PublishResult:
+    """Regenerate and publish the feeds for ALL projects (unchanged from the pre-R26 handler).
+
+    Raises on a fatal failure (same as before); non-fatal sub-step failures are logged and
+    swallowed exactly as before, except that data-bearing ones are reported on the result so
+    the SWEEP keeps the affected projects dirty."""
+    # 2. Fetch all project data from DynamoDB
+    generated_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    all_entries = _all_project_entries()
+    ddb = _ddb_client()
+    all_project_data: Dict[str, Dict[str, Any]] = {}
+    # ENC-TSK-R26: projects whose source read failed (the loops below publish an EMPTY
+    # feed for them, as per_batch always has). The SWEEP must not clear dirty for these.
+    degraded_projects: Set[str] = set()
+    global_degraded = False
+
+    for entry in all_entries:
+        try:
+            all_project_data[entry.name] = fetch_from_dynamodb(
+                entry,
+                table=TRACKER_TABLE,
+                region=TRACKER_REGION,
+            )
+        except Exception as exc:
+            logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
+            degraded_projects.add(entry.name)
+            all_project_data[entry.name] = {"tasks": [], "issues": [], "features": [], "lessons": [], "plans": []}
+
+    # 2b. Fetch all document data from the documents DynamoDB table
+    all_documents_data: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in all_entries:
+        try:
+            all_documents_data[entry.name] = fetch_documents_from_dynamodb(
+                entry,
+                table=DOCUMENTS_TABLE,
+                region=DOCUMENTS_REGION,
+            )
+        except Exception as exc:
+            logger.error("feed_publisher: documents DynamoDB fetch failed for project=%s: %s", entry.name, exc)
+            degraded_projects.add(entry.name)
+            all_documents_data[entry.name] = []
+
+    # 3. Generate mobile feeds locally in /tmp
+    feed_dir = FEED_TEMP_DIR
+    generate_mobile_feeds(all_entries, all_project_data, generated_at, feed_dir)
+
+    # 3a. Generate documents feed (separate from tracker feeds)
+    try:
+        generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir)
+    except Exception as exc:
+        logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
+        global_degraded = True
+        # Non-fatal: tracker feeds are already generated
+
+    # 3b. Generate deploy-pending feed (GMF notification banner — DOC-63420302EF65 §6.1)
+    try:
+        _generate_deploy_pending_feed(generated_at, feed_dir, ddb)
+    except Exception as exc:
+        logger.error("feed_publisher: generate_deploy_pending_feed failed: %s", exc)
+        # Non-fatal: approval banner falls back to direct API polling
+
+    # 3c. Freshness SLA check — warns if feeds lag behind source data
+    check_freshness_sla(generated_at, all_project_data)
+
+    # 4. Fetch reference docs from S3 (via DynamoDB metadata) and stage in /tmp/reference/
+    try:
+        s3_client = boto3.client("s3", region_name="us-east-1")
+        generate_reference_docs_from_s3(all_entries, feed_dir, ddb, table=TRACKER_TABLE, s3_client=s3_client)
+    except Exception as exc:
+        logger.error("feed_publisher: generate_reference_docs_from_s3 failed: %s", exc)
+        # Non-fatal: continue without reference docs
+
+    # 5. Publish feed files to S3
+    #
+    # ENC-TSK-K98: skip on gamma (FEED_S3_PUBLISH_ENABLED=false) — the
+    # /mobile/v1 objects are served PUBLICLY by the shared UI-origin cockpit
+    # CDN, and the ui-v2 cockpit now reads its snapshot from the
+    # authenticated feed_query API. Prod keeps publishing.
+    if FEED_S3_PUBLISH_ENABLED:
+        publish_kwargs: Dict[str, Any] = {}
+        if FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED:
+            # ENC-TSK-R26 (ruling A3): a 60 s TTL replaces invalidation; per_batch keeps
+            # feed_utils' existing header (no kwarg passed -> identical call).
+            publish_kwargs["cache_control"] = COALESCED_CACHE_CONTROL
+        uploaded_keys = publish_mobile_feeds_to_s3(
+            feed_dir=feed_dir,
+            bucket=FEED_BUCKET,
+            s3_prefix=FEED_PREFIX,
+            dry_run=DRY_RUN,
+            **publish_kwargs,
+        )
+        logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
+    else:
+        uploaded_keys = []
+        logger.info(
+            "feed_publisher: PUBLIC /mobile S3 publish disabled "
+            "(FEED_S3_PUBLISH_ENABLED=false); skipping write + CF invalidation"
+        )
+
+    # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
+    analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
+    try:
+        for entry in all_entries:
+            project_data = all_project_data.get(entry.name, {})
+            stage_prefixes = write_analytics_sync_stage(
+                project_name=entry.name,
+                project_data=project_data,
+                bucket=ANALYTICS_BUCKET,
+                region=ANALYTICS_REGION,
+                dry_run=DRY_RUN,
+            )
+            if stage_prefixes:
+                analytics_stage_prefixes[entry.name] = stage_prefixes
+        logger.info(
+            "feed_publisher: wrote analytics sync-stage for %d projects",
+            len(analytics_stage_prefixes),
+        )
+    except Exception as exc:
+        logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
+        # Non-fatal: mobile feeds are already published
+
+    # 6. CloudFront invalidation (only when we actually published — K98).
+    # ENC-TSK-R26: FEED_INVALIDATE=false drops the call; freshness then rides the object TTL.
+    if FEED_S3_PUBLISH_ENABLED and not FEED_INVALIDATE:
+        logger.info("feed_publisher: CloudFront invalidation disabled (FEED_INVALIDATE=false)")
+    elif FEED_S3_PUBLISH_ENABLED:
+        try:
+            inv_id = invalidate_mobile_cf(
+                distribution_id=CF_DISTRIBUTION,
+                dry_run=DRY_RUN,
+            )
+            logger.info("feed_publisher: CF invalidation id=%s", inv_id)
+        except Exception as exc:
+            logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
+            # Non-fatal: feeds are published even if invalidation fails
+
+    # 7. SNS signal for Trino/Superset pipeline
+    try:
+        today = dt.date.today()
+        for entry in all_entries:
+            publish_sync_message(
+                project_name=entry.name,
+                sync_date=today,
+                artifact_names=["tasks", "issues", "features"],
+                sns_topic=SNS_TOPIC,
+                dry_run=DRY_RUN,
+            )
+    except Exception as exc:
+        logger.error("feed_publisher: SNS publish failed: %s", exc)
+        # Non-fatal
+
+    # 8. Per-project EventBridge events for Trino/Superset pipeline
+    for project_name, stage_prefixes in analytics_stage_prefixes.items():
+        try:
+            # Extract the ingest_ts suffix from the first stage_prefix URI
+            first_prefix = next(iter(stage_prefixes.values()), "")
+            sync_suffix = first_prefix.rstrip("/").split("ingest_ts=")[-1].split("/")[0] if "ingest_ts=" in first_prefix else ""
+            eb_payload = {
+                "project": project_name,
+                "sync_date": dt.date.today().isoformat(),
+                "artifacts": list(stage_prefixes.keys()),
+                "stage_prefixes": stage_prefixes,
+                "sync_run_id": f"{sync_suffix}-{project_name}",
+                "sync_target_suffix": sync_suffix,
+                "generated_at": generated_at,
+            }
+            publish_eventbridge_event(
+                message=eb_payload,
+                bus_name=EVENT_BUS,
+                dry_run=DRY_RUN,
+            )
+        except Exception as exc:
+            logger.error("feed_publisher: EventBridge publish failed for project=%s: %s", project_name, exc)
+            # Non-fatal: continue with remaining projects
+
+    return PublishResult(
+        generated_at=generated_at,
+        degraded_projects=degraded_projects,
+        global_degraded=global_degraded,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
+
+
+def _is_sweep_event(event: Any) -> bool:
+    return isinstance(event, dict) and "Records" not in event and event.get("action") == SWEEP_ACTION
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Lambda entry point.
 
-    Receives SQS event → extracts affected project IDs → regenerates and publishes
-    full mobile feeds for all projects (ensures consistency across feeds).
+    * EventBridge sweep event ({"action": "feed_sweep"}) -> SWEEP (coalesced mode only).
+    * SQS event, FEED_PUBLISH_MODE=coalesced -> MARK (dirty flag only, no publish).
+    * SQS event, FEED_PUBLISH_MODE=per_batch (default) -> regenerate and publish all feeds.
     """
+    if _is_sweep_event(event):
+        return _handle_sweep(context)
+    if FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED:
+        return _handle_mark(event)
+    return _handle_per_batch(event)
+
+
+def _handle_per_batch(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Receives SQS event → extracts affected project IDs → regenerates and publishes
+    full mobile feeds for all projects (ensures consistency across feeds)."""
     logger.info(
         "feed_publisher: invoked records=%d dry_run=%s",
         len(event.get("Records", [])),
@@ -483,162 +1126,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.warning("feed_publisher: last_activity_at stamping skipped: %s", exc)
 
     try:
-        # 2. Fetch all project data from DynamoDB
-        generated_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        all_entries = _all_project_entries()
-        ddb = _ddb_client()
-        all_project_data: Dict[str, Dict[str, Any]] = {}
-
-        for entry in all_entries:
-            try:
-                all_project_data[entry.name] = fetch_from_dynamodb(
-                    entry,
-                    table=TRACKER_TABLE,
-                    region=TRACKER_REGION,
-                )
-            except Exception as exc:
-                logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
-                all_project_data[entry.name] = {"tasks": [], "issues": [], "features": [], "lessons": [], "plans": []}
-
-        # 2b. Fetch all document data from the documents DynamoDB table
-        all_documents_data: Dict[str, List[Dict[str, Any]]] = {}
-        for entry in all_entries:
-            try:
-                all_documents_data[entry.name] = fetch_documents_from_dynamodb(
-                    entry,
-                    table=DOCUMENTS_TABLE,
-                    region=DOCUMENTS_REGION,
-                )
-            except Exception as exc:
-                logger.error("feed_publisher: documents DynamoDB fetch failed for project=%s: %s", entry.name, exc)
-                all_documents_data[entry.name] = []
-
-        # 3. Generate mobile feeds locally in /tmp
-        feed_dir = FEED_TEMP_DIR
-        generate_mobile_feeds(all_entries, all_project_data, generated_at, feed_dir)
-
-        # 3a. Generate documents feed (separate from tracker feeds)
-        try:
-            generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir)
-        except Exception as exc:
-            logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
-            # Non-fatal: tracker feeds are already generated
-
-        # 3b. Generate deploy-pending feed (GMF notification banner — DOC-63420302EF65 §6.1)
-        try:
-            _generate_deploy_pending_feed(generated_at, feed_dir, ddb)
-        except Exception as exc:
-            logger.error("feed_publisher: generate_deploy_pending_feed failed: %s", exc)
-            # Non-fatal: approval banner falls back to direct API polling
-
-        # 3c. Freshness SLA check — warns if feeds lag behind source data
-        check_freshness_sla(generated_at, all_project_data)
-
-        # 4. Fetch reference docs from S3 (via DynamoDB metadata) and stage in /tmp/reference/
-        try:
-            s3_client = boto3.client("s3", region_name="us-east-1")
-            generate_reference_docs_from_s3(all_entries, feed_dir, ddb, table=TRACKER_TABLE, s3_client=s3_client)
-        except Exception as exc:
-            logger.error("feed_publisher: generate_reference_docs_from_s3 failed: %s", exc)
-            # Non-fatal: continue without reference docs
-
-        # 5. Publish feed files to S3
-        #
-        # ENC-TSK-K98: skip on gamma (FEED_S3_PUBLISH_ENABLED=false) — the
-        # /mobile/v1 objects are served PUBLICLY by the shared UI-origin cockpit
-        # CDN, and the ui-v2 cockpit now reads its snapshot from the
-        # authenticated feed_query API. Prod keeps publishing.
-        if FEED_S3_PUBLISH_ENABLED:
-            uploaded_keys = publish_mobile_feeds_to_s3(
-                feed_dir=feed_dir,
-                bucket=FEED_BUCKET,
-                s3_prefix=FEED_PREFIX,
-                dry_run=DRY_RUN,
-            )
-            logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
-        else:
-            uploaded_keys = []
-            logger.info(
-                "feed_publisher: PUBLIC /mobile S3 publish disabled "
-                "(FEED_S3_PUBLISH_ENABLED=false); skipping write + CF invalidation"
-            )
-
-        # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
-        analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
-        try:
-            for entry in all_entries:
-                project_data = all_project_data.get(entry.name, {})
-                stage_prefixes = write_analytics_sync_stage(
-                    project_name=entry.name,
-                    project_data=project_data,
-                    bucket=ANALYTICS_BUCKET,
-                    region=ANALYTICS_REGION,
-                    dry_run=DRY_RUN,
-                )
-                if stage_prefixes:
-                    analytics_stage_prefixes[entry.name] = stage_prefixes
-            logger.info(
-                "feed_publisher: wrote analytics sync-stage for %d projects",
-                len(analytics_stage_prefixes),
-            )
-        except Exception as exc:
-            logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
-            # Non-fatal: mobile feeds are already published
-
-        # 6. CloudFront invalidation (only when we actually published — K98)
-        if FEED_S3_PUBLISH_ENABLED:
-            try:
-                inv_id = invalidate_mobile_cf(
-                    distribution_id=CF_DISTRIBUTION,
-                    dry_run=DRY_RUN,
-                )
-                logger.info("feed_publisher: CF invalidation id=%s", inv_id)
-            except Exception as exc:
-                logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
-                # Non-fatal: feeds are published even if invalidation fails
-
-        # 7. SNS signal for Trino/Superset pipeline
-        try:
-            today = dt.date.today()
-            for entry in all_entries:
-                publish_sync_message(
-                    project_name=entry.name,
-                    sync_date=today,
-                    artifact_names=["tasks", "issues", "features"],
-                    sns_topic=SNS_TOPIC,
-                    dry_run=DRY_RUN,
-                )
-        except Exception as exc:
-            logger.error("feed_publisher: SNS publish failed: %s", exc)
-            # Non-fatal
-
-        # 8. Per-project EventBridge events for Trino/Superset pipeline
-        for project_name, stage_prefixes in analytics_stage_prefixes.items():
-            try:
-                # Extract the ingest_ts suffix from the first stage_prefix URI
-                first_prefix = next(iter(stage_prefixes.values()), "")
-                sync_suffix = first_prefix.rstrip("/").split("ingest_ts=")[-1].split("/")[0] if "ingest_ts=" in first_prefix else ""
-                eb_payload = {
-                    "project": project_name,
-                    "sync_date": dt.date.today().isoformat(),
-                    "artifacts": list(stage_prefixes.keys()),
-                    "stage_prefixes": stage_prefixes,
-                    "sync_run_id": f"{sync_suffix}-{project_name}",
-                    "sync_target_suffix": sync_suffix,
-                    "generated_at": generated_at,
-                }
-                publish_eventbridge_event(
-                    message=eb_payload,
-                    bus_name=EVENT_BUS,
-                    dry_run=DRY_RUN,
-                )
-            except Exception as exc:
-                logger.error("feed_publisher: EventBridge publish failed for project=%s: %s", project_name, exc)
-                # Non-fatal: continue with remaining projects
-
+        result = _publish_all(affected_projects)
         logger.info(
             "feed_publisher: complete. generated_at=%s affected=%s",
-            generated_at,
+            result.generated_at,
             sorted(affected_projects),
         )
         return _batch_failure_response(failed_message_ids)
