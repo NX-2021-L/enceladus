@@ -31,26 +31,12 @@ Part of DVP-TSK-A78 (isolation W4).
 
 from __future__ import annotations
 
-import gzip
 import os
 from typing import Any, Dict, List, Optional
 
 MODES = ("legacy", "dual", "content")
 READ_MODES = ("auto", "legacy")
 DEFAULT_LEGACY_BUCKET = "jreese-net"
-
-
-def decode_body(resp: Dict[str, Any]) -> bytes:
-    """Body bytes of a get_object response, gunzipped when the object is ``Content-Encoding: gzip``.
-
-    boto3 returns the stored (compressed) bytes; only HTTP clients decode transparently. The feed
-    publisher stores its JSON gzip-encoded under FEED_GZIP (ENC-TSK-R34), so every S3-API reader of
-    those objects must read through this (or ContentStore.read_bytes)."""
-    data = resp["Body"].read()
-    encoding = resp.get("ContentEncoding")
-    if encoding and "gzip" in str(encoding).lower():
-        return gzip.decompress(data)
-    return data
 
 
 class ContentStoreConfigError(ValueError):
@@ -189,7 +175,7 @@ class ContentStore:
         raise ContentStoreConfigError("unreachable")  # pragma: no cover
 
     def read_bytes(self, key: str) -> bytes:
-        return decode_body(self.get_object(key))
+        return self.get_object(key)["Body"].read()
 
     def list_keys(self, prefix: str, max_keys: Optional[int] = None) -> List[str]:
         """Legacy-form keys under ``prefix`` (a legacy-form prefix). Dual mode merges both buckets."""

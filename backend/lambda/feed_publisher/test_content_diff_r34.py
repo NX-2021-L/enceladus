@@ -36,7 +36,6 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(fp)
 
 import feed_utils  # noqa: E402
-from enceladus_shared import content_store as shared_content_store  # noqa: E402
 
 TABLE = "enceladus-feed-publish-state"
 
@@ -240,21 +239,6 @@ def test_reader_helpers_gunzip_on_content_encoding_and_pass_identity_through():
     assert feed_utils.read_s3_object_bytes(_resp(gz, "gzip")) == payload
     assert feed_utils.read_s3_object_bytes(_resp(payload)) == payload
     assert feed_utils.decode_s3_body(gz, "GZIP") == payload
-    assert shared_content_store.decode_body(_resp(gz, "gzip")) == payload
-    assert shared_content_store.decode_body(_resp(payload)) == payload
-
-
-def test_content_store_read_bytes_decodes_a_gzip_object_from_real_s3():
-    with mock_aws():
-        s3 = boto3.client("s3", region_name="us-east-1")
-        s3.create_bucket(Bucket="feed-test-bucket")
-        body = json.dumps({"tasks": [{"id": "T1"}]}).encode()
-        s3.put_object(Bucket="feed-test-bucket", Key="mobile/v1/tasks.json", Body=gzip.compress(body), ContentEncoding="gzip",
-                      ContentType="application/json")
-        store = shared_content_store.ContentStore(s3, mode="legacy", legacy_bucket="feed-test-bucket")
-        assert store.read_bytes("mobile/v1/tasks.json") == body
-        raw = s3.get_object(Bucket="feed-test-bucket", Key="mobile/v1/tasks.json")
-        assert raw["ContentEncoding"] == "gzip" and raw["Body"].read()[:2] == b"\x1f\x8b"  # boto3 does not decode
 
 
 def test_generate_reference_docs_from_s3_decodes_a_gzip_encoded_object():
