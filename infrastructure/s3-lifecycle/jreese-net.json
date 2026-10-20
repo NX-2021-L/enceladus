@@ -1,0 +1,34 @@
+{
+  "bucket": "jreese-net",
+  "region": "us-west-1",
+  "tracker": "ENC-TSK-R18 (ENC-PLN-100 C1.1, FR-11/FR-12)",
+  "note": "Explicit prefixes only. agent-documents/ must never be matched (FR-15); enforced in tools/apply_s3_lifecycle.py. Existing ENC-TSK-Q20 and RhythmArtifact-* rules are preserved verbatim by the tool.",
+  "rules": [
+    {
+      "ID": "enc-pln100-mobile-noncurrent-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "mobile/"},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "enc-pln100-lambda-arm64-py312-noncurrent-7d-mpu-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "lambda-artifacts/arm64-py3.12/"},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+    },
+    {
+      "ID": "enc-pln100-cost-digest-current-30d-noncurrent-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "governance/cost-digest/"},
+      "Expiration": {"Days": 30},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "enc-pln100-cost-digest-delete-marker-cleanup",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "governance/cost-digest/"},
+      "Expiration": {"ExpiredObjectDeleteMarker": true}
+    }
+  ]
+}
