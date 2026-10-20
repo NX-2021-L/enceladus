@@ -6631,6 +6631,24 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-streaming-gateway${EnvironmentSuffix}*"
+              # ENC-TSK-R32 (C2.8): this role runs server.py (asgi_app.py imports it) and so serves connection_health's
+              # cost_digest, a single GetObject of governance/cost-digest/latest.json (bucket jreese-net, us-west-1).
+              # Every other server.py-running role (CoordinationApiRole, shared by mcp_code / mcp_streamable /
+              # coordination_api on prod and gamma) already holds s3:GetObject on jreese-net/governance/*; this gamma-only
+              # gateway role had no S3 grant at all. Scoped to the cost-digest prefix only.
+              - Sid: CostDigestRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/governance/cost-digest/*"
+              - Sid: CostDigestList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    "s3:prefix": "governance/cost-digest/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
