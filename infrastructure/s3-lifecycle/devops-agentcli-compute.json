@@ -1,0 +1,21 @@
+{
+  "bucket": "devops-agentcli-compute",
+  "region": "us-west-2",
+  "tracker": "ENC-TSK-R19 (ENC-PLN-100 C1.2, FR-13)",
+  "note": "projects/sync-stage/ has no reader (C0.5). Trailing slash is required. Existing adhoc-quarantine-abort-incomplete-mpu-7d is preserved verbatim by the tool.",
+  "rules": [
+    {
+      "ID": "enc-pln100-sync-stage-current-14d-noncurrent-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "projects/sync-stage/"},
+      "Expiration": {"Days": 14},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "enc-pln100-sync-stage-delete-marker-cleanup",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "projects/sync-stage/"},
+      "Expiration": {"ExpiredObjectDeleteMarker": true}
+    }
+  ]
+}
