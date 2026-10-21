@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-10-19T19:25:44Z",
+  "generatedAt": "2026-10-21T02:27:29Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -2703,7 +2703,7 @@
           },
           "expected_version": {
             "type": "integer",
-            "description": "Record version the mutation was computed against."
+            "description": "Target record sync_version (from tracker.get) the mutation was computed against. A version_seq is accepted and normalized to the sync_version; any other mismatch is refused 409 expected_version_stale. Omit to pin the current sync_version (ENC-TSK-R50)."
           },
           "requested_by": {
             "type": "string",

@@ -182,7 +182,7 @@ describe('decide through the kit path', () => {
     expect(String((posts()[0][1] as RequestInit).body)).not.toContain('cognito_max_age')
   })
 
-  it('a 412 card_changed refreshes the queue and tells io', async () => {
+  it('a 412 without a re-rendered card refreshes the queue and reports the refusal', async () => {
     authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
       (init?.method ?? 'GET') === 'POST' ? json(JSON.stringify({ error: 'card_changed', reason: 'card_changed' }), 412) : defaultImpl(url, init))
     await mount(<EscalationsRoute />)
@@ -190,7 +190,8 @@ describe('decide through the kit path', () => {
     await openRow('DVP-ESC-100')
     await click(byText('button', 'Approve & apply'))
     expect(listCalls().length).toBeGreaterThan(before)
-    expect(container.textContent).toMatch(/Card changed|Decision was not recorded/)
+    expect(document.body.textContent).toContain('Decision was not recorded')
+    expect(document.body.textContent).not.toContain('Card changed')   // ENC-TSK-R50 AC5
   })
 
   it('refreshes in place when an escalation record event arrives (realtime)', async () => {
@@ -201,6 +202,65 @@ describe('decide through the kit path', () => {
     })
     await flush()
     expect(listCalls().length).toBeGreaterThan(before)
+  })
+})
+
+describe('live subject token and informational drift (ENC-TSK-R50, ENC-ISS-864)', () => {
+  const FRESH = { ...PENDING[0], subject: { record_id: 'DVP-TSK-1', project: 'devops', version: '4' }, etag: '"e100b"' }
+
+  it('a 412 subject_changed swaps in the re-rendered card, keeps the modal open, and the second approve succeeds', async () => {
+    let written = false
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST') {
+        if (!written) {
+          written = true
+          return json(JSON.stringify({ error: 'The subject record changed since it was rendered; no call was made.', reason: 'subject_changed', subject_version: '4', card: FRESH }), 412)
+        }
+        return defaultImpl(url, init)
+      }
+      // after the write the hub renders the record's new sync_version
+      if (String(url).includes('pending')) return json(listBody(written ? [FRESH, ...PENDING.slice(1)] : PENDING))
+      return defaultImpl(url, init)
+    })
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-100')
+    await click(byText('button', 'Approve & apply'))
+    expect(document.body.textContent).toContain('The record changed since you opened this card (version 3 to 4). Review the change and approve again.')
+    expect(document.body.textContent).not.toContain('Card changed')
+    await click(byText('button', 'Approve & apply'))   // the modal stayed open on the fresh card
+    const p = posts()
+    expect(p.length).toBe(2)
+    expect(String((p[0][1] as RequestInit).body)).toContain('"subjectVersion":"3"')
+    expect(String((p[1][1] as RequestInit).body)).toContain('"subjectVersion":"4"')
+    expect(new Headers((p[1][1] as RequestInit).headers).get('If-Match')).toBe('"e100b"')
+    expect(document.body.querySelector('[data-testid="decide-receipt"]')?.textContent).toContain('abc123')
+  })
+
+  it('filing-time drift is information: the card says so and Approve stays enabled', async () => {
+    const DRIFTED = base({
+      ...PENDING[0], id: 'DVP-ESC-024', etag: '"e024"',
+      diff: { before: { status: 'merged-main' }, after: { status: 'closed' }, renderedAt: iso(NOW), drift: false,
+              filed_against: { expected_version: '15715', current_sync_version: '18', current_updated_at: iso(NOW), changed: true } },
+    })
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET' && String(url).includes('pending') ? json(listBody([DRIFTED])) : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    expect(container.textContent).toContain('changed since filed')
+    await openRow('DVP-ESC-024')
+    expect(document.body.textContent).toContain('Filed against version 15715; the record is now at version 18')
+    expect(document.body.textContent).not.toContain('Re-render before clearing')
+    const approve = byText('button', 'Approve & apply') as HTMLButtonElement
+    expect(approve.disabled).toBe(false)
+    await click(approve)
+    expect(posts().length).toBe(1)
+  })
+
+  it('Requested by falls back to the record requested_by session', async () => {
+    const LEGACY = base({ ...PENDING[0], id: 'DVP-ESC-025', etag: '"e025"', requestedBy: undefined, requested_by: { session_id: 'ENC-SES-0NN' } })
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET' && String(url).includes('pending') ? json(listBody([LEGACY])) : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    expect(container.textContent).toContain('ENC-SES-0NN')
   })
 })
 

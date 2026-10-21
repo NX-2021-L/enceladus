@@ -18,7 +18,10 @@ import { StatusChip } from '../components/StatusChip'
 import { RecordLink } from '../components/RecordLink'
 import { useCanExecute } from '../auth/useCan'
 import { useEscalationRealtimeNonce } from './GateInboxPanel'
-import { decideCard, describeError, describeReceipt, fetchCockpitFeed, type CockpitNotice } from './escalationCockpit'
+import {
+  decideCard, describeError, describeReceipt, fetchCockpitFeed, normalizeCard, replaceCard,
+  type CockpitFeed, type CockpitNotice,
+} from './escalationCockpit'
 import { countByBucket, filterRows, toEscalationRows, type EscalationBucket, type EscalationRow } from './escalationRows'
 import { EscalationPushNudge } from '../notifications/EscalationPushNudge'
 import { notifyApi } from '../notifications/notifyApi'
@@ -69,7 +72,13 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
       setNotice(describeReceipt(row.card, verdict, receipt))
       closeModal()
     } catch (e) {
-      setNotice(describeError(e, cardFromConflict(e) !== undefined))
+      // ENC-TSK-R50 AC5: a 412 carries the re-rendered card; decide against it from the open modal.
+      const conflict = cardFromConflict(e)
+      const fresh = conflict === undefined ? undefined : normalizeCard(conflict)
+      if (fresh !== undefined) {
+        queryClient.setQueryData<CockpitFeed>([FEED_KEY, compact], (feed) => replaceCard(feed, fresh))
+      }
+      setNotice(describeError(e, fresh, row.card))
     } finally {
       setDeciding(false)
       // A 412/409 or a success both mean the queue moved: refresh so no stale control is offered.
@@ -92,7 +101,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
       cell: (row: EscalationRow) => (
         <span className="ev2-esc__mono">
           <RecordLink id={row.targetRecordId} />
-          {row.driftDetected && <span className="ev2-esc__drift" title="Target record changed since this was filed">drift</span>}
+          {row.filedAgainst?.changed && <span className="ev2-esc__drift" title="The record changed after this was filed; review the computed diff">changed since filed</span>}
         </span>
       ),
     },
@@ -130,6 +139,15 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
   const focusVerdicts = focusRow ? allowedVerdicts(focusRow.card) : []
   const focusCanAct = Boolean(focusRow?.decidable && canDecide)
 
+  const noticeAlert = notice && (
+    <div className="ev2-esc__notice">
+      <Alert type={notice.type} header={notice.header} dismissible onDismiss={() => setNotice(null)}>
+        <div>{notice.detail}</div>
+        {notice.receipt && <pre className="ev2-esc__payload ev2-esc__receipt" data-testid="decide-receipt">{notice.receipt}</pre>}
+      </Alert>
+    </div>
+  )
+
   return (
     <>
       {!compact && <EscalationPushNudge api={notifyApi} className="ev2-esc__notice" />}
@@ -158,7 +176,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
                   <Button variant="normal" disabled={deciding || note.trim() === ''} onClick={() => void submit(focusRow, deny(note))}>Deny</Button>
                 )}
                 {focusVerdicts.includes('approve') && (
-                  <Button variant="primary" disabled={deciding || Boolean(focusRow.card.candidates) || focusRow.driftDetected} onClick={() => void submit(focusRow, approve(undefined))}>Approve</Button>
+                  <Button variant="primary" disabled={deciding || Boolean(focusRow.card.candidates)} onClick={() => void submit(focusRow, approve(undefined))}>Approve</Button>
                 )}
                 {!focusVerdicts.includes('approve') && focusVerdicts.includes('ack') && (
                   <Button variant="primary" disabled={deciding} onClick={() => void submit(focusRow, { type: 'ack' })}>Acknowledge</Button>
@@ -171,14 +189,8 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
           )}
         </div>
       )}
-      {notice && (
-        <div className="ev2-esc__notice">
-          <Alert type={notice.type} header={notice.header} dismissible onDismiss={() => setNotice(null)}>
-            <div>{notice.detail}</div>
-            {notice.receipt && <pre className="ev2-esc__payload ev2-esc__receipt" data-testid="decide-receipt">{notice.receipt}</pre>}
-          </Alert>
-        </div>
-      )}
+      {/* With a card open the notice renders inside the modal (a 412 keeps it open), else here. */}
+      {openRow === null && noticeAlert}
 
       {feedQuery.isError && (
         <div className="ev2-esc__notice">
@@ -221,7 +233,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
                 </Button>
               )}
               {verdicts.includes('approve') && (
-                <Button variant="primary" disabled={deciding || needsCandidate || openRow.driftDetected} onClick={() => void submit(openRow, approve(candidateId))}>
+                <Button variant="primary" disabled={deciding || needsCandidate} onClick={() => void submit(openRow, approve(candidateId))}>
                   Approve &amp; apply
                 </Button>
               )}
@@ -236,6 +248,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
           )
         }
       >
+        {openRow && noticeAlert}
         {openRow && <EscalationDetail row={openRow} candidateId={candidateId} onCandidate={setCandidateId} disabled={deciding} />}
         {openRow && canAct && openRow.card.family === 'decision' && (
           <div className="ev2-esc__deny">
@@ -288,9 +301,10 @@ function EscalationDetail({ row, candidateId, onCandidate, disabled }: {
           <p className="ev2-esc__prose">{card.decision.note}</p>
         </Container>
       )}
-      {row.driftDetected && (
-        <Alert type="warning" header="Target record changed after this was filed">
-          The card was rendered against an older version of the record; approval is disabled until the queue refreshes.
+      {row.filedAgainst?.changed && (
+        <Alert type="info" header="The record changed after this was filed">
+          Filed against version {row.filedAgainst.expectedVersion || '—'}; the record is now at version{' '}
+          {row.filedAgainst.currentVersion || '—'}. The computed diff shows the record as it is now; you can still approve or deny.
         </Alert>
       )}
       {calls.map((c) => (
