@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-20.8",
-  "updated_at": "2026-10-20T03:10:00Z",
-  "last_change_summary": "ENC-TSK-R41 (ENC-PLN-100 C4.1, BRD FR-22, ruling P100-R28): feed_publisher incremental tracker re-read behind FEED_INCREMENTAL (false default; CFN FeedIncremental auto = true on gamma; coalesced mode only), no dictionary field changes. MARK ADDs changed_ids/removed_ids string sets (or SETs full_reread) on the project row of enceladus-feed-publish-state in the same conditional UpdateItem; SWEEP BatchGets exactly those keys and merges them into a per-project raw-item snapshot at s3://<content bucket>/feed-snapshots/v1/<project>.json.gz, with a full re-read every 24 h and on overflow (1000 ids), missing snapshot or merge error; the clear adds read_watermark and last_full_reread_at and DELETEs only the processed ids. Emits EMF FeedPublishBytes, FeedPublishReadUnits and FeedPublishMode per sweep (namespace Enceladus/FeedPublisher). Sweep rate unchanged.",
+  "version": "2026-10-21.1",
+  "updated_at": "2026-10-21T02:40:00Z",
+  "last_change_summary": "ENC-TSK-R50 (ENC-ISS-864): escalation decide subject token is the target's live sync_version bound at render (never expected_version); expected_version normalized at request (version_seq -> sync_version, stale -> 409 expected_version_stale); filing-time drift is informational diff.filed_against; correct 4xx error codes; refused decisions logged; tracker.get keeps sync_version.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7333,8 +7333,8 @@
           "constraints": {
             "required": false
           },
-          "definition": "Optional target-record version or content hash captured at request time.",
-          "usage_guidance": "When supplied and the target has drifted by approval time, the PWA shows a drift warning; io may still approve (informed consent) or deny."
+          "definition": "Target record sync_version the mutation was computed against, pinned at request time (ENC-TSK-R50). Accepted forms: the sync_version ('N' or 'sync_version:N') or the target's updated_at, stored as given; the version_seq tracker.get shows is normalized to the sync_version (the receipt carries expected_version_normalized_from='version_seq'); any other value is refused 409 reason expected_version_stale (current_sync_version, current_version_seq) and nothing is written. Omitted, the current sync_version is pinned. Targets without a sync_version keep the value as given.",
+          "usage_guidance": "Filing-time metadata only: it is NEVER the decide subject token (ENC-ISS-864). Cards expose the comparison as diff.filed_against {expected_version, current_sync_version, current_updated_at, changed}; io may still approve (informed consent) or deny. The subject token (subject.version) is the target's live sync_version bound when the card is rendered."
         },
         "requested_by": {
           "type": "object",
@@ -7518,11 +7518,11 @@
       "fields": {
         "GET /api/v1/coordination/escalations": {
           "type": "route",
-          "definition": "io approval queue feed. Query params: project_id (default enceladus), status. Pending (requested) escalations carry a fresh section-5.7 render_diff computed from the LIVE target record at render time - never the cached request - including a drift object {expected_version, current_sync_version, current_updated_at, detected} when expected_version was supplied. Terminal escalations return in a separate array for the collapsed audit section. Cognito-only."
+          "definition": "io approval queue feed. Query params: project_id (default enceladus), status. Pending (requested) escalations carry a fresh section-5.7 render_diff computed from the LIVE target record at render time - never the cached request. ENC-TSK-R50: the diff follows the @io-kit/gates GateDiff shape (before, after, renderedAt, drift) where drift is the kit's render-to-click flag and is always false at render; filing-time drift is the informational diff.filed_against {expected_version, current_sync_version, current_updated_at, changed} when expected_version was supplied and never blocks approval. Pending tracker-targeted cards carry subject.version = the target's live sync_version (the decide If-Match layer-two token) and requestedBy = requested_by.session_id. Terminal escalations return in a separate array for the collapsed audit section. Cognito-only."
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve": {
           "type": "route",
-          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write. ENC-TSK-M12: additionally gated by _is_human_cognito_principal (token_use=id + human app-client aud + non-machine email domain, fail-closed) BEFORE the allowlist check; machine token shapes 403 with a distinct 'structurally rejected' error."
+          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write. ENC-TSK-M12: additionally gated by _is_human_cognito_principal (token_use=id + human app-client aud + non-machine email domain, fail-closed) BEFORE the allowlist check; machine token shapes 403 with a distinct 'structurally rejected' error. ENC-TSK-R50 (ENC-ISS-864): body subject_version/subjectVersion is compared with the target's live sync_version; a mismatch means the record was written after the card was rendered and is refused 412 reason subject_changed (error code PRECONDITION_FAILED) with the re-rendered card (fresh subject.version and diff) so one re-render then approve succeeds. Refusal codes: 403 PERMISSION_DENIED, 409 CONFLICT, 410 GONE, 412 PRECONDITION_FAILED, 422 INVALID_INPUT, 428 PRECONDITION_REQUIRED (never INTERNAL_ERROR). Every non-2xx approve/deny logs one WARNING 'escalation decision refused {json}' with escalation_id, project_id, verdict, status, reason, code and, for subject_changed, client_subject_version/live_subject_version (no token, claim or email)."
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
           "type": "route",
@@ -9582,6 +9582,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-21.1",
+      "date": "2026-10-21",
+      "summary": "ENC-TSK-R50 (ENC-ISS-864): escalation subject token bound to the target's live sync_version. coordination_api: pending cards (feed and the 412 card) carry subject.version = live sync_version, never expected_version; diff follows the kit GateDiff shape (before/after/renderedAt, drift=false at render) with filing-time drift in diff.filed_against (informational); requestedBy backfilled; _error maps 410 GONE, 412 PRECONDITION_FAILED, 428 PRECONDITION_REQUIRED, other 4xx REQUEST_REJECTED; every refused decide logs a structured WARNING. tracker_mutation: escalation.request normalizes expected_version (version_seq -> sync_version, other mismatches 409 expected_version_stale, omitted pins the current sync_version); escalation get/list bind the live subject on pending records; same _error mapping. MCP: tracker.get summary keeps sync_version; escalation.request expected_version description names the sync_version (caps.json, recipe_caps and ui-v2 capsFull.json regenerated)."
+    },
     {
       "version": "2026-10-19.2",
       "date": "2026-10-19",

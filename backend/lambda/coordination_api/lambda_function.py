@@ -1461,14 +1461,21 @@ def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
             code = "NOT_FOUND"
         elif status_code == 409:
             code = "CONFLICT"
+        elif status_code == 410:
+            code = "GONE"
+        elif status_code == 412:
+            code = "PRECONDITION_FAILED"
         elif status_code == 422:
             code = "INVALID_INPUT"
+        elif status_code == 428:
+            code = "PRECONDITION_REQUIRED"
         elif status_code == 429:
             code = "RATE_LIMITED"
         elif status_code >= 500:
             code = "INTERNAL_ERROR"
         else:
-            code = "INTERNAL_ERROR"
+            # ENC-TSK-R50 AC6 / ENC-ISS-864: a refusal is the caller's to fix, never INTERNAL_ERROR.
+            code = "REQUEST_REJECTED"
     retryable = bool(extra.pop("retryable", status_code >= 500 or code in {"TIMEOUT", "UPSTREAM_ERROR", "DEBOUNCE_ACTIVE"}))
     details = dict(extra)
     body: Dict[str, Any] = {
@@ -10696,14 +10703,23 @@ def _escalation_gate_view(escalation: Dict[str, Any]) -> None:
     base = subject if isinstance(subject, dict) else {}
     if isinstance(subject, dict):
         escalation["subject"] = {**base, "project": str(base.get("project") or escalation.get("project_id") or "")}
+    # ENC-TSK-R50 / ENC-ISS-864: the backfilled version is never expected_version. That is the
+    # requester's filing-time pin (agents passed version_seq), and the kit echoes subject.version
+    # as the decide If-Match token, so copying it here made every approve a permanent 412.
+    # Pending tracker-targeted cards get the live sync_version from _escalation_bind_live_subject.
     if not str(base.get("record_id") or "").strip() or not isinstance(base.get("version"), str):
         escalation["subject"] = {
             **base,
             "record_id": str(base.get("record_id") or escalation.get("target_record_id")
                              or escalation.get("item_id") or "unknown"),
             "project": str(base.get("project") or escalation.get("project_id") or ""),
-            "version": str(base.get("version") or escalation.get("expected_version") or ""),
+            "version": str(base.get("version") or ""),
         }
+    requested_by = escalation.get("requested_by")
+    if not escalation.get("requestedBy") and isinstance(requested_by, dict):
+        session = str(requested_by.get("session_id") or "")
+        if session:
+            escalation["requestedBy"] = session   # tracker_mutation's read view does the same
     # DVP-TSK-A38 (2): the rest of the client card invariants for legacy records:
     # createdAt in the kit's second-precision UTC form (expiry bounds are checked
     # against it), non-empty {label, ref} evidence, and an assurance-level requiredAuth.
@@ -10783,18 +10799,53 @@ def _read_escalation_target(project_id: str, target_record_id: str) -> Optional[
     return _deserialize(raw) if raw else None
 
 
+def _escalation_target_version(target: Optional[Dict[str, Any]]) -> str:
+    """The target's live If-Match layer-two token: sync_version (legacy 'version'), else ""."""
+    if target is None:
+        return ""
+    raw = target.get("sync_version", target.get("version"))
+    return "" if raw is None else str(raw)
+
+
+def _escalation_bind_live_subject(escalation: Dict[str, Any], target: Optional[Dict[str, Any]]) -> None:
+    """ENC-TSK-R50 AC1 / ENC-ISS-864: bind subject.version to the target's live sync_version.
+
+    The kit echoes subject.version as subjectVersion and decide compares it with the live
+    sync_version (If-Match layer two), so the token must be read at render time. Only
+    tracker-targeted escalations are bound; producer gates (no target_record_id, e.g.
+    recipe.publish with a semver subject) keep their stored subject. View-only.
+    """
+    if not str(escalation.get("target_record_id") or "").strip():
+        return
+    subject = escalation.get("subject") if isinstance(escalation.get("subject"), dict) else {}
+    escalation["subject"] = {
+        **subject,
+        "record_id": str(subject.get("record_id") or escalation.get("target_record_id")),
+        "project": str(subject.get("project") or escalation.get("project_id") or ""),
+        "version": _escalation_target_version(target),
+    }
+
+
 def _render_escalation_diff(
     escalation: Dict[str, Any], target: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """§5.7 render_diff: fresh current-versus-requested delta computed at render
-    time from the LIVE target record — never from the cached request — with an
-    explicit drift flag when expected_version mismatches.
+    time from the LIVE target record — never from the cached request.
+
+    ENC-TSK-R50 AC4: the diff follows the kit GateDiff shape (before, after, renderedAt,
+    drift). `drift` is the kit's render-to-click flag, so it is always false at render;
+    filing-time drift (expected_version versus the live record) is informational and
+    lives in `filed_against`. It never blocks approval.
     """
     payload = _escalation_payload_dict(escalation)
     mutation_type = str(escalation.get("mutation_type") or "")
     diff: Dict[str, Any] = {
         "mutation_type": mutation_type,
         "target_record_id": escalation.get("target_record_id"),
+        "renderedAt": _gate_fmt(_gate_now()),
+        "before": None,
+        "after": None,
+        "drift": False,
     }
     if target is None:
         diff["target_missing"] = True
@@ -10814,6 +10865,12 @@ def _render_escalation_diff(
                 field: {"current": target.get(field), "requested": requested}
                 for field, requested in field_values.items()
             }
+    if diff.get("field"):
+        diff["before"] = {diff["field"]: diff.get("current")}
+        diff["after"] = {diff["field"]: diff.get("requested")}
+        for field, delta in (diff.get("field_values") or {}).items():
+            diff["before"][field] = delta["current"]
+            diff["after"][field] = delta["requested"]
 
     diff["target_snapshot"] = {
         "title": target.get("title"),
@@ -10825,16 +10882,19 @@ def _render_escalation_diff(
     }
     expected_version = str(escalation.get("expected_version") or "").strip()
     if expected_version:
+        # version_seq is a marker too: requests filed before ENC-TSK-R50 pinned it, and it
+        # still names the record's last write until the record is written again.
         current_markers = {
             str(target.get("sync_version") or ""),
             str(target.get("updated_at") or ""),
             f"sync_version:{target.get('sync_version')}",
-        }
-        diff["drift"] = {
+            str(target.get("version_seq") or ""),
+        } - {""}
+        diff["filed_against"] = {
             "expected_version": expected_version,
             "current_sync_version": str(target.get("sync_version") or ""),
             "current_updated_at": str(target.get("updated_at") or ""),
-            "detected": expected_version not in current_markers,
+            "changed": expected_version not in current_markers,
         }
     return diff
 
@@ -11113,6 +11173,7 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
                 str(escalation.get("project_id") or project_id),
                 str(escalation.get("target_record_id") or ""))
             escalation["diff"] = _render_escalation_diff(escalation, target)
+            _escalation_bind_live_subject(escalation, target)   # ENC-TSK-R50 AC1
 
     escalations.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     actionable = ("pending", "snoozed")
@@ -11153,6 +11214,12 @@ def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> D
 # head pointer is deferred. Existing clients are untouched (D9): the new
 # preconditions are enforced when supplied and REQUIRED (428) only for
 # records that carry an explicit non-legacy kind or proposedCalls/candidates.
+#
+# ENC-TSK-R50 (ENC-ISS-864): the subject version is the target's sync_version read
+# when the card is rendered (_escalation_bind_live_subject), never the request's
+# expected_version, so 412 subject_changed means "the record changed after you
+# opened this card" and the 412 payload's card carries the fresh token. Every
+# refusal is logged with its reason (_log_escalation_refusal).
 # ---------------------------------------------------------------------------
 _GATE_CHAIN_ZERO = "0" * 64
 _ESCALATION_INPUTS_MAX_BYTES = 16 * 1024
@@ -11824,16 +11891,73 @@ def _record_escalation_decision(
         raise
 
 
+def _log_escalation_refusal(
+    project_id: str, escalation_id: str, decision: str,
+    event: Dict[str, Any], resp: Dict[str, Any],
+) -> None:
+    """ENC-TSK-R50 AC7: one structured WARNING per refused decision.
+
+    Carries ids, verdict, status, reason and code, plus the client and live subject
+    versions on a subject_changed refusal. Never a token, claim, email or request body.
+    """
+    try:
+        out = json.loads(resp.get("body") or "{}")
+    except (ValueError, TypeError):
+        out = {}
+    out = out if isinstance(out, dict) else {}
+    line: Dict[str, Any] = {
+        "escalation_id": escalation_id,
+        "project_id": project_id,
+        "verdict": decision,
+        "status": int(resp.get("statusCode") or 0),
+        "reason": str(out.get("reason") or ""),
+        "code": str((out.get("error_envelope") or {}).get("code") or ""),
+    }
+    if line["reason"] == "subject_changed":
+        try:
+            sent = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            sent = {}
+        sent = sent if isinstance(sent, dict) else {}
+        line["client_subject_version"] = str(sent.get("subject_version", sent.get("subjectVersion")) or "")
+        line["live_subject_version"] = str(out.get("subject_version") or "")
+    logger.warning("escalation decision refused %s", json.dumps(line, sort_keys=True))
+
+
 def _handle_escalation_decision(
     project_id: str, escalation_id: str, decision: str,
     event: Dict[str, Any], claims: Dict[str, Any],
 ) -> Dict[str, Any]:
     """POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve|deny.
 
+    Decides through _decide_escalation and logs every refusal (ENC-TSK-R50 AC7):
+    before R50 a 4xx left only the route line in CloudWatch (ENC-ISS-864).
+    """
+    resp = _decide_escalation(project_id, escalation_id, decision, event, claims)
+    if int(resp.get("statusCode") or 0) >= 400:
+        _log_escalation_refusal(project_id, escalation_id, decision, event, resp)
+    return resp
+
+
+def _decide_escalation(
+    project_id: str, escalation_id: str, decision: str,
+    event: Dict[str, Any], claims: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Decide one escalation (approve|deny); see _handle_escalation_decision.
+
     Non-delegable (§6): Cognito human session only. Approve stamps approved_by
     and drives applyEscalatedMutation; if the applier invoke fails, the
     approval remains durable (status=approved) and the idempotent apply route
     can be re-driven — the agent never resubmits the mutation.
+
+    If-Match has two layers. Layer one is the escalation etag the human saw
+    (412 card_changed). Layer two is the subject version: the client echoes
+    card.subject.version, which the hub binds to the target's live sync_version
+    when it renders the card (ENC-TSK-R50). A mismatch means the record was
+    written after the card was rendered, so it is refused 412 subject_changed and
+    nothing runs. The 412 payload's card is re-rendered with the fresh token, so
+    one re-render then approve succeeds. Filing-time drift (expected_version) is
+    informational only (diff.filed_against). Deny never checks the subject.
     """
     if not _is_cognito_session(claims):
         return _error(403, (
@@ -11966,10 +12090,22 @@ def _handle_escalation_decision(
             onExpire=expiry["onExpire"],
         )
 
+    target_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def _target() -> Optional[Dict[str, Any]]:
+        if "item" not in target_cache:
+            tid = str(escalation.get("target_record_id") or "")
+            target_cache["item"] = _read_escalation_target(project_id, tid) if tid else None
+        return target_cache["item"]
+
     def _card() -> Dict[str, Any]:
+        # The re-rendered card a 412 hands back: same view as the feed, live subject token included.
         view = dict(escalation)
         view["payload"] = _escalation_payload_dict(escalation)
         _escalation_gate_view(view)
+        if str(view.get("target_record_id") or "").strip():
+            view["diff"] = _render_escalation_diff(view, _target())
+            _escalation_bind_live_subject(view, _target())
         return view
 
     # (5) layer one of If-Match: the escalation etag the human saw.
@@ -11992,7 +12128,7 @@ def _handle_escalation_decision(
         # (6) layer two of If-Match: the subject record's version.
         target_id = str(escalation.get("target_record_id") or "")
         if target_id:
-            target = _read_escalation_target(project_id, target_id)
+            target = _target()
             raw_version = None if target is None else target.get("sync_version", target.get("version"))
             subject_current = None if raw_version is None else str(raw_version)
             if strict and subject_version is None:

@@ -443,7 +443,12 @@ class TestRenderDiff(unittest.TestCase):
         self.assertEqual("github_pr_deploy", diff["current"])
         self.assertEqual("code_only", diff["requested"])
         self.assertEqual("in-progress", diff["target_snapshot"]["status"])
-        self.assertNotIn("drift", diff)
+        # ENC-TSK-R50: kit GateDiff shape; drift is the render-to-click flag, false at render.
+        self.assertIs(False, diff["drift"])
+        self.assertEqual({"transition_type": "github_pr_deploy"}, diff["before"])
+        self.assertEqual({"transition_type": "code_only"}, diff["after"])
+        self.assertEqual("2026-07-02T05:00:00Z", diff["renderedAt"])
+        self.assertNotIn("filed_against", diff)
 
     def test_override_diff_includes_field_values_delta(self):
         escalation = _escalation_item(
@@ -456,18 +461,20 @@ class TestRenderDiff(unittest.TestCase):
         self.assertEqual(
             "gamma ok", diff["field_values"]["live_validation_evidence"]["requested"])
 
-    def test_drift_detected_when_expected_version_mismatches(self):
+    def test_filed_against_changed_when_expected_version_mismatches(self):
+        # ENC-TSK-R50 AC4: filing-time drift is informational (filed_against), never diff.drift.
         escalation = _escalation_item(expected_version="sync_version:2")
         diff = coordination_lambda._render_escalation_diff(
             escalation, _target_item(sync_version=7))
-        self.assertTrue(diff["drift"]["detected"])
-        self.assertEqual("7", diff["drift"]["current_sync_version"])
+        self.assertTrue(diff["filed_against"]["changed"])
+        self.assertEqual("7", diff["filed_against"]["current_sync_version"])
+        self.assertIs(False, diff["drift"])
 
-    def test_drift_not_detected_when_expected_version_matches(self):
+    def test_filed_against_unchanged_when_expected_version_matches(self):
         escalation = _escalation_item(expected_version="sync_version:4")
         diff = coordination_lambda._render_escalation_diff(
             escalation, _target_item(sync_version=4))
-        self.assertFalse(diff["drift"]["detected"])
+        self.assertFalse(diff["filed_against"]["changed"])
 
     def test_missing_target_flagged(self):
         diff = coordination_lambda._render_escalation_diff(_escalation_item(), None)

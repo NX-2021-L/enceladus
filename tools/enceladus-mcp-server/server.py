@@ -5843,9 +5843,11 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     record = _unwrap_tracker_envelope(resp, record_type)
     # Add completeness score (ENC-FTR-013 ontology)
     record["ontology"] = _compute_completeness_score(record)
-    # Summary mode: strip verbose fields unless include_history=true
+    # Summary mode: strip verbose fields unless include_history=true. sync_version stays:
+    # it is the per-record write counter escalation.request takes as expected_version and the
+    # escalation decide gate compares; hiding it left agents only version_seq (ENC-TSK-R50 AC8).
     if not include_history:
-        for key in ("history", "write_source", "sync_version", "last_updated_by",
+        for key in ("history", "write_source", "last_updated_by",
                      "ttl", "gsi1pk", "gsi1sk", "gsi2pk", "gsi2sk"):
             record.pop(key, None)
     return _result_text(record)

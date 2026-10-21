@@ -15,9 +15,11 @@ def _view(item):
 
 class SubjectBackfillTests(unittest.TestCase):
     def test_legacy_request_without_subject_gets_target_subject(self):
+        # ENC-TSK-R50 / ENC-ISS-864: the version is never copied from expected_version (the
+        # filing-time pin); the feed binds the live sync_version for pending cards.
         card = _view({"item_id": "ENC-ESC-007", "project_id": "enceladus", "status": "requested",
                       "target_record_id": "ENC-TSK-Q01", "expected_version": "12"})
-        self.assertEqual({"record_id": "ENC-TSK-Q01", "project": "enceladus", "version": "12"}, card["subject"])
+        self.assertEqual({"record_id": "ENC-TSK-Q01", "project": "enceladus", "version": ""}, card["subject"])
 
     def test_subject_without_record_id_falls_back_to_item_id(self):
         card = _view({"item_id": "DVP-ESC-020", "project_id": "devops", "status": "requested",

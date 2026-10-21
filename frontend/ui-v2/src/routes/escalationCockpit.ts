@@ -6,7 +6,7 @@
  * requiredAuth step_up cards. The backend remains the arbiter of the human-only gates.
  */
 import {
-  assertVerdictAllowed, callHashFor, createGateSource, makeIdempotencyKey,
+  assertVerdictAllowed, callHashFor, createGateSource, GateHttpError, makeIdempotencyKey,
   type DecideInput, type DecideReceipt, type GateCard, type State, type Verdict,
 } from '@io-kit/gates'
 import { gateFetch, humanSession } from './GateInboxPanel'
@@ -57,6 +57,16 @@ export function normalizeCard(card: GateCard): GateCard {
   }
 }
 
+/**
+ * ENC-TSK-R50 AC5: a 412 hands back the re-rendered card (fresh etag and subject version). Swap it
+ * into the cached feed so the open modal decides against it at once, before the refetch lands.
+ */
+export function replaceCard(feed: CockpitFeed | undefined, card: GateCard): CockpitFeed | undefined {
+  if (feed === undefined) return feed
+  const same = (c: GateCard) => c.id === card.id && c.project_id === card.project_id
+  return feed.cards.some(same) ? { ...feed, cards: feed.cards.map((c) => (same(c) ? card : c)) } : feed
+}
+
 export async function decideCard(
   card: GateCard,
   verdict: Verdict,
@@ -69,7 +79,10 @@ export async function decideCard(
     id: card.id, project: card.project_id, etag: card.etag, subjectVersion: card.subject.version,
     verdict, idempotencyKey: makeIdempotencyKey(card.id, verdict.type),
   }
-  if (verdict.type === 'approve' && (verdict.candidateId !== undefined || (card.proposedCalls?.length ?? 0) > 0)) {
+  // ENC-TSK-R51 / ENC-ISS-865: every approve carries the callHash. A strict (explicit-kind)
+  // mutation_type card has no proposedCalls, but the hub still requires one (428 without it);
+  // callHashFor hashes the legacy {mutation_type, target_record_id, payload} triple the hub hashes.
+  if (verdict.type === 'approve') {
     input.callHash = await callHashFor(card, verdict.candidateId)
   }
   return gateSource.decide(input)
@@ -95,13 +108,38 @@ export function describeReceipt(card: GateCard, verdict: Verdict, receipt: Decid
 
 // ES-R7: no step-up; a signed-in allow-listed approver decides any risk with the existing session.
 
-export function describeError(e: unknown, cardChanged: boolean): CockpitNotice {
+/**
+ * `fresh` is the re-rendered card a 412 carried (cardFromConflict) and `sent` the card the verdict
+ * was posted against. A 412 is recoverable: the cockpit swaps in `fresh`, so the copy says what
+ * changed and asks for a second look instead of reporting a failure (ENC-TSK-R50 AC5).
+ */
+export function describeError(e: unknown, fresh?: GateCard, sent?: GateCard): CockpitNotice {
   const message = e instanceof Error ? e.message : String(e)
   if (/redirect/i.test(`${(e as { name?: string })?.name ?? ''} ${message}`)) {
     return { type: 'warning', header: 'Continuing sign-in', detail: 'Continuing sign-in to confirm your identity; choose again when you return.' }
   }
-  if (cardChanged) {
-    return { type: 'warning', header: 'Card changed', detail: 'This card changed since it was rendered (412); the queue was refreshed. Review it and choose again.' }
+  if (fresh !== undefined) {
+    const reason = e instanceof GateHttpError ? e.reason : undefined
+    if (reason === 'subject_changed') {
+      const from = sent?.subject.version || '—'
+      const to = fresh.subject.version || '—'
+      return {
+        type: 'warning', header: 'The record changed',
+        detail: `The record changed since you opened this card (version ${from} to ${to}). Review the change and approve again.`,
+      }
+    }
+    return {
+      type: 'warning', header: 'The escalation changed',
+      detail: 'This escalation changed since you opened it, and the card now shows its current state. Review it and choose again.',
+    }
+  }
+  if (e instanceof GateHttpError && e.status === 428) {
+    // ENC-TSK-R51 AC5: the hub names the precondition the request lacked; say that, not a generic failure.
+    const hub = (e.body as { error?: unknown } | null)?.error
+    return {
+      type: 'error', header: 'This escalation could not be approved',
+      detail: typeof hub === 'string' && hub !== '' ? hub : message,
+    }
   }
   return { type: 'error', header: 'Decision was not recorded', detail: message }
 }
