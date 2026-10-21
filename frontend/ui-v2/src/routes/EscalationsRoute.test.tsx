@@ -264,6 +264,53 @@ describe('live subject token and informational drift (ENC-TSK-R50, ENC-ISS-864)'
   })
 })
 
+describe('callHash on every approve (ENC-TSK-R51, ENC-ISS-865)', () => {
+  // Shared vector: coordination_api test_escalation_strict_callhash_r51.py pins the same sha256
+  // for _gate_call_hash(_escalation_call_basis(item, None)), so either side drifting fails CI.
+  const VECTOR = 'ada322f0433f968cd545b270ff17e1760fdeb98c5a4f65dfa9350fc92b02aec4'
+  const STRICT = base({
+    ...PENDING[0], id: 'DVP-ESC-030', kind: 'reconciliation', family: 'decision', etag: '"e030"',
+    mutation_type: 'direct_state_override', target_record_id: 'ENC-TSK-X01', payload: { target_status: 'closed' },
+  })
+
+  it('the kit hashes the legacy mutation triple exactly as the hub does', async () => {
+    expect(await callHashFor({ mutation_type: 'direct_state_override', target_record_id: 'ENC-TSK-X01', payload: { target_status: 'closed' } } as unknown as GateCard)).toBe(VECTOR)
+  })
+
+  it('approving a strict kind=reconciliation mutation card posts the legacy-triple callHash', async () => {
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET' && String(url).includes('pending') ? json(listBody([STRICT])) : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-030')
+    await click(byText('button', 'Approve & apply'))
+    expect(String((posts()[0][1] as RequestInit).body)).toContain(`"callHash":"${VECTOR}"`)
+  })
+
+  it('a non-strict legacy card carries its callHash too, and a deny carries none', async () => {
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-100')
+    await click(byText('button', 'Approve & apply'))
+    expect(String((posts()[0][1] as RequestInit).body)).toContain(`"callHash":"${await callHashFor(PENDING[0] as unknown as GateCard)}"`)
+    await openRow('TC-200')
+    await typeNote('not now')
+    await click(byText('button', 'Deny with guidance'))
+    expect(String((posts()[1][1] as RequestInit).body)).not.toContain('callHash')
+  })
+
+  it('a 428 precondition refusal says the escalation could not be approved and why', async () => {
+    authFetch.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'POST'
+        ? json(JSON.stringify({ success: false, error: 'callHash is required to approve this escalation.', reason: 'precondition_required' }), 428)
+        : defaultImpl(url, init))
+    await mount(<EscalationsRoute />)
+    await openRow('DVP-ESC-100')
+    await click(byText('button', 'Approve & apply'))
+    expect(document.body.textContent).toContain('This escalation could not be approved')
+    expect(document.body.textContent).toContain('callHash is required to approve this escalation.')
+    expect(document.body.textContent).not.toContain('Decision was not recorded')
+  })
+})
+
 describe('producer cards with JSON-string gate fields (DVP-TSK-B30)', () => {
   // DVP-ESC-011..015 as the hub served them before B30: proposedCalls is the stored JSON string.
   const CALL = {
