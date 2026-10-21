@@ -476,7 +476,11 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "mutation_type": _str("Lifecycle-forbidden mutation being proposed.", backend=True),
             "payload": _obj("Mutation payload, validated by the backend mutation-handler registry.", backend=True),
             "justification": _str("Why io should approve.", backend=True),
-            "expected_version": _int("Record version the mutation was computed against."),
+            "expected_version": _int(
+                "Target record sync_version (from tracker.get) the mutation was computed against. "
+                "A version_seq is accepted and normalized to the sync_version; any other mismatch is "
+                "refused 409 expected_version_stale. Omit to pin the current sync_version (ENC-TSK-R50)."
+            ),
             "requested_by": _str("Requesting identity."),
             "provider": _PROVIDER,
             "coordination_request_id": _CRQ,

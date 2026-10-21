@@ -2325,10 +2325,19 @@ def _error(status_code: int, message: str, **extra) -> Dict:
             code = "NOT_FOUND"
         elif status_code == 409:
             code = "CONFLICT"
+        elif status_code == 410:
+            code = "GONE"
+        elif status_code == 412:
+            code = "PRECONDITION_FAILED"
+        elif status_code == 422:
+            code = "INVALID_INPUT"
+        elif status_code == 428:
+            code = "PRECONDITION_REQUIRED"
         elif status_code >= 500:
             code = "INTERNAL_ERROR"
         else:
-            code = "INTERNAL_ERROR"
+            # ENC-TSK-R50 AC6 / ENC-ISS-864: a refusal is the caller's to fix, never INTERNAL_ERROR.
+            code = "REQUEST_REJECTED"
     retryable = bool(extra.pop("retryable", status_code >= 500))
     details = dict(extra)
     body = {
@@ -8961,10 +8970,12 @@ def _escalation_apply_gate_view(record: Dict) -> None:
     target = str(record.get("target_record_id") or "")
     if target:
         if not record.get("subject"):
+            # ENC-TSK-R50 / ENC-ISS-864: never expected_version (the filing-time pin). Pending
+            # records get the live sync_version from _escalation_bind_live_subject.
             record["subject"] = {
                 "record_id": target,
                 "project": record.get("project_id") or "",
-                "version": str(record.get("expected_version") or ""),
+                "version": "",
             }
         if not record.get("evidence"):
             record["evidence"] = [{"label": "target", "ref": target}]
@@ -9264,6 +9275,50 @@ def _escalation_public(item: Dict) -> Dict:
     return record
 
 
+def _escalation_target_versions(target: Dict) -> Tuple[str, str]:
+    """(sync_version, version_seq) of a deserialised target record as strings, "" when absent.
+
+    sync_version is the per-record write counter decide compares (If-Match layer two);
+    version_seq is the global sequence stamp tracker.get also shows, a different counter.
+    """
+    def _s(value: Any) -> str:
+        return "" if value is None else str(value)
+    return _s(target.get("sync_version")), _s(target.get("version_seq"))
+
+
+def _escalation_bind_live_subject(record: Dict, project_id: str) -> None:
+    """ENC-TSK-R50 AC1 / ENC-ISS-864: a pending card's subject.version is the target's live sync_version.
+
+    Clients echo subject.version as the decide subject token, so it must be read now, not
+    copied from the request. Only status=requested, tracker-targeted records are bound;
+    producer gates (no target_record_id) keep their stored subject. View-only, best effort.
+    """
+    target_id = str(record.get("target_record_id") or "").strip()
+    if record.get("status") != "requested" or not target_id:
+        return
+    _type, target_sk, target_err = _parse_escalation_target(target_id)
+    if target_err:
+        return
+    try:
+        raw = _get_ddb().get_item(
+            TableName=DYNAMODB_TABLE,
+            Key={"project_id": _ser_s(str(record.get("project_id") or project_id)),
+                 "record_id": _ser_s(target_sk)},
+            ConsistentRead=True,
+        ).get("Item")
+    except Exception as exc:
+        logger.warning("escalation live subject read failed for %s: %s", target_id, exc)
+        return
+    sync_version, _seq = _escalation_target_versions(_deser_item(raw) if raw else {})
+    subject = record.get("subject") if isinstance(record.get("subject"), dict) else {}
+    record["subject"] = {
+        **subject,
+        "record_id": str(subject.get("record_id") or target_id),
+        "project": str(subject.get("project") or record.get("project_id") or project_id),
+        "version": sync_version,
+    }
+
+
 def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] = None) -> Dict:
     """POST /{project}/escalation — governed escalation.request (§5.4).
 
@@ -9352,6 +9407,32 @@ def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] 
     if not target_item:
         return _error(404, f"Target record not found: {target_record_id}")
 
+    # ENC-TSK-R50 AC3 / ENC-ISS-864: expected_version is the target's sync_version. Accepted
+    # forms: "N", "sync_version:N" or the target's updated_at, all stored as given. The
+    # version_seq that tracker.get shows is normalized to the sync_version; anything else
+    # is stale and refused with nothing written. Omitted, the current sync_version is pinned.
+    target = _deser_item(target_item)
+    sync_version, version_seq = _escalation_target_versions(target)
+    normalized_from = ""
+    if sync_version:
+        if not expected_version:
+            expected_version = sync_version
+        elif expected_version in (sync_version, f"sync_version:{sync_version}",
+                                  str(target.get("updated_at") or "")):
+            pass
+        elif version_seq and expected_version == version_seq:
+            expected_version, normalized_from = sync_version, "version_seq"
+        else:
+            return _error(
+                409,
+                f"expected_version '{expected_version}' does not match {target_record_id}: its "
+                f"sync_version is {sync_version} (version_seq {version_seq or 'none'}). Re-read the "
+                "record and file against the current version.",
+                reason="expected_version_stale",
+                current_sync_version=sync_version,
+                current_version_seq=version_seq,
+            )
+
     prefix = _get_project_prefix(project_id)
     if not prefix:
         return _error(404, f"Project '{project_id}' not found or has no prefix.")
@@ -9410,7 +9491,11 @@ def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] 
         session_id, note=justification, project_id=project_id,
     )
 
+    receipt_extra: Dict[str, Any] = {"expected_version": expected_version} if expected_version else {}
+    if normalized_from:
+        receipt_extra["expected_version_normalized_from"] = normalized_from
     return _response(201, {
+        **receipt_extra,   # ENC-TSK-R50 AC3: what was pinned, and whether it was normalized
         "success": True,
         "escalation_id": escalation_id,
         "status": "requested",
@@ -9648,7 +9733,9 @@ def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
         return _error(500, "Database read failed.")
     if not item:
         return _error(404, f"Escalation not found: {escalation_id}")
-    return _response(200, {"success": True, "escalation": _escalation_public(item)})
+    escalation = _escalation_public(item)
+    _escalation_bind_live_subject(escalation, project_id)   # ENC-TSK-R50 AC1
+    return _response(200, {"success": True, "escalation": escalation})
 
 
 # ---------------------------------------------------------------------------
@@ -9910,6 +9997,8 @@ def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
     escalations.sort(key=lambda esc: (esc.get("created_at", ""), esc.get("item_id", "")), reverse=True)
     truncated = len(escalations) > page_size
     visible = escalations[:page_size]
+    for esc in visible:   # ENC-TSK-R50 AC1: pending rows only (one target read each)
+        _escalation_bind_live_subject(esc, project_id)
 
     next_cursor = ""
     if truncated or last_key:

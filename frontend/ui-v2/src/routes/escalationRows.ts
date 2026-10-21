@@ -23,8 +23,31 @@ export interface EscalationRow {
   ageLabel: string
   bucket: Exclude<EscalationBucket, 'all'> | 'closed'
   decidable: boolean
-  driftDetected: boolean
+  /** Filing-time drift (hub diff.filed_against, ENC-TSK-R50). Informational: it never blocks a verdict. */
+  filedAgainst: FiledAgainst | undefined
   card: GateCard
+}
+
+export interface FiledAgainst {
+  expectedVersion: string
+  currentVersion: string
+  changed: boolean
+}
+
+/** The hub's diff carries `filed_against` next to the kit GateDiff fields; read it defensively. */
+export function filedAgainstOf(card: GateCard): FiledAgainst | undefined {
+  const raw = (card.diff as unknown as { filed_against?: Record<string, unknown> } | undefined)?.filed_against
+  if (raw === null || typeof raw !== 'object') return undefined
+  return {
+    expectedVersion: String(raw.expected_version ?? ''),
+    currentVersion: String(raw.current_sync_version ?? ''),
+    changed: raw.changed === true,
+  }
+}
+
+function requesterOf(card: GateCard): string | undefined {
+  const session = (card as GateCard & { requested_by?: { session_id?: unknown } }).requested_by?.session_id
+  return typeof session === 'string' && session !== '' ? session : undefined
 }
 
 const MIN = 60_000
@@ -83,7 +106,7 @@ export function toEscalationRows(cards: readonly GateCard[], now: number = Date.
       status: statusOf(card),
       title: card.title ?? card.proposedCalls?.[0]?.capability ?? card.why?.summary ?? id,
       targetRecordId: card.subject.record_id,
-      requestedBy: card.requestedBy ?? card.sourcePrincipal ?? '—',
+      requestedBy: card.requestedBy ?? card.sourcePrincipal ?? requesterOf(card) ?? '—',
       expiresAt: card.expiresAt,
       expiresLabel: expiryLabel(card.expiresAt, now),
       createdAt: card.createdAt,
@@ -92,7 +115,7 @@ export function toEscalationRows(cards: readonly GateCard[], now: number = Date.
       decidable:
         (card.state === 'pending' || card.state === 'snoozed') &&
         card.etag !== undefined && card.id !== undefined && card.project_id !== undefined,
-      driftDetected: card.diff?.drift === true,
+      filedAgainst: filedAgainstOf(card),
       card,
     }
   })
