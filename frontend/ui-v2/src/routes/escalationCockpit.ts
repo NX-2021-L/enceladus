@@ -79,7 +79,10 @@ export async function decideCard(
     id: card.id, project: card.project_id, etag: card.etag, subjectVersion: card.subject.version,
     verdict, idempotencyKey: makeIdempotencyKey(card.id, verdict.type),
   }
-  if (verdict.type === 'approve' && (verdict.candidateId !== undefined || (card.proposedCalls?.length ?? 0) > 0)) {
+  // ENC-TSK-R51 / ENC-ISS-865: every approve carries the callHash. A strict (explicit-kind)
+  // mutation_type card has no proposedCalls, but the hub still requires one (428 without it);
+  // callHashFor hashes the legacy {mutation_type, target_record_id, payload} triple the hub hashes.
+  if (verdict.type === 'approve') {
     input.callHash = await callHashFor(card, verdict.candidateId)
   }
   return gateSource.decide(input)
@@ -128,6 +131,14 @@ export function describeError(e: unknown, fresh?: GateCard, sent?: GateCard): Co
     return {
       type: 'warning', header: 'The escalation changed',
       detail: 'This escalation changed since you opened it, and the card now shows its current state. Review it and choose again.',
+    }
+  }
+  if (e instanceof GateHttpError && e.status === 428) {
+    // ENC-TSK-R51 AC5: the hub names the precondition the request lacked; say that, not a generic failure.
+    const hub = (e.body as { error?: unknown } | null)?.error
+    return {
+      type: 'error', header: 'This escalation could not be approved',
+      detail: typeof hub === 'string' && hub !== '' ? hub : message,
     }
   }
   return { type: 'error', header: 'Decision was not recorded', detail: message }
