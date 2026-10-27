@@ -149,6 +149,22 @@ def test_record_without_record_id_is_skipped():
     assert mod.build_event_payload(rec, 0) is None
 
 
+def test_id_allocator_counter_row_is_skipped():
+    # ENC-ISS-876: every create also bumps COUNTER-<TYPE>; publishing it sent a titleless,
+    # statusless v2 event that made the client heal once per create.
+    for name in ("MODIFY", "INSERT"):
+        rec = _stream_record(
+            event_name=name,
+            new_image={"record_id": "COUNTER-ISSUE", "record_type": "counter", "project_id": "enceladus"},
+        )
+        assert mod.build_event_payload(rec, 0) is None
+    real = _stream_record(
+        event_name="INSERT",
+        new_image={"record_id": "ENC-ISS-877", "record_type": "issue", "project_id": "enceladus", "title": "t", "status": "open"},
+    )
+    assert mod.build_event_payload(real, 0) is not None
+
+
 # ---------------------------------------------------------------------------
 # actorType inference
 # ---------------------------------------------------------------------------
