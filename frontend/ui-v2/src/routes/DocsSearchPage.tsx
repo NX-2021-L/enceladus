@@ -6,7 +6,8 @@ import { Alert } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { useEnceladusCorpus } from '../search/CorpusProvider'
+import { useDocsDeltaWhileMounted, useEnceladusCorpus } from '../search/CorpusProvider'
+import { CorpusRefreshButton } from '../search/CorpusRefreshButton'
 import { hostSearchSource } from '../search/enceladusSearchSource'
 import { DOCS_PROPERTIES } from '../search/propertyDefs'
 import { rowToHit } from '../search/rowHit'
@@ -35,6 +36,7 @@ export default function DocsSearchPage() {
   }))
   const [sortId, setSortId] = useState('updated')
   const corpus = useEnceladusCorpus()
+  useDocsDeltaWhileMounted()
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const docs = corpus.rows.filter((r) => r.type === 'document')
 
@@ -53,6 +55,7 @@ export default function DocsSearchPage() {
       className="docs-route"
       single
       above={stale}
+      actions={<CorpusRefreshButton />}
       search={{
         title: 'Documents',
         things: 'documents',

@@ -34,10 +34,35 @@ describe('RUNTIME_CACHING (ENC-TSK-Q33 / ENC-ISS-830)', () => {
     expect(route?.handler).not.toBe('CacheFirst')
   })
 
-  it('serves the other feed reads network-first, never from the legacy SWR cache', () => {
-    const route = resolveRoute('/api/v1/feed')
-    expect(route?.handler).toBe('NetworkFirst')
-    expect(route?.options?.cacheName).not.toBe(LEGACY_FEED_API_CACHE)
+  // ENC-TSK-R56-0A (@io-kit/feed 1.2 service-worker requirement): a manual refresh or heal is only as fresh as the
+  // network path, so no rule may cache /api/v1/feed* or the Docs list endpoint.
+  it.each([
+    '/api/v1/feed',
+    '/api/v1/feed/tasks.json?_t=1',
+    '/api/v1/feed/corpus?limit=200',
+    '/api/v1/feed/delta?since=10',
+    '/api/v1/feed/delta?since=10&doc_since=5',
+  ])('serves %s NetworkOnly with no cache', (pathname) => {
+    const route = resolveRoute(pathname)
+    expect(route?.handler).toBe('NetworkOnly')
+    expect(route?.options?.cacheName).toBeUndefined()
+  })
+
+  it('matches no cache-capable route for the Docs list endpoint', () => {
+    for (const pathname of ['/api/v1/documents', '/api/v1/documents?project_id=enceladus', '/api/v1/documents/search']) {
+      const route = resolveRoute(pathname)
+      expect(route?.options?.cacheName).toBeUndefined()
+      expect(route?.handler ?? 'NetworkOnly').toBe('NetworkOnly')
+    }
+  })
+
+  it('never lets a CacheFirst, SWR or NetworkFirst route match any /api/v1/feed* path', () => {
+    const request = { method: 'GET', mode: 'cors', destination: '' } as unknown as Request
+    for (const pathname of ['/api/v1/feed', '/api/v1/feed/tasks.json', '/api/v1/feed/corpus', '/api/v1/feed/delta']) {
+      const url = new URL(pathname, ORIGIN)
+      const first = RUNTIME_CACHING.find((route) => (route.method ?? 'GET') === 'GET' && route.urlPattern({ url, request }))
+      expect(first?.handler).toBe('NetworkOnly')
+    }
   })
 
   it('has no StaleWhileRevalidate route matching /api/v1/feed', () => {
@@ -66,8 +91,9 @@ describe('RUNTIME_CACHING (ENC-TSK-Q33 / ENC-ISS-830)', () => {
   it('agrees with the canonical strategy map for the feed routes', () => {
     const feedSync = WORKBOX_STRATEGY_MAP.find((entry) => entry.id === 'feed-sync')
     expect(resolveRoute('/api/v1/feed/corpus')?.handler).toBe(feedSync?.handler)
+    expect(resolveRoute('/api/v1/feed')?.handler).toBe(feedSync?.handler)
     const feedApi = WORKBOX_STRATEGY_MAP.find((entry) => entry.id === 'feed-api')
-    expect(resolveRoute('/api/v1/feed')?.handler).toBe(feedApi?.handler)
+    expect(resolveRoute('/feed/x.json')?.handler).toBe(feedApi?.handler)
   })
 
   it('ships a cleanup script that deletes the legacy feed-api cache on activate', () => {

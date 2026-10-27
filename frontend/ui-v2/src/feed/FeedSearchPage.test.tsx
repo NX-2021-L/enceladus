@@ -7,7 +7,7 @@ import { mapCorpusItem } from '../search/corpusSource'
 
 /**
  * DVP-TSK-995 AC: /feed renders the kit CollectionSearch -- exactly two rows before the results (R15: the search
- * input; Filter | Sort | Clear), the count in the header, NO header action -- with the existing record cards via
+ * input; Filter | Sort | Clear), the count in the header, NO header action beyond the manual-refresh button -- with the existing record cards via
  * renderRow. No @testing-library in this package: createRoot + act.
  */
 const navigate = vi.fn()
@@ -73,8 +73,9 @@ describe('/feed on the kit CollectionSearch', () => {
     const header = container.querySelector('.io-split__header [data-page-header]')!
     expect(header.textContent).toMatch(/Feed/)
     expect(header.textContent).toMatch(/\(2\)/) // status=open -> 2 of 3 rows
-    // DVP-TSK-A12: the only header control is the tiny "hide toggles" link (no action button)
-    expect([...header.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['hide toggles'])
+    // DVP-TSK-A12: the tiny "hide toggles" link; ENC-TSK-R56-0A adds the kit manual-refresh button (the only action)
+    expect([...header.querySelectorAll('button:not([data-feed-refresh])')].map((b) => b.textContent)).toEqual(['hide toggles'])
+    expect(header.querySelectorAll('button[data-feed-refresh][aria-label="Refresh feed"]')).toHaveLength(1)
     expect(container.textContent).not.toMatch(/Pin as related/)
     // results are the existing record cards (status=open filter from the old-style URL applied)
     const results = container.querySelectorAll('.io-search__results > li')

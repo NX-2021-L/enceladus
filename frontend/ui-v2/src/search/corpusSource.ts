@@ -1,7 +1,8 @@
 import {
   CorpusStore,
   createCorpusStorage,
-  createLiveApplier,
+  createDefensiveLiveApplier,
+  defaultLiveKey,
   type CorpusSource,
   type Cursors,
   type DeltaResult,
@@ -89,7 +90,38 @@ const defaultFetchers: CorpusFetchers = {
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
-export function createEnceladusCorpusSource(fetchers: CorpusFetchers = defaultFetchers): CorpusSource<FeedCorpusItem> {
+/**
+ * ENC-PLN-101 catalog ruling P101-R15: a delta heal may send doc_since (the documents-table Scan) ONLY while the
+ * Docs page is mounted or during a manual refresh. Feed-page heals send `since` alone, so they never scan documents.
+ * The document cursor is simply not advanced while it is omitted; mounting Docs requests a heal that catches it up.
+ */
+let docsMounted = 0
+let manualDepth = 0
+export const docsDeltaWanted = (): boolean => docsMounted > 0 || manualDepth > 0
+/** Docs page mount: the returned release must run on unmount. */
+export function acquireDocsDelta(): () => void {
+  docsMounted += 1
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    docsMounted = Math.max(0, docsMounted - 1)
+  }
+}
+/** Runs `fn` with document deltas enabled (manual refresh), whichever page is showing. */
+export async function withDocsDelta<T>(fn: () => Promise<T>): Promise<T> {
+  manualDepth += 1
+  try {
+    return await fn()
+  } finally {
+    manualDepth = Math.max(0, manualDepth - 1)
+  }
+}
+
+export function createEnceladusCorpusSource(
+  fetchers: CorpusFetchers = defaultFetchers,
+  includeDocs: () => boolean = () => true,
+): CorpusSource<FeedCorpusItem> {
   return {
     id: CORPUS_ID,
     seqSpaces: [...SEQ_SPACES],
@@ -111,7 +143,7 @@ export function createEnceladusCorpusSource(fetchers: CorpusFetchers = defaultFe
     async since(cursors: Cursors, ctx): Promise<DeltaResult<FeedCorpusItem>> {
       const since = num(cursors.tracker)
       const docSince = num(cursors.document)
-      const page = await fetchers.delta({ since, docSince }, ctx.signal)
+      const page = await fetchers.delta(includeDocs() ? { since, docSince } : { since }, ctx.signal)
       const windowed = page.truncated !== undefined || page.doc_truncated !== undefined
       return {
         upserts: page.items ?? [],
@@ -206,11 +238,23 @@ function newer(a?: string | null, b?: string | null): string | undefined {
   return a ?? b ?? undefined
 }
 
-/** Bound to the app store; called by the realtime provider for every /feed/updates event. */
-export function applyFeedEventToCorpus(event: FeedRealtimeEvent): Promise<number> {
+/**
+ * Bound to the app store; called by the realtime provider for every /feed/updates event. Defensive (kit search 1.1):
+ * v2 headline events merge in place, while an incomplete or unknown-schema event never inserts a partial row and
+ * asks the corpus to heal instead. v1 events keep the liveChangeFromEvent overlay.
+ */
+export function applyFeedEventToCorpus(event: FeedRealtimeEvent, requestHeal: (reason: string) => void): Promise<number> {
   const s = getEnceladusCorpusStore()
   const projects = queryClient.getQueryData<ProjectSummary[]>(projectRegistryQueryOptions.queryKey) ?? []
-  return createLiveApplier<FeedRealtimeEvent>(s, (e) => liveChangeFromEvent(e, s.rows(), projects))(event)
+  return createDefensiveLiveApplier<FeedRealtimeEvent>(s, {
+    requestHeal,
+    // a known row keeps its stored key whatever channel the event arrived on; unknown rows fall back to the kit key
+    keyOf: (e) => {
+      const known = s.rows().find((r) => r.id === e.recordId)
+      return known ? (known.key ?? known.id) : defaultLiveKey(e)
+    },
+    mapV1: (e) => liveChangeFromEvent(e, s.rows(), projects),
+  })(event)
 }
 
 /** Instant header suggestions from the local index: id prefix first, then title substring. */

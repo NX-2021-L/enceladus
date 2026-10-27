@@ -23,8 +23,7 @@ describe('WORKBOX_STRATEGY_MAP (B67 AC-17)', () => {
   it('serves the feed corpus and delta NetworkOnly (ENC-TSK-Q33)', () => {
     const feedSync = WORKBOX_STRATEGY_MAP.find((e) => e.id === 'feed-sync')
     expect(feedSync?.handler).toBe('NetworkOnly')
-    expect(feedSync?.routes).toContain('/api/v1/feed/corpus')
-    expect(feedSync?.routes).toContain('/api/v1/feed/delta')
+    expect(feedSync?.routes).toContain('/api/v1/feed*')
   })
 
   it('uses 3s app-shell network timeout per DOC-E470AC8CE9A8', () => {

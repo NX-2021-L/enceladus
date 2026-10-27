@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CorpusStore, createMemoryCorpusStorage } from '@io-kit/search/corpus'
 import {
+  acquireDocsDelta,
+  applyFeedEventToCorpus,
   createEnceladusCorpusSource,
+  docsDeltaWanted,
+  getEnceladusCorpusStore,
+  resetEnceladusCorpusStoreForTests,
+  withDocsDelta,
   liveChangeFromEvent,
   mapCorpusItem,
   suggestRows,
@@ -127,5 +133,92 @@ describe('suggestRows', () => {
     const rows = ['ENC-TSK-12', 'ENC-TSK-120'].map((id) => mapCorpusItem(item({ record_id: id }))!).concat(mapCorpusItem(item({ record_id: 'ENC-ISS-1', title: 'mentions ENC-TSK-12 here' }))!)
     expect(suggestRows(rows, 'enc-tsk-12').map((r) => r.id)).toEqual(['ENC-TSK-12', 'ENC-TSK-120', 'ENC-ISS-1'])
     expect(suggestRows(rows, '')).toEqual([])
+  })
+})
+
+describe('doc_since gating (ENC-TSK-R56-0A, P101-R15)', () => {
+  const calls: Array<{ since: number; docSince?: number }> = []
+  const fetchers: CorpusFetchers = {
+    corpus: async () => page([], null),
+    delta: async (cursors) => {
+      calls.push(cursors)
+      return { success: true, items: [], tombstones: [], latest_version_seq: cursors.since + 1 } as unknown as FeedDeltaPage
+    },
+  }
+  afterEach(() => {
+    calls.length = 0
+  })
+
+  it('omits doc_since and keeps the document cursor while the Docs page is not mounted', async () => {
+    const source = createEnceladusCorpusSource(fetchers, docsDeltaWanted)
+    const d = await source.since({ tracker: 10, document: 185 }, {})
+    expect(calls.at(-1)).toEqual({ since: 10 })
+    expect(d.cursors).toEqual({ tracker: 11, document: 185 })
+  })
+
+  it('sends doc_since while Docs is mounted, and stops after unmount', async () => {
+    const source = createEnceladusCorpusSource(fetchers, docsDeltaWanted)
+    const release = acquireDocsDelta()
+    expect(docsDeltaWanted()).toBe(true)
+    await source.since({ tracker: 10, document: 185 }, {})
+    expect(calls.at(-1)).toEqual({ since: 10, docSince: 185 })
+    release()
+    release() // idempotent
+    expect(docsDeltaWanted()).toBe(false)
+    await source.since({ tracker: 10, document: 185 }, {})
+    expect(calls.at(-1)).toEqual({ since: 10 })
+  })
+
+  it('sends doc_since for the duration of a manual refresh', async () => {
+    const source = createEnceladusCorpusSource(fetchers, docsDeltaWanted)
+    await withDocsDelta(() => source.since({ tracker: 10, document: 185 }, {}))
+    expect(calls.at(-1)).toEqual({ since: 10, docSince: 185 })
+    expect(docsDeltaWanted()).toBe(false)
+  })
+})
+
+describe('applyFeedEventToCorpus: defensive live applier (ENC-TSK-R56-0A)', () => {
+  const base = { actorType: 'agent', actorId: 'a', summary: 's', cursor: 1, action: 'updated', record_type: 'task' } as const
+  afterEach(() => resetEnceladusCorpusStoreForTests())
+
+  it('merges a complete v2 event into a known row and heals instead of inserting a thin row for an incomplete one', async () => {
+    resetEnceladusCorpusStoreForTests()
+    const store = getEnceladusCorpusStore()
+    await store.ready()
+    await store.upsertMany([mapCorpusItem(item({ record_id: 'ENC-TSK-1', attrs: { status: 'open', priority: 'P2' } }))!])
+    const heal = vi.fn()
+
+    const merged = await applyFeedEventToCorpus(
+      { ...base, eventId: 'e1', recordId: 'ENC-TSK-1', channels: ['/projects/enceladus'], schemaVersion: 2, recordTitle: 'new', recordStatus: 'closed', recordUpdatedAt: '2026-10-02T00:00:00Z' },
+      heal,
+    )
+    expect(merged).toBe(1)
+    expect(store.get('tracker:enceladus:ENC-TSK-1')?.fields.status).toBe('closed')
+    expect(heal).not.toHaveBeenCalled()
+
+    const unknown = await applyFeedEventToCorpus({ ...base, eventId: 'e2', recordId: 'ENC-TSK-NEW', channels: ['/projects/enceladus'], schemaVersion: 2, recordTitle: 'x' }, heal)
+    expect(unknown).toBe(0)
+    expect(store.get('tracker:enceladus:ENC-TSK-NEW')).toBeUndefined()
+    expect(heal).toHaveBeenCalledWith('live-incomplete')
+
+    const v1Unknown = await applyFeedEventToCorpus({ ...base, eventId: 'e3', recordId: 'ENC-TSK-ZZ', channels: ['/projects/enceladus'] }, heal)
+    expect(v1Unknown).toBe(0)
+    expect(heal).toHaveBeenCalledWith('live-v1-unknown-row')
+
+    const future = await applyFeedEventToCorpus({ ...base, eventId: 'e4', recordId: 'ENC-TSK-1', channels: [], schemaVersion: 9 }, heal)
+    expect(future).toBe(0)
+    expect(heal).toHaveBeenCalledWith('live-unknown-schema')
+  })
+
+  it('applies a v1 event to a known row through the liveChangeFromEvent overlay', async () => {
+    resetEnceladusCorpusStoreForTests()
+    const store = getEnceladusCorpusStore()
+    await store.ready()
+    await store.upsertMany([mapCorpusItem(item({ record_id: 'ENC-TSK-1', attrs: { status: 'open' } }))!])
+    const heal = vi.fn()
+    const n = await applyFeedEventToCorpus({ ...base, eventId: 'e5', recordId: 'ENC-TSK-1', channels: [], recordStatus: 'closed' }, heal)
+    expect(n).toBe(1)
+    expect(store.get('tracker:enceladus:ENC-TSK-1')?.fields.status).toBe('closed')
+    expect(heal).not.toHaveBeenCalled()
   })
 })
