@@ -21,6 +21,7 @@ const rows = [
 ]
 vi.mock('../search/CorpusProvider', () => ({
   useEnceladusCorpus: () => ({ rows, status: 'live', lastSeededAt: null, staleNotice: null, error: null, refresh: async () => {} }),
+  useDocsDeltaWhileMounted: () => {},
 }))
 
 describe('/docs on the kit CollectionSearch', () => {
@@ -49,6 +50,8 @@ describe('/docs on the kit CollectionSearch', () => {
     })
     // R16: the page header (title + count) lives in the SplitPage header slot, above the columns.
     expect(container.querySelector('.io-split__header [data-page-header]')!.textContent).toMatch(/Documents.*\(1\)/) // project_id=devops narrows 2 docs to 1
+    // ENC-TSK-R56-0A: the kit manual-refresh button sits in the same header
+    expect(container.querySelectorAll('.io-split__header button[data-feed-refresh]')).toHaveLength(1)
     const results = [...container.querySelectorAll('.io-search__results > li')]
     expect(results.map((li) => li.textContent).join(' ')).toContain('DOC-A')
     expect(results.map((li) => li.textContent).join(' ')).not.toContain('DVP-TSK-1')

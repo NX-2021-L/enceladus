@@ -10,6 +10,7 @@ import { RecentlyViewedNav } from '../routes/RecentlyViewedNav'
 import { useUiStore } from '../store/uiStore'
 import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useEnceladusCorpus } from '../search/CorpusProvider'
+import { CorpusRefreshButton } from '../search/CorpusRefreshButton'
 import { decodeFeedSearch, encodeFeedSearch, persistFeedReturnSearch, type FeedRouteSearch } from '../search/feedUrl'
 import { hostSearchSource } from '../search/enceladusSearchSource'
 import { ENCELADUS_PROPERTIES } from '../search/propertyDefs'
@@ -127,15 +128,20 @@ export default function FeedSearchPage() {
       className="feed-route"
       engine="kit-search"
       above={stale}
+      actions={
+        <>
+          {isWide ? (
+            <RecentlyViewedNav
+              items={recentItems}
+              currentRecordId={selectedHit?.recordId ?? null}
+              onSelect={(entry) => setChosen(hitFromRecent(entry))}
+            />
+          ) : null}
+          <CorpusRefreshButton />
+        </>
+      }
       {...(isWide
         ? {
-            actions: (
-              <RecentlyViewedNav
-                items={recentItems}
-                currentRecordId={selectedHit?.recordId ?? null}
-                onSelect={(entry) => setChosen(hitFromRecent(entry))}
-              />
-            ),
             secondary: (
               <div className="feed-route__pane">
                 <FeedReadingPane hit={selectedHit} />

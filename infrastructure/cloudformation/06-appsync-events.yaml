@@ -250,6 +250,16 @@ Resources:
                   - dynamodb:ListStreams
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-TrackerStreamArn
+              # ENC-TSK-R55-0B (ENC-PLN-101): the documents stream feeds the same publisher.
+              - Sid: ConsumeDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
         - PolicyName: AppSyncEventPublish
           PolicyDocument:
             Version: '2012-10-17'
@@ -410,6 +420,35 @@ Resources:
         OnFailure:
           Destination: !GetAtt AppSyncFeedPublisherDlq.Arn
       StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      Enabled: true
+
+  # ENC-TSK-R55-0B (ENC-PLN-101): documents table -> the same publisher, so the PWA
+  # sees document create/update/remove live. Settings mirror the tracker mapping
+  # exactly (BatchSize 1, window 0, LATEST, 5 retries, bisect, DLQ, partial-batch
+  # failures; neither mapping has filter criteria). The data stack already exports
+  # <DataStackName>-DocumentsStreamArn (NEW_AND_OLD_IMAGES, enabled on both lanes).
+  AppSyncFeedDocumentsStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      FunctionName: !Ref AppSyncFeedPublisherFunction
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      MaximumRetryAttempts: 5
+      BisectBatchOnFunctionError: true
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt AppSyncFeedPublisherDlq.Arn
+      StartingPosition: LATEST
+      # Every document write also bumps the __COUNTER__VERSION_SEQ__ sentinel row; the
+      # publisher drops it, so filter it out at the mapping (no invocation, cost rule 4).
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"dynamodb":{"Keys":{"document_id":{"S":[{"anything-but":["__COUNTER__VERSION_SEQ__"]}]}}}}'
       FunctionResponseTypes:
         - ReportBatchItemFailures
       Enabled: true

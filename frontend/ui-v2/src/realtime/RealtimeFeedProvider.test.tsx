@@ -15,6 +15,11 @@ import type { FeedRealtimeEvent } from '../types/feedEvents'
  */
 
 let capturedOnEvent: ((event: RealtimeClientEvent) => void) | null = null
+const corpusHeal = { heal: vi.fn(), notifyReconnect: vi.fn() }
+
+vi.mock('../search/CorpusProvider', () => ({
+  useEnceladusCorpus: () => corpusHeal,
+}))
 
 vi.mock('../api/appsyncConfig', () => ({
   getAppSyncEventsConfig: () => ({
@@ -27,10 +32,8 @@ vi.mock('../api/appsyncConfig', () => ({
   }),
 }))
 
-vi.mock('../api/feeds', () => ({
-  fetchFeedSnapshot: () =>
-    Promise.resolve({ events: [], hydratedAt: '2026-07-07T00:00:00Z', source: 's3' as const }),
-}))
+const snapshotFetch = vi.hoisted(() => vi.fn())
+vi.mock('../api/feeds', () => ({ fetchFeedSnapshot: snapshotFetch }))
 
 vi.mock('./appsyncRealtimeClient', () => ({
   AppSyncRealtimeClient: class {
@@ -84,6 +87,10 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     capturedOnEvent = null
+    snapshotFetch.mockReset()
+    snapshotFetch.mockResolvedValue({ events: [], hydratedAt: '2026-07-07T00:00:00Z', source: 's3' as const })
+    corpusHeal.heal.mockClear()
+    corpusHeal.notifyReconnect.mockClear()
     useFeedBufferStore.getState().clear()
   })
 
@@ -128,6 +135,38 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
 
     expect(container.querySelector('[data-testid="visible-events"]')?.textContent).toBe('')
     expect(useFeedBufferStore.getState().bufferedEvents.map((e) => e.eventId)).toEqual(['live-1'])
+  })
+
+  it('gap_too_large and a re-connect heal the corpus; the first connect and the tasks.json snapshot do not (ENC-ISS-872)', async () => {
+    act(() => {
+      root.render(
+        <QueryClientProvider client={qc}>
+          <RealtimeFeedProvider>
+            <Consumer />
+          </RealtimeFeedProvider>
+        </QueryClientProvider>,
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      capturedOnEvent?.({ type: 'connected' } as RealtimeClientEvent)
+    })
+    expect(corpusHeal.notifyReconnect).not.toHaveBeenCalled()
+
+    await act(async () => {
+      capturedOnEvent?.({ type: 'gap_too_large', signal: { reason: 'gap' } } as unknown as RealtimeClientEvent)
+    })
+    expect(corpusHeal.notifyReconnect).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      capturedOnEvent?.({ type: 'connected' } as RealtimeClientEvent)
+    })
+    expect(corpusHeal.notifyReconnect).toHaveBeenCalledTimes(2)
+    // cold-start seed only: no gap or reconnect refetches tasks.json
+    expect(snapshotFetch).toHaveBeenCalledTimes(1)
   })
 
   it('mergeBufferedEvents() moves buffered events into the visible list and drains the buffer', async () => {

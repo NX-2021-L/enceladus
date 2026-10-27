@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-21.1",
-  "updated_at": "2026-10-21T02:40:00Z",
-  "last_change_summary": "ENC-TSK-R50 (ENC-ISS-864): escalation decide subject token is the target's live sync_version bound at render (never expected_version); expected_version normalized at request (version_seq -> sync_version, stale -> 409 expected_version_stale); filing-time drift is informational diff.filed_against; correct 4xx error codes; refused decisions logged; tracker.get keeps sync_version.",
+  "version": "2026-10-27.2",
+  "updated_at": "2026-10-27T05:00:00Z",
+  "last_change_summary": "ENC-TSK-R55-0B (ENC-PLN-101, contract ENC-TSK-R53-0C AC2): devops-appsync-feed-publisher gains the documents table as a second event source. 06-appsync-events.yaml adds AppSyncFeedDocumentsStreamTrigger (AWS::Lambda::EventSourceMapping on <DataStackName>-DocumentsStreamArn, settings identical to the tracker mapping plus a FilterCriteria that drops the __COUNTER__VERSION_SEQ__ sentinel row) and extends the publisher role's DynamoDBStreamEventSource policy to that stream; both lanes via the existing DataStackName parameter. The publisher detects documents records (eventSourceARN table 'documents*', else document_id image shape) and emits the document-shaped v2 payload on /feed/updates, /records/{document_id} and /projects/{project_id}: record_type 'document', action created/updated/removed (REMOVE or status deleted/archived => removed), recordTitle (title else id, 160 chars), recordStatus (default active), recordUpdatedAt (updated_at else created_at), optional recordVersionSeq and documentSubtype, no recordPriority, no /records full body. Stream image only, no new reads. No table or API schema change",
   "owners": [
     "enceladus-platform"
   ],
@@ -7789,7 +7789,7 @@
       "telemetry_eligible": false
     },
     "appsync_feed.event": {
-      "description": "ENC-TSK-K20 (B67 AC-10 / AC-23): lightweight real-time event payload emitted by devops-appsync-feed-publisher to AppSync Events. Server-pre-rendered (summary is computed in the Lambda). Raw DynamoDB item images are NOT inlined; median payload <= 500 bytes (AC-23). Published to /feed/updates, /records/{recordId}, and /projects/{projectId}.",
+      "description": "ENC-TSK-K20 (B67 AC-10 / AC-23): lightweight real-time event payload emitted by devops-appsync-feed-publisher to AppSync Events. Server-pre-rendered (summary is computed in the Lambda). Raw DynamoDB item images are NOT inlined; median payload <= 500 bytes (AC-23) for v1, <= 700 bytes for v2 (ENC-TSK-R54-0C adds schemaVersion/recordTitle/recordStatus/recordPriority/recordUpdatedAt/recordVersionSeq; additive, v1 keys unchanged; schemaVersion absent = v1). Since ENC-TSK-R55-0B the publisher also consumes the documents table stream and emits document-shaped events (record_type document) on the same channels. Published to /feed/updates, /records/{recordId}, and /projects/{projectId}.",
       "fields": {
         "eventId": {
           "definition": "UUID v7 (time-ordered, RFC 9562 §5.7) generated in-Lambda; leading 48 ms bits make it sort by creation time.",
@@ -7822,7 +7822,7 @@
           ]
         },
         "actorId": {
-          "definition": "write_source.provider (session id or Cognito username), falling back to updated_by/owner/assignee, else 'unknown'.",
+          "definition": "write_source.provider (session id or Cognito username); when empty (MCP tracker.log writes) the '[provider=...]' marker in last_update_note, then the newest history entry (provider/actor/session_id or a '[provider=...]' marker in its description), then active_agent_session_id/checked_out_by, then updated_by/owner/assignee, else 'unknown'.",
           "type": "string"
         },
         "summary": {
@@ -7837,10 +7837,38 @@
           "definition": "Target AppSync channel paths the event is published to: /feed/updates, /records/{recordId}, /projects/{projectId}.",
           "type": "array",
           "item_type": "string"
+        },
+        "schemaVersion": {
+          "definition": "Live-event payload schema version (ENC-TSK-R54-0C). Always 2 from this publisher; absent on older events means v1. Clients must ignore unknown keys.",
+          "type": "integer"
+        },
+        "recordTitle": {
+          "definition": "Record title (tracker title, else name) from the stream image, truncated to 160 characters.",
+          "type": "string"
+        },
+        "recordStatus": {
+          "definition": "Record status from the stream image (NewImage; OldImage on REMOVE). Omitted when the row has no status.",
+          "type": "string"
+        },
+        "recordPriority": {
+          "definition": "Record priority from the stream image. Omitted when the row has none (documents, lessons).",
+          "type": "string"
+        },
+        "recordUpdatedAt": {
+          "definition": "Record updated_at as stored (ISO-8601); the last stored value on REMOVE. Empty string when the row has none.",
+          "type": "string"
+        },
+        "documentSubtype": {
+          "definition": "Document events only (ENC-TSK-R55-0B): documents row document_subtype. Omitted when absent. Document events otherwise use the same keys with record_type 'document', recordId = document_id, no recordPriority, and action removed for REMOVE or status deleted/archived.",
+          "type": "string"
+        },
+        "recordVersionSeq": {
+          "definition": "Optional. The row's own version_seq (integer, its own sequence space; not the event cursor). Omitted when absent or non-integral; clients must not require it.",
+          "type": "integer"
         }
       },
       "owner": "pwa-realtime",
-      "source": "ENC-TSK-K20 / B67 AC-10",
+      "source": "ENC-TSK-K20 / B67 AC-10; payload v2 ENC-TSK-R54-0C",
       "telemetry_eligible": false
     },
     "corpus_entropy_engine.lambda": {
@@ -9582,6 +9610,16 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-27.2",
+      "date": "2026-10-27",
+      "summary": "ENC-TSK-R55-0B (ENC-PLN-101, contract ENC-TSK-R53-0C AC2): devops-appsync-feed-publisher gains the documents table as a second event source. 06-appsync-events.yaml adds AppSyncFeedDocumentsStreamTrigger (AWS::Lambda::EventSourceMapping on <DataStackName>-DocumentsStreamArn, settings identical to the tracker mapping plus a FilterCriteria that drops the __COUNTER__VERSION_SEQ__ sentinel row) and extends the publisher role's DynamoDBStreamEventSource policy to that stream; both lanes via the existing DataStackName parameter. The publisher detects documents records (eventSourceARN table 'documents*', else document_id image shape) and emits the document-shaped v2 payload on /feed/updates, /records/{document_id} and /projects/{project_id}: record_type 'document', action created/updated/removed (REMOVE or status deleted/archived => removed), recordTitle (title else id, 160 chars), recordStatus (default active), recordUpdatedAt (updated_at else created_at), optional recordVersionSeq and documentSubtype, no recordPriority, no /records full body. Stream image only, no new reads. No table or API schema change"
+    },
+    {
+      "version": "2026-10-27.1",
+      "date": "2026-10-27",
+      "summary": "ENC-TSK-R54-0C (ENC-PLN-101 feed freshness, contract ENC-TSK-R53-0C): devops-appsync-feed-publisher live-event payload v2. appsync_feed.event gains additive keys schemaVersion (2), recordTitle (title else name, truncated to 160 chars), recordStatus and recordPriority (omitted when the row has none), recordUpdatedAt and optional recordVersionSeq, all read from the stream image already in hand (no new reads); every v1 key is unchanged and schemaVersion absent means v1. actorId inference now resolves MCP tracker.log writes with an empty write_source.provider from the last_update_note '[provider=...]' marker, the newest history entry, then active_agent_session_id/checked_out_by before the updated_by/owner/assignee fallback, instead of 'unknown'. Median payload budget is now 700 bytes (v1 was 500). No table or API schema change"
+    },
     {
       "version": "2026-10-21.1",
       "date": "2026-10-21",

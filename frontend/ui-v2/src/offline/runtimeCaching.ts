@@ -30,7 +30,7 @@ export interface RuntimeCachingRoute {
  *  service worker deletes it on activation (public/sw-feed-cache-cleanup.js). */
 export const LEGACY_FEED_API_CACHE = 'feed-api'
 
-/** NetworkFirst cache for the remaining /api/v1/feed* reads and /feed/ JSON. */
+/** NetworkFirst cache for /feed/ JSON (the /api/v1/feed* reads are NetworkOnly). */
 export const FEED_API_NETWORK_FIRST_CACHE = 'feed-api-network-first'
 
 /** Script imported into the generated service worker (importScripts). */
@@ -54,16 +54,15 @@ export const RUNTIME_CACHING: RuntimeCachingRoute[] = [
     },
   },
   {
-    // ENC-TSK-Q33: the corpus seed and delta heal must always reach the
-    // network. fetch(..., { cache: 'no-store' }) does not bypass a service
-    // worker, so any Workbox cache here re-serves an old snapshot. IndexedDB
-    // tier1 (sync/idbStore.ts) is the offline tier for this data.
-    urlPattern: ({ url }) =>
-      url.pathname.startsWith('/api/v1/feed/corpus') || url.pathname.startsWith('/api/v1/feed/delta'),
+    // ENC-TSK-Q33 / ENC-TSK-R56-0A: every /api/v1/feed* read (corpus seed, delta heal, tasks.json cold-start
+    // snapshot) must always reach the network. fetch(..., { cache: 'no-store' }) does not bypass a service
+    // worker, so any Workbox cache here re-serves an old body and a manual refresh or heal would "succeed" with
+    // stale data (kit @io-kit/feed 1.2 requirement). IndexedDB tier1 is the offline tier for this data.
+    urlPattern: ({ url }) => url.pathname === '/api/v1/feed' || url.pathname.startsWith('/api/v1/feed/'),
     handler: 'NetworkOnly',
   },
   {
-    urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/feed') || url.pathname.startsWith('/feed/'),
+    urlPattern: ({ url }) => url.pathname.startsWith('/feed/'),
     handler: 'NetworkFirst',
     options: {
       cacheName: FEED_API_NETWORK_FIRST_CACHE,

@@ -24,11 +24,11 @@ import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 import type { FeedRealtimeEvent } from '../types/feedEvents'
 import { applyFeedEventToCorpus } from '../search/corpusSource'
+import { useEnceladusCorpus } from '../search/CorpusProvider'
 
 interface RealtimeFeedContextValue {
   isHydrating: boolean
   isSnapshotError: boolean
-  refetchSnapshot: () => void
   manualReconnect: () => void
   /**
    * ENC-TSK-K24 (B67 AC-11): merges every buffered "new activity" into the
@@ -85,27 +85,25 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
   const recordLatency = useFeedConnectionStore((s) => s.recordLatency)
   const setErrorMessage = useFeedConnectionStore((s) => s.setErrorMessage)
 
+  // ENC-TSK-R56-0A (ENC-ISS-872): the tasks.json snapshot only COLD-START seeds the activity list (GateInboxPanel).
+  // It is never a recovery path any more: reconnect and gap_too_large heal the corpus (delta) through the kit's
+  // coalesced heal, so this query neither refetches on focus/reconnect nor goes stale.
   const snapshotQuery = useQuery({
     queryKey: ['feed-snapshot'],
     queryFn: fetchFeedSnapshot,
-    staleTime: 60_000,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 2,
   })
 
-  // ENC-TSK-M82: the realtime socket is a LONG-LIVED connection whose lifecycle
-  // must be independent of the snapshot query. `snapshotQuery` is a TanStack
-  // Query result object that gets a NEW identity on every state change
-  // (pending→success, the 60s staleTime refetch, refetchOnWindowFocus, retries,
-  // and every explicit gap_too_large refetch). It used to be a dependency of
-  // the connect effect below, so each of those churned the effect: cleanup ran
-  // `client.stop()` (disposed=true + socket.close()) and a fresh client was
-  // built — flapping the socket and, under focus/visibility churn, leaving
-  // windows with NO live socket at all. The gap-recovery refetch now reaches
-  // the query through this ref, so it never forces the connect effect to re-run.
-  const refetchSnapshotRef = useRef(snapshotQuery.refetch)
+  // The live socket effect below runs once per mount (ENC-TSK-M82), so it reaches the corpus's heal handles through
+  // a ref instead of taking them as dependencies (their identities may change with the provider value).
+  const corpus = useEnceladusCorpus()
+  const corpusRef = useRef(corpus)
   useEffect(() => {
-    refetchSnapshotRef.current = snapshotQuery.refetch
-  }, [snapshotQuery.refetch])
+    corpusRef.current = corpus
+  }, [corpus])
 
   useEffect(() => {
     if (!snapshotQuery.data) return
@@ -125,9 +123,13 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     const events = queryClient.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? []
     const initialCursor = maxCursor(events)
 
+    let connectedBefore = false
     const handleClientEvent = (event: RealtimeClientEvent) => {
       switch (event.type) {
         case 'connected':
+          // A re-connect may have skipped events: close the gap through the corpus (coalesced delta heal).
+          if (connectedBefore) corpusRef.current.notifyReconnect()
+          connectedBefore = true
           setPhase('connected')
           resetFailedReconnects()
           setErrorMessage(null)
@@ -147,7 +149,7 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
         case 'feed_event':
           recordLatency(event.latencyMs)
           // DVP-TSK-995: /feed/updates events merge into the kit corpus (applyLiveEvent), not the retired cache engine.
-          void applyFeedEventToCorpus(event.event).catch(() => {})
+          void applyFeedEventToCorpus(event.event, (reason) => corpusRef.current.heal(reason)).catch(() => {})
           // ENC-TSK-K24 (B67 AC-11): buffer, never auto-inject. AC-15:
           // startTransition keeps this low-priority relative to anything
           // the user is actively doing (typing, clicking) — a burst of
@@ -158,7 +160,7 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
           break
         case 'gap_too_large':
           setErrorMessage(event.signal.reason)
-          void refetchSnapshotRef.current()
+          corpusRef.current.notifyReconnect()
           break
         default:
           break
@@ -217,9 +219,6 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
   const value: RealtimeFeedContextValue = {
     isHydrating: snapshotQuery.isPending,
     isSnapshotError: snapshotQuery.isError,
-    refetchSnapshot: () => {
-      void snapshotQuery.refetch()
-    },
     manualReconnect: () => {
       clientRef.current?.manualRetry()
       resetFailedReconnects()
