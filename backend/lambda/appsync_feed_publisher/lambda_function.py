@@ -390,6 +390,102 @@ def _coerce_version_seq(value: Any) -> Optional[int]:
     return int(d)
 
 
+# ENC-TSK-R55-0B: documents-table stream source (same publisher, second ESM).
+DOCUMENT_COUNTER_SENTINEL_ID = "__COUNTER__VERSION_SEQ__"
+_DOCUMENT_REMOVED_STATUSES = frozenset({"deleted", "archived"})
+
+
+def _stream_table_name(record: Dict[str, Any]) -> str:
+    """Table name parsed from a stream record's eventSourceARN ('' when absent)."""
+    arn = str(record.get("eventSourceARN") or "")
+    marker = ":table/"
+    if marker not in arn:
+        return ""
+    return arn.split(marker, 1)[1].split("/", 1)[0]
+
+
+def is_documents_record(record: Dict[str, Any]) -> bool:
+    """True for a record from the documents table stream.
+
+    Primary signal is eventSourceARN (table 'documents' / 'documents-<suffix>');
+    fallback is image shape: a document_id key with no tracker record_id/item_id.
+    """
+    table = _stream_table_name(record)
+    if table:
+        return table == "documents" or table.startswith("documents-")
+    ddb = record.get("dynamodb", {}) or {}
+    keys = ddb.get("Keys") or {}
+    if "document_id" in keys and "record_id" not in keys:
+        return True
+    image = ddb.get("NewImage") or ddb.get("OldImage") or {}
+    return "document_id" in image and "record_id" not in image and "item_id" not in image
+
+
+def _build_document_event_payload(
+    record: Dict[str, Any], batch_counter: int
+) -> Optional[Dict[str, Any]]:
+    """Document-shaped v2 payload (ENC-TSK-R53-0C AC2). Stream image only; no reads."""
+    ddb = record.get("dynamodb", {}) or {}
+    event_name = record.get("eventName", "")
+    new_image = _deserialize_image(ddb.get("NewImage"))
+    old_image = _deserialize_image(ddb.get("OldImage"))
+    keys = _deserialize_image(ddb.get("Keys"))
+    primary = new_image or old_image
+
+    document_id = _first_nonempty(primary.get("document_id"), keys.get("document_id"))
+    if not document_id or document_id == DOCUMENT_COUNTER_SENTINEL_ID:
+        return None
+    if _first_nonempty(primary.get("record_type")).lower() == "counter":
+        return None
+
+    project_id = _first_nonempty(primary.get("project_id"), keys.get("project_id")) or DEFAULT_PROJECT_ID
+    if not _is_real_project_id(project_id):
+        _emit_filtered_metric(document_id)
+        return None
+
+    status = _first_nonempty(primary.get("status"), "active")
+    ev = (event_name or "").upper()
+    if ev == "REMOVE" or status.lower() in _DOCUMENT_REMOVED_STATUSES:
+        action = "removed"
+    elif ev == "INSERT":
+        action = "created"
+    else:
+        action = "updated"
+
+    title = _first_nonempty(primary.get("title"), document_id)
+    actor_type, actor_id = infer_actor(primary)
+
+    approx_secs = ddb.get("ApproximateCreationDateTime")
+    approx_ms = int(float(approx_secs) * 1000) if approx_secs is not None else None
+
+    payload: Dict[str, Any] = {
+        "eventId": uuid7(approx_ms),
+        "recordId": document_id,
+        "record_type": "document",
+        "action": action,
+        "actorType": actor_type,
+        "actorId": actor_id,
+        "summary": build_summary(actor_id, action, "document", document_id, title),
+        "cursor": derive_cursor(approx_ms, batch_counter),
+        "channels": [
+            "/feed/updates",
+            f"/records/{document_id}",
+            f"/projects/{project_id}",
+        ],
+        "schemaVersion": SCHEMA_VERSION,
+        "recordTitle": title[:RECORD_TITLE_MAX_CHARS],
+        "recordStatus": status,
+        "recordUpdatedAt": _first_nonempty(primary.get("updated_at"), primary.get("created_at")),
+    }
+    subtype = _first_nonempty(primary.get("document_subtype"))
+    if subtype:
+        payload["documentSubtype"] = subtype
+    version_seq = _coerce_version_seq(primary.get("version_seq"))
+    if version_seq is not None:
+        payload["recordVersionSeq"] = version_seq
+    return payload
+
+
 def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[Dict[str, Any]]:
     """Build the lightweight AppSync event payload for one stream record.
 
@@ -399,6 +495,9 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     recordUpdatedAt, optional recordVersionSeq); raw DynamoDB item images are
     NOT inlined (AC-23 payload budget).
     """
+    if is_documents_record(record):
+        return _build_document_event_payload(record, batch_counter)
+
     ddb = record.get("dynamodb", {}) or {}
     event_name = record.get("eventName", "")
 
@@ -513,6 +612,9 @@ def build_full_record_body(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     function from build_event_payload so the /feed/updates and /projects/{id}
     channels (B67 AC-23 fixed ~500-byte budget) are never touched by this.
     """
+    if is_documents_record(record):
+        # Documents carry the lightweight v2 payload only (no full-body mirror).
+        return None
     ddb = record.get("dynamodb", {}) or {}
     new_image = _deserialize_image(ddb.get("NewImage"))
     return new_image or None

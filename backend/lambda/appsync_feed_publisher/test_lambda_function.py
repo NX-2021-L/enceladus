@@ -1102,3 +1102,112 @@ def test_tracker_log_update_event_resolves_actor_from_record_image_not_unknown()
     p = mod.build_event_payload(rec, 0)
     assert p["actorId"] == "ENC-SES-0NW" and p["actorType"] == "agent"
     assert p["summary"].startswith("ENC-SES-0NW updated task")
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-R55-0B: documents-table stream source, document-shaped v2 payload
+# ---------------------------------------------------------------------------
+
+_DOCS_ARN = "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/stream/2026-10-27T00:00:00.000"
+_TRACKER_ARN = "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/stream/2026-10-27T00:00:00.000"
+
+
+def _doc_record(event_name="MODIFY", arn=_DOCS_ARN, new=None, old=None, keys=None):
+    rec = _stream_record(event_name=event_name, new_image=new, old_image=old, keys=keys)
+    if arn:
+        rec["eventSourceARN"] = arn
+    return rec
+
+
+def _doc_image(**over):
+    img = {
+        "document_id": "DOC-56AA3C4F96BF",
+        "project_id": "enceladus",
+        "title": "A governed document",
+        "status": "active",
+        "document_subtype": "design",
+        "updated_at": "2026-10-27T01:00:00Z",
+        "created_at": "2026-10-26T01:00:00Z",
+        "version_seq": 77,
+        "keywords": ["a", "b"],
+    }
+    img.update(over)
+    return img
+
+
+def test_is_documents_record_by_arn_and_by_shape():
+    assert mod.is_documents_record(_doc_record(new=_doc_image()))
+    assert not mod.is_documents_record(_doc_record(arn=_TRACKER_ARN, new=_v2_image()))
+    # no ARN: fall back to image shape
+    assert mod.is_documents_record(_doc_record(arn=None, new=_doc_image()))
+    assert not mod.is_documents_record(_doc_record(arn=None, new=_v2_image()))
+
+
+def test_document_create_event_payload_v2():
+    p = mod.build_event_payload(_doc_record("INSERT", new=_doc_image()), 0)
+    assert p["recordId"] == "DOC-56AA3C4F96BF"
+    assert p["record_type"] == "document"
+    assert p["action"] == "created"
+    assert p["schemaVersion"] == 2
+    assert p["recordTitle"] == "A governed document"
+    assert p["recordStatus"] == "active"
+    assert p["recordUpdatedAt"] == "2026-10-27T01:00:00Z"
+    assert p["recordVersionSeq"] == 77
+    assert p["documentSubtype"] == "design"
+    assert "recordPriority" not in p
+    assert p["channels"] == ["/feed/updates", "/records/DOC-56AA3C4F96BF", "/projects/enceladus"]
+    assert _V1_KEYS <= set(p)
+    assert "keywords" not in p  # tags are not carried (size)
+
+
+def test_document_update_event_and_defaults():
+    p = mod.build_event_payload(
+        _doc_record(new=_doc_image(status="", title="", updated_at="", title_x=1), old=_doc_image()), 1
+    )
+    assert p["action"] == "updated"
+    assert p["recordStatus"] == "active"            # default
+    assert p["recordTitle"] == "DOC-56AA3C4F96BF"   # title falls back to the id
+    assert p["recordUpdatedAt"] == "2026-10-26T01:00:00Z"  # falls back to created_at
+
+
+def test_document_removed_on_remove_and_on_deleted_or_archived_status():
+    rem = mod.build_event_payload(_doc_record("REMOVE", old=_doc_image()), 0)
+    assert rem["action"] == "removed" and rem["recordTitle"] == "A governed document"
+    for st in ("deleted", "archived"):
+        p = mod.build_event_payload(_doc_record(new=_doc_image(status=st), old=_doc_image()), 0)
+        assert p["action"] == "removed" and p["recordStatus"] == st
+
+
+def test_document_counter_row_is_skipped():
+    rec = _doc_record(new={"document_id": "__COUNTER__VERSION_SEQ__", "project_id": "__feed__", "version_seq": 9})
+    assert mod.build_event_payload(rec, 0) is None
+    rec = _doc_record(new={"document_id": "DOC-X", "record_type": "counter"})
+    assert mod.build_event_payload(rec, 0) is None
+
+
+def test_document_title_truncated_and_payload_small():
+    p = mod.build_event_payload(_doc_record("INSERT", new=_doc_image(title="t" * 500)), 0)
+    assert len(p["recordTitle"]) == 160
+    assert len(json.dumps(p, separators=(",", ":")).encode()) < 1200
+
+
+def test_document_event_has_no_full_record_body():
+    assert mod.build_full_record_body(_doc_record(new=_doc_image())) is None
+    # tracker behaviour unchanged
+    assert mod.build_full_record_body(_stream_record(new_image=_v2_image())) is not None
+
+
+def test_tracker_record_with_tracker_arn_unchanged_by_document_branch():
+    rec = _stream_record(event_name="INSERT", new_image=_v2_image())
+    rec["eventSourceARN"] = _TRACKER_ARN
+    p = mod.build_event_payload(rec, 0)
+    assert p["record_type"] == "task" and p["recordId"] == "ENC-TSK-R1"
+    assert "documentSubtype" not in p
+
+
+def test_handler_publishes_document_event_dry_run_and_skips_counter():
+    event = {"Records": [
+        _doc_record("INSERT", new=_doc_image()),
+        _doc_record("MODIFY", new={"document_id": "__COUNTER__VERSION_SEQ__", "version_seq": 3}),
+    ]}
+    assert mod.handler(event, None) == {}
