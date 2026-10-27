@@ -6,16 +6,17 @@
  * StaleWhileRevalidate. A service worker answers before fetch's
  * `cache: 'no-store'` applies, so SWR handed the corpus seed the previous
  * visit's first page — exactly the newest records. They are NetworkOnly now
- * (IndexedDB tier1 is the offline tier); other feed reads are NetworkFirst.
+ * (IndexedDB tier1 is the offline tier). ENC-TSK-R56-0A: every /api/v1/feed* read is NetworkOnly so a manual
+ * refresh or heal can never be answered from a Workbox cache; only /feed/* stays NetworkFirst.
  */
 export const WORKBOX_STRATEGY_MAP = [
   { id: 'static-assets', handler: 'CacheFirst', routes: 'Vite content-hashed JS/CSS (precache + media)' },
   { id: 's3-payloads', handler: 'CacheFirst', routes: '/mobile/v1/reference/*' },
-  { id: 'feed-sync', handler: 'NetworkOnly', routes: '/api/v1/feed/corpus*, /api/v1/feed/delta*' },
+  { id: 'feed-sync', handler: 'NetworkOnly', routes: '/api/v1/feed* (corpus, delta, tasks.json and every other feed read)' },
   {
     id: 'feed-api',
     handler: 'NetworkFirst',
-    routes: '/api/v1/feed* (other reads), /feed/*',
+    routes: '/feed/*',
     timeoutSeconds: 3,
   },
   { id: 'mobile-feed', handler: 'StaleWhileRevalidate', routes: '/mobile/v1/*.json' },

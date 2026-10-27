@@ -19,6 +19,10 @@ export interface FeedRealtimeEvent {
   recordTitle?: string
   recordUpdatedAt?: string
   recordPriority?: string
+  /** Absent or 1 = v1 headline-less event; 2 = headline payload (kit createDefensiveLiveApplier). */
+  schemaVersion?: number
+  /** Optional row version_seq carried by v2 events. */
+  recordVersionSeq?: number | string
   /**
    * ENC-TSK-L29: the full current record body, present ONLY on events
    * delivered over a per-record `/records/{recordId}` subscription (never on
