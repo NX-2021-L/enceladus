@@ -94,6 +94,10 @@ def test_payload_has_exact_ac10_field_set():
         "summary",
         "cursor",
         "channels",
+        # ENC-TSK-R54-0C v2 additions (status/priority/updated_at absent from this image)
+        "schemaVersion",
+        "recordTitle",
+        "recordUpdatedAt",
     }
     assert payload["recordId"] == "ENC-TSK-K20"
     assert payload["record_type"] == "task"
@@ -104,7 +108,8 @@ def test_payload_has_exact_ac10_field_set():
     ]
 
 
-def test_payload_median_size_under_500_bytes():
+def test_payload_median_size_under_v2_budget():
+    # v1 budget was 500 B (B67 AC-23); v2 adds ~5 display keys (ENC-TSK-R53-0C) => 700 B.
     sizes = []
     for i in range(11):
         rec = _stream_record(
@@ -115,6 +120,9 @@ def test_payload_median_size_under_500_bytes():
                 "project_id": "enceladus",
                 "title": "A reasonably descriptive task title here",
                 "status": "in-progress",
+                "priority": "P1",
+                "updated_at": "2026-10-27T01:02:03Z",
+                "version_seq": 123456,
                 "write_source": {"provider": "ENC-SES-00P", "channel": "mcp_server"},
             },
         )
@@ -122,7 +130,7 @@ def test_payload_median_size_under_500_bytes():
         sizes.append(len(json.dumps(payload, separators=(",", ":")).encode("utf-8")))
     sizes.sort()
     median = sizes[len(sizes) // 2]
-    assert median <= 500, f"median payload {median} bytes exceeds 500-byte budget"
+    assert median <= 700, f"median payload {median} bytes exceeds 700-byte v2 budget"
 
 
 def test_payload_does_not_inline_raw_item_image():
@@ -932,3 +940,165 @@ def test_cognito_only_permanent_rejection_is_poison_skipped_by_the_handler():
         result = mod.handler({"Records": [rec]}, None)
     assert result == {}
     assert cw.put_metric_data.call_args.kwargs["MetricData"][0]["MetricName"] == "PoisonRecordSkipped"
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-R54-0C: live-event payload v2 (ENC-TSK-R53-0C contract)
+# ---------------------------------------------------------------------------
+
+_V1_KEYS = {
+    "eventId", "recordId", "record_type", "action", "actorType", "actorId",
+    "summary", "cursor", "channels",
+}
+
+
+def _v2_image(**over) -> dict:
+    img = {
+        "record_id": "task#ENC-TSK-R1",
+        "item_id": "ENC-TSK-R1",
+        "record_type": "task",
+        "project_id": "enceladus",
+        "title": "Ship payload v2",
+        "status": "in-progress",
+        "priority": "P1",
+        "updated_at": "2026-10-27T01:02:03Z",
+        "version_seq": 4242,
+        "write_source": {"provider": "ENC-SES-0NW", "channel": "mcp_server"},
+    }
+    img.update(over)
+    return img
+
+
+def test_v2_payload_for_create_event_carries_display_fields():
+    rec = _stream_record(event_name="INSERT", new_image=_v2_image(status="open"))
+    p = mod.build_event_payload(rec, 0)
+    assert p["action"] == "created"
+    assert p["schemaVersion"] == 2
+    assert p["recordTitle"] == "Ship payload v2"
+    assert p["recordStatus"] == "open"
+    assert p["recordPriority"] == "P1"
+    assert p["recordUpdatedAt"] == "2026-10-27T01:02:03Z"
+    assert p["recordVersionSeq"] == 4242 and isinstance(p["recordVersionSeq"], int)
+    assert set(p) == _V1_KEYS | {
+        "schemaVersion", "recordTitle", "recordStatus", "recordPriority",
+        "recordUpdatedAt", "recordVersionSeq",
+    }
+
+
+def test_v2_payload_for_update_event_reflects_new_image():
+    rec = _stream_record(
+        event_name="MODIFY",
+        new_image=_v2_image(status="pr", updated_at="2026-10-27T02:00:00Z", version_seq=4243),
+        old_image=_v2_image(status="in-progress"),
+    )
+    p = mod.build_event_payload(rec, 1)
+    assert p["action"] == "updated"
+    assert p["recordStatus"] == "pr"
+    assert p["recordUpdatedAt"] == "2026-10-27T02:00:00Z"
+    assert p["recordVersionSeq"] == 4243
+
+
+def test_v2_payload_for_remove_event_uses_old_image():
+    rec = _stream_record(event_name="REMOVE", old_image=_v2_image())
+    p = mod.build_event_payload(rec, 0)
+    assert p["action"] == "removed"
+    assert p["recordStatus"] == "in-progress"
+    assert p["recordTitle"] == "Ship payload v2"
+    assert p["recordUpdatedAt"] == "2026-10-27T01:02:03Z"
+
+
+def test_v2_optional_fields_omitted_when_row_lacks_them():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={"record_id": "LES-1", "record_type": "lesson", "project_id": "enceladus", "name": "A lesson"},
+    )
+    p = mod.build_event_payload(rec, 0)
+    assert p["schemaVersion"] == 2
+    assert p["recordTitle"] == "A lesson"  # falls back to name
+    assert "recordStatus" not in p and "recordPriority" not in p and "recordVersionSeq" not in p
+
+
+def test_v2_title_truncated_to_160_chars_but_summary_keeps_v1_form():
+    long_title = "x" * 400
+    rec = _stream_record(event_name="INSERT", new_image=_v2_image(title=long_title))
+    p = mod.build_event_payload(rec, 0)
+    assert len(p["recordTitle"]) == 160
+    assert p["summary"].endswith(": " + long_title)
+    assert len(json.dumps(p, separators=(",", ":")).encode()) < 1200
+
+
+def test_v2_non_integral_version_seq_is_dropped():
+    rec = _stream_record(event_name="INSERT", new_image=_v2_image(version_seq=1.5))
+    assert "recordVersionSeq" not in mod.build_event_payload(rec, 0)
+
+
+def test_v1_keys_preserved_with_unchanged_values():
+    rec = _stream_record(event_name="MODIFY", new_image=_v2_image())
+    p = mod.build_event_payload(rec, 3)
+    assert _V1_KEYS <= set(p)
+    assert p["recordId"] == "ENC-TSK-R1"
+    assert p["record_type"] == "task"
+    assert p["actorType"] == "agent" and p["actorId"] == "ENC-SES-0NW"
+    assert p["summary"] == "ENC-SES-0NW updated task ENC-TSK-R1: Ship payload v2"
+    assert p["channels"] == ["/feed/updates", "/records/ENC-TSK-R1", "/projects/enceladus"]
+    assert isinstance(p["cursor"], int)
+
+
+# actorId inference for MCP tracker.log writes (empty write_source.provider)
+
+
+def test_actor_id_from_last_update_note_provider_marker():
+    at, aid = mod.infer_actor({
+        "write_source": {"provider": "", "channel": "mcp_server"},
+        "last_update_note": "Created via tracker API [provider=ENC-SES-0NW, dispatch=D1]: x",
+        "owner": "someone",
+    })
+    assert (at, aid) == ("agent", "ENC-SES-0NW")
+
+
+def test_actor_id_from_last_history_entry_structured_then_description_marker():
+    base = {"write_source": {"provider": "", "channel": "mcp_server"}}
+    assert mod.infer_actor({**base, "history": [
+        {"status": "worklog", "description": "old [provider=ENC-SES-OLD]"},
+        {"status": "worklog", "provider": "ENC-SES-0AB", "description": "new"},
+    ]}) == ("agent", "ENC-SES-0AB")
+    assert mod.infer_actor({**base, "history": [
+        {"status": "worklog", "description": "note [provider=ENC-SES-0CD]"},
+    ]}) == ("agent", "ENC-SES-0CD")
+
+
+def test_actor_id_from_checkout_holder_when_nothing_else_names_the_actor():
+    assert mod.infer_actor({
+        "write_source": {"provider": "", "channel": "mcp_server"},
+        "history": [{"status": "worklog", "description": "plain text"}],
+        "active_agent_session_id": "ENC-SES-0EF",
+        "owner": "someone",
+    }) == ("agent", "ENC-SES-0EF")
+
+
+def test_actor_id_precedence_provider_beats_derived_and_legacy_fallbacks_kept():
+    # write_source.provider wins over note/history/checkout.
+    assert mod.infer_actor({
+        "write_source": {"provider": "jreese", "channel": "mutation_api"},
+        "last_update_note": "[provider=ENC-SES-X]",
+        "active_agent_session_id": "ENC-SES-Y",
+    }) == ("human", "jreese")
+    # Existing precedence for non-session writes: updated_by/owner/assignee, then unknown.
+    assert mod.infer_actor({"write_source": {"provider": ""}, "updated_by": "u", "owner": "o"})[1] == "u"
+    assert mod.infer_actor({"owner": "o", "assignee": "a"})[1] == "o"
+    assert mod.infer_actor({"assignee": "a"})[1] == "a"
+    assert mod.infer_actor({"write_source": {"provider": "", "channel": "mcp_server"}})[1] == "unknown"
+
+
+def test_tracker_log_update_event_resolves_actor_from_record_image_not_unknown():
+    rec = _stream_record(
+        event_name="MODIFY",
+        new_image=_v2_image(
+            write_source={"provider": "", "channel": "mcp_server"},
+            last_update_note="worklog text",
+            history=[{"status": "worklog", "description": "did a thing [provider=ENC-SES-0NW]"}],
+        ),
+    )
+    p = mod.build_event_payload(rec, 0)
+    assert p["actorId"] == "ENC-SES-0NW" and p["actorType"] == "agent"
+    assert p["summary"].startswith("ENC-SES-0NW updated task")
