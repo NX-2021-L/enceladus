@@ -534,6 +534,11 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
         record_type = "recipe_run"
     if record_type == "recipe" and _first_nonempty(primary.get("record_kind")) == "name":
         return None
+    # ENC-ISS-876: the ID allocator's per-type rows (COUNTER-TASK, COUNTER-ISSUE, ...) carry a real
+    # project_id but are bookkeeping, not feed records. Published, they reach clients as titleless,
+    # statusless v2 events that the defensive applier must heal around on every create.
+    if record_type == "counter":
+        return None
     project_id = _first_nonempty(primary.get("project_id"), keys.get("project_id")) or DEFAULT_PROJECT_ID
     title = _first_nonempty(primary.get("title"), primary.get("name"))
 
