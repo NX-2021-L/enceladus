@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-27.2",
-  "updated_at": "2026-10-27T05:00:00Z",
-  "last_change_summary": "ENC-TSK-R55-0B (ENC-PLN-101, contract ENC-TSK-R53-0C AC2): devops-appsync-feed-publisher gains the documents table as a second event source. 06-appsync-events.yaml adds AppSyncFeedDocumentsStreamTrigger (AWS::Lambda::EventSourceMapping on <DataStackName>-DocumentsStreamArn, settings identical to the tracker mapping plus a FilterCriteria that drops the __COUNTER__VERSION_SEQ__ sentinel row) and extends the publisher role's DynamoDBStreamEventSource policy to that stream; both lanes via the existing DataStackName parameter. The publisher detects documents records (eventSourceARN table 'documents*', else document_id image shape) and emits the document-shaped v2 payload on /feed/updates, /records/{document_id} and /projects/{project_id}: record_type 'document', action created/updated/removed (REMOVE or status deleted/archived => removed), recordTitle (title else id, 160 chars), recordStatus (default active), recordUpdatedAt (updated_at else created_at), optional recordVersionSeq and documentSubtype, no recordPriority, no /records full body. Stream image only, no new reads. No table or API schema change",
+  "version": "2026-10-27.3",
+  "updated_at": "2026-10-27T06:00:00Z",
+  "last_change_summary": "ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9610,6 +9610,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-10-27.3",
+      "date": "2026-10-27",
+      "summary": "ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records."
+    },
     {
       "version": "2026-10-27.2",
       "date": "2026-10-27",
