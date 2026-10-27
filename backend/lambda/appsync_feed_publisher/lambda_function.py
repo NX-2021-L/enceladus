@@ -87,6 +87,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -218,6 +219,40 @@ def _first_nonempty(*values: Any) -> str:
 
 _AGENT_CHANNELS = frozenset({"mcp_server", "arc-walker"})
 
+# ENC-TSK-R54-0C: tracker_mutation stamps "[provider=<id>, dispatch=<id>]" onto
+# last_update_note for create/update/checkout writes (_write_source_note_suffix).
+_NOTE_PROVIDER_RE = re.compile(r"\[provider=([^,\]\s]+)")
+
+# Payload schema version for the live-event contract (ENC-TSK-R53-0C). Absent = v1.
+SCHEMA_VERSION = 2
+# recordTitle is truncated so v2 stays within the per-event size budget.
+RECORD_TITLE_MAX_CHARS = 160
+
+
+def _provider_from_text(text: Any) -> str:
+    if not isinstance(text, str) or not text:
+        return ""
+    m = _NOTE_PROVIDER_RE.search(text)
+    return m.group(1).strip() if m else ""
+
+
+def _provider_from_last_history(image: Dict[str, Any]) -> str:
+    """Session/agent id carried by the newest history entry, if any.
+
+    Structured keys (provider/actor/session_id) win; otherwise a
+    "[provider=...]" marker embedded in the entry description is used.
+    """
+    history = image.get("history")
+    if not isinstance(history, list) or not history:
+        return ""
+    last = history[-1]
+    if not isinstance(last, dict):
+        return ""
+    structured = _first_nonempty(last.get("provider"), last.get("actor"), last.get("session_id"))
+    if structured:
+        return structured
+    return _provider_from_text(last.get("description"))
+
 
 def infer_actor(image: Dict[str, Any]) -> Tuple[str, str]:
     """Return (actorType, actorId) for a record image.
@@ -227,7 +262,16 @@ def infer_actor(image: Dict[str, Any]) -> Tuple[str, str]:
       * channel in {mcp_server, arc-walker}                => 'agent'
       * a Cognito username/sub as provider                 => 'human'
       * default                                            => 'agent'
-    actorId is the write_source.provider (falling back to updated_by / owner).
+
+    actorId precedence (ENC-TSK-R54-0C; MCP tracker.log writes often arrive with
+    an empty write_source.provider and used to resolve to 'unknown'):
+      1. write_source.provider
+      2. "[provider=...]" marker in last_update_note
+      3. newest history entry (structured provider/actor/session_id, else a
+         "[provider=...]" marker in its description)
+      4. active_agent_session_id / checked_out_by (the checkout holder)
+      5. updated_by, owner, assignee
+      6. 'unknown'
     """
     ws = image.get("write_source") or {}
     if not isinstance(ws, dict):
@@ -235,14 +279,23 @@ def infer_actor(image: Dict[str, Any]) -> Tuple[str, str]:
 
     provider = _first_nonempty(ws.get("provider"))
     channel = _first_nonempty(ws.get("channel")).lower()
+    derived = ""
+    if not provider:
+        derived = _first_nonempty(
+            _provider_from_text(image.get("last_update_note")),
+            _provider_from_last_history(image),
+            image.get("active_agent_session_id"),
+            image.get("checked_out_by"),
+        )
     actor_id = _first_nonempty(
         provider,
+        derived,
         image.get("updated_by"),
         image.get("owner"),
         image.get("assignee"),
     ) or "unknown"
 
-    if provider.upper().startswith("ENC-SES-"):
+    if provider.upper().startswith("ENC-SES-") or actor_id.upper().startswith("ENC-SES-"):
         return "agent", actor_id
     if channel in _AGENT_CHANNELS:
         return "agent", actor_id
@@ -298,7 +351,7 @@ def derive_cursor(approx_creation_ms: Optional[int], batch_counter: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Payload construction (B67 AC-10 fields; AC-23 median <= 500 bytes)
+# Payload construction (B67 AC-10 fields; AC-23 median <= 500 bytes v1, <= 700 bytes v2)
 # ---------------------------------------------------------------------------
 
 
@@ -324,11 +377,26 @@ def _is_real_project_id(project_id: str) -> bool:
     return not (project_id.startswith("__") and project_id.endswith("__"))
 
 
+def _coerce_version_seq(value: Any) -> Optional[int]:
+    """The row's own version_seq as an int, or None when absent/non-integral."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        d = Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+    if d != d.to_integral_value():
+        return None
+    return int(d)
+
+
 def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[Dict[str, Any]]:
     """Build the lightweight AppSync event payload for one stream record.
 
     Returns None if the record cannot be resolved to a target (no recordId).
-    Field set is EXACTLY the B67 AC-10 contract; raw DynamoDB item images are
+    Field set is the B67 AC-10 contract (v1 keys, unchanged) plus the ENC-TSK-R53-0C
+    v2 additions (schemaVersion, recordTitle, recordStatus, recordPriority,
+    recordUpdatedAt, optional recordVersionSeq); raw DynamoDB item images are
     NOT inlined (AC-23 payload budget).
     """
     ddb = record.get("dynamodb", {}) or {}
@@ -412,7 +480,21 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
             f"/records/{item_id}",
             f"/projects/{project_id}",
         ],
+        # ENC-TSK-R54-0C: payload v2 display fields (additive; v1 keys above are unchanged).
+        # Values come from the stream image already in hand (no extra reads).
+        "schemaVersion": SCHEMA_VERSION,
+        "recordTitle": title[:RECORD_TITLE_MAX_CHARS],
+        "recordUpdatedAt": _first_nonempty(primary.get("updated_at")),
     }
+    record_status = _first_nonempty(primary.get("status"))
+    if record_status:
+        payload["recordStatus"] = record_status
+    record_priority = _first_nonempty(primary.get("priority"))
+    if record_priority:
+        payload["recordPriority"] = record_priority
+    version_seq = _coerce_version_seq(primary.get("version_seq"))
+    if version_seq is not None:
+        payload["recordVersionSeq"] = version_seq
     return payload
 
 
