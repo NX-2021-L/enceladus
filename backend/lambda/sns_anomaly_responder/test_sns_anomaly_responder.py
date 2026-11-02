@@ -132,3 +132,102 @@ def test_second_adapter_stub_needs_no_primitive_change():  # AC-8 seam
     finally:
         os.environ.pop("ANOMALY_SOURCE", None)
         lf.ADAPTERS.pop("stub", None)
+
+
+# --- ENC-TSK-R82-0A: identity (FTR-150 AC-2) + notify on first create (AC-4) -------------------
+
+class FakeApi:
+    """Scripted internal-key HTTP: records every call, answers governance/register/claim/mutations."""
+    def __init__(self, register_error=None):
+        self.calls = []
+        self.register_error = register_error
+        self.issues = {}
+
+    def __call__(self, method, url, body=None):
+        self.calls.append((method, url, body))
+        if url.endswith("/governance/hash"):
+            return {"governance_hash": "g" * 64}
+        if url.endswith("/agents/sessions") and method == "POST":
+            if self.register_error:
+                raise lf.TrackerError("POST register -> HTTP 422: agent-type-not-active")
+            return {"session": {"session_id": "ENC-SES-0ZZ"}}
+        if url.endswith("/agents/sessions/claim"):
+            return {"sci": "SCI-" + "a" * 32}
+        if url.endswith("/retire"):
+            return {}
+        if "?type=issue" in url:
+            status = url.split("status=")[1].split("&")[0]
+            return {"records": [r for r in self.issues.values() if r["status"] == status], "next_cursor": ""}
+        if method == "POST" and url.endswith("/issue"):
+            self.issues["DVP-ISS-950"] = {"item_id": "DVP-ISS-950", "status": "open", "title": body["title"],
+                                          "evidence": body["evidence"]}
+            return {"record_id": "DVP-ISS-950"}
+        return {}
+
+
+def _run_api(monkeypatch, api, event=None):
+    monkeypatch.setattr(lf, "_http", api)
+    monkeypatch.setattr(lf.acquire_identity, "__defaults__", (api,))
+    monkeypatch.setattr(lf.retire_identity, "__defaults__", (api,))
+    return lf.lambda_handler(event or _event(), None)
+
+
+def test_identity_fail_closed_register_claim_then_stamped_mutations(monkeypatch):
+    api = FakeApi()
+    out = _run_api(monkeypatch, api)
+    reg = [c for c in api.calls if c[1].endswith("/agents/sessions") and c[0] == "POST"][0]
+    assert reg[2]["agent_type_id"] == "ENC-AGT-00R" and reg[2]["runtime"] == "aws_lambda"
+    claim = [c for c in api.calls if c[1].endswith("/claim")][0]
+    assert claim[2] == {"session_id": "ENC-SES-0ZZ", "expected_agent_type_id": "ENC-AGT-00R"}
+    mutations = [c for c in api.calls if c[0] in ("POST", "PATCH") and "/tracker/" in c[1]]
+    assert mutations
+    for _m, _u, body in mutations:
+        assert body["write_source"] == {"provider": "ENC-SES-0ZZ"}
+        assert body["sci"] == "SCI-" + "a" * 32 and body["governance_hash"] == "g" * 64
+    # governance hash is fetched BEFORE register (same invocation), session retired at the end
+    urls = [c[1] for c in api.calls]
+    assert urls[0].endswith("/governance/hash") and urls[-1].endswith("/ENC-SES-0ZZ/retire")
+    assert out["results"][0]["action"] == "created"
+
+
+def test_register_rejection_aborts_before_any_mutation(monkeypatch):
+    api = FakeApi(register_error=True)
+    try:
+        _run_api(monkeypatch, api)
+        assert False, "must fail closed"
+    except lf.TrackerError:
+        pass
+    assert not [c for c in api.calls if "/tracker/" in c[1]]
+
+
+def test_unstamped_client_refuses_mutations():
+    c = lf.TrackerClient()
+    for fn in (lambda: c.create_issue("devops", {}), lambda: c.set_field("devops", "X", "f", 1),
+               lambda: c.log("devops", "X", "d")):
+        try:
+            fn()
+            assert False
+        except lf.TrackerError:
+            pass
+
+
+def test_push_on_first_create_only_with_issue_service_impact_even_if_enrichment_off(monkeypatch):
+    monkeypatch.setenv("ANOMALY_ENRICHMENT_ENABLED", "0")
+    api = FakeApi()
+    _run_api(monkeypatch, api)
+    pushes = [c for c in api.calls if c[1].endswith("/coordination/notifications/anomaly")]
+    assert len(pushes) == 1
+    body = pushes[0][2]
+    assert body["issue_id"] == "DVP-ISS-950" and body["project_id"] == "devops"
+    assert body["service"] == "AWS Lambda" and body["total_impact_usd"]
+    _run_api(monkeypatch, api)  # replay: no second push
+    assert len([c for c in api.calls if c[1].endswith("/notifications/anomaly")]) == 1
+
+
+def test_push_failure_does_not_fail_intake():
+    class NoPush(FakeTracker):
+        def notify_anomaly(self, *a):
+            raise lf.TrackerError("push down")
+    t = NoPush()
+    out = lf.lambda_handler(_event(), None, client=t)
+    assert out["results"][0] == {**out["results"][0], "action": "created", "notified": False} and t.creates == 1
