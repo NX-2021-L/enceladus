@@ -3836,22 +3836,39 @@ def _graphsearch_audit_record(
     return audit
 
 
+def _is_gamma_env() -> bool:
+    """ENC-TSK-S22 (F6): gamma = "-gamma" function name / ENVIRONMENT_SUFFIX, else prod."""
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    suffix = os.environ.get("ENVIRONMENT_SUFFIX", "")
+    return fn.endswith("-gamma") or suffix == "-gamma"
+
+
+def _graphsearch_emf_enabled() -> bool:
+    """ENC-TSK-S22 (F6, P103-R21): GRAPHSEARCH_EMF_ENABLED env wins when set;
+    otherwise the code default is true on prod, false on gamma."""
+    raw = os.environ.get("GRAPHSEARCH_EMF_ENABLED")
+    if raw is not None and raw.strip():
+        return raw.strip().lower() not in ("0", "false", "no", "off")
+    return not _is_gamma_env()
+
+
 def _emit_graphsearch_emf(record: Dict[str, Any]) -> None:
     """ENC-TSK-S11 (N11, DOC-F08AE0127D4E §10): emit CloudWatch EMF for the audit record.
 
     Printed (not logged) so the Lambda JSON log formatter does not wrap the object and
     CloudWatch extracts Enceladus/GraphSearch metrics from the top-level `_aws` block.
     SearchDurationMs for hybrid and neighbors; HybridPathwayFailed (0/1) for hybrid.
-    Never raises; kill switch GRAPHSEARCH_EMF_ENABLED (default "true").
+    Never raises; kill switch GRAPHSEARCH_EMF_ENABLED (default true on prod, false on gamma).
+    ENC-TSK-S22: dimensions [SearchType, Environment] keep gamma and prod series apart.
     """
     try:
-        if os.environ.get("GRAPHSEARCH_EMF_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
+        if not _graphsearch_emf_enabled():
             return
         st = record.get("search_type")
         if st not in ("hybrid", "neighbors"):
             return
         metrics = [{"Name": "SearchDurationMs", "Unit": "Milliseconds"}]
-        emf: Dict[str, Any] = {"SearchType": st, "SearchDurationMs": float(record.get("duration_ms") or 0)}
+        emf: Dict[str, Any] = {"SearchType": st, "Environment": "gamma" if _is_gamma_env() else "prod", "SearchDurationMs": float(record.get("duration_ms") or 0)}
         if st == "hybrid":
             metrics.append({"Name": "HybridPathwayFailed", "Unit": "Count"})
             emf["HybridPathwayFailed"] = 1 if record.get("pathway_status") == "failed" else 0
@@ -3859,7 +3876,7 @@ def _emit_graphsearch_emf(record: Dict[str, Any]) -> None:
             "Timestamp": int(time.time() * 1000),
             "CloudWatchMetrics": [{
                 "Namespace": "Enceladus/GraphSearch",
-                "Dimensions": [["SearchType"]],
+                "Dimensions": [["SearchType", "Environment"]],
                 "Metrics": metrics,
             }],
         }

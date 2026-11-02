@@ -201,10 +201,11 @@ Resources:
 
   # ENC-TSK-S11 (N11, DOC-F08AE0127D4E §10) — graph search latency/health alarms.
   # Metrics are EMF-emitted by graph_query_api (Enceladus/GraphSearch, dimension
-  # SearchType); no metric filters. Cost: 3 custom metrics (hybrid duration,
+  # SearchType+Environment); no metric filters. ENC-TSK-S22: prod-only. Cost: 3 custom metrics (hybrid duration,
   # neighbors duration, hybrid pathway-failed) x $0.30 + 2 alarms x $0.10 ~ $1.10/mo.
   GraphSearchHybridP95Over4sAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: IsProd  # ENC-TSK-S22 (F6): prod-only; gamma EMF is off
     Properties:
       AlarmName: !Sub "enceladus-graphsearch-hybrid-p95-over-4s${EnvironmentSuffix}"
       AlarmDescription: >
@@ -215,6 +216,8 @@ Resources:
       Dimensions:
         - Name: SearchType
           Value: hybrid
+        - Name: Environment
+          Value: prod
       ExtendedStatistic: p95
       Period: 300
       EvaluationPeriods: 3
@@ -229,6 +232,7 @@ Resources:
 
   GraphSearchPathwayFailureRateAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: IsProd  # ENC-TSK-S22 (F6): prod-only; gamma EMF is off
     Properties:
       AlarmName: !Sub "enceladus-graphsearch-pathway-failure-rate${EnvironmentSuffix}"
       AlarmDescription: >
@@ -239,6 +243,8 @@ Resources:
       Dimensions:
         - Name: SearchType
           Value: hybrid
+        - Name: Environment
+          Value: prod
       Statistic: Average
       Period: 300
       EvaluationPeriods: 3

@@ -29,7 +29,7 @@ class EmfTests(unittest.TestCase):
         o = _emit({"search_type": "hybrid", "duration_ms": 2500, "pathway_status": "ok"})
         cwm = o["_aws"]["CloudWatchMetrics"][0]
         self.assertEqual(cwm["Namespace"], "Enceladus/GraphSearch")
-        self.assertEqual(cwm["Dimensions"], [["SearchType"]])
+        self.assertEqual(cwm["Dimensions"], [["SearchType", "Environment"]])
         self.assertEqual([m["Name"] for m in cwm["Metrics"]], ["SearchDurationMs", "HybridPathwayFailed"])
         self.assertEqual(cwm["Metrics"][0]["Unit"], "Milliseconds")
         self.assertIsInstance(o["_aws"]["Timestamp"], int)
