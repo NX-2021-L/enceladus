@@ -1,9 +1,0 @@
-[
-  {
-    "ResourceType": "AWS::Logs::LogGroup",
-    "LogicalResourceId": "GraphQueryApiLogGroup",
-    "ResourceIdentifier": {
-      "LogGroupName": "/aws/lambda/devops-graph-query-api-gamma"
-    }
-  }
-]
