@@ -20,13 +20,12 @@ Environment variables:
   SECRETS_REGION              AWS region for Secrets Manager (default: us-west-2)
   COGNITO_USER_POOL_ID        Cognito user pool ID
   COGNITO_CLIENT_ID           Cognito client ID
-  CORS_ORIGIN                 CORS allowed origin (default: https://jreese.net)
+  CORS_ORIGIN                 CORS allowed origin (default: https://enceladus.jreese.net)
   COORDINATION_INTERNAL_API_KEY  Internal API key for service-to-service auth
   OPENSEARCH_ENDPOINT            Gamma OpenSearch HTTPS URL (ENC-TSK-L43)
   OPENSEARCH_READ_ALIAS          Read alias (records_read)
   OPENSEARCH_SECRET_NAME         Secrets Manager secret for query user
   OPENSEARCH_USERNAME            OpenSearch security-plugin username (query)
-  FEED_API_BASE                  Base URL for feed/corpus facet fallback
   BEDROCK_REGION              AWS region for Bedrock (default: us-west-2)
 """
 
@@ -39,7 +38,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs
 
 import corroboration
@@ -66,7 +65,7 @@ except Exception:  # pragma: no cover - import guard
 
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", "us-west-2")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
 
@@ -571,11 +570,60 @@ def _authenticate(event: Dict) -> Optional[str]:
 # Graph queries
 # ---------------------------------------------------------------------------
 
-def _node_to_dict(node) -> Dict[str, Any]:
-    """Convert a Neo4j Node to a serializable dict."""
+def _node_to_dict(node, include_embedding: bool = False) -> Dict[str, Any]:
+    """Convert a Neo4j Node to a serializable dict.
+
+    ENC-TSK-R81-0F (ENC-FTR-089 contract): the raw `embedding` vector (256 floats,
+    ~5 KB JSON) is research-only egress served ONLY by search_type=embeddings_for.
+    Every other node serialisation strips it server-side. The hybrid path is the
+    sole internal caller that opts in (include_embedding=True) because corroboration
+    reads the vectors in-process; it strips them again before responding.
+    """
     props = dict(node)
+    if not include_embedding:
+        props.pop("embedding", None)
     props["_labels"] = sorted(node.labels)
     return props
+
+
+# ENC-TSK-R81-0F: per-node byte budget for neighbors payloads (AC-2: < 1 KB).
+NEIGHBOR_NODE_MAX_BYTES = 1000
+_NEIGHBOR_STRING_FLOOR = 48
+
+
+def _compact_neighbor_node(node: Dict[str, Any], max_bytes: int = NEIGHBOR_NODE_MAX_BYTES) -> Dict[str, Any]:
+    """Bound one neighbors node to `max_bytes` of JSON without dropping identity.
+
+    Drops the embedding and any other numeric-vector property, then truncates the
+    longest string properties (with an ellipsis) until the node fits. record_id,
+    project_id, status and the other short fields are never touched in practice.
+    """
+    out = {
+        k: v for k, v in node.items()
+        if k != "embedding"
+        and not (isinstance(v, list) and len(v) > 16 and all(isinstance(x, (int, float)) for x in v))
+    }
+
+    def _size() -> int:
+        return len(json.dumps(out, default=str).encode("utf-8"))
+
+    guard = 0
+    while _size() > max_bytes and guard < 64:
+        guard += 1
+        longest_key = max(
+            (k for k, v in out.items() if isinstance(v, str) and len(v) > _NEIGHBOR_STRING_FLOOR),
+            key=lambda k: len(out[k]),
+            default=None,
+        )
+        if longest_key is None:
+            break
+        cur = out[longest_key]
+        excess = _size() - max_bytes
+        keep = max(_NEIGHBOR_STRING_FLOOR, len(cur) - excess - 8)
+        if keep >= len(cur):
+            keep = len(cur) - 1
+        out[longest_key] = cur[:keep].rstrip() + "\u2026"
+    return out
 
 
 _ALLOWED_EDGE_TYPES = frozenset({
@@ -794,12 +842,12 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
         for rec in result:
             start_node = rec.get("start")
             if start_node is not None:
-                snd = _node_to_dict(start_node)
+                snd = _compact_neighbor_node(_node_to_dict(start_node))
                 srid = snd.get("record_id", "")
                 if srid and srid not in seen_ids:
                     nodes.append(snd)
                     seen_ids.add(srid)
-            nd = _node_to_dict(rec["neighbor"])
+            nd = _compact_neighbor_node(_node_to_dict(rec["neighbor"]))
             rid = nd.get("record_id", "")
             if rid and rid not in seen_ids:
                 nodes.append(nd)
@@ -962,6 +1010,71 @@ def _b64_array(arr, np_dtype: str) -> str:
     ).decode("ascii")
 
 
+LAPLACIAN_BFS_MAX_HOPS = 64
+LAPLACIAN_BFS_MAX_VISITED = 50000
+
+
+def _laplacian_giant_component_sample(driver, project_id: str, limit: int) -> Optional[Dict]:
+    """ENC-TSK-R80-0J (U4): sample the project's giant component for lambda2.
+
+    The previous default took the alphabetically-first ``limit`` record_ids, so a
+    single zero-degree stub (or any vertex whose neighbors fell outside the
+    slice) made the induced subgraph disconnected and lambda2 identically 0.
+    This seeds a BFS at the highest-degree non-placeholder vertex, walks the whole
+    connected component level by level, and keeps the first ``limit`` vertices in
+    BFS order. Every kept vertex (after the seed) was reached through an earlier
+    kept vertex, so the induced subgraph is connected by construction.
+
+    Returns {ids, component_size, component_coverage, query_cypher} or None when
+    no seed resolves (caller falls back to the degree-filtered legacy query).
+    component_coverage = len(ids) / component_size (1.0 when the whole giant
+    component fits under ``limit``).
+    """
+    seed_cypher = (
+        "MATCH (n)-[]-(m) "
+        "WHERE n.project_id = $project_id AND m.project_id = $project_id "
+        "AND coalesce(n.is_placeholder, false) = false "
+        "AND coalesce(m.is_placeholder, false) = false "
+        "RETURN n.record_id AS seed, count(m) AS d ORDER BY d DESC, seed LIMIT 1"
+    )
+    hop_cypher = (
+        "MATCH (a)-[]-(b) "
+        "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+        "AND a.record_id IN $frontier "
+        "AND coalesce(b.is_placeholder, false) = false "
+        "RETURN DISTINCT b.record_id AS nbr"
+    )
+    with driver.session() as session:
+        seed = None
+        for rec in session.run(seed_cypher, project_id=project_id):
+            seed = rec.get("seed")
+            break
+        if not seed:
+            return None
+        order: List[str] = [seed]
+        seen = {seed}
+        frontier = [seed]
+        for _ in range(LAPLACIAN_BFS_MAX_HOPS):
+            if not frontier or len(seen) >= LAPLACIAN_BFS_MAX_VISITED:
+                break
+            found = set()
+            for rec in session.run(hop_cypher, project_id=project_id, frontier=frontier):
+                nbr = rec.get("nbr")
+                if nbr and nbr not in seen:
+                    found.add(nbr)
+            frontier = sorted(found)  # deterministic; parents always precede children
+            seen.update(frontier)
+            order.extend(frontier)
+    component_size = len(order)
+    ids = order[:limit]
+    return {
+        "ids": ids,
+        "component_size": component_size,
+        "component_coverage": round(len(ids) / component_size, 6) if component_size else 0.0,
+        "query_cypher": f"{seed_cypher} ;; {hop_cypher}",
+    }
+
+
 def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
     """Resolve the ordered vertex set for the induced subgraph.
 
@@ -1005,10 +1118,18 @@ def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
         )
         run_params = {"project_id": project_id, "q": vertex_set_query, "limit": limit}
     else:
+        # ENC-TSK-R80-0J: default selection samples the giant component (BFS),
+        # not the alphabetically-first ids. If no seed resolves, fall back to the
+        # first ids restricted to non-isolated (degree >= 1) vertices.
+        sampled = _laplacian_giant_component_sample(driver, project_id, limit)
+        if sampled is not None:
+            sampled["sampling"] = "giant_component_bfs"
+            return sampled
         cypher = (
             "MATCH (n) "
             "WHERE n.project_id = $project_id "
             "AND coalesce(n.is_placeholder, false) = false "
+            "AND (n)-[]-() "
             "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
         )
         run_params = {"project_id": project_id, "limit": limit}
@@ -1016,7 +1137,7 @@ def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
     with driver.session() as session:
         result = session.run(cypher, **run_params)
         ids = [rec["rid"] for rec in result if rec.get("rid")]
-    return {"ids": ids, "query_cypher": cypher}
+    return {"ids": ids, "query_cypher": cypher, "sampling": "explicit_or_filtered"}
 
 
 def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
@@ -1178,6 +1299,9 @@ def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
             "n": n,
             "k": k_req,
             "edge_count": len(pairs),
+            "sampling": selection.get("sampling"),
+            "component_size": selection.get("component_size"),
+            "component_coverage": selection.get("component_coverage"),
             "normalization": normalization,
             "formula": formula,
             "weighted": False,
@@ -1866,6 +1990,16 @@ def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
     )
 
 
+KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_title_ft")
+_LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
+
+
+def _lucene_escape(token: str) -> str:
+    """Escape Lucene query syntax characters in a single token; neutralise bare AND/OR/NOT."""
+    esc = "".join("\\" + c if c in _LUCENE_SPECIAL else c for c in token)
+    return esc.lower()
+
+
 def _hybrid_keyword_ranks(
     driver,
     project_id: str,
@@ -1873,16 +2007,19 @@ def _hybrid_keyword_ranks(
     top_n: int,
     record_type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Keyword signal via case-insensitive title/description/intent contains.
+    """Keyword signal over record titles (ENC-TSK-R81-0E, DOC-52FE56D6F529 U2).
 
-    Uses a scoring tiebreaker: title match scores higher than description
-    match. Graceful when the fulltext index is absent — falls back to
-    CONTAINS which is correct (though slower) on a <1k-node corpus.
+    Primary path: ``db.index.fulltext.queryNodes`` on the TITLE-ONLY fulltext
+    index ``governed_record_title_ft`` (tools/neo4j-migrations/002-*). Fallback
+    (index absent / procedure error): title-only per-token CONTAINS scan, which
+    is correct but slower. ``intent`` and ``description`` are not projected onto
+    prod graph nodes and are no longer queried (ruling D-1).
     """
     if not query_text:
         return []
 
     label_filter = ""
+    label = ""
     if record_type_filter:
         label_map = {
             "task": "Task",
@@ -1915,38 +2052,58 @@ def _hybrid_keyword_ranks(
     if not tokens:
         return []
 
+    ft_query = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_cypher = (
+        "CALL db.index.fulltext.queryNodes($index_name, $ft_query) YIELD node, score "
+        "WHERE node.project_id = $project_id "
+        "AND ($label IS NULL OR $label IN labels(node)) "
+        "RETURN node.record_id AS rid, score ORDER BY score DESC LIMIT $limit"
+    )
     cypher = (
         f"MATCH (n{label_filter}) "
         "WHERE n.project_id = $project_id "
-        "AND ANY(t IN $tokens WHERE "
-        "  toLower(coalesce(n.title, '')) CONTAINS t "
-        "  OR toLower(coalesce(n.intent, '')) CONTAINS t "
-        "  OR toLower(coalesce(n.description, '')) CONTAINS t) "
+        "AND ANY(t IN $tokens WHERE toLower(coalesce(n.title, '')) CONTAINS t) "
         "WITH n, reduce(s = 0.0, t IN $tokens | s "
         "  + (CASE WHEN toLower(coalesce(n.title, '')) CONTAINS t THEN 3.0 ELSE 0.0 END) "
-        "  + (CASE WHEN toLower(coalesce(n.intent, '')) CONTAINS t THEN 2.0 ELSE 0.0 END) "
-        "  + (CASE WHEN toLower(coalesce(n.description, '')) CONTAINS t THEN 1.0 ELSE 0.0 END) "
         ") AS score "
         "WHERE score > 0.0 "
         "RETURN n.record_id AS rid, score ORDER BY score DESC LIMIT $limit"
     )
-    ranked: List[Dict[str, Any]] = []
+
+    def _collect(result) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for idx, rec in enumerate(result, start=1):
+            rid = rec.get("rid")
+            if not rid:
+                continue
+            out.append({
+                "record_id": rid,
+                "score": float(rec.get("score") or 0.0),
+                "rank": idx,
+            })
+        return out
+
     try:
         with driver.session() as session:
+            try:
+                return _collect(session.run(
+                    ft_cypher,
+                    index_name=KEYWORD_FULLTEXT_INDEX,
+                    ft_query=ft_query,
+                    project_id=project_id,
+                    label=label or None,
+                    limit=top_n,
+                ))
+            except Exception:
+                logger.warning(
+                    "[INFO] fulltext keyword path unavailable; falling back to title CONTAINS",
+                    exc_info=True,
+                )
             result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
-            for idx, rec in enumerate(result, start=1):
-                rid = rec.get("rid")
-                if not rid:
-                    continue
-                ranked.append({
-                    "record_id": rid,
-                    "score": float(rec.get("score") or 0.0),
-                    "rank": idx,
-                })
+            return _collect(result)
     except Exception:
         logger.exception("[ERROR] keyword signal scoring failed")
         return []
-    return ranked
 
 
 def _rrf_fuse(
@@ -2008,7 +2165,7 @@ def _fetch_nodes_by_record_ids(
         with driver.session() as session:
             result = session.run(cypher, project_id=project_id, rids=record_ids)
             for rec in result:
-                nd = _node_to_dict(rec["n"])
+                nd = _node_to_dict(rec["n"], include_embedding=True)
                 rid = nd.get("record_id")
                 if rid:
                     out[rid] = nd
@@ -2292,6 +2449,39 @@ def _maybe_emit_stigmergic_trace(
         logger.exception("[ERROR] stigmergic trace build failed (suppressed)")
 
 
+_FACET_FIELDS = ("project_id", "record_type", "status", "priority")
+FACETS_SOURCE_FUSED = "fused_candidates"
+
+
+def _facets_from_candidates(
+    nodes: Iterable[Dict[str, Any]], project_id: str = ""
+) -> Dict[str, Dict[str, int]]:
+    """ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): query-relative facet counts.
+
+    Counts {project_id, record_type, status, priority} over the fused candidate
+    set resolved inside _query_hybrid. Pure in-process computation: no outbound
+    request, no feed base. Every facet field is always present (empty dict when
+    the candidate set carries no value for it) so the response shape is stable.
+    """
+    facets: Dict[str, Dict[str, int]] = {f: {} for f in _FACET_FIELDS}
+    for node in nodes:
+        if not node:
+            continue
+        values = {
+            "project_id": node.get("project_id") or project_id,
+            "record_type": node.get("record_type")
+            or next(iter(str(l).lower() for l in (node.get("_labels") or [])), None),
+            "status": node.get("status"),
+            "priority": node.get("priority"),
+        }
+        for field, raw in values.items():
+            if raw in (None, ""):
+                continue
+            key = str(raw)
+            facets[field][key] = facets[field].get(key, 0) + 1
+    return facets
+
+
 def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     """Phase 1 hybrid retrieval: vector + graph + keyword fused via RRF.
 
@@ -2320,6 +2510,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
                               k_corr, b_corr, final_score, final_rank}},
         "corroboration_alpha": 0.02,
         "s_top":             <max fused_score in this call>,
+        "facets":            {project_id|record_type|status|priority: {value: n}}
+                             computed over the fused candidate set (always present),
+        "facets_source":     "fused_candidates",
       }
 
     ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
@@ -2450,10 +2643,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     keyword_ranks: List[Dict[str, Any]] = []
     keyword_available = False
     keyword_source = "unavailable"
-    facets: Dict[str, Dict[str, int]] = {}
-    facets_source: Optional[str] = None
     if query_text:
-        os_ranks, os_facets, os_err = opensearch_keyword.hybrid_keyword_ranks(
+        os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
             project_id,
             query_text,
             top_n=HYBRID_SIGNAL_TOP_N,
@@ -2463,8 +2654,6 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             keyword_ranks = os_ranks
             keyword_available = bool(keyword_ranks)
             keyword_source = "opensearch"
-            facets = os_facets
-            facets_source = "opensearch"
         else:
             logger.warning(
                 "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
@@ -2479,16 +2668,6 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             )
             keyword_available = bool(keyword_ranks)
             keyword_source = "neo4j_fallback"
-            fallback_facets, fb_err = opensearch_keyword.fetch_feed_corpus_facets(
-                project_id=project_id,
-                query_text=query_text,
-                record_type_filter=record_type_filter,
-            )
-            if fallback_facets:
-                facets = fallback_facets
-                facets_source = "feed_corpus"
-            elif fb_err:
-                logger.warning("[WARNING] feed/corpus facet fallback failed: %s", fb_err)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -2553,8 +2732,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             # surfaced for observability parity with energy_lambda_weights.
             "corroboration_alpha": corroboration_alpha,
             "s_top": 0.0,
-            "facets": facets,
-            "facets_source": facets_source,
+            # ENC-TSK-R80-0I: facets are always present; empty candidate set.
+            "facets": _facets_from_candidates([], project_id),
+            "facets_source": FACETS_SOURCE_FUSED,
             "keyword_source": keyword_source,
         }
 
@@ -2566,6 +2746,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+    # ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): facets over the fused candidate set,
+    # in-process. Replaces the OpenSearch aggregations and the prod-to-gamma
+    # feed/corpus HTTP fallback (W0.5 D-2: query-relative, no prod feed base).
+    facets = _facets_from_candidates(
+        (node_by_rid.get(rid) for rid in top_rids), project_id
+    )
 
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
     # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
@@ -2797,7 +2983,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "corroboration_alpha": corroboration_alpha,
         "s_top": s_top,
         "facets": facets,
-        "facets_source": facets_source,
+        "facets_source": FACETS_SOURCE_FUSED,
         "keyword_source": keyword_source,
     }
 # without forcing an import at module load time (deploy packages the helper at
@@ -3118,6 +3304,72 @@ def _project_hybrid_compact(response_body: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _caller_attribution(event: Dict, params: Dict[str, Any]) -> Dict[str, str]:
+    """ENC-TSK-R81-0F: who issued this graphsearch call (best effort, never raises).
+
+    caller_type: 'internal' (service key), 'user' / 'agent' (JWT), 'cookie', 'unknown'.
+    caller: stable id (JWT sub/username/client_id, or a service label). session_id
+    comes from the request params (session_id/agent_session_id/wave_id) or the
+    X-Enceladus-Session / X-Enceladus-Surface headers where present.
+    """
+    caller, caller_type = "unknown", "unknown"
+    surface = ""
+    session_id = _session_id_from_params(params)
+    try:
+        headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+        surface = str(headers.get("x-enceladus-surface") or params.get("surface") or "").strip()
+        if session_id == "unassigned":
+            session_id = str(headers.get("x-enceladus-session") or "").strip() or "unassigned"
+        internal_key = headers.get("x-coordination-internal-key", "").strip()
+        if internal_key and COORDINATION_INTERNAL_API_KEY and internal_key in {
+            COORDINATION_INTERNAL_API_KEY, COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+        }:
+            caller, caller_type = (surface or "internal-service"), "internal"
+        else:
+            claims = _egress_jwt_claims(event)
+            ident = (claims.get("cognito:username") or claims.get("username")
+                     or claims.get("client_id") or claims.get("sub") or "")
+            if ident:
+                caller = str(ident)
+                caller_type = "agent" if claims.get("enc:agent_tier") else "user"
+            elif _has_enceladus_id_token(event):
+                caller, caller_type = "enceladus-cookie", "cookie"
+    except Exception:
+        logger.debug("[DEBUG] caller attribution failed (suppressed)", exc_info=True)
+    return {"caller": caller, "caller_type": caller_type, "surface": surface or "unknown",
+            "session_id": session_id}
+
+
+def _graphsearch_audit_record(
+    event: Dict, qs: Dict[str, Any], search_type: str, project_id: str,
+    result: Dict[str, Any], duration_ms: int,
+) -> Dict[str, Any]:
+    """Build the `graphsearch_query` audit line (ENC-TSK-R81-0F AC-3).
+
+    record_id: the anchor/target record (record_id, else anchor_record_id).
+    empty_neighbors: true when a neighbors query returned nothing beyond the start
+    node, so the empty-neighbors rate can be grouped by `caller` in Logs Insights.
+    """
+    nodes = result.get("nodes", [])
+    record_id = str(qs.get("record_id") or qs.get("anchor_record_id") or "")
+    audit: Dict[str, Any] = {
+        "event": "graphsearch_query",
+        "search_type": search_type,
+        "project_id": project_id,
+        "record_id": record_id,
+        **_caller_attribution(event, qs),
+        "depth": qs.get("depth"),
+        "node_count": len(nodes),
+        "edge_count": len(result.get("edges", [])),
+        "path_count": len(result.get("paths", [])),
+        "duration_ms": duration_ms,
+        "query_cypher": result.get("query_cypher", ""),
+    }
+    if search_type == "neighbors":
+        audit["empty_neighbors"] = len([n for n in nodes if n.get("record_id") != record_id]) == 0
+    return audit
+
+
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
@@ -3170,19 +3422,11 @@ def _handle_search(event: Dict) -> Dict:
     if "error" in result:
         return _error(400, result["error"])
 
-    # Audit log
+    # Audit log (ENC-TSK-R81-0F: carries record_id + caller attribution)
     logger.info(
-        json.dumps({
-            "event": "graphsearch_query",
-            "search_type": search_type,
-            "project_id": project_id,
-            "depth": qs.get("depth"),
-            "node_count": len(result.get("nodes", [])),
-            "edge_count": len(result.get("edges", [])),
-            "path_count": len(result.get("paths", [])),
-            "duration_ms": duration_ms,
-            "query_cypher": result.get("query_cypher", ""),
-        })
+        json.dumps(_graphsearch_audit_record(
+            event, qs, search_type, project_id, result, duration_ms,
+        ))
     )
 
     if search_type != "hybrid":
@@ -3502,6 +3746,25 @@ def _handle_embeddings_for(event: Dict) -> Dict:
     })
 
 
+def _graph_operating_mode(gds_plugin_present: bool, projection: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-TSK-R81-0F (ENC-ISS-541): the graph signal's OPERATING mode, not plugin presence.
+
+    Vocabulary matches hybrid's graph_algorithm: 'gds_pagerank' | 'cypher_fallback'.
+    GDS_HARD_DISABLED (ENC-ISS-465/J41) forces cypher_fallback by policy even when the
+    plugin is installed, so presence alone lies. 'disabled' is reported only when the
+    graph signal cannot run at all (not produced here; reserved for a failed probe).
+    """
+    if _GDS_HARD_DISABLED:
+        return {"mode": "cypher_fallback", "reason": "policy_gds_hard_disabled",
+                "gds_plugin_present": bool(gds_plugin_present)}
+    if gds_plugin_present:
+        warm = bool(projection.get("configured")) and bool(projection.get("exists")) and not projection.get("stale")
+        return {"mode": "gds_pagerank",
+                "reason": "standing_projection" if warm else "per_query_projection",
+                "gds_plugin_present": True}
+    return {"mode": "cypher_fallback", "reason": "gds_plugin_absent", "gds_plugin_present": False}
+
+
 def _handle_health(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch/health.
 
@@ -3533,8 +3796,10 @@ def _handle_health(event: Dict) -> Dict:
         except Exception:
             logger.warning("[WARNING] health vector probe failed", exc_info=True)
         # graph: GDS/AGA plugin reachable (cheap CALL gds.list; no projection build).
+        # ENC-TSK-R81-0F: reported below as the operating MODE, not this boolean.
+        gds_plugin_present = False
         try:
-            signals["graph"] = _check_gds_available(driver)
+            gds_plugin_present = bool(_check_gds_available(driver))
         except Exception:
             logger.warning("[WARNING] health graph probe failed", exc_info=True)
 
@@ -3547,11 +3812,16 @@ def _handle_health(event: Dict) -> Dict:
         except Exception:
             logger.warning("[WARNING] health standing-projection probe failed", exc_info=True)
 
+        graph_mode = _graph_operating_mode(gds_plugin_present, graph_projection)
+        # signals.graph is the operating mode string (truthy == the graph signal runs).
+        signals["graph"] = graph_mode["mode"]
+
         duration_ms = int((time.time() - start) * 1000)
         return _response(200, {
             "status": "healthy",
             "response_ms": duration_ms,
             "signals": signals,
+            "graph_mode": graph_mode,
             "graph_projection": graph_projection,
             "hybrid_fields_compact": True,  # ENC-TSK-Q49
         })
@@ -3743,6 +4013,34 @@ def _handle_close_wave(event: Dict[str, Any]) -> Dict[str, Any]:
         "objects_failed": objects_failed,
         "records_aggregated": len(combined_records),
     })
+
+
+def _init_clients_at_module_load() -> None:
+    """ENC-TSK-R81-0D (U3): warm the Secrets Manager client, Neo4j driver and
+    Bedrock runtime client during the Lambda init phase (full-CPU burst) so a
+    cold invocation does not pay for them serially. Lazy-safe: every step is
+    individually guarded; on any failure the per-invocation getters
+    (_get_neo4j_driver, embedding.get_bedrock_runtime) re-initialise on demand,
+    so a cold start can never crash at import.
+    """
+    try:
+        _get_secretsmanager()
+        _get_neo4j_driver()
+    except Exception:
+        logger.warning("[WARNING] module-load neo4j init failed; falling back to per-invocation init", exc_info=True)
+    try:
+        import embedding as _embedding
+
+        _embedding.get_bedrock_runtime()
+    except Exception:
+        logger.warning("[WARNING] module-load bedrock init failed; falling back to per-invocation init", exc_info=True)
+
+
+if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    try:
+        _init_clients_at_module_load()
+    except Exception:  # never fail import
+        pass
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

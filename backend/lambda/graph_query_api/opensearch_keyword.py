@@ -1,7 +1,8 @@
 """OpenSearch keyword signal + within-search facets for hybrid graphsearch (ENC-TSK-L43).
 
 Reads exclusively via the records_read alias. When OpenSearch is unreachable the
-caller should fall back to Neo4j keyword ranks and feed/corpus facets.
+caller should fall back to Neo4j keyword ranks. Facets are no longer produced here:
+_query_hybrid computes them in-process over the fused candidate set (ENC-TSK-R80-0I).
 """
 from __future__ import annotations
 
@@ -22,7 +23,6 @@ OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "").strip()
 OPENSEARCH_SECRET_NAME = os.environ.get("OPENSEARCH_SECRET_NAME", "").strip()
 OPENSEARCH_USERNAME = os.environ.get("OPENSEARCH_USERNAME", "query").strip() or "query"
 OPENSEARCH_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD", "").strip()
-FEED_API_BASE = os.environ.get("FEED_API_BASE", "https://enceladus-gamma.jreese.net/api/v1/feed").rstrip("/")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "").strip()
 
 SSL_CONTEXT = ssl.create_default_context()
@@ -209,7 +209,9 @@ def hybrid_keyword_ranks(
         query_text,
         top_n=top_n,
         record_type_filter=record_type_filter,
-        include_facets=True,
+        # ENC-TSK-R80-0I: facets are computed over the fused candidate set in
+        # lambda_function._query_hybrid; no aggregation work here.
+        include_facets=False,
     )
     try:
         status, resp = opensearch_request("POST", f"/{READ_ALIAS}/_search", body)
@@ -340,40 +342,3 @@ def feed_selection_msearch(
                 selection[f"{pid}#{rtype}"] = bare_ids
 
     return selection, None
-
-
-def fetch_feed_corpus_facets(
-    *,
-    project_id: str,
-    query_text: str = "",
-    record_type_filter: Optional[str] = None,
-) -> Tuple[Dict[str, Dict[str, int]], Optional[str]]:
-    """Circuit-breaker facet fallback via GET /feed/corpus (ENC-TSK-L23)."""
-    if not COORDINATION_INTERNAL_API_KEY:
-        return {}, "feed_internal_key_missing"
-
-    params: Dict[str, str] = {"limit": "1", "project_id": project_id}
-    if query_text:
-        params["q"] = query_text
-    if record_type_filter:
-        params["record_type"] = record_type_filter
-
-    url = f"{FEED_API_BASE}/corpus?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("X-Coordination-Internal-Key", COORDINATION_INTERNAL_API_KEY)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read())
-    except Exception as exc:
-        logger.warning("[WARNING] feed/corpus facet fallback failed: %s", exc)
-        return {}, str(exc)
-
-    facets = payload.get("facets")
-    if not isinstance(facets, dict):
-        return {}, "feed_corpus_missing_facets"
-    normalized: Dict[str, Dict[str, int]] = {}
-    for field in _FACET_FIELDS:
-        raw = facets.get(field)
-        if isinstance(raw, dict):
-            normalized[field] = {str(k): int(v) for k, v in raw.items()}
-    return normalized, None

@@ -42,7 +42,7 @@ TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 DEFAULT_MAX_DOCS = 5
 
 # ---------------------------------------------------------------------------

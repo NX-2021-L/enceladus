@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GREEN FIXTURE (DVP-TSK-B89): the declare-don't-instantiate pattern. Every C3
+  resource is declared but gated off in non-prod stages, either by a parameter
+  toggle defaulting to false or by a stage comparison that excludes non-prod.
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+  EnableNat:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+Conditions:
+  IsProduction: !Equals [!Ref Environment, "production"]
+  NatEnabled: !Equals [!Ref EnableNat, "true"]
+  ProdAndEnabled: !And [!Condition IsProduction, !Condition NatEnabled]
+Resources:
+  LatentNat:             # parameter toggle, default false
+    Type: AWS::EC2::NatGateway
+    Condition: NatEnabled
+    Properties: {SubnetId: subnet-1, AllocationId: eipalloc-1}
+  ProdOnlyEip:           # stage comparison excluding non-prod
+    Type: AWS::EC2::EIP
+    Condition: IsProduction
+  ProdOnlyDb:            # compound condition
+    Type: AWS::RDS::DBInstance
+    Condition: ProdAndEnabled
+    Properties: {DBInstanceClass: db.t4g.micro, Engine: postgres}
+  GatewayEndpoint:       # Gateway endpoints are free: not a C3 resource
+    Type: AWS::EC2::VPCEndpoint
+    Properties: {VpcEndpointType: Gateway, ServiceName: com.amazonaws.us-west-2.s3, VpcId: vpc-1}

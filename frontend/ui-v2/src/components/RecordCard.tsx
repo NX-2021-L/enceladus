@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
+import { CopyIdButton } from './CopyIdButton'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
 import './recordCard.css'
@@ -70,6 +71,8 @@ export function RecordCard({
         <div className="ev2-rc__feed-top">
           <span className="ev2-rc__feed-ids">
             <RecordId id={recordId} />
+            {/* ENC-FTR-151 AC-1: the card itself is a link/button, so the copy control is a nested span[role=button]. */}
+            <CopyIdButton id={recordId} nested />
             {projectLabel ? <span className="ev2-rc__feed-project">{projectLabel}</span> : null}
           </span>
           {timestamp ? <span className="ev2-rc__feed-time">{timestamp}</span> : null}

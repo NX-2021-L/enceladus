@@ -20,7 +20,7 @@
       "COORDINATION_GSI_IDEMPOTENCY": "idempotency-key-index",
       "COORDINATION_INTERNAL_API_KEY": "dvp-internal-manual-20260220",
       "COORDINATION_TABLE": "coordination-requests",
-      "CORS_ORIGIN": "https://jreese.net",
+      "CORS_ORIGIN": "https://enceladus.jreese.net",
       "DEAD_LETTER_SNS_TOPIC_ARN": "",
       "DEAD_LETTER_TIMEOUT_MULTIPLIER": "2",
       "DEBOUNCE_WINDOW_SECONDS": "180",

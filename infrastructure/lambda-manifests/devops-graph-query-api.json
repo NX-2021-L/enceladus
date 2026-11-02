@@ -11,7 +11,7 @@
       "SECRETS_REGION": "us-west-2",
       "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
       "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
-      "CORS_ORIGIN": "https://jreese.net"
+      "CORS_ORIGIN": "https://enceladus.jreese.net"
     },
     "function_arn": "",
     "handler": "lambda_function.lambda_handler",

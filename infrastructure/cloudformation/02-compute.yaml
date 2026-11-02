@@ -138,7 +138,10 @@ Parameters:
     Default: 6q607dk3liirhtecgps7hifmlk
   CorsOrigin:
     Type: String
-    Default: https://jreese.net
+    Default: ""
+    Description: >
+      ENC-TSK-R82-0F: optional CORS origin override. Empty derives the PWA origin from EnvironmentSuffix
+      (prod https://enceladus.jreese.net, gamma https://enceladus-gamma.jreese.net); jreese.net is no longer an API origin.
   AppBaseUrl:
     Type: String
     Default: "https://enceladus.jreese.net/"
@@ -408,6 +411,7 @@ Conditions:
   HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  HasCorsOrigin: !Not [!Equals [!Ref CorsOrigin, ""]]
   # ENC-TSK-R26: effective feed-publisher flags. ENC-TSK-R48 / ruling P100-R30 (io directive
   # 2026-10-20, no gamma soak): "auto" now resolves ON in BOTH planes; an explicit per_batch /
   # "true" / "false" parameter override is the per-plane rollback switch.
@@ -532,7 +536,7 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           # ENC-TSK-J70 / ENC-FTR-121 Ph3: applyEscalatedMutation lives in
@@ -945,7 +949,7 @@ Resources:
           GITHUB_TOKEN: !If [IsGamma, "disabled-for-gamma", !Ref "AWS::NoValue"]
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          CORS_ORIGIN: https://jreese.net
+          CORS_ORIGIN: !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]
           # ENC-TSK-O43: was an unconditional GAMMA host on BOTH planes. The prod stack
           # does not own this resource today (describe-stack-resource on enceladus-compute
           # returns ValidationError), so the correct prod value is out-of-band drift rather
@@ -1416,7 +1420,7 @@ Resources:
           # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -1707,7 +1711,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           GITHUB_APP_ID: !Ref GitHubAppId
           GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
           GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
@@ -1774,6 +1778,12 @@ Resources:
           CFN_DRIFT_STACKS: "enceladus-data,enceladus-api,enceladus-github-roles,enceladus-monitoring"
           SNAPSTART_MAX_STALE_VERSIONS: "5"
           DRIFT_POLL_TIMEOUT: "240"
+          # ENC-TSK-R83-0B / ENC-FTR-150 AC-9: gamma hands MENTIONS drift to the anomaly-responder
+          # (stable dedupe key). Unset in prod (the responder is gamma-only) -> legacy ENC-ISS path.
+          ANOMALY_RESPONDER_FUNCTION: !If
+            - IsGamma
+            - !Sub "enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+            - !Ref AWS::NoValue
           # ENC-TSK-G43 / ENC-FTR-098 AC-7 — mentions_drift_audit
           TRACKER_TABLE:    !Sub "devops-project-tracker${EnvironmentSuffix}"
           DOCUMENTS_TABLE:  !Sub "documents${EnvironmentSuffix}"
@@ -2103,7 +2113,7 @@ Resources:
           # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -2200,7 +2210,7 @@ Resources:
           TRACKER_API_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COORDINATION_INTERNAL_API_KEY_SCOPES: ""
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
       Tags:
         - Key: Project
           Value: enceladus
@@ -2246,7 +2256,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           USER_PREFERENCES_TABLE: !Sub "user-preferences${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
       Tags:
         - Key: Project
           Value: enceladus
@@ -2404,7 +2414,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-R81-0D (U3): 256 -> 1024 MB
       # ENC-TSK-F36 / ENC-ISS-268: raised from 10s to 180s. Worst-case Bolt
       # pool rebuild after a NAT 350s idle-kill can take ~60-120s; the prior
       # 10s CFN value was shadowed by deploy.sh's 30s update anyway. The
@@ -2430,7 +2440,7 @@ Resources:
           SECRETS_REGION: !Ref AWS::Region
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           # ENC-TSK-F57 AC-2 / ENC-ISS-280: internal-key auth vars added out-of-band to
           # live function during the 2026-04-20 override session (DOC-D45141D94C55). CFN
           # now declares them via parameters so the next stack deploy does not strip the
@@ -2988,6 +2998,198 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-R81-0B (ENC-FTR-150 AC-1/AC-3, ENC-PLN-102 W1.2): SNS anomaly responder.
+  # AWS Cost Anomaly Detection -> SNS topic -> Lambda -> deterministic normalize -> idempotent
+  # governed issue create (dedupe key {source}:{anomaly_id}). Gamma-only until the io-gated
+  # prod promote (FTR-150 AC-11). Cost class C0: Lambda + SNS topic/subscription are pay-per-use,
+  # no always-on resource. Code is managed outside CloudFormation (Gen2 matrix / _deploy.yml).
+  # Wiring the CAD subscription itself (ce:CreateAnomalySubscription, SNS subscriber, IMMEDIATE
+  # frequency) is a separate privileged step; the topic policy below already trusts
+  # costalerts.amazonaws.com for this account.
+  # ---------------------------------------------------------------------------
+  CostAnomalyEventsTopic:
+    Type: AWS::SNS::Topic
+    Condition: IsGamma
+    Properties:
+      TopicName: !Sub "enceladus-cost-anomaly-events${EnvironmentSuffix}"
+      DisplayName: Enceladus Cost Anomaly Detection events
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  CostAnomalyEventsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: IsGamma
+    Properties:
+      Topics:
+        - !Ref CostAnomalyEventsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCostAnomalyDetectionPublish
+            Effect: Allow
+            Principal:
+              Service: costalerts.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref CostAnomalyEventsTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  SnsAnomalyResponderFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+      FunctionName: !Sub "enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - arm64
+      Role: !GetAtt SnsAnomalyResponderRole.Arn
+      Environment:
+        Variables:
+          TRACKER_API_BASE: !If
+            - HasPlaneTrackerApiBase
+            - !Ref PlaneTrackerApiBase
+            - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ANOMALY_SOURCE: aws-cad
+          ANOMALY_DEFAULT_PROJECT: devops
+          CAD_MIN_IMPACT_USD: "1.0"
+          CAD_MIN_IMPACT_PCT: "35"
+          # ENC-TSK-R83-0A (FTR-150 AC-6): async fail-open Bedrock enrichment, advisory fields only.
+          ANOMALY_ENRICHMENT_ENABLED: "true"
+          ANOMALY_ENRICHMENT_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          BEDROCK_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  SnsAnomalyResponderRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-sns-anomaly-responder-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sns-anomaly-responder-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-sns-anomaly-responder${EnvironmentSuffix}:*"
+              # ENC-TSK-R83-0A (cost class C0, pay-per-invoke): enrichment runs off the critical path.
+              # Async self-invoke (Event) -- scoped to this one function; no queue/always-on resource.
+              - Sid: EnrichmentSelfInvoke
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+              # One small model only, via its US inference profile (+ the underlying foundation model
+              # as reached through that profile). Role is gamma-only (Condition: IsGamma).
+              - Sid: EnrichmentBedrockInvoke
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+              # Read-only: the single cost-digest object (W0.1 settled / settled_day / settled_day_spend).
+              - Sid: EnrichmentCostDigestRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/governance/cost-digest/latest.json"
+              # ENC-TSK-R83-0C: weekly fixed-floor digest inventory. Read-only describe/list only;
+              # these APIs have no resource-level scoping. Deliberately NO ce:* (Cost Explorer is
+              # never used for the digest -- DOC-323ED181F51D rule 7).
+              - Sid: CostFloorDigestInventoryRead
+                Effect: Allow
+                Action:
+                  - ec2:DescribeNatGateways
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeInstances
+                  - es:ListDomainNames
+                  - es:DescribeDomains
+                  - rds:DescribeDBInstances
+                  - lightsail:GetInstances
+                  - lightsail:GetStaticIps
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  # Lambda-protocol SNS subscriptions deliver the standard Notification envelope
+  # ({Records:[{Sns:{Message,TopicArn}}]}); the handler unwraps it.
+  SnsAnomalyResponderSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: IsGamma
+    Properties:
+      TopicArn: !Ref CostAnomalyEventsTopic
+      Protocol: lambda
+      Endpoint: !GetAtt SnsAnomalyResponderFunction.Arn
+
+  SnsAnomalyResponderSnsPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref SnsAnomalyResponderFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref CostAnomalyEventsTopic
+
+  # ENC-TSK-R83-0C (ENC-FTR-150 W3.3): weekly fixed-floor magnitude digest. Cost class C1:
+  # one EventBridge rule firing one Lambda invocation per week (pay-per-use, no always-on
+  # resource; no C3). Gamma-scoped like the rest of the responder. Mondays 14:30 UTC.
+  # On-demand run: aws lambda invoke --payload '{"digest_source":"cost-floor"}' (see worklog).
+  CostFloorDigestSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    Properties:
+      Name: !Sub "enceladus-cost-floor-digest-weekly${EnvironmentSuffix}"
+      Description: Weekly fixed-floor magnitude digest (top N C3 resources by list price) via the SNS anomaly responder
+      ScheduleExpression: "cron(30 14 ? * MON *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SnsAnomalyResponderFunction.Arn
+          Id: cost-floor-digest-target
+          Input: '{"digest_source": "cost-floor"}'
+
+  CostFloorDigestSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref SnsAnomalyResponderFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CostFloorDigestSchedule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-R24 (ENC-PLN-100 C1.7, BRD FR-2, rulings A4/A13): Daily Cost Digest producer.
@@ -6321,6 +6523,15 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
+              # ENC-TSK-R83-0B (C0: IAM statement, no resource): invoke the gamma anomaly-responder.
+              - !If
+                - IsGamma
+                - Sid: InvokeAnomalyResponder
+                  Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+                - !Ref AWS::NoValue
               # ENC-TSK-G43 / ENC-FTR-098 AC-7 — mentions_drift_audit needs
               # read access to tracker + documents (base + type-updated-index)
               # to sample recently-mutated records and recompute expected
@@ -8534,7 +8745,7 @@ Resources:
           S3_BUCKET: jreese-net
           S3_GOVERNANCE_HISTORY_PREFIX: governance/history
           S3_GOVERNANCE_PREFIX: governance/live
-          CORS_ORIGIN: https://jreese.net
+          CORS_ORIGIN: https://enceladus-gamma.jreese.net
           ENVIRONMENT_SUFFIX: "-gamma"
           ENCELADUS_MCP_SERVER_PATH: server.py
           ENCELADUS_MCP_TRANSPORT: streamable_http

@@ -318,6 +318,24 @@ class TestAlphaResolution(unittest.TestCase):
         cfg = cb._appconfig_corroboration_config()
         self.assertEqual(cfg, {})
 
+    def test_appconfig_not_fetched_unless_profile_env_set_r80_0c(self):
+        """ENC-ISS-506: no profile env var -> no extension call (no failed sessions)."""
+        with mock.patch.dict("os.environ", {}, clear=False) as _e:
+            import os as _os
+            _os.environ.pop("CORROBORATION_FUNCTION_APPCONFIG_CONFIGURATION", None)
+            with mock.patch("urllib.request.urlopen") as uo:
+                self.assertEqual(cb._appconfig_corroboration_config(), {})
+                uo.assert_not_called()
+
+    def test_appconfig_fetched_when_profile_env_set_r80_0c(self):
+        import io as _io
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = _io.BytesIO(b'{"k": 1}')
+        with mock.patch.dict("os.environ", {"CORROBORATION_FUNCTION_APPCONFIG_CONFIGURATION": "corroboration-function"}):
+            with mock.patch("urllib.request.urlopen", return_value=resp) as uo:
+                self.assertEqual(cb._appconfig_corroboration_config(), {"k": 1})
+                self.assertIn("/configurations/corroboration-function", uo.call_args[0][0])
+
 
 class TestOgtmByConstruction(unittest.TestCase):
     """ENC-FTR-110 AC-5: pure compute + a config read. No new tracker record

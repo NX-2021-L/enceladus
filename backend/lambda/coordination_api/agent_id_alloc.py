@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -95,6 +96,10 @@ __all__ = [
     "list_agent_types",
     "list_credentials",
     "find_agent_type",
+    "canonicalize_agent_type_fields",
+    "canonicalize_surface",
+    "canonicalize_model",
+    "canonicalize_runtime",
     "IdAllocationError",
     "CallerSuppliedIdError",
 ]
@@ -262,6 +267,7 @@ def mint_session_id(
     status: str = "allocated",
     claimed_at: str = "",
     credential_id: str = "",
+    increment_usage: bool = False,
     caller_payload: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mint a server-allocated ENC-SES-NNN and persist the session node. Returns the
@@ -275,6 +281,11 @@ def mint_session_id(
     authenticated with. It is written ONLY when provided, so the frozen value-identity
     shape (``SESSION_NODE_PROPERTIES``) is preserved for the credential-less path; the
     revoke cascade (``revoke_credential``) reaps sessions carrying a bound credential_id.
+
+    ``increment_usage`` (ENC-TSK-R81-0H / ENC-FTR-146 AC-6) makes the mint a two-item
+    TransactWriteItems: the session Put plus ``ADD usage_count 1`` on the ACTIVE agent-type
+    row, so the counter moves if and only if the session row is written (a rejected or
+    raced register never increments).
     """
     _assert_no_caller_id(caller_payload, "session_id")
     if status not in SESSION_STATUSES:
@@ -314,7 +325,10 @@ def mint_session_id(
         if credential_id:
             item["credential_id"] = credential_id
         try:
-            _put_node(AGENT_SESSIONS_TABLE, "session_id", item)
+            if increment_usage:
+                _put_session_and_increment_usage(item, agent_type_id)
+            else:
+                _put_node(AGENT_SESSIONS_TABLE, "session_id", item)
             logger.info("[INFO] Minted session id %s (agent_type=%s)", session_id, agent_type_id)
             return item
         except ClientError as exc:
@@ -325,6 +339,54 @@ def mint_session_id(
     raise IdAllocationError(
         f"Failed minting session id after {_MINT_MAX_ATTEMPTS} attempts: {last_exc}"
     )
+
+
+def usage_increment_update(agent_type_id: str) -> Dict[str, Any]:
+    """TransactWriteItems ``Update`` that ADDs 1 to ``usage_count`` on an ACTIVE agent-type row.
+
+    ``status`` is aliased through ExpressionAttributeNames (ENC-TSK-P89: reserved-word /
+    path collisions in UpdateExpression). ``ADD`` creates the attribute at 1 when absent.
+    """
+    return {
+        "TableName": AGENT_TYPES_TABLE,
+        "Key": {"agent_type_id": _serialize(agent_type_id)},
+        "UpdateExpression": "ADD #uc :one",
+        "ConditionExpression": "attribute_exists(agent_type_id) AND #st = :active",
+        "ExpressionAttributeNames": {"#uc": "usage_count", "#st": "status"},
+        "ExpressionAttributeValues": {":one": _serialize(1), ":active": _serialize("active")},
+    }
+
+
+def _put_session_and_increment_usage(item: Dict[str, Any], agent_type_id: str) -> None:
+    """Atomically write the session node and bump the agent type's usage_count.
+
+    Raises ClientError(ConditionalCheckFailedException) when the SESSION id collided (the
+    mint loop retries) and ValueError when the agent-type row is missing/inactive.
+    """
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": AGENT_SESSIONS_TABLE,
+                "Item": {k: _serialize(v) for k, v in item.items()},
+                "ConditionExpression": "attribute_not_exists(session_id)",
+            }},
+            {"Update": usage_increment_update(agent_type_id)},
+        ])
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            reasons = exc.response.get("CancellationReasons") or []
+            codes = [(r or {}).get("Code") for r in reasons]
+            if len(codes) > 1 and codes[1] == "ConditionalCheckFailed":
+                raise ValueError(
+                    f"agent_type_id {agent_type_id!r} is not an active agent type; "
+                    "session not minted, usage_count unchanged"
+                ) from exc
+            if codes and codes[0] == "ConditionalCheckFailed":
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "session id collision"}},
+                    "TransactWriteItems",
+                ) from exc
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1366,29 +1428,263 @@ def list_agent_types(*, status: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def find_agent_type(*, surface: str, model: str) -> Optional[Dict[str, Any]]:
-    """Scan AGENT_TYPES_TABLE for a node matching surface + model.
+    """Find the agent-type node whose canonical surface + model match the input.
 
-    Returns the first active match (preferring active over deprecated), or
-    None if no match exists. Used by agent.type.register for idempotency:
-    if a type already exists for this surface/model pair, return it rather
-    than minting a duplicate.
+    ENC-TSK-R80-0F: scans ALL pages of AGENT_TYPES_TABLE (the previous filtered scan read
+    only the first page, so a match on a later page minted a duplicate) and compares the
+    canonical normal form of both the request and each stored row, so a spelling variant
+    ("Claude Code CLI") resolves to the existing row. Stored rows are never rewritten.
+
+    Selection among matches is deterministic: active before deprecated, then a row already
+    stored in canonical spelling, then the lowest ENC-AGT sequence. Returns None when no
+    match exists. Used by agent.type.register for idempotency.
     """
+    want = canonicalize_agent_type_fields(surface, model)
     ddb = _get_ddb()
-    scan = ddb.scan(
-        TableName=AGENT_TYPES_TABLE,
-        FilterExpression=(
-            "surface = :surface AND model = :model "
-            "AND NOT begins_with(agent_type_id, :ctr_pfx)"
-        ),
-        ExpressionAttributeValues={
-            ":surface": _serialize(surface),
-            ":model": _serialize(model),
-            ":ctr_pfx": _serialize("counter#"),
-        },
-    )
-    items = [_deserialize(r) for r in scan.get("Items", [])]
-    active = [i for i in items if i.get("status") == "active"]
-    return active[0] if active else (items[0] if items else None)
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_TYPES_TABLE,
+        "FilterExpression": "NOT begins_with(agent_type_id, :ctr_pfx)",
+        "ExpressionAttributeValues": {":ctr_pfx": _serialize("counter#")},
+    }
+    matches: List[Dict[str, Any]] = []
+    while True:
+        page = ddb.scan(**kwargs)
+        for raw in page.get("Items", []):
+            item = _deserialize(raw)
+            have = canonicalize_agent_type_fields(item.get("surface"), item.get("model"))
+            if have["surface"] == want["surface"] and have["model"] == want["model"]:
+                matches.append(item)
+        lek = page.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    if not matches:
+        return None
+
+    def _rank(i: Dict[str, Any]):
+        aid = str(i.get("agent_type_id") or "")
+        exact = i.get("surface") == want["surface"] and i.get("model") == want["model"]
+        return (i.get("status") != "active", not exact, len(aid), aid)
+
+    return sorted(matches, key=_rank)[0]
+
+
+# ---------------------------------------------------------------------------
+# Agent-type / runtime canonical normal form (ENC-TSK-R80-0F / ENC-FTR-146 AC-1..AC-3)
+# ---------------------------------------------------------------------------
+#
+# ONE documented normal form for the free-text surface / model / runtime strings so a
+# spelling variant ("Claude Code CLI", "claude-code-cli", " CLAUDE_CODE_CLI ") resolves to the
+# SAME agent type instead of minting a new ENC-AGT row. Read-side consumers (the devops
+# governance mart, DVP-TSK-788) apply this same function/doc to canonicalize history.
+#
+# Rules (see governance dictionary entity coordination.agent_type_normal_form):
+#   key(x)      = lowercase(strip(x)) with every run of non-[a-z0-9] collapsed to "_" and
+#                 leading/trailing "_" trimmed.
+#   surface     = _SURFACE_CANONICAL[key] when known (alias or live spelling), else key.
+#                 Known canonical spellings are the ones already stored on live ENC-AGT rows
+#                 (e.g. "claude.ai-webui", "cowork-desktop"), so no existing row changes.
+#   model       = lowercase(strip(x)), whitespace/underscore runs -> "-", "-" runs collapsed;
+#                 for "claude-*" models, dots in the version become "-" (claude-opus-5.5 ==
+#                 claude-opus-5-5). Other dots are kept (gpt-5.5-thinking).
+#   runtime     = _RUNTIME_CANONICAL[key] when an alias, else key.
+# Empty / None input yields "".
+_NON_ALNUM_RUN = re.compile(r"[^a-z0-9]+")
+_SEP_RUN = re.compile(r"[\s_]+")
+_DASH_RUN = re.compile(r"-{2,}")
+
+# key -> canonical spelling. Canonical values for pre-existing surfaces keep the spelling
+# already stored on live rows (backward compatible: existing ENC-AGT ids are untouched).
+_SURFACE_CANONICAL: Dict[str, str] = {
+    "claude_code_cli": "claude_code_cli",
+    "claude_code": "claude_code_cli",
+    "claude_code_terminal": "claude_code_cli",
+    "cli": "claude_code_cli",
+    "claude_code_desktop": "claude_code_desktop",
+    "claude_ai_webui": "claude.ai-webui",
+    "cowork_desktop": "cowork-desktop",
+    "codex_terminal": "codex-terminal",
+    "cursor_cloud_agent": "cursor-cloud-agent",
+    "devin_webui": "devin-webui",
+    "chatgpt_native_app": "chatgpt-native-app",
+    "eventbridge_scheduler": "eventbridge-scheduler",
+    "enceladus_recipe_runner": "enceladus-recipe-runner",
+    # ENC-TSK-R82-0A: Lambda responder surface (matches the live prod ENC-AGT-00R row).
+    "sns_anomaly_responder": "sns-anomaly-responder",
+}
+
+_RUNTIME_CANONICAL: Dict[str, str] = {
+    "claude_code_cli": "claude_code_cli",
+    "claude_code": "claude_code_cli",
+    "cli": "claude_code_cli",
+}
+
+
+def _normal_key(value: Any) -> str:
+    return _NON_ALNUM_RUN.sub("_", str(value or "").strip().lower()).strip("_")
+
+
+def canonicalize_surface(value: Any) -> str:
+    """Canonical agent-type surface (see normal-form rules above). '' for empty input."""
+    key = _normal_key(value)
+    return _SURFACE_CANONICAL.get(key, key)
+
+
+def canonicalize_model(value: Any) -> str:
+    """Canonical agent-type model (see normal-form rules above). '' for empty input."""
+    out = _DASH_RUN.sub("-", _SEP_RUN.sub("-", str(value or "").strip().lower())).strip("-")
+    if out.startswith("claude-"):
+        out = out.replace(".", "-")
+    return out
+
+
+def canonicalize_runtime(value: Any) -> str:
+    """Canonical session runtime (see normal-form rules above). '' for empty input."""
+    key = _normal_key(value)
+    return _RUNTIME_CANONICAL.get(key, key)
+
+
+def canonicalize_agent_type_fields(
+    surface: Any, model: Any, runtime: Any = None
+) -> Dict[str, str]:
+    """Single entry point for the agent surface/model/runtime normal form.
+
+    Returns ``{"surface", "model", "runtime"}`` of canonical strings (runtime is ''
+    when not supplied). Pure and idempotent: ``f(f(x)) == f(x)``. Downstream gates
+    (ENC-FTR-146 W1.1 fail-closed register/claim, W1.8 usage_count) import this.
+    """
+    return {
+        "surface": canonicalize_surface(surface),
+        "model": canonicalize_model(model),
+        "runtime": canonicalize_runtime(runtime),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed identity gate (ENC-TSK-R81-0A / ENC-FTR-146 AC-4 / AC-5)
+# ---------------------------------------------------------------------------
+#
+# agent.register / agent.claim accept an agent_type_id ONLY when it names an ACTIVE row in
+# the agent-type directory. Free text ("claude-code", "coord-lead") is rejected, never
+# mapped. surface (agent.type.register) and runtime (agent.register) are closed enums over
+# the W0.6 normal form. The runtime enum was derived from the live agent-sessions table
+# (2026-11-02 scan, 898 rows) so every runtime family in current use still registers; a
+# caller that appends a free-text descriptor ("claude.ai-webui coordination-lead ...") or
+# passes a mapping carrying a "surface" key resolves to its canonical family.
+AGENT_TYPE_ID_PATTERN = re.compile(r"^ENC-AGT-[0-9A-Z]{3,}$")
+
+ALLOWED_SURFACES = frozenset(set(_SURFACE_CANONICAL.values()) | {"test"})
+
+ALLOWED_RUNTIMES = frozenset({
+    "claude_code_cli", "claude_code_cli_subagent", "claude_code_desktop",
+    "claude_code_desktop_subagent", "claude_code_remote", "claude_ai_webui",
+    "cowork_desktop", "cursor", "cursor_desktop", "cursor_cloud_agent", "cursor_webui",
+    "cursor_ide", "cursor_terminal", "cursor_composer", "codex_terminal", "codex_desktop",
+    "devin_webui", "chatgpt_native_app", "recipe_runner", "enceladus_recipe_runner",
+    "eventbridge_scheduler", "claude_agent_sdk", "claude_routine", "test",
+    # ENC-TSK-R82-0A: AWS Lambda-hosted agents (sns-anomaly-responder registers per invocation).
+    "aws_lambda",
+})
+
+# Exact-key aliases (never prefix-matched) -> canonical runtime.
+_RUNTIME_ALIASES: Dict[str, str] = {
+    "claude_code": "claude_code_cli",
+    "cli": "claude_code_cli",
+    "claude_code_terminal": "claude_code_cli",
+    "claude_ai": "claude_ai_webui",
+    "claude_ai_web": "claude_ai_webui",
+    "webui": "claude_ai_webui",
+    "claude_cowork_desktop": "cowork_desktop",
+    "cursor_cloud": "cursor_cloud_agent",
+    "codex": "codex_terminal",
+    "chatgpt": "chatgpt_native_app",
+    "devin": "devin_webui",
+}
+# Longest canonical runtime first so claude_code_cli_subagent_x wins over claude_code_cli.
+_RUNTIME_PREFIX_ORDER = tuple(sorted(ALLOWED_RUNTIMES, key=len, reverse=True))
+_EMBEDDED_SURFACE = re.compile(r"""['"]?surface['"]?\s*[:=]\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+
+
+class AgentFieldRejected(ValueError):
+    """A register/claim/type-register field failed the fail-closed identity gate."""
+
+    def __init__(self, field: str, value: Any, reason: str, message: str,
+                 allowed: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.value = value
+        self.reason = reason
+        self.allowed = allowed or []
+
+
+def _runtime_from_key(key: str) -> str:
+    if key in ALLOWED_RUNTIMES:
+        return key
+    if key in _RUNTIME_ALIASES:
+        return _RUNTIME_ALIASES[key]
+    for canon in _RUNTIME_PREFIX_ORDER:
+        if key.startswith(canon + "_"):
+            return canon
+    return ""
+
+
+def resolve_runtime(value: Any) -> str:
+    """Return the canonical runtime for ``value`` or raise AgentFieldRejected (closed enum)."""
+    if isinstance(value, Mapping):
+        value = value.get("surface") or value.get("runtime") or ""
+    raw = str(value or "")
+    resolved = _runtime_from_key(_normal_key(raw))
+    if not resolved:
+        embedded = _EMBEDDED_SURFACE.search(raw)
+        if embedded:
+            resolved = _runtime_from_key(_normal_key(embedded.group(1)))
+    if not resolved:
+        allowed = sorted(ALLOWED_RUNTIMES)
+        raise AgentFieldRejected(
+            "runtime", raw, "not_in_enum",
+            f"runtime {raw!r} is not an allowed runtime; allowed: {allowed}", allowed,
+        )
+    return resolved
+
+
+def validate_surface(value: Any) -> str:
+    """Return the canonical surface for ``value`` or raise AgentFieldRejected (closed enum)."""
+    surface = canonicalize_surface(value)
+    if surface not in ALLOWED_SURFACES:
+        allowed = sorted(ALLOWED_SURFACES)
+        raise AgentFieldRejected(
+            "surface", str(value or ""), "not_in_enum",
+            f"surface {value!r} is not an allowed surface; allowed: {allowed}", allowed,
+        )
+    return surface
+
+
+def require_active_agent_type(agent_type_id: Any) -> Dict[str, Any]:
+    """FK gate: return the ACTIVE agent-type row for ``agent_type_id`` or raise.
+
+    Free text is rejected before any lookup (never mapped to a row); an unknown or
+    deprecated id is rejected after a consistent read of the directory.
+    """
+    aid = str(agent_type_id or "").strip()
+    if not AGENT_TYPE_ID_PATTERN.match(aid):
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "not_an_agent_type_id",
+            f"agent_type_id {aid!r} is not an ENC-AGT id; free-text agent types are "
+            "rejected, not mapped. Pick an active id from agent.type.list.",
+        )
+    row = get_agent_type(aid)
+    if row is None:
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "unknown",
+            f"agent_type_id {aid!r} does not exist; pick an active id from agent.type.list.",
+        )
+    if row.get("status") != "active":
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "inactive",
+            f"agent_type_id {aid!r} is not active (status={row.get('status')!r}); "
+            "pick an active id from agent.type.list.",
+        )
+    return row
 
 
 # ---------------------------------------------------------------------------

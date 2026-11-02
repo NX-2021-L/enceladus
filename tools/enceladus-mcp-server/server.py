@@ -9447,6 +9447,8 @@ _COST_DIGEST_FIELDS = (
     "prior_day_spend",
     "median_7d",
     "regression",
+    "settled",
+    "settled_day",
     "top_deltas",
     "feed_publisher_invocations",
     "invalidation_paths_mtd",
@@ -9481,6 +9483,9 @@ def _compact_cost_digest(raw: Any) -> Dict[str, Any]:
             continue
         value = raw[field]
         if field == "regression":
+            # ENC-TSK-R80-0D: null = unsettled window (unknown); never coerce it to False.
+            value = None if value is None else bool(value)
+        elif field == "settled":
             value = bool(value)
         elif field == "top_deltas":
             value = list(value)[:_COST_DIGEST_MAX_TOP_DELTAS] if isinstance(value, (list, tuple)) else []
@@ -9657,7 +9662,8 @@ async def _agent_register(args: dict) -> list[TextContent]:
     payload: Dict[str, Any] = {}
     # ENC-TSK-J43: credential_id is an optional binding to an ENC-CRED credential; it is
     # only forwarded when supplied, so omitting it is fully backward-compatible.
-    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id"):
+    # ENC-TSK-R81-0A: dry_run forwards so a dry-run gets the same fail-closed rejection.
+    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id", "dry_run"):
         if args.get(key) is not None:
             payload[key] = args[key]
     result = _coordination_api_request("POST", "/agents/sessions", payload=payload)

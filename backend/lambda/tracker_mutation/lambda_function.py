@@ -159,7 +159,7 @@ _INTERNAL_SCOPE_MAP_RAW = (
     or os.environ.get("ENCELADUS_INTERNAL_API_KEY_SCOPES", "")
 ).strip()
 GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 # ENC-FTR-037: checkout service gate key — only checkout_service Lambda may change task status
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate stores. SCI tokens (minted

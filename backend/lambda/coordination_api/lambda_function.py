@@ -227,7 +227,7 @@ GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 AUTH_TOKENS_TABLE = os.environ.get("AUTH_TOKENS_TABLE", GOVERNANCE_POLICIES_TABLE)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 # ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
@@ -17223,6 +17223,45 @@ def _handle_agent_credential_revoke(credential_id: str, event: Dict[str, Any]) -
 # ENC-TSK-I38 — Agent identity handlers (agent.*) — ported to v4/main by ENC-TSK-J43
 # ---------------------------------------------------------------------------
 
+def _agent_field_problem(exc: "_agent_id_alloc.AgentFieldRejected") -> Dict[str, Any]:
+    """RFC 9457 problem response for a fail-closed identity-gate rejection (ENC-TSK-R81-0A)."""
+    is_fk = exc.field == "agent_type_id"
+    status = 422 if is_fk else 400
+    slug = "agent-type-not-active" if is_fk else f"{exc.field}-not-in-enum"
+    ext: Dict[str, Any] = {
+        "type": f"https://jreese.net/enceladus/problems/{slug}",
+        "title": "agent_type_id is not an active agent type" if is_fk else f"{exc.field} is not an allowed value",
+        "status": status,
+        "detail": str(exc),
+        "field": exc.field,
+        "reason": exc.reason,
+        exc.field: exc.value,
+    }
+    if is_fk:
+        ext["see"] = {"action": "agent.type.list", "endpoint": "GET /api/v1/coordination/agents/types"}
+    else:
+        ext["allowed"] = list(exc.allowed)
+    resp = _error(status, str(exc), code="AGENT_TYPE_NOT_ACTIVE" if is_fk else "INVALID_ENUM", retryable=False, **ext)
+    resp["headers"]["Content-Type"] = "application/problem+json"
+    return resp
+
+
+def _agent_register_gate(agent_type_id: str, runtime: Any) -> Tuple[Optional[Dict[str, Any]], str]:
+    """ENC-TSK-R81-0A / ENC-FTR-146 AC-4/5: fail-closed FK + runtime enum gate for agent.register.
+
+    Returns (problem_response, "") on rejection, else (None, canonical_runtime). A directory
+    read failure fails closed (5xx), never open.
+    """
+    try:
+        _agent_id_alloc.require_active_agent_type(agent_type_id)
+        return None, _agent_id_alloc.resolve_runtime(runtime)
+    except _agent_id_alloc.AgentFieldRejected as exc:
+        return _agent_field_problem(exc), ""
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] agent-type FK gate read failed: %s", exc)
+        return _error(500, "Agent-type directory read failed; registration refused"), ""
+
+
 def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/agents/sessions — mint a new ENC-SES-NNN session."""
     body = _json_body(event) or {}
@@ -17241,6 +17280,14 @@ def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]
         return _error(400, "runtime is required", retryable=False)
     if status not in _agent_id_alloc.SESSION_STATUSES:
         return _error(400, f"status must be one of {list(_agent_id_alloc.SESSION_STATUSES)}", retryable=False)
+    gate_error, runtime = _agent_register_gate(agent_type_id, body.get("runtime"))
+    if gate_error:
+        return gate_error
+    if body.get("dry_run"):
+        return _response(200, {"dry_run": True, "would_register": {
+            "agent_type_id": agent_type_id, "runtime": runtime,
+            "parent_session_id": parent_session_id, "status": status,
+        }})
     try:
         item = _agent_id_alloc.mint_session_id(
             agent_type_id=agent_type_id,
@@ -17248,6 +17295,7 @@ def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]
             parent_session_id=parent_session_id,
             status=status,
             credential_id=credential_id,
+            increment_usage=True,  # ENC-TSK-R81-0H / FTR-146 AC-6: atomic usage_count ADD
             caller_payload=body,
         )
     except _agent_id_alloc.CallerSuppliedIdError as exc:
@@ -17268,6 +17316,16 @@ def _handle_agent_session_claim(event: Dict[str, Any], claims: Dict[str, Any]) -
     expected_agent_type_id = str(body.get("expected_agent_type_id") or "").strip() or None
     if not session_id:
         return _error(400, "session_id is required", retryable=False)
+    # ENC-TSK-R81-0A: a caller-supplied agent_type_id is FK-gated. The stored agent_type_id of
+    # a session minted before the gate is NOT re-validated, so pre-gate allocations still claim.
+    if expected_agent_type_id:
+        try:
+            _agent_id_alloc.require_active_agent_type(expected_agent_type_id)
+        except _agent_id_alloc.AgentFieldRejected as exc:
+            return _agent_field_problem(exc)
+        except (BotoCoreError, ClientError) as exc:
+            logger.exception("[ERROR] agent-type FK gate read failed: %s", exc)
+            return _error(500, "Agent-type directory read failed; claim refused")
     try:
         item = _agent_id_alloc.claim_session(session_id, expected_agent_type_id=expected_agent_type_id)
     except ValueError as exc:
@@ -17409,11 +17467,21 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     body = _json_body(event) or {}
     if body.get("agent_type_id"):
         return _error(400, "agent_type_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
-    surface = str(body.get("surface") or "").strip()
-    model = str(body.get("model") or "").strip()
+    # ENC-TSK-R80-0F / ENC-FTR-146: canonicalize surface/model(/runtime) to the documented
+    # normal form so spelling variants resolve to one agent type; surface is then a closed
+    # enum (ENC-TSK-R81-0A).
+    _nf = _agent_id_alloc.canonicalize_agent_type_fields(
+        body.get("surface"), body.get("model"), body.get("runtime")
+    )
+    surface = _nf["surface"]
+    model = _nf["model"]
     cost_tier = str(body.get("cost_tier") or "").strip()
     if not surface:
         return _error(400, "surface is required", retryable=False)
+    try:
+        _agent_id_alloc.validate_surface(surface)  # ENC-TSK-R81-0A: closed surface enum
+    except _agent_id_alloc.AgentFieldRejected as exc:
+        return _agent_field_problem(exc)
     if not model:
         return _error(400, "model is required", retryable=False)
     if not cost_tier:
@@ -17421,7 +17489,7 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     try:
         existing = _agent_id_alloc.find_agent_type(surface=surface, model=model)
         if existing:
-            return _response(200, {"agent_type": existing, "created": False})
+            return _response(200, {"agent_type": existing, "created": False, "normal_form": _nf})
         item = _agent_id_alloc.mint_agent_type_id(
             surface=surface,
             model=model,
@@ -17436,7 +17504,7 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     except (BotoCoreError, ClientError) as exc:
         logger.exception("[ERROR] agent_type register DDB error: %s", exc)
         return _error(500, "DynamoDB error during agent type registration")
-    return _response(201, {"agent_type": item, "created": True})
+    return _response(201, {"agent_type": item, "created": True, "normal_form": _nf})
 
 
 def _handle_auth_tokens_create(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -18908,6 +18976,9 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return _handle_escalation_watch(event, claims or {})
 
     # DVP-TSK-A23 (E4-R29..R32): escalation web push — approver-only notification routes.
+    # ENC-TSK-R82-0A (ENC-FTR-150 AC-4): service-credential anomaly push (sns-anomaly-responder).
+    if method == "POST" and path == "/api/v1/coordination/notifications/anomaly":
+        return notify_v2.handle_anomaly_push(sys.modules[__name__], event, claims or {})
     if path.startswith("/api/v1/coordination/notifications/"):
         return notify_v2.handle(sys.modules[__name__], method, path, event, claims or {})
 

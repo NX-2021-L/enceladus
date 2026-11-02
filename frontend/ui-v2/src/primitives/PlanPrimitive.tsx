@@ -5,7 +5,7 @@ import { ContextNodeBadges } from '../components/ContextNodeBadges'
 import { ActiveSessionChip, CategoryChip, CheckoutChip, ComponentChips, PriorityChip } from '../components/ChipRow'
 import { PlanGraphExplorer } from '../components/PlanGraphExplorer'
 import { MetaRow, Metric, Prose, SectionHeading } from '../components/PrimitiveCard'
-import { NeighborsTab, RecordDetailHub, WorklogTab, useRecordHubTabJump } from '../components/RecordDetailHub'
+import { CheckoutVitalValue, NeighborsTab, RecordDetailHub, WorklogTab, useRecordHubTabJump } from '../components/RecordDetailHub'
 import { isCheckedOut } from '../utils/transitionArcs'
 
 export function PlanPrimitive({ record }: { record: Plan }) {
@@ -17,7 +17,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
     { label: 'Category', value: record.category ?? 'Uncategorized' },
     ...(record.transition_type ? [{ label: 'Transition type', value: record.transition_type }] : []),
     ...(record.checked_out_by
-      ? [{ label: 'Checkout', value: `${record.checked_out_by} (${record.checkout_state ?? 'checked_out'})` }]
+      ? [{ label: 'Checkout', value: <CheckoutVitalValue by={record.checked_out_by} state={record.checkout_state} /> }]
       : []),
   ]
 
@@ -49,6 +49,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
         status: record.status,
         checkedOut,
         syncVersion: record.sync_version,
+        metadata: record as unknown as Record<string, unknown>,
       }}
       actions={record.github_issue_url ? [{ label: 'GitHub ↗', href: record.github_issue_url }] : []}
       overview={

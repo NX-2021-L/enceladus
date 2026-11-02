@@ -63,7 +63,7 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_REFERENCE_PREFIX = os.environ.get("S3_REFERENCE_PREFIX", "mobile/v1/reference")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 
 MAX_RESULTS_CAP = 100
 MAX_CONTEXT_LINES = 10

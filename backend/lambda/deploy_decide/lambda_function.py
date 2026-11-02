@@ -56,7 +56,7 @@ DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
 DEPLOY_REGION = os.environ.get("DEPLOY_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 
 # GitHub App config (for merge/retarget/close API calls)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")

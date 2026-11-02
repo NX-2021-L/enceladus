@@ -28,8 +28,21 @@ Flagged additions (one finding line each):
                                        gamma (literal Active, or Fn::If whose gamma
                                        branch is Active)
 
+Non-prod latent-capability gate (DVP-TSK-B89, CG-6 extension; --scan-nonprod):
+a separate full-template scan (not a diff). In every template that has a stage
+axis (an EnvironmentSuffix / Environment / Stage style parameter) each C3
+resource from NONPROD_C3_TYPES must be behind a Condition that evaluates FALSE
+for every non-production binding of the stage parameters (other parameters at
+their Default). That covers a toggle parameter defaulting to "false" and a
+stage comparison such as IsProduction; a resource with no Condition, or whose
+Condition is true/unresolvable in non-prod (for example IsGamma), FAILS.
+Pattern: declare the capability, do not instantiate it (DOC-323ED181F51D 3.2).
+Known live findings live in tools/cost_resource_guard_nonprod_allowlist.json
+with a dated reason. The cost-approved label does not bypass this scan.
+
 Usage:
   cost_resource_guard.py --base <sha> --head <sha> [--cost-approved]
+  cost_resource_guard.py --scan-nonprod [--scan-root DIR] [--allowlist FILE]
   cost_resource_guard.py --base-file old.yaml --head-file new.yaml
 Environment: COST_APPROVED=true is equivalent to --cost-approved.
 
@@ -326,6 +339,189 @@ def find_findings(base_tpl: dict, head_tpl: dict, file: str = "<template>") -> L
     return out
 
 
+# --------------------------------------------------------------------------
+# Non-prod latent-capability gate (DVP-TSK-B89)
+# --------------------------------------------------------------------------
+# C3 (persistent, monthly-billed) types the gate covers. Deliberately a small
+# explicit list: the always-on, big-ticket resources. Neo4j/Aura is not a
+# CloudFormation resource and is out of scope. The diff guard above still covers
+# the long tail (secrets, KMS, alarms, tables, ...) at add time.
+NONPROD_C3_TYPES = {
+    "AWS::EC2::NatGateway": None,
+    "AWS::EC2::EIP": None,
+    "AWS::EC2::VPCEndpoint": _rule_vpc_endpoint,  # Interface endpoints only; Gateway is free
+    "AWS::EC2::Instance": None,
+    "AWS::RDS::DBInstance": None,
+    "AWS::RDS::DBCluster": None,
+    "AWS::OpenSearchService::Domain": None,
+    "AWS::Elasticsearch::Domain": None,
+    "AWS::OpenSearchServerless::Collection": None,
+    "AWS::ElastiCache::CacheCluster": None,
+    "AWS::ElastiCache::ReplicationGroup": None,
+    "AWS::MemoryDB::Cluster": None,
+    "AWS::Redshift::Cluster": None,
+    "AWS::Lightsail::Instance": None,
+    "AWS::Lightsail::Database": None,
+}
+STAGE_PARAMS = ("EnvironmentSuffix", "Environment", "Stage", "EnvName", "EnvironmentName", "DeployStage")
+PROD_VALUES = {"", "production", "prod", "live"}
+NONPROD_FALLBACK = {"Suffix": "-gamma"}
+NONPROD_ALLOWLIST = "tools/cost_resource_guard_nonprod_allowlist.json"
+NONPROD_ROOT = "infrastructure/cloudformation"
+
+
+def _norm(v: Any) -> Optional[str]:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (str, int, float)):
+        return str(v).strip().lower() if str(v).strip().lower() in ("true", "false") else str(v)
+    return None
+
+
+def _cond_value(node: Any, tpl: dict, binding: dict) -> Optional[str]:
+    if isinstance(node, dict) and set(node) == {"Ref"}:
+        name = node["Ref"]
+        if name in binding:
+            return _norm(binding[name])
+        p = (tpl.get("Parameters") or {}).get(name)
+        if isinstance(p, dict) and "Default" in p:
+            return _norm(p["Default"])
+        return None
+    return _norm(node)
+
+
+def eval_condition(node: Any, tpl: dict, binding: dict, _seen: tuple = ()) -> Optional[bool]:
+    """Three-valued CFN condition evaluation (True / False / None=unresolvable)."""
+    if isinstance(node, str):  # a named condition
+        if node in _seen:
+            return None
+        body = (tpl.get("Conditions") or {}).get(node)
+        return None if body is None else eval_condition(body, tpl, binding, _seen + (node,))
+    if not isinstance(node, dict) or len(node) != 1:
+        return None
+    (key, arg), = node.items()
+    if key in ("Condition", "Fn::Condition"):  # `!Condition X` loads as Fn::Condition
+        return eval_condition(arg, tpl, binding, _seen)
+    if key == "Fn::Equals" and isinstance(arg, list) and len(arg) == 2:
+        a, b = _cond_value(arg[0], tpl, binding), _cond_value(arg[1], tpl, binding)
+        return None if a is None or b is None else a == b
+    if key == "Fn::Not" and isinstance(arg, list) and len(arg) == 1:
+        v = eval_condition(arg[0], tpl, binding, _seen)
+        return None if v is None else not v
+    if key in ("Fn::And", "Fn::Or") and isinstance(arg, list):
+        vals = [eval_condition(x, tpl, binding, _seen) for x in arg]
+        decisive = False if key == "Fn::And" else True
+        if any(v is decisive for v in vals):
+            return decisive
+        return None if any(v is None for v in vals) else (not decisive)
+    return None
+
+
+def nonprod_bindings(tpl: dict) -> List[dict]:
+    """Bindings that put every stage parameter in a non-production value.
+    [] when the template has no stage axis (single-stage template: out of scope)."""
+    params = tpl.get("Parameters") or {}
+    axes = {}
+    for name in STAGE_PARAMS:
+        p = params.get(name)
+        if not isinstance(p, dict):
+            continue
+        allowed = [str(v) for v in (p.get("AllowedValues") or [])]
+        vals = [v for v in allowed if v.strip().lower() not in PROD_VALUES]
+        if not vals:
+            vals = ["-gamma" if name.endswith("Suffix") else "gamma"]
+        axes[name] = vals
+    bindings: List[dict] = [{}]
+    for name, vals in axes.items():
+        bindings = [{**b, name: v} for b in bindings for v in vals]
+    return bindings if axes else []
+
+
+def find_nonprod_ungated(tpl: dict, file: str = "<template>") -> List[Finding]:
+    bindings = nonprod_bindings(tpl)
+    out: List[Finding] = []
+    if not bindings:
+        return out
+    for logical_id, res in _resources(tpl).items():
+        if not isinstance(res, dict) or res.get("Type") not in NONPROD_C3_TYPES:
+            continue
+        pred = NONPROD_C3_TYPES[res["Type"]]
+        if pred is not None and not pred(res, tpl):
+            continue  # e.g. Gateway VPC endpoint
+        cond = res.get("Condition")
+        if cond is None:
+            why = "no Condition: instantiated in every non-prod stage"
+        else:
+            states = [eval_condition(cond, tpl, b) for b in bindings]
+            if all(s is False for s in states):
+                continue  # gated: declared, not instantiated in non-prod
+            why = (f"Condition {cond} is "
+                   f"{'unresolvable' if any(s is None for s in states) else 'true'} in a non-prod stage")
+        out.append((file, logical_id, str(res["Type"]),
+                    f"C3 resource not gated off in non-prod ({why}); gate it behind a stage-scoped "
+                    f"Condition defaulting to false (declare, do not instantiate)"))
+    return out
+
+
+def load_allowlist(path: Optional[str]) -> dict:
+    import json
+    if not path or not Path(path).is_file():
+        return {}
+    entries = json.loads(Path(path).read_text()).get("entries", [])
+    return {(e["file"], e["logical_id"]): e for e in entries}
+
+
+def scan_nonprod(root: str, repo_root: str = ".", allowlist: Optional[dict] = None) -> Tuple[List[Finding], List[Tuple[Finding, dict]], List[str]]:
+    """(failures, allow-listed, warnings) across every template under root."""
+    allowlist = allowlist or {}
+    failures: List[Finding] = []
+    allowed: List[Tuple[Finding, dict]] = []
+    warnings: List[str] = []
+    base = Path(repo_root)
+    hit = set()
+    for p in sorted((base / root).rglob("*")):
+        if not p.is_file() or not p.name.endswith(TEMPLATE_SUFFIXES):
+            continue
+        rel = p.relative_to(base).as_posix()
+        try:
+            tpl = load_template_text(p.read_text())
+        except yaml.YAMLError as exc:
+            warnings.append(f"{rel}: unparseable ({type(exc).__name__}); skipped")
+            continue
+        if not tpl:
+            continue
+        for f in find_nonprod_ungated(tpl, rel):
+            entry = allowlist.get((f[0], f[1]))
+            if entry:
+                hit.add((f[0], f[1]))
+                allowed.append((f, entry))
+            else:
+                failures.append(f)
+    for key in sorted(set(allowlist) - hit):
+        warnings.append(f"stale allow-list entry {key[0]}:{key[1]} (resource gone or now gated); remove it")
+    return failures, allowed, warnings
+
+
+def run_scan(failures, allowed, warnings, annotate: bool = False, out=None) -> int:
+    out = out or sys.stdout
+    for w in warnings:
+        print(f"WARN {w}", file=out)
+    for f, e in allowed:
+        print(f"ALLOWED {f[0]}: {f[1]} ({f[2]}) since {e.get('added', '?')}: {e.get('reason', '')}", file=out)
+    for f in failures:
+        if annotate:
+            print(f"::error file={f[0]},title=cost-resource-guard-nonprod::FAIL {f[1]} ({f[2]}): {f[3]}", file=out)
+        else:
+            print(f"FAIL {f[0]}: {f[1]} ({f[2]}): {f[3]}", file=out)
+    if failures:
+        print(f"cost-resource-guard --scan-nonprod: {len(failures)} ungated non-prod C3 resource(s); "
+              f"{len(allowed)} allow-listed", file=out)
+        return 1
+    print(f"cost-resource-guard --scan-nonprod: OK, all non-prod C3 resources gated "
+          f"({len(allowed)} allow-listed)", file=out)
+    return 0
+
+
 def _git(args: List[str], cwd: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
 
@@ -397,11 +593,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--base-file", help="old template file (single-pair mode)")
     ap.add_argument("--head-file", help="new template file (single-pair mode)")
     ap.add_argument("--repo-root", default=".")
+    ap.add_argument("--scan-nonprod", action="store_true",
+                    help="full scan: C3 resources must be gated off in non-prod stages (DVP-TSK-B89)")
+    ap.add_argument("--scan-root", default=NONPROD_ROOT, help="template directory for --scan-nonprod")
+    ap.add_argument("--allowlist", default=NONPROD_ALLOWLIST, help="allow-list JSON for --scan-nonprod")
     ap.add_argument("--cost-approved", action="store_true",
                     help=f"PR carries the '{APPROVAL_LABEL}' label (also env COST_APPROVED=true)")
     args = ap.parse_args(argv)
     approved = args.cost_approved or os.environ.get("COST_APPROVED", "").strip().lower() == "true"
     annotate = os.environ.get("GITHUB_ACTIONS") == "true"
+    if args.scan_nonprod:
+        try:
+            allow = load_allowlist(str(Path(args.repo_root) / args.allowlist))
+            return run_scan(*scan_nonprod(args.scan_root, args.repo_root, allow), annotate=annotate)
+        except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+            print(f"::error::cost-resource-guard --scan-nonprod could not run: {exc}")
+            return 2
     try:
         if args.head_file:
             base_tpl = load_template_text(Path(args.base_file).read_text()) if args.base_file else {}

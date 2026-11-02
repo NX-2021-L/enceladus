@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": CORS_ORIGIN,
     "Access-Control-Allow-Headers": "Content-Type,Authorization,Cookie",
