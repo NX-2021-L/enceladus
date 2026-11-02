@@ -119,6 +119,7 @@ function_name_map:
   recompute_governance: devops-recompute-governance
   reference_search: devops-reference-search
   scoring_service: enceladus-scoring-service
+  sns_anomaly_responder: enceladus-sns-anomaly-responder
   stale_checkout_monitor: enceladus-stale-checkout-monitor
   titan_embedding_backfill: devops-titan-embedding-backfill
   tracker_mutation: devops-tracker-mutation-api
