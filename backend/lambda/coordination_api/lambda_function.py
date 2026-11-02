@@ -17409,8 +17409,13 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     body = _json_body(event) or {}
     if body.get("agent_type_id"):
         return _error(400, "agent_type_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
-    surface = str(body.get("surface") or "").strip()
-    model = str(body.get("model") or "").strip()
+    # ENC-TSK-R80-0F / ENC-FTR-146: canonicalize surface/model(/runtime) to the documented
+    # normal form so spelling variants resolve to one agent type (no fail-closed here).
+    _nf = _agent_id_alloc.canonicalize_agent_type_fields(
+        body.get("surface"), body.get("model"), body.get("runtime")
+    )
+    surface = _nf["surface"]
+    model = _nf["model"]
     cost_tier = str(body.get("cost_tier") or "").strip()
     if not surface:
         return _error(400, "surface is required", retryable=False)
@@ -17421,7 +17426,7 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     try:
         existing = _agent_id_alloc.find_agent_type(surface=surface, model=model)
         if existing:
-            return _response(200, {"agent_type": existing, "created": False})
+            return _response(200, {"agent_type": existing, "created": False, "normal_form": _nf})
         item = _agent_id_alloc.mint_agent_type_id(
             surface=surface,
             model=model,
@@ -17436,7 +17441,7 @@ def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -
     except (BotoCoreError, ClientError) as exc:
         logger.exception("[ERROR] agent_type register DDB error: %s", exc)
         return _error(500, "DynamoDB error during agent type registration")
-    return _response(201, {"agent_type": item, "created": True})
+    return _response(201, {"agent_type": item, "created": True, "normal_form": _nf})
 
 
 def _handle_auth_tokens_create(event: Dict[str, Any]) -> Dict[str, Any]:

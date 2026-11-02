@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -95,6 +96,10 @@ __all__ = [
     "list_agent_types",
     "list_credentials",
     "find_agent_type",
+    "canonicalize_agent_type_fields",
+    "canonicalize_surface",
+    "canonicalize_model",
+    "canonicalize_runtime",
     "IdAllocationError",
     "CallerSuppliedIdError",
 ]
@@ -1366,29 +1371,134 @@ def list_agent_types(*, status: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def find_agent_type(*, surface: str, model: str) -> Optional[Dict[str, Any]]:
-    """Scan AGENT_TYPES_TABLE for a node matching surface + model.
+    """Find the agent-type node whose canonical surface + model match the input.
 
-    Returns the first active match (preferring active over deprecated), or
-    None if no match exists. Used by agent.type.register for idempotency:
-    if a type already exists for this surface/model pair, return it rather
-    than minting a duplicate.
+    ENC-TSK-R80-0F: scans ALL pages of AGENT_TYPES_TABLE (the previous filtered scan read
+    only the first page, so a match on a later page minted a duplicate) and compares the
+    canonical normal form of both the request and each stored row, so a spelling variant
+    ("Claude Code CLI") resolves to the existing row. Stored rows are never rewritten.
+
+    Selection among matches is deterministic: active before deprecated, then a row already
+    stored in canonical spelling, then the lowest ENC-AGT sequence. Returns None when no
+    match exists. Used by agent.type.register for idempotency.
     """
+    want = canonicalize_agent_type_fields(surface, model)
     ddb = _get_ddb()
-    scan = ddb.scan(
-        TableName=AGENT_TYPES_TABLE,
-        FilterExpression=(
-            "surface = :surface AND model = :model "
-            "AND NOT begins_with(agent_type_id, :ctr_pfx)"
-        ),
-        ExpressionAttributeValues={
-            ":surface": _serialize(surface),
-            ":model": _serialize(model),
-            ":ctr_pfx": _serialize("counter#"),
-        },
-    )
-    items = [_deserialize(r) for r in scan.get("Items", [])]
-    active = [i for i in items if i.get("status") == "active"]
-    return active[0] if active else (items[0] if items else None)
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_TYPES_TABLE,
+        "FilterExpression": "NOT begins_with(agent_type_id, :ctr_pfx)",
+        "ExpressionAttributeValues": {":ctr_pfx": _serialize("counter#")},
+    }
+    matches: List[Dict[str, Any]] = []
+    while True:
+        page = ddb.scan(**kwargs)
+        for raw in page.get("Items", []):
+            item = _deserialize(raw)
+            have = canonicalize_agent_type_fields(item.get("surface"), item.get("model"))
+            if have["surface"] == want["surface"] and have["model"] == want["model"]:
+                matches.append(item)
+        lek = page.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    if not matches:
+        return None
+
+    def _rank(i: Dict[str, Any]):
+        aid = str(i.get("agent_type_id") or "")
+        exact = i.get("surface") == want["surface"] and i.get("model") == want["model"]
+        return (i.get("status") != "active", not exact, len(aid), aid)
+
+    return sorted(matches, key=_rank)[0]
+
+
+# ---------------------------------------------------------------------------
+# Agent-type / runtime canonical normal form (ENC-TSK-R80-0F / ENC-FTR-146 AC-1..AC-3)
+# ---------------------------------------------------------------------------
+#
+# ONE documented normal form for the free-text surface / model / runtime strings so a
+# spelling variant ("Claude Code CLI", "claude-code-cli", " CLAUDE_CODE_CLI ") resolves to the
+# SAME agent type instead of minting a new ENC-AGT row. Read-side consumers (the devops
+# governance mart, DVP-TSK-788) apply this same function/doc to canonicalize history.
+#
+# Rules (see governance dictionary entity coordination.agent_type_normal_form):
+#   key(x)      = lowercase(strip(x)) with every run of non-[a-z0-9] collapsed to "_" and
+#                 leading/trailing "_" trimmed.
+#   surface     = _SURFACE_CANONICAL[key] when known (alias or live spelling), else key.
+#                 Known canonical spellings are the ones already stored on live ENC-AGT rows
+#                 (e.g. "claude.ai-webui", "cowork-desktop"), so no existing row changes.
+#   model       = lowercase(strip(x)), whitespace/underscore runs -> "-", "-" runs collapsed;
+#                 for "claude-*" models, dots in the version become "-" (claude-opus-5.5 ==
+#                 claude-opus-5-5). Other dots are kept (gpt-5.5-thinking).
+#   runtime     = _RUNTIME_CANONICAL[key] when an alias, else key.
+# Empty / None input yields "".
+_NON_ALNUM_RUN = re.compile(r"[^a-z0-9]+")
+_SEP_RUN = re.compile(r"[\s_]+")
+_DASH_RUN = re.compile(r"-{2,}")
+
+# key -> canonical spelling. Canonical values for pre-existing surfaces keep the spelling
+# already stored on live rows (backward compatible: existing ENC-AGT ids are untouched).
+_SURFACE_CANONICAL: Dict[str, str] = {
+    "claude_code_cli": "claude_code_cli",
+    "claude_code": "claude_code_cli",
+    "claude_code_terminal": "claude_code_cli",
+    "cli": "claude_code_cli",
+    "claude_code_desktop": "claude_code_desktop",
+    "claude_ai_webui": "claude.ai-webui",
+    "cowork_desktop": "cowork-desktop",
+    "codex_terminal": "codex-terminal",
+    "cursor_cloud_agent": "cursor-cloud-agent",
+    "devin_webui": "devin-webui",
+    "chatgpt_native_app": "chatgpt-native-app",
+    "eventbridge_scheduler": "eventbridge-scheduler",
+    "enceladus_recipe_runner": "enceladus-recipe-runner",
+}
+
+_RUNTIME_CANONICAL: Dict[str, str] = {
+    "claude_code_cli": "claude_code_cli",
+    "claude_code": "claude_code_cli",
+    "cli": "claude_code_cli",
+}
+
+
+def _normal_key(value: Any) -> str:
+    return _NON_ALNUM_RUN.sub("_", str(value or "").strip().lower()).strip("_")
+
+
+def canonicalize_surface(value: Any) -> str:
+    """Canonical agent-type surface (see normal-form rules above). '' for empty input."""
+    key = _normal_key(value)
+    return _SURFACE_CANONICAL.get(key, key)
+
+
+def canonicalize_model(value: Any) -> str:
+    """Canonical agent-type model (see normal-form rules above). '' for empty input."""
+    out = _DASH_RUN.sub("-", _SEP_RUN.sub("-", str(value or "").strip().lower())).strip("-")
+    if out.startswith("claude-"):
+        out = out.replace(".", "-")
+    return out
+
+
+def canonicalize_runtime(value: Any) -> str:
+    """Canonical session runtime (see normal-form rules above). '' for empty input."""
+    key = _normal_key(value)
+    return _RUNTIME_CANONICAL.get(key, key)
+
+
+def canonicalize_agent_type_fields(
+    surface: Any, model: Any, runtime: Any = None
+) -> Dict[str, str]:
+    """Single entry point for the agent surface/model/runtime normal form.
+
+    Returns ``{"surface", "model", "runtime"}`` of canonical strings (runtime is ''
+    when not supplied). Pure and idempotent: ``f(f(x)) == f(x)``. Downstream gates
+    (ENC-FTR-146 W1.1 fail-closed register/claim, W1.8 usage_count) import this.
+    """
+    return {
+        "surface": canonicalize_surface(surface),
+        "model": canonicalize_model(model),
+        "runtime": canonicalize_runtime(runtime),
+    }
 
 
 # ---------------------------------------------------------------------------
