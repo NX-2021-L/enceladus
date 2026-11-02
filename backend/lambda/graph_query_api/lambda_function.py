@@ -2631,114 +2631,135 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     if driver is None:
         return {"error": "neo4j driver unavailable after rebuild attempt"}
 
-    # ---- Vector signal -----------------------------------------------------
-    vector_ranks: List[Dict[str, Any]] = []
-    vector_available = False
-    _t0 = time.perf_counter()
-    if query_text:
-        query_embedding = _compute_query_embedding(query_text)
-        if query_embedding is not None:
-            vector_ranks = _hybrid_vector_ranks(
-                driver,
-                project_id,
-                query_embedding,
-                k_per_label=HYBRID_SIGNAL_TOP_N,
-                record_type_filter=record_type_filter,
-            )
-            vector_available = True
-        else:
-            logger.info("[INFO] vector signal skipped — embedding computation unavailable")
-    _tel["vector_ms"] = _ms_since(_t0)
-
-    # ---- Graph signal ------------------------------------------------------
-    graph_ranks: List[Dict[str, Any]] = []
-    graph_available = False
-    graph_algorithm = "unavailable"
-    _t0 = time.perf_counter()
-    if anchor_record_id:
-        # ENC-ISS-311 / ENC-TSK-G98: the GDS path builds a per-query Aura Graph
-        # Analytics session (gds.graph.project {memory:'2GB'}) whose creation can
-        # blow past the synchronous read budget and hang the whole hybrid response.
-        # Run the graph signal under a hard wall-clock deadline; on timeout degrade
-        # to an empty graph signal (graph_algorithm='timeout') so vector+keyword
-        # still return via RRF. The worker thread is abandoned on timeout (shutdown
-        # wait=False) — the Bolt call finishes/errors in the background without
-        # blocking the handler.
-        def _graph_signal():
-            # ENC-FTR-101 (Option B): try the warm standing projection first
-            # (reattach + gds.pageRank.stream; no per-query projection build). On
-            # miss/unconfigured/error it returns [] and we fall back to the
-            # per-query path, then the Cypher proxy — all under the deadline.
-            warm_ranks = _hybrid_graph_ranks_gds_warm(
-                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
-            )
-            if warm_ranks:
-                return warm_ranks, "gds_pagerank"
-            if _check_gds_available(driver):
-                gds_ranks = _hybrid_graph_ranks_gds(
-                    driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+    # ---- Signals (ENC-TSK-S09 / PLN-103 N13: run concurrently) --------------
+    # Vector (embed + HNSW), graph and keyword run in ONE 3-worker executor and
+    # are fused once all three return or the graph deadline lapses. Every signal
+    # function opens its OWN `driver.session()` (the driver is thread-safe,
+    # sessions are not), so no session is shared across the workers. Per-signal
+    # *_ms is measured inside each task (S02 telemetry contract); the caller's
+    # duration_ms still covers the whole call. Failure semantics are unchanged:
+    # vector/keyword exceptions propagate, a graph exception or timeout degrades
+    # the graph signal only (the worker is abandoned, shutdown wait=False).
+    def _vector_task():
+        _t = time.perf_counter()
+        ranks: List[Dict[str, Any]] = []
+        available = False
+        if query_text:
+            query_embedding = _compute_query_embedding(query_text)
+            if query_embedding is not None:
+                ranks = _hybrid_vector_ranks(
+                    driver,
+                    project_id,
+                    query_embedding,
+                    k_per_label=HYBRID_SIGNAL_TOP_N,
+                    record_type_filter=record_type_filter,
                 )
-                if gds_ranks:
-                    return gds_ranks, "gds_pagerank"
-            cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
+                available = True
+            else:
+                logger.info("[INFO] vector signal skipped — embedding computation unavailable")
+        return ranks, available, _ms_since(_t)
+
+    def _graph_task():
+        # ENC-FTR-101 (Option B): try the warm standing projection first
+        # (reattach + gds.pageRank.stream; no per-query projection build). On
+        # miss/unconfigured/error it returns [] and we fall back to the
+        # per-query path, then the Cypher proxy — all under the deadline.
+        # ENC-ISS-311 / ENC-TSK-G98: the GDS path can blow past the synchronous
+        # read budget, hence the hard wall-clock deadline applied by the caller.
+        _t = time.perf_counter()
+        warm_ranks = _hybrid_graph_ranks_gds_warm(
+            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+        )
+        if warm_ranks:
+            return warm_ranks, "gds_pagerank", _ms_since(_t)
+        if _check_gds_available(driver):
+            gds_ranks = _hybrid_graph_ranks_gds(
                 driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
             )
-            if cypher_ranks:
-                return cypher_ranks, "cypher_fallback"
-            return [], "unavailable"
-
-        _gex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            graph_ranks, graph_algorithm = _gex.submit(_graph_signal).result(
-                timeout=_GRAPH_SIGNAL_DEADLINE_S
-            )
-            graph_available = bool(graph_ranks)
-        except concurrent.futures.TimeoutError:
-            logger.warning(
-                "[WARNING] graph signal exceeded %.1fs deadline for anchor=%s — "
-                "degrading to vector+keyword", _GRAPH_SIGNAL_DEADLINE_S, anchor_record_id,
-            )
-            graph_ranks, graph_available, graph_algorithm = [], False, "timeout"
-        except Exception:
-            logger.exception("[ERROR] graph signal computation failed")
-            graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
-        finally:
-            _gex.shutdown(wait=False)
-    _tel["graph_ms"] = _ms_since(_t0)
-    _tel["graph_candidates"] = len(graph_ranks)
-    _tel["graph_algorithm"] = graph_algorithm
-
-    # ---- Keyword signal (ENC-TSK-L43: OpenSearch primary, Neo4j fallback) --
-    keyword_ranks: List[Dict[str, Any]] = []
-    keyword_available = False
-    keyword_source = "unavailable"
-    _t0 = time.perf_counter()
-    if query_text:
-        os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
-            project_id,
-            query_text,
-            top_n=HYBRID_SIGNAL_TOP_N,
-            record_type_filter=record_type_filter,
+            if gds_ranks:
+                return gds_ranks, "gds_pagerank", _ms_since(_t)
+        cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
+            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
         )
-        if os_err is None:
-            keyword_ranks = os_ranks
-            keyword_available = bool(keyword_ranks)
-            keyword_source = "opensearch"
-        else:
-            logger.warning(
-                "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
-                os_err,
-            )
-            keyword_ranks = _hybrid_keyword_ranks(
-                driver,
+        if cypher_ranks:
+            return cypher_ranks, "cypher_fallback", _ms_since(_t)
+        return [], "unavailable", _ms_since(_t)
+
+    def _keyword_task():
+        # ENC-TSK-L43: OpenSearch primary, Neo4j fallback.
+        _t = time.perf_counter()
+        ranks: List[Dict[str, Any]] = []
+        available = False
+        source = "unavailable"
+        if query_text:
+            os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
                 project_id,
                 query_text,
                 top_n=HYBRID_SIGNAL_TOP_N,
                 record_type_filter=record_type_filter,
             )
-            keyword_available = bool(keyword_ranks)
-            keyword_source = "neo4j_fallback"
-    _tel["keyword_ms"] = _ms_since(_t0)
+            if os_err is None:
+                ranks = os_ranks
+                available = bool(ranks)
+                source = "opensearch"
+            else:
+                logger.warning(
+                    "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
+                    os_err,
+                )
+                ranks = _hybrid_keyword_ranks(
+                    driver,
+                    project_id,
+                    query_text,
+                    top_n=HYBRID_SIGNAL_TOP_N,
+                    record_type_filter=record_type_filter,
+                )
+                available = bool(ranks)
+                source = "neo4j_fallback"
+        return ranks, available, source, _ms_since(_t)
+
+    vector_ranks: List[Dict[str, Any]] = []
+    vector_available = False
+    graph_ranks: List[Dict[str, Any]] = []
+    graph_available = False
+    graph_algorithm = "unavailable"
+    keyword_ranks: List[Dict[str, Any]] = []
+    keyword_available = False
+    keyword_source = "unavailable"
+
+    _sig_t0 = time.perf_counter()
+    _sex = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    try:
+        _vfut = _sex.submit(_vector_task)
+        _gfut = _sex.submit(_graph_task) if anchor_record_id else None
+        _kfut = _sex.submit(_keyword_task)
+
+        # Vector and keyword have no deadline (exceptions propagate, as before).
+        vector_ranks, vector_available, _tel["vector_ms"] = _vfut.result()
+        keyword_ranks, keyword_available, keyword_source, _tel["keyword_ms"] = _kfut.result()
+
+        if _gfut is not None:
+            # The deadline runs from submit, so what is left after waiting on the
+            # other two signals is the graph signal's remaining budget.
+            _remaining = max(0.0, _GRAPH_SIGNAL_DEADLINE_S - (time.perf_counter() - _sig_t0))
+            try:
+                graph_ranks, graph_algorithm, _tel["graph_ms"] = _gfut.result(timeout=_remaining)
+                graph_available = bool(graph_ranks)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[WARNING] graph signal exceeded %.1fs deadline for anchor=%s — "
+                    "degrading to vector+keyword", _GRAPH_SIGNAL_DEADLINE_S, anchor_record_id,
+                )
+                graph_ranks, graph_available, graph_algorithm = [], False, "timeout"
+                _tel["graph_ms"] = _ms_since(_sig_t0)
+            except Exception:
+                logger.exception("[ERROR] graph signal computation failed")
+                graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
+                _tel["graph_ms"] = _ms_since(_sig_t0)
+    finally:
+        _sex.shutdown(wait=False)
+    _tel["graph_candidates"] = len(graph_ranks)
+    _tel["graph_algorithm"] = graph_algorithm
     _tel["keyword_candidates"] = len(keyword_ranks)
 
     # ---- RRF fusion --------------------------------------------------------
