@@ -45,6 +45,7 @@ export function TaskPrimitive({ record }: { record: Task }) {
         transitionType: record.transition_type,
         checkedOut,
         syncVersion: record.sync_version,
+        metadata: record as unknown as Record<string, unknown>,
       }}
       actions={record.github_issue_url ? [{ label: 'GitHub ↗', href: record.github_issue_url }] : []}
       overview={

@@ -49,6 +49,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
         status: record.status,
         checkedOut,
         syncVersion: record.sync_version,
+        metadata: record as unknown as Record<string, unknown>,
       }}
       actions={record.github_issue_url ? [{ label: 'GitHub ↗', href: record.github_issue_url }] : []}
       overview={
