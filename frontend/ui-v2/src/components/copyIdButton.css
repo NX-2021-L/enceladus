@@ -1,0 +1,64 @@
+/* ENC-TSK-R80-0H / ENC-FTR-151 AC-6 — copy-ID button.
+ * Visual glyph is 14px; the hit area is 32x32 (>= 32px) but the negative
+ * margins cancel the extra box so the row never grows, shifts or wraps
+ * (390px iPhone). flex: none keeps it on the ID's line. */
+.ev2-copy {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  margin: -9px -8px -9px -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--enc-dust, currentColor);
+  cursor: pointer;
+  vertical-align: middle;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ev2-copy:hover,
+.ev2-copy:focus-visible {
+  color: var(--accent);
+}
+
+.ev2-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.ev2-copy--copied {
+  color: var(--accent);
+}
+
+/* Confirmation floats above so it takes no layout space. */
+.ev2-copy__tip {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-elevated, #111);
+  color: var(--fg, #fff);
+  border: 1px solid var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.enc-record-link-copyable {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  max-width: 100%;
+}

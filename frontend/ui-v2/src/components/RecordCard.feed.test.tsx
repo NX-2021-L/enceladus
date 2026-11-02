@@ -1,8 +1,21 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// Narrow-viewport feed cards are router <Link>s; a plain anchor is enough to prove no navigation.
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ to, children, onClick, className }: { to: string; children: unknown; onClick?: () => void; className?: string }) => (
+    <a href={to} className={className} onClick={onClick}>
+      {children as never}
+    </a>
+  ),
+}))
 import { RecordCard } from './RecordCard'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { Badge } from './Badge'
+
+const copyCss = readFileSync(resolve(process.cwd(), 'src/components/copyIdButton.css'), 'utf8')
 
 /**
  * ENC-TSK-M35 -- smoke coverage for the dense "feed" RecordCard variant
@@ -97,5 +110,95 @@ describe('RecordCard variant="feed"', () => {
       button.click()
     })
     expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+
+  // ENC-TSK-R80-0H / ENC-FTR-151 AC-1, AC-2, AC-6 -- copy button on every Feed card.
+  describe('copy-ID button', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      writeText.mockClear()
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const flush = async () => {
+      await act(async () => {
+        await Promise.resolve()
+      })
+    }
+
+    it('renders a labelled copy button immediately right of the ID, 32px hit area, no wrap', () => {
+      act(() => {
+        root.render(<RecordCard recordId="ENC-FTR-150" title="t" status="open" variant="feed" projectLabel="enceladus" />)
+      })
+      const ids = container.querySelector('.ev2-rc__feed-ids') as HTMLElement
+      const idEl = ids.querySelector('.enc-record-id') as HTMLElement
+      const btn = ids.querySelector('[aria-label="Copy ENC-FTR-150"]') as HTMLElement
+      expect(btn).not.toBeNull()
+      expect(btn.getAttribute('role')).toBe('button')
+      expect(btn.tabIndex).toBe(0)
+      expect(idEl.nextElementSibling).toBe(btn)
+      // AC-6: >= 32px hit area, held on the ID's line without growing the row (negative margins), never wraps.
+      expect(copyCss).toMatch(/\.ev2-copy\s*\{[^}]*min-width:\s*32px/)
+      expect(copyCss).toMatch(/\.ev2-copy\s*\{[^}]*min-height:\s*32px/)
+      expect(copyCss).toMatch(/\.ev2-copy\s*\{[^}]*flex:\s*none/)
+      expect(copyCss).toMatch(/\.ev2-copy\s*\{[^}]*margin:\s*-\d+px/)
+      // The "Copied" confirmation floats (absolute) so it cannot shift layout.
+      expect(copyCss).toMatch(/\.ev2-copy__tip\s*\{[^}]*position:\s*absolute/)
+    })
+
+    it('copies the bare ID without selecting the card, then confirms for ~1.5s', async () => {
+      const onSelect = vi.fn()
+      act(() => {
+        root.render(<RecordCard recordId="ENC-FTR-150" title="t" status="open" variant="feed" onSelect={onSelect} />)
+      })
+      const btn = container.querySelector('[aria-label="Copy ENC-FTR-150"]') as HTMLElement
+      act(() => {
+        btn.click()
+      })
+      await flush()
+      expect(writeText).toHaveBeenCalledWith('ENC-FTR-150')
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(container.textContent).toContain('Copied')
+      act(() => {
+        vi.advanceTimersByTime(1400)
+      })
+      expect(container.textContent).toContain('Copied')
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(container.textContent).not.toContain('Copied')
+    })
+
+    it('does not navigate when the card is a link, and works from the keyboard', async () => {
+      const onSelect = vi.fn()
+      act(() => {
+        root.render(
+          <RecordCard recordId="ENC-TSK-R80-0H" title="t" status="open" variant="feed" href="/x" onSelect={onSelect} />,
+        )
+      })
+      const btn = container.querySelector('[aria-label="Copy ENC-TSK-R80-0H"]') as HTMLElement
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      act(() => {
+        btn.dispatchEvent(click)
+      })
+      await flush()
+      expect(click.defaultPrevented).toBe(true)
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(writeText).toHaveBeenCalledWith('ENC-TSK-R80-0H')
+
+      writeText.mockClear()
+      const key = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      act(() => {
+        btn.dispatchEvent(key)
+      })
+      await flush()
+      expect(key.defaultPrevented).toBe(true)
+      expect(writeText).toHaveBeenCalledWith('ENC-TSK-R80-0H')
+    })
   })
 })
