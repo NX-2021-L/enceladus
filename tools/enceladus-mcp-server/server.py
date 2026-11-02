@@ -9447,6 +9447,8 @@ _COST_DIGEST_FIELDS = (
     "prior_day_spend",
     "median_7d",
     "regression",
+    "settled",
+    "settled_day",
     "top_deltas",
     "feed_publisher_invocations",
     "invalidation_paths_mtd",
@@ -9481,6 +9483,9 @@ def _compact_cost_digest(raw: Any) -> Dict[str, Any]:
             continue
         value = raw[field]
         if field == "regression":
+            # ENC-TSK-R80-0D: null = unsettled window (unknown); never coerce it to False.
+            value = None if value is None else bool(value)
+        elif field == "settled":
             value = bool(value)
         elif field == "top_deltas":
             value = list(value)[:_COST_DIGEST_MAX_TOP_DELTAS] if isinstance(value, (list, tuple)) else []

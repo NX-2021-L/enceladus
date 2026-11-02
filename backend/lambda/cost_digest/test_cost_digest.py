@@ -30,8 +30,9 @@ def _day(offset_from_prior: int) -> str:
 class StubCE:
     """Distinguishes the ungrouped daily call from the USAGE_TYPE-grouped call."""
 
-    def __init__(self, prior_spend=10.0, baseline=10.0, pages=1):
+    def __init__(self, prior_spend=10.0, baseline=10.0, pages=1, settled_spend=None):
         self.prior_spend, self.baseline, self.pages = prior_spend, baseline, pages
+        self.settled_spend = baseline if settled_spend is None else settled_spend
         self.requests = []
 
     def get_cost_and_usage(self, **kw):
@@ -39,7 +40,7 @@ class StubCE:
         if "GroupBy" not in kw:
             rows = []
             for off in range(7, -1, -1):  # 2026-10-11 .. 2026-10-18
-                amt = self.prior_spend if off == 0 else self.baseline
+                amt = self.prior_spend if off == 0 else (self.settled_spend if off == 1 else self.baseline)
                 rows.append({"TimePeriod": {"Start": _day(off), "End": _day(off - 1)},
                              "Total": {"UnblendedCost": {"Amount": str(amt), "Unit": "USD"}}})
             return {"ResultsByTime": rows}
@@ -49,7 +50,7 @@ class StubCE:
         for off in range(17, -1, -1):  # 2026-10-01 .. 2026-10-18 (month start earlier than today-8)
             groups = [
                 {"Keys": ["USW2-Requests-Tier1"], "Metrics": {
-                    "UnblendedCost": {"Amount": "5" if off == 0 else "1"}, "UsageQuantity": {"Amount": "9"}}},
+                    "UnblendedCost": {"Amount": "5" if off == 1 else "1"}, "UsageQuantity": {"Amount": "9"}}},
                 {"Keys": ["Invalidations"], "Metrics": {
                     "UnblendedCost": {"Amount": "0"}, "UsageQuantity": {"Amount": "10" if off % 2 == 0 else "0"}}},
                 {"Keys": ["USW2-Steady"], "Metrics": {
@@ -148,9 +149,56 @@ def test_regression_threshold_boundary():
 
 
 def test_regression_true_end_to_end_and_median_robust_to_outlier():
-    ce = mod._CostExplorerBudget(StubCE(prior_spend=30.0, baseline=10.0))
+    ce = mod._CostExplorerBudget(StubCE(prior_spend=10.0, baseline=10.0, settled_spend=30.0))
     d = mod.build_digest(ce, _cw_factory(), NOW)
-    assert d["regression"] is True and d["prior_day_spend"] == 30.0 and d["median_7d"] == 10.0
+    assert d["regression"] is True and d["settled"] is True and d["settled_day"] == "2026-10-17"
+    assert d["settled_day_spend"] == 30.0 and d["median_7d"] == 10.0 and d["prior_day_spend"] == 10.0
+    # an outlier on the unsettled T-1 alone is NOT compared (ENC-TSK-R80-0D)
+    d2 = mod.build_digest(mod._CostExplorerBudget(StubCE(prior_spend=30.0, baseline=10.0)), _cw_factory(), NOW)
+    assert d2["regression"] is False and d2["settled"] is True
+
+
+class SettlementStubCE:
+    """2026-11-01-shaped data: T-1 (10-31) is unsettled (0.0 for the provisioned C3 usage type), T-2 (10-30) is settled."""
+
+    def __init__(self, t2_present=True):
+        self.t2_present = t2_present
+        self.requests = []
+
+    def get_cost_and_usage(self, **kw):
+        from datetime import date, timedelta
+        self.requests.append(kw)
+        start, end = date.fromisoformat(kw["TimePeriod"]["Start"]), date.fromisoformat(kw["TimePeriod"]["End"])
+        rows, d = [], start
+        while d < end:
+            iso = d.isoformat()
+            unsettled = iso == "2026-10-31" or (iso == "2026-10-30" and not self.t2_present)
+            nxt = {"Start": iso, "End": (d + timedelta(days=1)).isoformat()}
+            if "GroupBy" not in kw:
+                rows.append({"TimePeriod": nxt, "Total": {"UnblendedCost": {"Amount": "0" if unsettled else ("12" if iso == "2026-10-30" else "10")}}})
+            else:
+                c3 = "0" if unsettled else ("3" if iso == "2026-10-30" else "2")
+                rows.append({"TimePeriod": nxt, "Groups": [
+                    {"Keys": ["C3-Provisioned-Hrs"], "Metrics": {"UnblendedCost": {"Amount": c3}, "UsageQuantity": {"Amount": "24"}}}]})
+            d += timedelta(days=1)
+        return {"ResultsByTime": rows}
+
+
+def test_unsettled_t1_does_not_report_zero_prior_day_for_c3_resources():
+    ce = SettlementStubCE()
+    d = mod.build_digest(mod._CostExplorerBudget(ce), _cw_factory(), datetime(2026, 11, 1, 13, 15, tzinfo=timezone.utc))
+    assert d["prior_day_date"] == "2026-10-31" and d["prior_day_spend"] == 0.0  # raw unsettled T-1, informational
+    assert d["settled"] is True and d["settled_day"] == "2026-10-30" and d["settled_day_spend"] == 12.0
+    assert d["median_7d"] == 10.0 and d["regression"] is False
+    row = [t for t in d["top_deltas"] if t["usage_type"] == "C3-Provisioned-Hrs"][0]
+    assert row["prior_day"] == 3.0 and row["mean_7d"] == 2.0 and row["delta"] == 1.0  # not 0.0
+    assert len([r for r in ce.requests]) == 2  # no extra Cost Explorer calls
+
+
+def test_unsettled_window_never_emits_regression_false():
+    d = mod.build_digest(mod._CostExplorerBudget(SettlementStubCE(t2_present=False)), _cw_factory(),
+                         datetime(2026, 11, 1, 13, 15, tzinfo=timezone.utc))
+    assert d["settled"] is False and d["regression"] is None and d["top_deltas"] == []
 
 
 def test_ce_call_budget_never_exceeds_three_even_with_pagination():
