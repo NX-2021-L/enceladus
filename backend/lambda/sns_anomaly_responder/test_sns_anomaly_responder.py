@@ -405,13 +405,14 @@ def test_unknown_evidence_never_overwrites_or_pushes(monkeypatch):
     _clear_thresholds(monkeypatch)
     t = CompactListTracker()
     lf.lambda_handler(_event(_msg(10.0)), None, client=t)
+    sets_before = len([x for x in t.sets if x[1] == "evidence"])  # create's pushed-flag write
 
     def boom(project, issue_id):
         raise lf.TrackerError("down")
     t.get_issue = boom
     r = lf.lambda_handler(_event(_msg(50.0)), None, client=t)["results"][0]
     assert r["notified"] is False and t.updates == []
-    assert [s for s in t.sets if s[1] == "evidence"] == []  # stored evidence untouched
+    assert len([x for x in t.sets if x[1] == "evidence"]) == sets_before  # stored evidence untouched
 
 
 def test_lambda_handler_passes_context_to_enrichment_dispatch(monkeypatch):
@@ -425,3 +426,38 @@ def test_lambda_handler_passes_context_to_enrichment_dispatch(monkeypatch):
     fn, payload = calls[0]
     assert fn == "enceladus-sns-anomaly-responder-gamma"
     assert payload["issue_id"] == out["results"][0]["issue_id"] and payload["project"] == "devops"
+
+
+# ---- ENC-TSK-R91 follow-up: create-time baseline + enrichment only after create ----
+def test_identical_replay_after_2xx_create_push_does_not_push(monkeypatch):
+    _clear_thresholds(monkeypatch)
+    t = CompactListTracker()
+    lf.lambda_handler(_event(_msg(24.71)), None, client=t)
+    first = next(iter(t.issues.values()))["evidence"][0]
+    assert first["total_impact_usd"] == 24.71 and first["pushed"] is True
+    r = lf.lambda_handler(_event(_msg(24.71)), None, client=t)["results"][0]
+    assert r["notified"] is False and t.updates == []  # baseline = create push, not None
+    assert "prior pushed impact=None" not in " ".join(d for _, d in t.logs)
+
+
+def test_failed_create_push_is_not_flagged_pushed(monkeypatch):
+    _clear_thresholds(monkeypatch)
+    t = CompactListTracker(push_ok=False)
+    lf.lambda_handler(_event(_msg(24.71)), None, client=t)
+    first = next(iter(t.issues.values()))["evidence"][0]
+    assert first["total_impact_usd"] == 24.71 and "pushed" not in first
+
+
+def test_enrichment_dispatched_once_across_create_replay_and_closed(monkeypatch):
+    import types
+    _clear_thresholds(monkeypatch)
+    calls = []
+    monkeypatch.setattr(lf.enrichment, "dispatch_async", lambda fn, payload: calls.append(payload))
+    t = CompactListTracker()
+    ctx = types.SimpleNamespace(function_name="fn")
+    lf.lambda_handler(_event(_msg(24.71)), ctx, client=t)
+    lf.lambda_handler(_event(_msg(24.71)), ctx, client=t)
+    lf.lambda_handler(_event(_msg(60.0)), ctx, client=t)
+    r = lf.lambda_handler(_event(_msg(24.71, anomalyStatus="CLOSED")), ctx, client=t)["results"][0]
+    assert r["action"] == "closed_logged"
+    assert len(calls) == 1 and calls[0]["issue_id"] == "DVP-ISS-901"
