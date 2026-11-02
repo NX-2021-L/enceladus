@@ -65,7 +65,7 @@ COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 
 SESSION_ARCHIVE_BUCKET = os.environ.get("SESSION_ARCHIVE_BUCKET", "jreese-net")
 SESSION_ARCHIVE_PREFIX = os.environ.get("SESSION_ARCHIVE_PREFIX", "codex-sessions/")

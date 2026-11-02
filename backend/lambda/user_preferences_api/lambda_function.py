@@ -25,7 +25,7 @@ Environment variables:
     COGNITO_CLIENT_ID      6q607dk3liirhtecgps7hifmlk
     USER_PREFERENCES_TABLE default: user-preferences
     DYNAMODB_REGION        default: us-west-2
-    CORS_ORIGIN            default: https://jreese.net
+    CORS_ORIGIN            default: https://enceladus.jreese.net
 
 Related: ENC-FTR-127, ENC-TSK-L25
 """
@@ -65,7 +65,7 @@ USER_PREFERENCES_TABLE = os.environ.get("USER_PREFERENCES_TABLE", "user-preferen
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 
 MAX_SAVED_SEARCHES = 50
 MAX_RECENTLY_VIEWED_PER_TYPE = 50

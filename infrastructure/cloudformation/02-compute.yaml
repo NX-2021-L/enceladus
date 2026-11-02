@@ -138,7 +138,10 @@ Parameters:
     Default: 6q607dk3liirhtecgps7hifmlk
   CorsOrigin:
     Type: String
-    Default: https://jreese.net
+    Default: ""
+    Description: >
+      ENC-TSK-R82-0F: optional CORS origin override. Empty derives the PWA origin from EnvironmentSuffix
+      (prod https://enceladus.jreese.net, gamma https://enceladus-gamma.jreese.net); jreese.net is no longer an API origin.
   AppBaseUrl:
     Type: String
     Default: "https://enceladus.jreese.net/"
@@ -408,6 +411,7 @@ Conditions:
   HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  HasCorsOrigin: !Not [!Equals [!Ref CorsOrigin, ""]]
   # ENC-TSK-R26: effective feed-publisher flags. ENC-TSK-R48 / ruling P100-R30 (io directive
   # 2026-10-20, no gamma soak): "auto" now resolves ON in BOTH planes; an explicit per_batch /
   # "true" / "false" parameter override is the per-plane rollback switch.
@@ -532,7 +536,7 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           # ENC-TSK-J70 / ENC-FTR-121 Ph3: applyEscalatedMutation lives in
@@ -945,7 +949,7 @@ Resources:
           GITHUB_TOKEN: !If [IsGamma, "disabled-for-gamma", !Ref "AWS::NoValue"]
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          CORS_ORIGIN: https://jreese.net
+          CORS_ORIGIN: !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]
           # ENC-TSK-O43: was an unconditional GAMMA host on BOTH planes. The prod stack
           # does not own this resource today (describe-stack-resource on enceladus-compute
           # returns ValidationError), so the correct prod value is out-of-band drift rather
@@ -1416,7 +1420,7 @@ Resources:
           # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -1707,7 +1711,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           GITHUB_APP_ID: !Ref GitHubAppId
           GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
           GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
@@ -2109,7 +2113,7 @@ Resources:
           # legacy fallback on a miss (writers dual since B51; delta 5506/5506).
           CONTENT_BUCKET: !Sub "enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}"
           S3_ENV_PREFIX: !Ref S3EnvPrefix
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -2206,7 +2210,7 @@ Resources:
           TRACKER_API_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COORDINATION_INTERNAL_API_KEY_SCOPES: ""
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
       Tags:
         - Key: Project
           Value: enceladus
@@ -2252,7 +2256,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           USER_PREFERENCES_TABLE: !Sub "user-preferences${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
       Tags:
         - Key: Project
           Value: enceladus
@@ -2436,7 +2440,7 @@ Resources:
           SECRETS_REGION: !Ref AWS::Region
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          CORS_ORIGIN: !Ref CorsOrigin
+          CORS_ORIGIN: !If [HasCorsOrigin, !Ref CorsOrigin, !If [IsGamma, https://enceladus-gamma.jreese.net, https://enceladus.jreese.net]]
           # ENC-TSK-F57 AC-2 / ENC-ISS-280: internal-key auth vars added out-of-band to
           # live function during the 2026-04-20 override session (DOC-D45141D94C55). CFN
           # now declares them via parameters so the next stack deploy does not strip the
@@ -8699,7 +8703,7 @@ Resources:
           S3_BUCKET: jreese-net
           S3_GOVERNANCE_HISTORY_PREFIX: governance/history
           S3_GOVERNANCE_PREFIX: governance/live
-          CORS_ORIGIN: https://jreese.net
+          CORS_ORIGIN: https://enceladus-gamma.jreese.net
           ENVIRONMENT_SUFFIX: "-gamma"
           ENCELADUS_MCP_SERVER_PATH: server.py
           ENCELADUS_MCP_TRANSPORT: streamable_http

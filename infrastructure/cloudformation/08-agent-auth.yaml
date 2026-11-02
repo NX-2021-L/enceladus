@@ -24,13 +24,15 @@ Parameters:
 
   WebUiCallbackUrl:
     Type: String
-    Default: "https://jreese.net/enceladus/auth/callback"
-    Description: OAuth redirect (callback) URL for the human-interactive web UI client.
+    Default: ""
+    Description: >
+      OAuth redirect (callback) URL override for the human-interactive web UI client. Empty derives the PWA callback
+      from EnvironmentSuffix (ENC-TSK-R82-0F: jreese.net is no longer an API origin).
 
   WebUiLogoutUrl:
     Type: String
-    Default: "https://jreese.net/enceladus"
-    Description: Sign-out redirect URL for the human-interactive web UI client.
+    Default: ""
+    Description: Sign-out redirect URL override for the web UI client. Empty derives the PWA origin from EnvironmentSuffix.
 
   # --- ENC-FTR-074 Ph2 (ENC-TSK-I80) parameters ---------------------------------
 
@@ -66,6 +68,8 @@ Conditions:
   HasInternalKeySecret: !Not [!Equals [!Ref InternalKeySecretId, ""]]
   # ENC-TSK-O91 (ENC-TSK-P23): gates the structured JSON LoggingConfig to gamma.
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  HasWebUiCallbackOverride: !Not [!Equals [!Ref WebUiCallbackUrl, ""]]
+  HasWebUiLogoutOverride: !Not [!Equals [!Ref WebUiLogoutUrl, ""]]
 
 Resources:
 
@@ -264,9 +268,9 @@ Resources:
       SupportedIdentityProviders:
         - COGNITO
       CallbackURLs:
-        - !Ref WebUiCallbackUrl
+        - !If [HasWebUiCallbackOverride, !Ref WebUiCallbackUrl, !If [IsGamma, https://enceladus-gamma.jreese.net/api/v1/auth/callback, https://enceladus.jreese.net/api/v1/auth/callback]]
       LogoutURLs:
-        - !Ref WebUiLogoutUrl
+        - !If [HasWebUiLogoutOverride, !Ref WebUiLogoutUrl, !If [IsGamma, https://enceladus-gamma.jreese.net/, https://enceladus.jreese.net/]]
       ExplicitAuthFlows:
         - ALLOW_REFRESH_TOKEN_AUTH
         - ALLOW_USER_SRP_AUTH

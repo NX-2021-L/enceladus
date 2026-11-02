@@ -15,7 +15,7 @@ Parameters:
       Production uses "" (zero drift), gamma uses "-gamma".
   CorsOrigin:
     Type: String
-    Default: "https://jreese.net"
+    Default: "https://enceladus.jreese.net"
     Description: >
       CORS AllowOrigins value. Override for gamma environment.
   HubShellOrigins:

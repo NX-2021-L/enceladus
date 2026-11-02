@@ -89,7 +89,7 @@ FEED_PUBLISHER_FUNCTION = os.environ.get("FEED_PUBLISHER_FUNCTION", "devops-feed
 # itself. Empty/unset means the OpenSearch tier is unavailable (e.g. v3-prod).
 GRAPH_QUERY_API_FUNCTION = os.environ.get("GRAPH_QUERY_API_FUNCTION", "")
 OPENSEARCH_TIER_INVOKE_TIMEOUT_S = 5
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
 INCREMENTAL_LOOKBACK_SECONDS = 10
 

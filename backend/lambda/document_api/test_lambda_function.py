@@ -555,7 +555,7 @@ class ResponseFormatTests(unittest.TestCase):
     def test_response_includes_cors(self):
         resp = document_api._response(200, {"ok": True})
         self.assertIn("Access-Control-Allow-Origin", resp["headers"])
-        self.assertEqual(resp["headers"]["Access-Control-Allow-Origin"], "https://jreese.net")
+        self.assertEqual(resp["headers"]["Access-Control-Allow-Origin"], "https://enceladus.jreese.net")
 
     def test_error_includes_envelope(self):
         resp = document_api._error(400, "Bad input")

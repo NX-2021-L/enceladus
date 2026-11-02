@@ -11,7 +11,7 @@
       "arm64"
     ],
     "environment_vars": {
-      "TRACKER_API_BASE": "https://jreese.net/api/v1",
+      "TRACKER_API_BASE": "https://enceladus.jreese.net/api/v1",
       "CHECKOUT_TABLE": "enceladus-checkout-tokens",
       "CHECKOUT_SERVICE_KEY": "<from Secrets Manager: enceladus/checkout-service/key>",
       "GITHUB_TOKEN": "<from Secrets Manager: enceladus/github/token>",

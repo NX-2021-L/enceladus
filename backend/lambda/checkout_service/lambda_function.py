@@ -38,7 +38,7 @@ Environment variables:
     AGENT_SESSIONS_TABLE          agent-sessions store for the SCI gate (default: agent-sessions)
     COGNITO_USER_POOL_ID          us-east-1_b2D0V3E1k
     COGNITO_CLIENT_ID             6q607dk3liirhtecgps7hifmlk
-    CORS_ORIGIN                   default: https://jreese.net
+    CORS_ORIGIN                   default: https://enceladus.jreese.net
     TOKEN_TTL_DAYS                token expiry in days (default: 90)
     COMPONENTS_TABLE              component registry DynamoDB table (default: component-registry)
     DOCUMENT_API_BASE             document API base URL (defaults from TRACKER_API_BASE sibling)
@@ -157,7 +157,7 @@ CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-check
 CHECKOUT_TOKENS_REGION = os.environ.get("CHECKOUT_TOKENS_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 TOKEN_TTL_DAYS = int(os.environ.get("TOKEN_TTL_DAYS", "90"))
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
 # ENC-FTR-041: Component registry enforcement

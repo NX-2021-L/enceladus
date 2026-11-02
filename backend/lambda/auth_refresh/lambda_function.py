@@ -67,7 +67,7 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
 # Lambda deployment region — used for Secrets Manager (secret lives co-located with Lambda)
 LAMBDA_REGION = os.environ.get("AWS_REGION", "us-west-2")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 ID_TOKEN_MAX_AGE = 3600       # 1 hour
 SESSION_COOKIE_MAX_AGE = 3600  # 1 hour
 REFRESH_TOKEN_MAX_AGE = 2592000  # 30 days

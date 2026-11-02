@@ -118,7 +118,7 @@ _INTERNAL_SCOPE_MAP_RAW = (
     os.environ.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
     or os.environ.get("ENCELADUS_INTERNAL_API_KEY_SCOPES", "")
 ).strip()
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 PREFIX_GSI = "prefix-index"
 TRACKER_GSI = "project-type-index"
 TEMPLATE_URL = os.environ.get(
