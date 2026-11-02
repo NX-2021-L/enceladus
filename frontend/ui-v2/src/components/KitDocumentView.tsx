@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { KitMarkdown } from '@io-kit/md/lean/react'
 import './markdownContent.css'
@@ -10,6 +10,8 @@ import { useDocumentOutline } from '../hooks/useDocumentOutline'
 import { kitSections, makeKitIdResolver } from '../utils/kitDocstore'
 import { hostMarkdownComponents, hostMarkdownPlugins } from './KitMarkdownContent'
 import type { DocumentSection } from '../utils/documentSections'
+
+const DocumentEditorHost = lazy(() => import('../documents/DocumentEditorHost'))
 import { SectionEditor } from './SectionEditor'
 import './documentSections.css'
 
@@ -44,6 +46,7 @@ export default function KitDocumentView({ record }: { record: Document }) {
   const plugins = hostMarkdownPlugins(makeKitIdResolver(projects), true)
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [editIfMatch, setEditIfMatch] = useState('')
+  const [editingDoc, setEditingDoc] = useState(false)
 
   const { doc, items } = kitSections(record.content ?? '')
   const editing: DocumentSection | undefined = items.find((it) => it.section.key === editingKey)?.section
@@ -53,10 +56,28 @@ export default function KitDocumentView({ record }: { record: Document }) {
     setEditingKey(section.key)
   }
 
+  if (editingDoc) {
+    return (
+      <Suspense fallback={null}>
+        <DocumentEditorHost
+          documentId={documentId}
+          onClose={() => setEditingDoc(false)}
+          onSaved={() => {
+            setEditingDoc(false)
+            invalidateDocument()
+          }}
+        />
+      </Suspense>
+    )
+  }
+
   if (!record.content || !record.content.trim()) return null
 
   return (
     <div className="ev2-docsec__view" data-md-engine="kit">
+      <button type="button" className="ev2-docsec__edit-btn" onClick={() => setEditingDoc(true)} aria-label="Edit document">
+        Edit document
+      </button>
       {items.length > 0 && (
         <nav aria-label="Document outline" className="ev2-docsec__outline">
           <h3 className="ev2-docsec__outline-title">Outline</h3>
