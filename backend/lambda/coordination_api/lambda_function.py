@@ -17295,6 +17295,7 @@ def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]
             parent_session_id=parent_session_id,
             status=status,
             credential_id=credential_id,
+            increment_usage=True,  # ENC-TSK-R81-0H / FTR-146 AC-6: atomic usage_count ADD
             caller_payload=body,
         )
     except _agent_id_alloc.CallerSuppliedIdError as exc:
