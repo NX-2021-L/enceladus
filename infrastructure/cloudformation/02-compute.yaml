@@ -3060,6 +3060,10 @@ Resources:
           ANOMALY_DEFAULT_PROJECT: devops
           CAD_MIN_IMPACT_USD: "1.0"
           CAD_MIN_IMPACT_PCT: "35"
+          # ENC-TSK-R83-0A (FTR-150 AC-6): async fail-open Bedrock enrichment, advisory fields only.
+          ANOMALY_ENRICHMENT_ENABLED: "true"
+          ANOMALY_ENRICHMENT_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          BEDROCK_REGION: !Ref AWS::Region
       Tags:
         - Key: Project
           Value: enceladus
@@ -3091,6 +3095,25 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-sns-anomaly-responder${EnvironmentSuffix}:*"
+              # ENC-TSK-R83-0A (cost class C0, pay-per-invoke): enrichment runs off the critical path.
+              # Async self-invoke (Event) -- scoped to this one function; no queue/always-on resource.
+              - Sid: EnrichmentSelfInvoke
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+              # One small model only, via its US inference profile (+ the underlying foundation model
+              # as reached through that profile). Role is gamma-only (Condition: IsGamma).
+              - Sid: EnrichmentBedrockInvoke
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+              # Read-only: the single cost-digest object (W0.1 settled / settled_day / settled_day_spend).
+              - Sid: EnrichmentCostDigestRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/governance/cost-digest/latest.json"
       Tags:
         - Key: Project
           Value: enceladus

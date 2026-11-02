@@ -23,7 +23,8 @@ type, 400 enum, any transport error) the invocation FAILS before any mutation. T
 (never a replay) sends a notify v2 push of type `anomaly` through the coordination API; the push
 is independent of any enrichment and a push failure never fails the intake.
 
-Out of scope here (later waves): Bedrock enrichment (W3.1).
+Bedrock enrichment lives in enrichment.py (ENC-TSK-R83-0A, ENC-FTR-150 AC-6): async self-invoked leg after
+intake, fail-open, advisory fields only (deterministic on the critical path, probabilistic off it).
 
 Auth: internal-key tracker API, same service-to-service convention as env_drift_auditor.
 """
@@ -39,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import aws_cad_adapter
+import enrichment
 import source_adapters
 
 logger = logging.getLogger()
@@ -188,6 +190,9 @@ class TrackerClient:
 
     def create_issue(self, project: str, body: Dict[str, Any]) -> Dict[str, Any]:
         return _http("POST", f"{TRACKER_API_BASE}/{project}/issue", self._stamp(body))
+
+    def get_issue(self, project: str, issue_id: str) -> Dict[str, Any]:
+        return _http("GET", f"{TRACKER_API_BASE}/{project}/issue/{issue_id}")
 
     def set_field(self, project: str, issue_id: str, field: str, value: Any) -> Dict[str, Any]:
         return _http(
@@ -409,15 +414,28 @@ def _select_adapter(event_source: str) -> Any:
 
 def lambda_handler(event: Any, context: Any, client: Optional[Any] = None,
                    identity: Optional[Identity] = None) -> Dict[str, Any]:
+    is_enrich = isinstance(event, dict) and "enrichment_request" in event
     owns_identity = False
     if client is None:
         client = TrackerClient()
-        if identity is None and (event or {}).get("Records"):
-            identity = acquire_identity()  # raises (fail closed) BEFORE any mutation
-            owns_identity = True
+        if identity is None and ((event or {}).get("Records") or is_enrich):
+            if is_enrich:
+                # ENC-TSK-R83-0A is fail-open: no identity -> no advisory write, never an error.
+                try:
+                    identity = acquire_identity()
+                    owns_identity = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("enrichment skipped, identity unavailable: %s", exc)
+                    return {"enrichment": {"skipped": "identity_unavailable"}}
+            else:
+                identity = acquire_identity()  # raises (fail closed) BEFORE any mutation
+                owns_identity = True
     if identity is not None and hasattr(client, "set_identity"):
         client.set_identity(identity)
     try:
+        if is_enrich:
+            # ENC-TSK-R83-0A: async enrichment leg (self-invoked after intake). Never raises (fail-open).
+            return {"enrichment": enrichment.enrich(event["enrichment_request"], client)}
         return _run(event, client)
     finally:
         if owns_identity and identity is not None:
@@ -440,7 +458,17 @@ def _run(event: Any, client: Any) -> Dict[str, Any]:
             suppressed += 1
         for norm in anomalies:
             try:
-                results.append(process_anomaly(norm, client))
+                res = process_anomaly(norm, client)
+                results.append(res)
+                # Single enrichment call site: AFTER the issue exists. Async + fail-open; a dispatch
+                # failure can never fail intake or the SNS retry contract.
+                if res.get("issue_id"):
+                    try:
+                        enrichment.dispatch_async(
+                            getattr(context, "function_name", "") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""),
+                            {"norm": norm, "key": res["key"], "project": res["project"], "issue_id": res["issue_id"]})
+                    except Exception as exc:  # noqa: BLE001 -- enrichment must never fail intake
+                        logger.error("enrichment dispatch raised (ignored): %s", exc)
             except Exception as exc:  # noqa: BLE001
                 logger.error("anomaly %s failed: %s", norm.get("anomaly_id"), exc)
                 errors.append(f"{norm.get('anomaly_id')}: {exc}")
