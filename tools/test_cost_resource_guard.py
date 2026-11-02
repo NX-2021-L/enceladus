@@ -269,5 +269,74 @@ class RealTemplates(unittest.TestCase):
                 self.assertEqual(g.find_findings(t, t, p.name), [])
 
 
+class NonProdLatentGateTests(unittest.TestCase):
+    """DVP-TSK-B89: C3 resources must be gated off in non-prod stages."""
+
+    FIX = ROOT / "tools" / "cost_resource_guard_fixtures"
+
+    def _scan(self, root, allow=None):
+        return g.scan_nonprod(root, str(ROOT), allow)
+
+    def test_seeded_failing_fixture_is_red(self):
+        failures, allowed, _ = self._scan("tools/cost_resource_guard_fixtures/red")
+        red = {f[1] for f in failures if f[0].endswith("nonprod_c3_ungated_RED.yaml")}
+        self.assertEqual(red, {"UngatedNat", "GammaOnlyEip", "DefaultOnToggle"})
+        buf = io.StringIO()
+        self.assertEqual(g.run_scan(failures, allowed, [], out=buf), 1)
+
+    def test_gated_fixture_is_green(self):
+        t = g.load_template_text((self.FIX / "green" / "nonprod_c3_gated_GREEN.yaml").read_text())
+        self.assertEqual(g.find_nonprod_ungated(t, "g.yaml"), [])
+
+    def test_cli_exit_codes(self):
+        argv = ["--scan-nonprod", "--repo-root", str(ROOT), "--scan-root"]
+        with unittest.mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(g.main(argv + ["tools/cost_resource_guard_fixtures/red", "--allowlist", "none"]), 1)
+
+    def test_condition_evaluation(self):
+        t = {"Parameters": {"EnvironmentSuffix": {"Default": "", "AllowedValues": ["", "-gamma"]},
+                            "Flag": {"Default": "false"}},
+             "Conditions": {"IsGamma": {"Fn::Not": [{"Fn::Equals": [{"Ref": "EnvironmentSuffix"}, ""]}]},
+                            "Off": {"Fn::Equals": [{"Ref": "Flag"}, "true"]},
+                            "Unknown": {"Fn::Equals": [{"Ref": "NoSuchParam"}, "x"]}}}
+        b = g.nonprod_bindings(t)
+        self.assertEqual(b, [{"EnvironmentSuffix": "-gamma"}])
+        self.assertTrue(g.eval_condition("IsGamma", t, b[0]))
+        self.assertFalse(g.eval_condition("Off", t, b[0]))
+        self.assertIsNone(g.eval_condition("Unknown", t, b[0]))
+
+    def test_unresolvable_condition_fails_and_stageless_template_skipped(self):
+        res = {"N": {"Type": "AWS::EC2::NatGateway", "Condition": "Unknown"}}
+        t = {"Parameters": {"Stage": {"Default": "prod", "AllowedValues": ["prod", "dev"]}},
+             "Conditions": {"Unknown": {"Fn::Equals": [{"Ref": "Nope"}, "x"]}}, "Resources": res}
+        self.assertEqual(len(g.find_nonprod_ungated(t)), 1)
+        t2 = {"Resources": res, "Conditions": t["Conditions"]}  # no stage axis
+        self.assertEqual(g.find_nonprod_ungated(t2), [])
+
+    def test_gateway_endpoint_not_c3_interface_is_(self):
+        mk = lambda kind: {"Parameters": {"EnvironmentSuffix": {"Default": ""}},
+                           "Resources": {"E": {"Type": "AWS::EC2::VPCEndpoint",
+                                               "Properties": {"VpcEndpointType": kind}}}}
+        self.assertEqual(g.find_nonprod_ungated(mk("Gateway")), [])
+        self.assertEqual(len(g.find_nonprod_ungated(mk("Interface"))), 1)
+
+    def test_allowlist_and_stale_warning(self):
+        failures, _, _ = self._scan("tools/cost_resource_guard_fixtures/red")
+        allow = {(f[0], f[1]): {"added": "2026-11-02", "reason": "t"} for f in failures}
+        allow[("gone.yaml", "Missing")] = {"added": "2026-11-02", "reason": "t"}
+        failures2, allowed2, warns = self._scan("tools/cost_resource_guard_fixtures/red", allow)
+        self.assertEqual(failures2, [])
+        self.assertEqual(len(allowed2), 3)
+        self.assertTrue(any("stale allow-list entry gone.yaml:Missing" in w for w in warns))
+
+    def test_real_templates_green_with_allowlist(self):
+        allow = g.load_allowlist(str(ROOT / g.NONPROD_ALLOWLIST))
+        failures, allowed, warns = self._scan(g.NONPROD_ROOT, allow)
+        self.assertEqual(failures, [], failures)
+        self.assertEqual([w for w in warns if "stale" in w], [])
+        self.assertEqual({a[0][1] for a in allowed},
+                         {"OpenSearchIndexerNatGateway", "OpenSearchIndexerNatGatewayEip", "OpenSearchNodeInstance"})
+
+
 if __name__ == "__main__":
     unittest.main()

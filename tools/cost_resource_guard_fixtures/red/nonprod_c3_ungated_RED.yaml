@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SEEDED FAILING FIXTURE (DVP-TSK-B89 / CG-6 non-prod latent-capability gate).
+  Never deployed. Each C3 resource below would be instantiated in a non-prod
+  stage with no stage-scoped Condition defaulting to false, so the scan must
+  report all three and exit 1.
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+  EnableNat:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  NatEnabled: !Equals [!Ref EnableNat, "true"]
+Resources:
+  UngatedNat:            # no Condition at all
+    Type: AWS::EC2::NatGateway
+    Properties: {SubnetId: subnet-1, AllocationId: eipalloc-1}
+  GammaOnlyEip:          # IsGamma INSTANTIATES in non-prod; it does not exclude it
+    Type: AWS::EC2::EIP
+    Condition: IsGamma
+  DefaultOnToggle:       # parameter toggle that defaults to true
+    Type: AWS::RDS::DBInstance
+    Condition: NatEnabled
+    Properties: {DBInstanceClass: db.t4g.micro, Engine: postgres}

@@ -1,0 +1,23 @@
+{
+  "_comment": "DVP-TSK-B89 / CG-6 non-prod latent-capability gate. Each entry is a C3 resource that is instantiated in a non-prod stage without a stage-scoped Condition defaulting to false. These are KNOWN, already-live findings recorded so the guard can go green without touching infra. Remove an entry when the resource is gated (the guard warns on stale entries). Adding an entry needs a dated reason and io review; the cost-approved label does NOT bypass this check.",
+  "entries": [
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "logical_id": "OpenSearchIndexerNatGateway",
+      "added": "2026-11-02",
+      "reason": "Gamma NAT gateway for the OpenSearch indexer. Condition IsGamma (EnvironmentSuffix != '') instantiates it in every non-prod stage and it is already live and billing; converting it to a toggle defaulting to false is an infra change owned by a separate task (cost class C3 cleanup), not B89."
+    },
+    {
+      "file": "infrastructure/cloudformation/02-compute.yaml",
+      "logical_id": "OpenSearchIndexerNatGatewayEip",
+      "added": "2026-11-02",
+      "reason": "EIP attached to the gamma OpenSearch indexer NAT gateway above; same Condition IsGamma, same deferral."
+    },
+    {
+      "file": "infrastructure/cloudformation/10-opensearch-node.yaml",
+      "logical_id": "OpenSearchNodeInstance",
+      "added": "2026-11-02",
+      "reason": "Gamma-only self-hosted OpenSearch node (ENC-TSK-L39, ~$13/mo, cost posture locked in the template header). Unconditioned by design: the whole stack is gamma-only and refused for prod by the deploy workflow. Gating it behind a default-false toggle is a separate infra change."
+    }
+  ]
+}
