@@ -77,6 +77,10 @@ class RuntimeEnumTest(unittest.TestCase):
             self.assertEqual(alloc.resolve_runtime(raw), want, raw)
             self.assertIn(want, alloc.ALLOWED_RUNTIMES)
 
+    def test_aws_lambda_runtime_allowed(self):  # ENC-TSK-R82-0A
+        self.assertEqual(alloc.resolve_runtime("aws_lambda"), "aws_lambda")
+        self.assertIn("aws_lambda", alloc.ALLOWED_RUNTIMES)
+
     def test_mapping_runtime_uses_surface(self):
         self.assertEqual(alloc.resolve_runtime({"surface": "claude_code_desktop"}), "claude_code_desktop")
 

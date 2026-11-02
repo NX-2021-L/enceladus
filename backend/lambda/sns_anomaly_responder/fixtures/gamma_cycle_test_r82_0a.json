@@ -1,0 +1,37 @@
+{
+  "accountId": "356364570033",
+  "anomalyId": "b7e1c0de-0000-4000-8000-a82a00000001",
+  "anomalyStartDate": "2026-04-22T00:00:00Z",
+  "anomalyEndDate": "2026-04-23T00:00:00Z",
+  "anomalyScore": {
+    "currentScore": 0.97,
+    "maxScore": 0.97
+  },
+  "impact": {
+    "maxImpact": 24.71,
+    "totalActualSpend": 24.93,
+    "totalExpectedSpend": 0.22,
+    "totalImpact": 24.71,
+    "totalImpactPercentage": 11231.8
+  },
+  "monitorArn": "arn:aws:ce::356364570033:anomalymonitor/d14d8793-6657-4a7e-ac73-4ea236c11932",
+  "monitorName": "enceladus-services-monitor",
+  "dimensionValue": "AWS Lambda",
+  "rootCauses": [
+    {
+      "service": "AWS Lambda",
+      "region": "us-west-2",
+      "linkedAccount": "356364570033",
+      "usageType": "USW2-Lambda-SnapStart-Restore-Duration"
+    },
+    {
+      "service": "AWS Lambda",
+      "region": "us-west-2",
+      "linkedAccount": "356364570033",
+      "usageType": "USW2-Lambda-SnapStart-Cache-GB-Second"
+    }
+  ],
+  "subscriptionId": "b10698f6-2dc2-4b46-9e15-571699ce84de",
+  "subscriptionName": "enceladus-daily-anomaly-summary",
+  "anomalyDetailsLink": "https://console.aws.amazon.com/cost-management/home#/anomaly-detection/monitors/d14d8793-6657-4a7e-ac73-4ea236c11932/anomalies/a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+}

@@ -475,6 +475,97 @@ def _handle_escalation_push_sns(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": True, "sent": sent}
 
 
+_ANOMALY_ISSUE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}-ISS-[0-9A-Z]{1,12}$")
+_ANOMALY_PROJECT_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,63}$")
+
+
+def _anomaly_render(issue_id: str, project_id: str, service: str, impact: Any, severity: str,
+                    level: int) -> Dict[str, Any]:
+    """Notify v2 `anomaly` payload. Generic detail carries the issue id ONLY; detailed adds the
+    service and total impact. `navigate` is the PWA cockpit deep link to the issue."""
+    if level == 0:
+        body = issue_id
+    else:
+        amount = f"${float(impact):,.2f}" if isinstance(impact, (int, float)) else "impact n/a"
+        body = " ".join(f"{issue_id} {service or 'unknown'} {amount}".split())
+    return {"web_push": 8030, "notification": {
+        "title": f"Anomaly · {severity}" if level else "Anomaly", "body": body[:200],
+        "navigate": f"{APP_BASE_URL.rstrip('/')}/{project_id}/issue/{issue_id}",
+    }}
+
+
+def _notify_push_anomaly(issue_id: str, project_id: str, service: str, impact: Any, severity: str) -> int:
+    """Fan one new-anomaly push out per approver device (type `anomaly`, same per-device prefs
+    gate as escalations: prefs.types.anomaly.enabled and severity >= min_risk). Returns accepted."""
+    kind = "anomaly"
+    risk_rank = _NOTIFY_RISKS.index(severity) if severity in _NOTIFY_RISKS else 1
+    ddb, sent = d._get_ddb(), 0
+    for email in sorted(d._load_escalation_approver_allowlist()):
+        try:
+            devices = ddb.query(
+                TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                ExpressionAttributeValues={":pk": {"S": _notify_pk(email)}}).get("Items", [])
+        except Exception as exc:  # noqa: BLE001
+            d.logger.warning("anomaly push prepare failed approver-hash=%s: %s",
+                           hashlib.sha256(email.encode()).hexdigest()[:8], exc)
+            continue
+        sent_endpoints: set = set()
+        for item in devices:
+            try:
+                ehash = (item.get("endpoint_hash") or {}).get("S")
+                if ehash and ehash in sent_endpoints:
+                    continue
+                prefs = _notify_prefs_from_item(item)
+                cfg = prefs["types"].get(kind)
+                if not cfg or not cfg.get("enabled"):
+                    continue
+                if risk_rank < _NOTIFY_RISKS.index(cfg.get("min_risk", "low")):
+                    continue
+                level = 1 if (cfg.get("detail") or prefs["detail"]) == "detailed" else 0
+                status = _notify_send_raw(item, _anomaly_render(issue_id, project_id, service, impact, severity, level), issue_id)
+                if status in (404, 410):
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
+                elif 200 <= status < 300:
+                    sent += 1
+                    if ehash:
+                        sent_endpoints.add(ehash)
+                    try:
+                        _notify_mark_sent(item)
+                    except Exception as exc:  # noqa: BLE001
+                        d.logger.warning("anomaly push last_sent_at update failed: %s", exc)
+                else:
+                    d.logger.warning("anomaly push rejected status=%s", status)
+            except Exception as exc:  # noqa: BLE001 -- one device never stops the rest
+                d.logger.warning("anomaly push send failed: %s", exc)
+    return sent
+
+
+def handle_anomaly_push(host: Any, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/notifications/anomaly -- service-to-service (internal key) only.
+
+    Sent by the sns-anomaly-responder on the FIRST create of an anomaly issue (ENC-FTR-150 AC-4).
+    Independent of enrichment. Body: {issue_id, project_id, service, total_impact_usd, severity}."""
+    global d
+    d = host
+    if str((claims or {}).get("auth_mode") or "") not in ("internal-key", "managed-token"):
+        return d._error(403, "Anomaly push requires a service credential.")
+    if d._webpush is None:
+        return d._error(503, "Web push is unavailable.")
+    body = d._json_body(event) or {}
+    issue_id = str(body.get("issue_id") or "").strip()
+    project_id = str(body.get("project_id") or "").strip()
+    if not _ANOMALY_ISSUE_RE.match(issue_id) or not _ANOMALY_PROJECT_RE.match(project_id):
+        return d._error(400, "issue_id and project_id are required and must be valid ids.", retryable=False)
+    severity = str(body.get("severity") or "medium").strip().lower()
+    service = " ".join(str(body.get("service") or "").split())[:80]
+    try:
+        sent = _notify_push_anomaly(issue_id, project_id, service, body.get("total_impact_usd"), severity)
+    except Exception as exc:  # noqa: BLE001 -- never raises
+        d.logger.error("anomaly push failed: %s", exc)
+        sent = 0
+    return d._response(200, {"success": True, "sent": sent})
+
+
 def handle_escalation_push_sns(host: Any, event: Dict[str, Any]) -> Dict[str, Any]:
     global d
     d = host

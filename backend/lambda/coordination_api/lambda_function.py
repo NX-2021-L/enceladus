@@ -18976,6 +18976,9 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return _handle_escalation_watch(event, claims or {})
 
     # DVP-TSK-A23 (E4-R29..R32): escalation web push — approver-only notification routes.
+    # ENC-TSK-R82-0A (ENC-FTR-150 AC-4): service-credential anomaly push (sns-anomaly-responder).
+    if method == "POST" and path == "/api/v1/coordination/notifications/anomaly":
+        return notify_v2.handle_anomaly_push(sys.modules[__name__], event, claims or {})
     if path.startswith("/api/v1/coordination/notifications/"):
         return notify_v2.handle(sys.modules[__name__], method, path, event, claims or {})
 

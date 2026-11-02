@@ -1580,6 +1580,8 @@ ALLOWED_RUNTIMES = frozenset({
     "cursor_ide", "cursor_terminal", "cursor_composer", "codex_terminal", "codex_desktop",
     "devin_webui", "chatgpt_native_app", "recipe_runner", "enceladus_recipe_runner",
     "eventbridge_scheduler", "claude_agent_sdk", "claude_routine", "test",
+    # ENC-TSK-R82-0A: AWS Lambda-hosted agents (sns-anomaly-responder registers per invocation).
+    "aws_lambda",
 })
 
 # Exact-key aliases (never prefix-matched) -> canonical runtime.

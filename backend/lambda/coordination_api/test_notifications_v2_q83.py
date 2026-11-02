@@ -247,6 +247,43 @@ class RouteTests(Base):
         self.assertEqual(1, len(self.call("GET", "devices")[1]["devices"]))
 
 
+class AnomalyPushTests(Base):  # ENC-TSK-R82-0A / ENC-FTR-150 AC-4
+    SVC = {"auth_mode": "internal-key"}
+
+    def push(self, body=None, claims=None):
+        ev = {"body": json.dumps(body or {"issue_id": "DVP-ISS-950", "project_id": "devops",
+                                          "service": "AWS Lambda", "total_impact_usd": 31.5, "severity": "high"})}
+        r = notify_v2.handle_anomaly_push(lf, ev, self.SVC if claims is None else claims)
+        return r["statusCode"], json.loads(r["body"])
+
+    def optin(self, device_id, detail="detailed", **kw):
+        prefs = {"types": {"anomaly": {"enabled": True, "min_risk": kw.get("min_risk", "low")}}, "detail": detail}
+        self.assertEqual(200, self.call("PUT", f"devices/{device_id}/preferences", prefs)[0])
+
+    def test_detailed_and_generic_payloads_validate_and_deep_link(self):
+        a = self.subscribe()
+        c = self.subscribe(device_id="dev-cccccccc")
+        self.optin("dev-aaaaaaaa", "detailed")
+        self.optin("dev-cccccccc", "generic")
+        code, out = self.push()
+        self.assertEqual((200, 2), (code, out["sent"]))
+        got = {e: json.loads(self.uas[e].decrypt(b)) for e, b, _h in self.sent}
+        da, dc = got[a["subscription"]["endpoint"]], got[c["subscription"]["endpoint"]]
+        validate("#/$defs/DeclarativePushPayload", da)
+        validate("#/$defs/DeclarativePushPayload", dc)
+        self.assertEqual("DVP-ISS-950 AWS Lambda $31.50", da["notification"]["body"])
+        self.assertEqual("DVP-ISS-950", dc["notification"]["body"])
+        self.assertTrue(da["notification"]["navigate"].endswith("/devops/issue/DVP-ISS-950"))
+
+    def test_off_by_default_min_risk_and_auth(self):
+        self.subscribe()
+        self.assertEqual(0, self.push()[1]["sent"])  # type not enabled -> disabled (ES-R1)
+        self.optin("dev-aaaaaaaa", min_risk="critical")
+        self.assertEqual(0, self.push()[1]["sent"])  # severity high < critical
+        self.assertEqual(403, self.push(claims={"auth_mode": "cognito"})[0])
+        self.assertEqual(400, self.push({"issue_id": "bad", "project_id": "devops"})[0])
+
+
 class SenderTests(Base):
     def setUp(self):
         super().setUp()
