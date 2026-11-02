@@ -33,7 +33,7 @@ def _stub_msg(*ids, project=None):
 
 def test_default_registry_is_aws_cad_only_and_handler_uses_it():
     assert lf.ADAPTERS is sa.REGISTRY
-    assert sa.REGISTRY.sources() == ["aws-cad"]
+    assert sa.REGISTRY.sources() == ["aws-cad", "mentions-drift"]
     assert isinstance(cad, sa.SourceAdapter)
 
 

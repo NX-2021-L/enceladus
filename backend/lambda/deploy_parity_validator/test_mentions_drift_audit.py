@@ -456,3 +456,44 @@ class TestDispatch:
         assert resp["statusCode"] == 200
         import json
         assert json.loads(resp["body"])["action"] == "mentions_drift_audit"
+
+
+class TestEmitViaAnomalyResponder:
+    """ENC-TSK-R83-0B: breach is handed to the anomaly-responder, never the legacy ENC-ISS POST."""
+
+    class _Payload:
+        def __init__(self, data): self._d = data
+        def read(self): import json; return json.dumps(self._d).encode()
+
+    class _Lambda:
+        def __init__(self, payload, error=None):
+            self.calls, self._payload, self._error = [], payload, error
+        def invoke(self, **kw):
+            self.calls.append(kw)
+            r = {"Payload": TestEmitViaAnomalyResponder._Payload(self._payload)}
+            if self._error: r["FunctionError"] = "Unhandled"
+            return r
+
+    DIV = [{"record_id": "ENC-TSK-1", "record_type": "task", "missing": {"ENC-TSK-2"}, "extra": set()}]
+
+    def test_invokes_with_mentions_drift_source_and_returns_issue_id(self):
+        import json
+        fake = self._Lambda({"results": [{"action": "replayed", "issue_id": "ENC-ISS-9"}]})
+        with patch.object(lf, "ANOMALY_RESPONDER_FUNCTION", "responder-fn"), \
+             patch.object(lf, "_get_lambda", return_value=fake):
+            out = lf._emit_drift_via_responder("2026-11-02T10:00:00Z", 96, 33, self.DIV, True)
+        assert out == "ENC-ISS-9"
+        call = fake.calls[0]
+        assert call["FunctionName"] == "responder-fn" and call["InvocationType"] == "RequestResponse"
+        sns = json.loads(call["Payload"])["Records"][0]["Sns"]
+        assert sns["MessageAttributes"]["anomaly_source"]["Value"] == "mentions-drift"
+        msg = json.loads(sns["Message"])
+        assert msg["threshold_breached"] is True and msg["has_missing"] is True and msg["has_extra"] is False
+
+    def test_function_error_returns_none_without_legacy_fallback(self):
+        fake = self._Lambda({"errorMessage": "boom"}, error=True)
+        with patch.object(lf, "ANOMALY_RESPONDER_FUNCTION", "responder-fn"), \
+             patch.object(lf, "_get_lambda", return_value=fake), \
+             patch.object(lf, "_emit_drift_iss") as legacy:
+            assert lf._emit_drift_via_responder("t", 10, 5, self.DIV, True) is None
+        legacy.assert_not_called()

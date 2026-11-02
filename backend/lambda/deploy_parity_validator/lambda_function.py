@@ -61,6 +61,9 @@ MENTIONS_AUDIT_THRESHOLD   = float(os.environ.get("MENTIONS_AUDIT_THRESHOLD", "0
 
 # ENC-TSK-F64 / ENC-FTR-090 AC-20 — daily drift audit config
 SNS_TOPIC_ARN        = os.environ.get("SNS_TOPIC_ARN", "")
+# ENC-TSK-R83-0B / FTR-150 AC-9: when set, the MENTIONS drift finding is handed to the
+# anomaly-responder primitive (stable dedupe key) instead of POSTing a new ENC-ISS every run.
+ANOMALY_RESPONDER_FUNCTION = os.environ.get("ANOMALY_RESPONDER_FUNCTION", "")
 CFN_DRIFT_STACKS     = [
     s.strip()
     for s in os.environ.get(
@@ -934,6 +937,48 @@ def _emit_drift_iss(run_at: str, sample_size: int, mismatch_count: int,
     return new_id
 
 
+def _emit_drift_via_responder(run_at: str, sample_size: int, mismatch_count: int,
+                              divergent: List[Dict], threshold_breached: bool) -> Optional[str]:
+    """Invoke the anomaly-responder with an SNS-shaped event (source mentions-drift).
+    Returns the canonical issue id (created or replayed) or None on failure. Never falls
+    back to _emit_drift_iss: that path is the duplicate flood this replaces."""
+    message = {
+        "audit": "mentions_drift_audit", "run_at": run_at, "sample_size": sample_size,
+        "mismatch_count": mismatch_count,
+        "ratio": round(mismatch_count / max(sample_size, 1), 4),
+        "threshold": MENTIONS_AUDIT_THRESHOLD, "threshold_breached": threshold_breached,
+        "divergent": [
+            {"record_id": d["record_id"], "record_type": d["record_type"],
+             "missing": sorted(d["missing"])[:5], "extra": sorted(d["extra"])[:5]}
+            for d in divergent[:10]
+        ] if divergent else [],
+    }
+    # Signature needs the full direction set, not just the first 10 shown in evidence.
+    message["has_missing"] = any(d["missing"] for d in divergent)
+    message["has_extra"] = any(d["extra"] for d in divergent)
+    event = {"Records": [{"Sns": {
+        "Message": json.dumps(message),
+        "MessageAttributes": {"anomaly_source": {"Type": "String", "Value": "mentions-drift"}},
+    }}]}
+    try:
+        resp = _get_lambda().invoke(
+            FunctionName=ANOMALY_RESPONDER_FUNCTION,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(event).encode(),
+        )
+        payload = json.loads(resp["Payload"].read() or b"{}")
+        if resp.get("FunctionError"):
+            logger.error("[ERROR] anomaly-responder FunctionError: %s", str(payload)[:500])
+            return None
+        results = payload.get("results") or []
+        logger.info("[INFO] mentions drift handed to anomaly-responder: %s",
+                    [(r.get("action"), r.get("issue_id")) for r in results])
+        return (results[0].get("issue_id") if results else None)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ERROR] anomaly-responder invoke failed: %s", exc)
+        return None
+
+
 def _run_mentions_drift_audit() -> Dict:
     """Sample 100 recent records, diff expected vs live MENTIONS edges, emit ISS on >threshold."""
     run_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -998,7 +1043,11 @@ def _run_mentions_drift_audit() -> Dict:
 
     iss_record_id: Optional[str] = None
     if breach:
-        iss_record_id = _emit_drift_iss(run_at, effective_sample, mismatch_count, divergent)
+        if ANOMALY_RESPONDER_FUNCTION:
+            iss_record_id = _emit_drift_via_responder(
+                run_at, effective_sample, mismatch_count, divergent, breach)
+        else:
+            iss_record_id = _emit_drift_iss(run_at, effective_sample, mismatch_count, divergent)
 
     result: Dict[str, Any] = {
         "action":            "mentions_drift_audit",
