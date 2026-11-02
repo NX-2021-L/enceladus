@@ -170,6 +170,14 @@ async function callTool(name: string, args: Json, signal?: AbortSignal): Promise
   return un.body
 }
 
+/** Current governance hash (search -> governance.hash), required by every governed write. */
+export async function fetchGovernanceHash(signal?: AbortSignal): Promise<string> {
+  const gh = await callTool('search', { action: 'governance.hash', arguments: {} }, signal)
+  const hash = isRecord(gh) ? String(gh.governance_hash ?? gh.hash ?? '') : ''
+  if (!hash) throw new Error('governance hash unavailable')
+  return hash
+}
+
 /**
  * DVP-TSK-921: pin-as-related. The same governed path the generic action form uses (POST /coordination/mcp,
  * `execute` -> tracker.relate, Cognito cookie auth); tracker.relate requires the current governance hash, read

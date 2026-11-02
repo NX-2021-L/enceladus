@@ -8,6 +8,7 @@ import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useDocsDeltaWhileMounted, useEnceladusCorpus } from '../search/CorpusProvider'
 import { CorpusRefreshButton } from '../search/CorpusRefreshButton'
+import { NewDocumentButton } from '../documents/NewDocumentButton'
 import { hostSearchSource } from '../search/enceladusSearchSource'
 import { DOCS_PROPERTIES } from '../search/propertyDefs'
 import { rowToHit } from '../search/rowHit'
@@ -55,7 +56,12 @@ export default function DocsSearchPage() {
       className="docs-route"
       single
       above={stale}
-      actions={<CorpusRefreshButton />}
+      actions={
+        <>
+          <NewDocumentButton defaultProjectId={project || undefined} />
+          <CorpusRefreshButton />
+        </>
+      }
       search={{
         title: 'Documents',
         things: 'documents',
