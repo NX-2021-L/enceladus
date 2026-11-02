@@ -3449,6 +3449,38 @@ def _graphsearch_audit_record(
     return audit
 
 
+def _emit_graphsearch_emf(record: Dict[str, Any]) -> None:
+    """ENC-TSK-S11 (N11, DOC-F08AE0127D4E §10): emit CloudWatch EMF for the audit record.
+
+    Printed (not logged) so the Lambda JSON log formatter does not wrap the object and
+    CloudWatch extracts Enceladus/GraphSearch metrics from the top-level `_aws` block.
+    SearchDurationMs for hybrid and neighbors; HybridPathwayFailed (0/1) for hybrid.
+    Never raises; kill switch GRAPHSEARCH_EMF_ENABLED (default "true").
+    """
+    try:
+        if os.environ.get("GRAPHSEARCH_EMF_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
+            return
+        st = record.get("search_type")
+        if st not in ("hybrid", "neighbors"):
+            return
+        metrics = [{"Name": "SearchDurationMs", "Unit": "Milliseconds"}]
+        emf: Dict[str, Any] = {"SearchType": st, "SearchDurationMs": float(record.get("duration_ms") or 0)}
+        if st == "hybrid":
+            metrics.append({"Name": "HybridPathwayFailed", "Unit": "Count"})
+            emf["HybridPathwayFailed"] = 1 if record.get("pathway_status") == "failed" else 0
+        emf["_aws"] = {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": "Enceladus/GraphSearch",
+                "Dimensions": [["SearchType"]],
+                "Metrics": metrics,
+            }],
+        }
+        print(json.dumps(emf), flush=True)
+    except Exception:  # noqa: BLE001 - metrics must never break a request
+        pass
+
+
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
@@ -3502,11 +3534,11 @@ def _handle_search(event: Dict) -> Dict:
         return _error(400, result["error"])
 
     # Audit log (ENC-TSK-R81-0F: carries record_id + caller attribution)
-    logger.info(
-        json.dumps(_graphsearch_audit_record(
-            event, qs, search_type, project_id, result, duration_ms,
-        ))
+    _audit = _graphsearch_audit_record(
+        event, qs, search_type, project_id, result, duration_ms,
     )
+    logger.info(json.dumps(_audit))
+    _emit_graphsearch_emf(_audit)  # ENC-TSK-S11 (N11)
 
     if search_type != "hybrid":
         _maybe_emit_stigmergic_trace(
