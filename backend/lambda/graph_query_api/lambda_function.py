@@ -39,7 +39,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs
 
 import corroboration
@@ -1386,6 +1386,67 @@ def _compute_query_embedding(query_text: str) -> Optional[List[float]]:
         return None
 
 
+# ENC-TSK-S10 (PLN-103 W1.3 / N14): record-mode anchor-embedding reuse. When the
+# hybrid call carries anchor_record_id and the query text is the record-derived
+# one (MCP context.py: normalized "<title> <intent>"[:300]), the anchor node's
+# stored 256-d embedding is used to query the HNSW indexes instead of a Titan
+# round trip. `vector_source` is an internal/agent-only per-request override.
+_VECTOR_SOURCES = ("auto", "anchor", "titan")
+
+
+def _normalize_embedding(value: Any) -> Optional[List[float]]:
+    """Return value as a non-empty list of floats, else None (never raises)."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    try:
+        return [float(x) for x in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_anchor_embedding(driver, project_id: str, anchor_record_id: str):
+    """One Cypher read: (stored embedding | None, record-derived query text)."""
+    try:
+        with driver.session() as session:
+            rec = session.run(
+                "MATCH (a) WHERE a.record_id = $rid AND a.project_id = $project_id "
+                "RETURN a.embedding AS embedding, a.title AS title, a.intent AS intent LIMIT 1",
+                rid=anchor_record_id,
+                project_id=project_id,
+            ).single()
+        if rec is None:
+            return None, ""
+        title, intent = rec.get("title"), rec.get("intent")
+        derived = ""
+        if isinstance(title, str):
+            derived = " ".join(f"{title} {intent if isinstance(intent, str) else ''}".split())[:300].strip()
+        return _normalize_embedding(rec.get("embedding")), derived
+    except Exception:
+        logger.warning("[WARNING] anchor embedding read failed for %s", anchor_record_id, exc_info=True)
+        return None, ""
+
+
+def _resolve_query_embedding(driver, project_id: str, query_text: str,
+                             anchor_record_id: str, params: Dict) -> Tuple[Optional[List[float]], str]:
+    """Pick the vector-signal query embedding. Returns (embedding, vector_source).
+
+    vector_source: 'anchor' (stored anchor embedding, no Bedrock call), 'titan'
+    (Titan V2 query embedding) or 'titan_fallback' (anchor path was eligible but the
+    node had no usable embedding).
+    """
+    mode = str(params.get("vector_source") or "auto").strip().lower()
+    if mode not in _VECTOR_SOURCES:
+        mode = "auto"
+    fallback = False
+    if anchor_record_id and mode != "titan":
+        stored, derived = _read_anchor_embedding(driver, project_id, anchor_record_id)
+        if mode == "anchor" or (derived and query_text == derived):
+            if stored is not None:
+                return stored, "anchor"
+            fallback = True
+    return _compute_query_embedding(query_text), ("titan_fallback" if fallback else "titan")
+
+
 def _hybrid_vector_ranks(
     driver,
     project_id: str,
@@ -2240,6 +2301,10 @@ _HYBRID_TELEMETRY_FIELDS = (
 )
 
 
+# ENC-TSK-S10: which path produced the vector query embedding (additive audit field).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + ("vector_source",)
+
+
 def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
     tel: Dict[str, Any] = {
         "vector_ms": 0, "graph_ms": 0, "keyword_ms": 0, "facets_ms": 0,
@@ -2645,7 +2710,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         ranks: List[Dict[str, Any]] = []
         available = False
         if query_text:
-            query_embedding = _compute_query_embedding(query_text)
+            query_embedding, _tel["vector_source"] = _resolve_query_embedding(
+                driver, project_id, query_text, anchor_record_id, params,
+            )
             if query_embedding is not None:
                 ranks = _hybrid_vector_ranks(
                     driver,
@@ -3538,6 +3605,14 @@ def _handle_search(event: Dict) -> Dict:
         return _error(503, "Graph index temporarily unavailable. Use tracker_list for equivalent queries.",
                        code="GRAPH_UNAVAILABLE", retryable=True,
                        fallback_hint="Use search(action='tracker.list') or search(action='tracker.get') for direct DynamoDB access.")
+
+    # ENC-TSK-S10: vector_source is an internal/agent-only override; strip it otherwise.
+    if "vector_source" in qs:
+        _vs = str(qs.get("vector_source") or "").strip().lower()
+        if _vs in _VECTOR_SOURCES and _caller_attribution(event, qs)["caller_type"] in ("internal", "agent"):
+            qs["vector_source"] = _vs
+        else:
+            qs.pop("vector_source", None)
 
     handler_fn = SEARCH_HANDLERS[search_type]
     start = time.time()
