@@ -32,3 +32,17 @@ def test_entity_record_detection_includes_plan_lesson_and_document():
 def test_relationship_record_detection_is_explicit():
     assert backfill_graph._is_relationship_record({"record_type": "relationship"}) is True
     assert backfill_graph._is_relationship_record({"record_type": "task"}) is False
+
+
+def test_backfill_node_upsert_projects_intent_and_description():
+    """ENC-TSK-S05: backfill replays graph_sync._upsert_node, so it carries the same capped props."""
+    from unittest.mock import MagicMock
+
+    tx = MagicMock()
+    backfill_graph.GS._upsert_node(tx, {
+        "record_id": "ENC-TSK-ZZ1", "record_type": "task", "title": "t",
+        "intent": "i" * 1500, "description": "d" * 2500,
+    })
+    props = tx.run.call_args.kwargs["props"]
+    assert len(props["intent"]) == 1000
+    assert len(props["description"]) == 2000
