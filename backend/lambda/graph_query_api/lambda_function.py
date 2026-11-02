@@ -1511,6 +1511,9 @@ def _resolve_query_embedding(driver, project_id: str, query_text: str,
     return _compute_query_embedding(query_text), ("titan_fallback" if fallback else "titan")
 
 
+_VECTOR_LABEL_MAX_WORKERS = 6  # ENC-TSK-S20: bounded pool for per-label HNSW queries
+
+
 def _hybrid_vector_ranks(
     driver,
     project_id: str,
@@ -1531,19 +1534,25 @@ def _hybrid_vector_ranks(
     else:
         labels_to_query = list(LABEL_VECTOR_INDEXES.keys())
 
-    by_rid: Dict[str, Dict[str, Any]] = {}
-    for label in labels_to_query:
+    # ENC-TSK-S20 (PLN-103 N16 / P103-R17): the per-label HNSW queries are independent,
+    # so run them concurrently (bounded pool, ONE session per label query - sessions are
+    # not thread-safe, the driver is). Results are merged in the original label order, so
+    # dedup (highest score wins, first label wins ties) and ranking match the sequential
+    # implementation exactly. A failing label degrades only that label.
+    cypher = (
+        "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
+        "YIELD node, score "
+        "WHERE node.project_id = $project_id "
+        # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
+        # recall signal so a twin no longer competes with its canonical - the
+        # central precision@1 fix (DOC-DF651F07D5C2 section 3).
+        "AND node.superseded_by IS NULL "
+        "RETURN node.record_id AS rid, score, labels(node) AS labels"
+    )
+
+    def _query_label(label: str) -> List[Any]:
         index_name = LABEL_VECTOR_INDEXES[label]
-        cypher = (
-            "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
-            "YIELD node, score "
-            "WHERE node.project_id = $project_id "
-            # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
-            # recall signal so a twin no longer competes with its canonical — the
-            # central precision@1 fix (DOC-DF651F07D5C2 §3).
-            "AND node.superseded_by IS NULL "
-            "RETURN node.record_id AS rid, score, labels(node) AS labels"
-        )
+        rows: List[Any] = []
         try:
             with driver.session() as session:
                 result = session.run(
@@ -1555,19 +1564,28 @@ def _hybrid_vector_ranks(
                 )
                 for rec in result:
                     rid = rec.get("rid")
-                    if not rid:
-                        continue
-                    score = float(rec.get("score") or 0.0)
-                    prev = by_rid.get(rid)
-                    if prev is None or score > prev["score"]:
-                        by_rid[rid] = {
-                            "record_id": rid,
-                            "score": score,
-                            "label": label,
-                        }
+                    if rid:
+                        rows.append((rid, float(rec.get("score") or 0.0)))
         except Exception as exc:
-            # Index missing or unreachable — log and continue with other labels.
+            # Index missing or unreachable - log and continue with other labels.
             logger.warning("[WARNING] vector index %s query failed: %s", index_name, exc)
+            return []
+        return rows
+
+    if len(labels_to_query) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(labels_to_query), _VECTOR_LABEL_MAX_WORKERS)
+        ) as _pool:
+            per_label_rows = list(_pool.map(_query_label, labels_to_query))
+    else:
+        per_label_rows = [_query_label(lb) for lb in labels_to_query]
+
+    by_rid: Dict[str, Dict[str, Any]] = {}
+    for label, rows in zip(labels_to_query, per_label_rows):
+        for rid, score in rows:
+            prev = by_rid.get(rid)
+            if prev is None or score > prev["score"]:
+                by_rid[rid] = {"record_id": rid, "score": score, "label": label}
 
     ranked = sorted(by_rid.values(), key=lambda d: d["score"], reverse=True)
     for idx, item in enumerate(ranked, start=1):
@@ -2202,8 +2220,13 @@ def _hybrid_keyword_ranks(
     query_text: str,
     top_n: int,
     record_type_filter: Optional[str] = None,
+    timings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Keyword signal over title, intent and description (ENC-TSK-S12 / N5c).
+
+    ENC-TSK-S20: when ``timings`` is given it receives keyword_fulltext_ms (time in the
+    fulltext index attempts), keyword_fallback_ms (time in the per-token CONTAINS
+    fallback) and keyword_rows (rows returned).
 
     Primary path: ``db.index.fulltext.queryNodes`` on ``KEYWORD_FULLTEXT_INDEX``
     (default ``governed_record_text_ft``) with Lucene field boosts title^3,
@@ -2286,11 +2309,16 @@ def _hybrid_keyword_ranks(
             })
         return out
 
+    def _note(**fields: Any) -> None:
+        if timings is not None:
+            timings.update(fields)
+
+    _kt0 = time.perf_counter()
     try:
         with driver.session() as session:
             for index_name, ft_query in ft_attempts:
                 try:
-                    return _collect(session.run(
+                    _rows = _collect(session.run(
                         ft_cypher,
                         index_name=index_name,
                         ft_query=ft_query,
@@ -2298,14 +2326,22 @@ def _hybrid_keyword_ranks(
                         label=label or None,
                         limit=top_n,
                     ))
+                    _note(keyword_fulltext_ms=_ms_since(_kt0), keyword_fallback_ms=0,
+                          keyword_rows=len(_rows))
+                    return _rows
                 except Exception:
                     logger.warning(
                         "[INFO] fulltext keyword index %s unavailable; trying next fallback",
                         index_name,
                         exc_info=True,
                     )
+            _kt1 = time.perf_counter()
+            _ft_ms = int((_kt1 - _kt0) * 1000)
             result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
-            return _collect(result)
+            _rows = _collect(result)
+            _note(keyword_fulltext_ms=_ft_ms, keyword_fallback_ms=_ms_since(_kt1),
+                  keyword_rows=len(_rows))
+            return _rows
     except Exception:
         logger.exception("[ERROR] keyword signal scoring failed")
         return []
@@ -2447,6 +2483,10 @@ _HYBRID_TELEMETRY_FIELDS = (
 
 # ENC-TSK-S10: which path produced the vector query embedding (additive audit field).
 _HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + ("vector_source",)
+# ENC-TSK-S20: keyword sub-timers (0 unless the Neo4j keyword arm ran).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + (
+    "keyword_fulltext_ms", "keyword_fallback_ms", "keyword_rows",
+)
 
 # ENC-TSK-S19 (PLN-103 N15): non-signal stage timers (additive audit fields).
 _HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + (
@@ -2538,6 +2578,7 @@ def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
         "graph_algorithm": "unavailable", "pathway_status": "skipped",
         "query_hash": query_hash,
         "preflight_ms": 0, "node_fetch_ms": 0, "rank_cpu_ms": 0, "emit_ms": 0,
+        "keyword_fulltext_ms": 0, "keyword_fallback_ms": 0, "keyword_rows": 0,
     }
     _HYBRID_TELEMETRY.current = tel
     return tel
@@ -3029,6 +3070,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
                     query_text,
                     top_n=HYBRID_SIGNAL_TOP_N,
                     record_type_filter=record_type_filter,
+                    timings=_tel,
                 )
                 available = bool(ranks)
                 source = "neo4j_fallback"
