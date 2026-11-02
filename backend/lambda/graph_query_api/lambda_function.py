@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
@@ -2228,6 +2229,47 @@ def _apply_fsrs_t3_filter(
 _PATHWAY_WALK_EDGE_UNION = "|".join(GRAPH_EDGE_WEIGHTS.keys())
 
 
+# ENC-TSK-S02 (PLN-103 W0.1 / N2): per-signal telemetry for the hybrid
+# `graphsearch_query` audit line. `_query_hybrid` fills a private per-thread dict
+# that `_graphsearch_audit_record` consumes, so the response body is unchanged.
+_HYBRID_TELEMETRY = threading.local()
+_HYBRID_TELEMETRY_FIELDS = (
+    "vector_ms", "graph_ms", "keyword_ms", "facets_ms", "pathway_ms",
+    "graph_candidates", "keyword_candidates", "graph_algorithm",
+    "pathway_status", "query_hash",
+)
+
+
+def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
+    tel: Dict[str, Any] = {
+        "vector_ms": 0, "graph_ms": 0, "keyword_ms": 0, "facets_ms": 0,
+        "pathway_ms": 0, "graph_candidates": 0, "keyword_candidates": 0,
+        "graph_algorithm": "unavailable", "pathway_status": "skipped",
+        "query_hash": query_hash,
+    }
+    _HYBRID_TELEMETRY.current = tel
+    return tel
+
+
+def _hybrid_telemetry_set(**fields: Any) -> None:
+    tel = getattr(_HYBRID_TELEMETRY, "current", None)
+    if tel is not None:
+        tel.update(fields)
+
+
+def _hybrid_telemetry_take() -> Dict[str, Any]:
+    """Pop this thread's telemetry (never leaks into a later request)."""
+    tel = getattr(_HYBRID_TELEMETRY, "current", None)
+    _HYBRID_TELEMETRY.current = None
+    if tel is None:
+        tel = {}
+    return {k: tel.get(k) for k in _HYBRID_TELEMETRY_FIELDS}
+
+
+def _ms_since(t0: float) -> int:
+    return int((time.perf_counter() - t0) * 1000)
+
+
 def _derive_intent_signature(query_text: str, anchor_record_id: str,
                              record_type: Optional[str]) -> str:
     """Deterministic intent fingerprint for AC-1 telemetry when the caller does not
@@ -2255,6 +2297,7 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
     Returns: (edges_traversed, edge_participation, node_sequence)
     """
     if not anchor_record_id or not result_rids:
+        _hybrid_telemetry_set(pathway_status="skipped")
         return [], [], ([anchor_record_id] if anchor_record_id else [])
 
     result_set = set(result_rids)
@@ -2285,12 +2328,15 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
             "[WARNING] pathway edge reconstruction exceeded %.1fs for anchor=%s — "
             "emitting empty edge telemetry", _PATHWAY_EDGE_DEADLINE_S, anchor_record_id,
         )
+        _hybrid_telemetry_set(pathway_status="timeout")
         return [], [], [anchor_record_id]
     except Exception:
         logger.warning("[WARNING] pathway edge reconstruction failed", exc_info=True)
+        _hybrid_telemetry_set(pathway_status="failed")
         return [], [], [anchor_record_id]
     finally:
         _pex.shutdown(wait=False)
+    _hybrid_telemetry_set(pathway_status="ok")
 
     edges_traversed: List[Dict[str, Any]] = []
     participation: Dict[str, Dict[str, Any]] = {}
@@ -2540,6 +2586,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     intent_signature = str(params.get("intent_signature", "")).strip()
     if not intent_signature:
         intent_signature = _derive_intent_signature(query_text, anchor_record_id, record_type_filter)
+    # ENC-TSK-S02: query_hash = sha256 hex of (query, anchor, record_type) — the
+    # FTR-082 derivation, computed even when the caller supplied an explicit signature.
+    _tel = _hybrid_telemetry_begin(
+        _derive_intent_signature(query_text, anchor_record_id, record_type_filter)[len("sha256:"):]
+    )
 
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
@@ -2571,6 +2622,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ---- Vector signal -----------------------------------------------------
     vector_ranks: List[Dict[str, Any]] = []
     vector_available = False
+    _t0 = time.perf_counter()
     if query_text:
         query_embedding = _compute_query_embedding(query_text)
         if query_embedding is not None:
@@ -2584,11 +2636,13 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             vector_available = True
         else:
             logger.info("[INFO] vector signal skipped — embedding computation unavailable")
+    _tel["vector_ms"] = _ms_since(_t0)
 
     # ---- Graph signal ------------------------------------------------------
     graph_ranks: List[Dict[str, Any]] = []
     graph_available = False
     graph_algorithm = "unavailable"
+    _t0 = time.perf_counter()
     if anchor_record_id:
         # ENC-ISS-311 / ENC-TSK-G98: the GDS path builds a per-query Aura Graph
         # Analytics session (gds.graph.project {memory:'2GB'}) whose creation can
@@ -2638,11 +2692,15 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
         finally:
             _gex.shutdown(wait=False)
+    _tel["graph_ms"] = _ms_since(_t0)
+    _tel["graph_candidates"] = len(graph_ranks)
+    _tel["graph_algorithm"] = graph_algorithm
 
     # ---- Keyword signal (ENC-TSK-L43: OpenSearch primary, Neo4j fallback) --
     keyword_ranks: List[Dict[str, Any]] = []
     keyword_available = False
     keyword_source = "unavailable"
+    _t0 = time.perf_counter()
     if query_text:
         os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
             project_id,
@@ -2668,6 +2726,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             )
             keyword_available = bool(keyword_ranks)
             keyword_source = "neo4j_fallback"
+    _tel["keyword_ms"] = _ms_since(_t0)
+    _tel["keyword_candidates"] = len(keyword_ranks)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -2749,9 +2809,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): facets over the fused candidate set,
     # in-process. Replaces the OpenSearch aggregations and the prod-to-gamma
     # feed/corpus HTTP fallback (W0.5 D-2: query-relative, no prod feed base).
+    _t0 = time.perf_counter()
     facets = _facets_from_candidates(
         (node_by_rid.get(rid) for rid in top_rids), project_id
     )
+    _tel["facets_ms"] = _ms_since(_t0)
 
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
     # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
@@ -2888,9 +2950,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # reconstruct the graph edges connecting the anchor to the resolved result set.
     # Bounded + fully degradable; never perturbs `nodes`/RRF above.
     result_rids = [n.get("record_id") for n in nodes if n.get("record_id")]
+    _t0 = time.perf_counter()
     edges_traversed, edge_participation, node_sequence = _reconstruct_pathway_edges(
         driver, project_id, anchor_record_id, result_rids,
     )
+    _tel["pathway_ms"] = _ms_since(_t0)
 
     summary = (
         f"Hybrid: {len(nodes)} nodes "
@@ -3365,6 +3429,9 @@ def _graphsearch_audit_record(
         "duration_ms": duration_ms,
         "query_cypher": result.get("query_cypher", ""),
     }
+    if search_type == "hybrid":
+        # ENC-TSK-S02 (PLN-103 N2): per-signal timing/candidate/pathway telemetry.
+        audit.update(_hybrid_telemetry_take())
     if search_type == "neighbors":
         audit["empty_neighbors"] = len([n for n in nodes if n.get("record_id") != record_id]) == 0
     return audit
