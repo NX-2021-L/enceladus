@@ -210,6 +210,28 @@ def show_vector_indexes(driver) -> List[Dict[str, Any]]:
     return rows
 
 
+def run_nodes_only(driver, entity_records: List[Dict[str, Any]], sleep_ms: int = 0, limit: Optional[int] = None) -> int:
+    """Re-project node properties only (ENC-TSK-S12, ruling P103-R14).
+
+    Calls ``GS._upsert_project_node`` + ``GS._upsert_node`` per record. Never calls
+    ``GS._reconcile_edges`` (which deletes non-field-derived edges) and never embeds
+    (embedding lives only in the graph_sync handler). ``SET n += $props`` leaves other
+    properties, including embeddings, untouched. Sleeps ``sleep_ms`` after every 100 records.
+    """
+    batch = entity_records[:limit] if limit else entity_records
+    with driver.session() as session:
+        for i, record in enumerate(batch, 1):
+            project_id = str(record.get("project_id") or "").strip()
+            if project_id:
+                session.execute_write(GS._upsert_project_node, project_id)
+            session.execute_write(GS._upsert_node, record)
+            if i % 100 == 0:
+                logger.info("[INFO] Nodes upserted (nodes-only): %d / %d", i, len(batch))
+                if sleep_ms > 0:
+                    time.sleep(sleep_ms / 1000.0)
+    return len(batch)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backfill Neo4j graph from governed DynamoDB tables")
     parser.add_argument("--region", default="us-west-2")
@@ -220,6 +242,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Scan only, no graph writes")
     parser.add_argument("--wipe-existing", action="store_true",
                         help="DETACH DELETE the current graph before replaying projection state")
+    parser.add_argument("--nodes-only", action="store_true",
+                        help="Re-project node properties only via GS._upsert_node: no edge "
+                             "reconcile, no embedding (ENC-TSK-S12 / P103-R14)")
+    parser.add_argument("--sleep-ms", type=int, default=0,
+                        help="With --nodes-only: sleep this many ms after every 100 records")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="With --nodes-only: process only the first N entity records (smoke run)")
     parser.add_argument("--run-migration", default=None,
                         help="Path to a .cypher migration file; when set, runs only the migration "
                              "and exits (no DynamoDB scan, no backfill). See "
@@ -277,6 +306,17 @@ def main():
     logger.info("[INFO] Connecting to Neo4j...")
     creds = get_neo4j_credentials(secret_name, args.region)
     driver = get_neo4j_driver(creds)
+
+    if args.nodes_only:
+        if args.wipe_existing:
+            parser.error("--nodes-only cannot be combined with --wipe-existing")
+        start = time.time()
+        done = run_nodes_only(driver, entity_records, sleep_ms=args.sleep_ms, limit=args.limit)
+        node_count, edge_count = report_counts(driver)
+        driver.close()
+        logger.info("[SUCCESS] Nodes-only backfill: %d records upserted in %.1fs; graph has %d nodes, %d relationships",
+                    done, time.time() - start, node_count, edge_count)
+        return
 
     if args.wipe_existing:
         _wipe_graph(driver)
