@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import threading
 import time
 import uuid
@@ -484,20 +485,49 @@ def _rebuild_neo4j_driver():
         except Exception:
             logger.warning("[WARNING] Bolt driver close raised during rebuild", exc_info=True)
     _neo4j_driver = None
+    _invalidate_driver_liveness()
     return _get_neo4j_driver()
+
+
+# ENC-TSK-S19 (PLN-103 N15): skip the verify_connectivity Bolt round-trip when this
+# driver was proven live within DRIVER_LIVENESS_TTL_S (default 60). Wall-clock
+# (time.time) is used on purpose: it advances across a Lambda freeze, so a thawed
+# container whose pool may be NAT-killed (350 s) re-verifies instead of trusting a
+# stale stamp. Any rebuild/failure resets the stamp.
+try:
+    DRIVER_LIVENESS_TTL_S = float(os.environ.get("DRIVER_LIVENESS_TTL_S", "60"))
+except ValueError:
+    DRIVER_LIVENESS_TTL_S = 60.0
+_driver_verified: Tuple[int, float] = (0, 0.0)  # (id(driver), time.time() at verify)
+
+
+def _mark_driver_verified(driver) -> None:
+    global _driver_verified
+    _driver_verified = (id(driver), time.time())
+
+
+def _invalidate_driver_liveness() -> None:
+    """Forget the liveness stamp (call after any query failure on the pool)."""
+    global _driver_verified
+    _driver_verified = (0, 0.0)
 
 
 def _ensure_live_driver(driver):
     """Probe the Bolt pool and rebuild on failure.
 
     Returns a driver with at least one proven-live connection, or None if
-    rebuild also failed. Cheap on the happy path (one round-trip); only
-    rebuilds when the pool has decayed.
+    rebuild also failed. Cheap on the happy path (one round-trip, skipped when
+    the driver was verified within DRIVER_LIVENESS_TTL_S); only rebuilds when
+    the pool has decayed.
     """
     if driver is None:
         return _get_neo4j_driver()
+    vid, vat = _driver_verified
+    if DRIVER_LIVENESS_TTL_S > 0 and vid == id(driver) and 0 <= time.time() - vat < DRIVER_LIVENESS_TTL_S:
+        return driver
     try:
         driver.verify_connectivity()
+        _mark_driver_verified(driver)
         return driver
     except Exception as exc:
         logger.warning(
@@ -2418,6 +2448,88 @@ _HYBRID_TELEMETRY_FIELDS = (
 # ENC-TSK-S10: which path produced the vector query embedding (additive audit field).
 _HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + ("vector_source",)
 
+# ENC-TSK-S19 (PLN-103 N15): non-signal stage timers (additive audit fields).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + (
+    "preflight_ms", "node_fetch_ms", "rank_cpu_ms", "emit_ms",
+)
+
+
+# ENC-TSK-S19 (PLN-103 N15): fire-and-forget telemetry emits. A module-level
+# single-worker daemon thread drains a bounded queue (64); a full queue drops the
+# emit with a log line and worker exceptions are swallowed + logged, so telemetry
+# is best-effort and never delays or fails a response. NOTE: Lambda may freeze
+# background threads once the response returns. To keep that acceptable the next
+# hybrid invocation calls _flush_async_emits() first, which (when the last enqueue
+# was long enough ago that the worker was probably frozen) briefly waits for the
+# thawed worker to drain what is pending. Anything still lost on container
+# recycle is accepted: telemetry is best-effort.
+ASYNC_EMIT_QUEUE_MAX = 64
+ASYNC_EMIT_FLUSH_TIMEOUT_S = 0.25
+ASYNC_EMIT_FLUSH_IDLE_S = 2.0
+_ASYNC_EMIT_QUEUE: "queue.Queue" = queue.Queue(maxsize=ASYNC_EMIT_QUEUE_MAX)
+_async_emit_worker: Optional[threading.Thread] = None
+_async_emit_lock = threading.Lock()
+_async_emit_last_enqueue = 0.0
+
+
+def _async_emit_loop() -> None:
+    while True:
+        fn, args, kwargs = _ASYNC_EMIT_QUEUE.get()
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("[ERROR] async telemetry emit failed (suppressed)")
+        finally:
+            _ASYNC_EMIT_QUEUE.task_done()
+
+
+def _emit_async(fn, *args, **kwargs) -> bool:
+    """Enqueue fn(*args, **kwargs) on the background emitter. True if queued."""
+    global _async_emit_worker, _async_emit_last_enqueue
+    try:
+        with _async_emit_lock:
+            if _async_emit_worker is None or not _async_emit_worker.is_alive():
+                _async_emit_worker = threading.Thread(
+                    target=_async_emit_loop, name="graphsearch-emit", daemon=True)
+                _async_emit_worker.start()
+        _ASYNC_EMIT_QUEUE.put_nowait((fn, args, kwargs))
+        _async_emit_last_enqueue = time.time()
+        return True
+    except queue.Full:
+        logger.warning("[WARNING] async telemetry queue full (%d); emit dropped", ASYNC_EMIT_QUEUE_MAX)
+        return False
+    except Exception:
+        logger.exception("[ERROR] async telemetry enqueue failed (suppressed)")
+        return False
+
+
+def _flush_async_emits(timeout_s: Optional[float] = None) -> None:
+    """Give a possibly-thawed worker a bounded chance to drain pending emits."""
+    if _ASYNC_EMIT_QUEUE.unfinished_tasks == 0:
+        return
+    timeout_s = ASYNC_EMIT_FLUSH_TIMEOUT_S if timeout_s is None else timeout_s
+    deadline = time.time() + timeout_s
+    while _ASYNC_EMIT_QUEUE.unfinished_tasks and time.time() < deadline:
+        time.sleep(0.005)
+
+
+def _emit_hybrid_telemetry_async(record_fn, trace_kwargs: Dict[str, Any]) -> None:
+    """Build the pathway record synchronously (cheap, snapshots inputs) and ship
+    the S3 put + stigmergic trace on the background worker. Sets emit_ms to the
+    enqueue cost only."""
+    _t0 = time.perf_counter()
+    try:
+        record = record_fn()
+
+        def _run() -> None:
+            _emit_pathway_telemetry(record)
+            _maybe_emit_stigmergic_trace(**trace_kwargs)
+
+        _emit_async(_run)
+    except Exception:
+        logger.exception("[ERROR] hybrid telemetry enqueue failed (suppressed)")
+    _hybrid_telemetry_set(emit_ms=_ms_since(_t0))
+
 
 def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
     tel: Dict[str, Any] = {
@@ -2425,6 +2537,7 @@ def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
         "pathway_ms": 0, "graph_candidates": 0, "keyword_candidates": 0,
         "graph_algorithm": "unavailable", "pathway_status": "skipped",
         "query_hash": query_hash,
+        "preflight_ms": 0, "node_fetch_ms": 0, "rank_cpu_ms": 0, "emit_ms": 0,
     }
     _HYBRID_TELEMETRY.current = tel
     return tel
@@ -2790,6 +2903,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): resolve the energy-function lambda
     # weights once per call (not once per candidate) so a single hybrid call
     # never re-probes AppConfig more than once.
+    _pf_t0 = time.perf_counter()
+    if time.time() - _async_emit_last_enqueue > ASYNC_EMIT_FLUSH_IDLE_S:
+        _flush_async_emits()  # ENC-TSK-S19: drain emits stranded by a Lambda freeze
     energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
 
     # ENC-TSK-I92 / ENC-TSK-Q46 (ENC-FTR-110, ENC-ISS-836): resolve the
@@ -2807,6 +2923,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # driver. On failure, rebuild rebinds the module-global so subsequent
     # handler invocations also pick up the fresh pool.
     driver = _ensure_live_driver(driver)
+    _tel["preflight_ms"] = _ms_since(_pf_t0)
     if driver is None:
         return {"error": "neo4j driver unavailable after rebuild attempt"}
 
@@ -2979,23 +3096,25 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         # AC-1: emit telemetry even for zero-result retrievals (no edges/nodes).
         # ENC-TSK-I98: lambda weights are still logged even with zero candidates
         # so the AppConfig-resolved values used for this call are auditable.
-        _emit_pathway_telemetry(_build_pathway_telemetry_record(
-            wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
-            anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
-            edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
-            signal_availability=_sig_avail, retrieval_records=[],
-            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
-        ))
-        _maybe_emit_stigmergic_trace(
-            project_id=project_id,
-            params=params,
-            event_type="retrieval",
-            result={"pathway": {"node_sequence": []}, "nodes": []},
-            outcome_signal={
-                "result_count": 0,
-                "graph_algorithm": graph_algorithm,
-                "signal_availability": _sig_avail,
-            },
+        _emit_hybrid_telemetry_async(
+            lambda: _build_pathway_telemetry_record(
+                wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+                anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
+                edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
+                signal_availability=_sig_avail, retrieval_records=[],
+                lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
+            ),
+            dict(
+                project_id=project_id,
+                params=dict(params),
+                event_type="retrieval",
+                result={"pathway": {"node_sequence": []}, "nodes": []},
+                outcome_signal={
+                    "result_count": 0,
+                    "graph_algorithm": graph_algorithm,
+                    "signal_availability": _sig_avail,
+                },
+            ),
         )
         return {
             "nodes": [],
@@ -3037,7 +3156,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
+    _nf_t0 = time.perf_counter()
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+    _tel["node_fetch_ms"] = _ms_since(_nf_t0)
+    _rank_t0 = time.perf_counter()  # ENC-TSK-S19: rank_cpu_ms = facets+energy+corroboration+filter
     # ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): facets over the fused candidate set,
     # in-process. Replaces the OpenSearch aggregations and the prod-to-gamma
     # feed/corpus HTTP fallback (W0.5 D-2: query-relative, no prod feed base).
@@ -3182,6 +3304,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # reconstruct the graph edges connecting the anchor to the resolved result set.
     # Bounded + fully degradable; never perturbs `nodes`/RRF above.
     result_rids = [n.get("record_id") for n in nodes if n.get("record_id")]
+    _tel["rank_cpu_ms"] = _ms_since(_rank_t0)
     _t0 = time.perf_counter()
     edges_traversed, edge_participation, node_sequence = _reconstruct_pathway_edges(
         driver, project_id, anchor_record_id, result_rids,
@@ -3219,28 +3342,30 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # else CloudWatch fallback). Carries the AC-10 edge_participation list.
     # ENC-TSK-I98: additively carries the per-record energy breakdown (AC-2)
     # alongside everything FTR-082 already logs here.
-    _emit_pathway_telemetry(_build_pathway_telemetry_record(
-        wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
-        anchor_record_id=anchor_record_id, node_sequence=node_sequence,
-        edges_traversed=edges_traversed, edge_participation=edge_participation,
-        result_count=len(nodes), graph_algorithm=graph_algorithm,
-        signal_availability=_sig_avail, retrieval_records=retrieval_records,
-        lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
-    ))
-    _maybe_emit_stigmergic_trace(
-        project_id=project_id,
-        params=params,
-        event_type="retrieval",
-        result={
-            "pathway": {"node_sequence": node_sequence},
-            "nodes": nodes,
-            "edges": edges_traversed,
-        },
-        outcome_signal={
-            "result_count": len(nodes),
-            "graph_algorithm": graph_algorithm,
-            "signal_availability": _sig_avail,
-        },
+    _emit_hybrid_telemetry_async(
+        lambda: _build_pathway_telemetry_record(
+            wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+            anchor_record_id=anchor_record_id, node_sequence=node_sequence,
+            edges_traversed=edges_traversed, edge_participation=edge_participation,
+            result_count=len(nodes), graph_algorithm=graph_algorithm,
+            signal_availability=_sig_avail, retrieval_records=retrieval_records,
+            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
+        ),
+        dict(
+            project_id=project_id,
+            params=dict(params),
+            event_type="retrieval",
+            result={
+                "pathway": {"node_sequence": list(node_sequence)},
+                "nodes": [dict(n) for n in nodes],
+                "edges": list(edges_traversed),
+            },
+            outcome_signal={
+                "result_count": len(nodes),
+                "graph_algorithm": graph_algorithm,
+                "signal_availability": _sig_avail,
+            },
+        ),
     )
 
     return {
