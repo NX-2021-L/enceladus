@@ -3124,6 +3124,22 @@ Resources:
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: "arn:aws:s3:::jreese-net/governance/cost-digest/latest.json"
+              # ENC-TSK-R83-0C: weekly fixed-floor digest inventory. Read-only describe/list only;
+              # these APIs have no resource-level scoping. Deliberately NO ce:* (Cost Explorer is
+              # never used for the digest -- DOC-323ED181F51D rule 7).
+              - Sid: CostFloorDigestInventoryRead
+                Effect: Allow
+                Action:
+                  - ec2:DescribeNatGateways
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeInstances
+                  - es:ListDomainNames
+                  - es:DescribeDomains
+                  - rds:DescribeDBInstances
+                  - lightsail:GetInstances
+                  - lightsail:GetStaticIps
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -3148,6 +3164,32 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: sns.amazonaws.com
       SourceArn: !Ref CostAnomalyEventsTopic
+
+  # ENC-TSK-R83-0C (ENC-FTR-150 W3.3): weekly fixed-floor magnitude digest. Cost class C1:
+  # one EventBridge rule firing one Lambda invocation per week (pay-per-use, no always-on
+  # resource; no C3). Gamma-scoped like the rest of the responder. Mondays 14:30 UTC.
+  # On-demand run: aws lambda invoke --payload '{"digest_source":"cost-floor"}' (see worklog).
+  CostFloorDigestSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    Properties:
+      Name: !Sub "enceladus-cost-floor-digest-weekly${EnvironmentSuffix}"
+      Description: Weekly fixed-floor magnitude digest (top N C3 resources by list price) via the SNS anomaly responder
+      ScheduleExpression: "cron(30 14 ? * MON *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SnsAnomalyResponderFunction.Arn
+          Id: cost-floor-digest-target
+          Input: '{"digest_source": "cost-floor"}'
+
+  CostFloorDigestSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref SnsAnomalyResponderFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CostFloorDigestSchedule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-R24 (ENC-PLN-100 C1.7, BRD FR-2, rulings A4/A13): Daily Cost Digest producer.

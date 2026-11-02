@@ -420,13 +420,29 @@ def _select_adapter(event_source: Any) -> Any:
     return ADAPTERS.resolve(per_record or os.environ.get("ANOMALY_SOURCE"), aws_cad_adapter.SOURCE)
 
 
+def run_scheduled_digest(event: Dict[str, Any], client: Any, collect: Optional[Any] = None) -> Dict[str, Any]:
+    """Scheduled (EventBridge) intake: ``{"digest_source": "<registered source>"}``. The adapter
+    collects its own read-only snapshot (``collect_message``) and the anomalies flow through the
+    same idempotent ``process_anomaly`` create path as SNS-delivered ones (ENC-TSK-R83-0C)."""
+    source = str(event.get("digest_source") or "")
+    adapter = ADAPTERS.get(source)
+    collect_fn = collect or getattr(adapter, "collect_message", None)
+    if adapter is None or collect_fn is None:
+        raise RuntimeError(f"digest_source {source!r} is not a registered collecting adapter")
+    anomalies = source_adapters.parse_message(adapter, collect_fn())
+    results = [process_anomaly(norm, client) for norm in anomalies]
+    summary = {"event": "anomaly_digest_complete", "source": source, "processed": len(results)}
+    logger.info(json.dumps(summary))
+    return {"summary": summary, "results": results}
+
+
 def lambda_handler(event: Any, context: Any, client: Optional[Any] = None,
                    identity: Optional[Identity] = None) -> Dict[str, Any]:
     is_enrich = isinstance(event, dict) and "enrichment_request" in event
     owns_identity = False
     if client is None:
         client = TrackerClient()
-        if identity is None and ((event or {}).get("Records") or is_enrich):
+        if identity is None and ((event or {}).get("Records") or is_enrich or (event or {}).get("digest_source")):
             if is_enrich:
                 # ENC-TSK-R83-0A is fail-open: no identity -> no advisory write, never an error.
                 try:
@@ -451,6 +467,8 @@ def lambda_handler(event: Any, context: Any, client: Optional[Any] = None,
 
 
 def _run(event: Any, client: Any) -> Dict[str, Any]:
+    if isinstance(event, dict) and event.get("digest_source"):
+        return run_scheduled_digest(event, client)  # ENC-TSK-R83-0C weekly schedule
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
     suppressed = 0

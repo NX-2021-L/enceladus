@@ -131,6 +131,9 @@ def build_default_registry(extra: Iterable[Any] = ()) -> AdapterRegistry:
     reg = AdapterRegistry()
     reg.register(aws_cad_adapter)
     reg.register(mentions_drift_adapter)  # ENC-TSK-R83-0B / FTR-150 AC-9
+    import cost_floor_digest  # ENC-TSK-R83-0C weekly fixed-floor magnitude digest
+
+    reg.register(cost_floor_digest)
     for adapter in extra:
         reg.register(adapter)
     return reg
