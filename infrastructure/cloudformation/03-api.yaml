@@ -3086,6 +3086,15 @@ Resources:
       RouteKey: "POST /api/v1/coordination/notifications/subscribe"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-R91 (ENC-TSK-R82-0A handler): service-to-service anomaly push (sns-anomaly-responder,
+  # internal key checked in coordination_api). Same integration; no gateway authorizer.
+  RouteNotificationsAnomaly:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/notifications/anomaly"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # ENC-TSK-Q83 notify v2: per-device routes (v1 unsubscribe/preferences routes removed).
   RouteNotificationsDevices:
     Type: AWS::ApiGatewayV2::Route

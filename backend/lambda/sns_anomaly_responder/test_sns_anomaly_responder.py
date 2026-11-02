@@ -82,7 +82,8 @@ def test_replay_x3_yields_one_create_and_evidence_worklog_on_replays():
     assert issue["body"]["idempotency_key"] == "aws-cad:a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
     assert [r["action"] for r in out["results"]] == ["replayed"]
     assert len(t.logs) == 2  # worklog on each replay, none on first create
-    assert t.sets == []  # identical impact -> evidence unchanged
+    assert t.sets == [(issue["item_id"], "evidence")] * 2  # ENC-TSK-R91: every replay appends an evidence entry
+    assert len(issue["evidence"]) == 3
 
 
 def test_replay_with_new_impact_refreshes_evidence():
@@ -339,3 +340,88 @@ def test_type_resolution_failure_fails_closed(monkeypatch):
     with pytest.raises(lf.TrackerError):
         lf.acquire_identity(api)
     assert not any(c[1].endswith("/agents/sessions") for c in api.calls)
+
+
+# ---- ENC-TSK-R91: gamma E2E defects (compact list, truthful pushed, handler context) ----
+class CompactListTracker(PushTracker):
+    """Mirrors the real tracker: list rows are COMPACT (no evidence); get_issue returns the full record."""
+    def __init__(self, push_ok=True):
+        super().__init__()
+        self.push_ok = push_ok
+        self.create_pushes = 0
+
+    def list_issues(self, project, status, cursor=""):
+        rows = [{k: v for k, v in r.items() if k not in ("evidence", "body")}
+                for r in self.issues.values() if r["status"] == status]
+        return {"records": rows, "next_cursor": ""}
+
+    def get_issue(self, project, issue_id):
+        return {"record": self.issues[issue_id]}
+
+    def notify_anomaly(self, project, issue_id, norm):
+        self.create_pushes += 1
+        if not self.push_ok:
+            raise lf.TrackerError("HTTP 404")
+        return {}
+
+    def notify_anomaly_update(self, project, issue_id, norm, prior_usd):
+        if not self.push_ok:
+            raise lf.TrackerError("HTTP 404")
+        return super().notify_anomaly_update(project, issue_id, norm, prior_usd)
+
+
+def _clear_thresholds(monkeypatch):
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_RATIO", raising=False)
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_ABS_USD", raising=False)
+
+
+def test_replays_append_entries_and_baseline_survives_compact_list(monkeypatch):
+    _clear_thresholds(monkeypatch)
+    t = CompactListTracker()
+    lf.lambda_handler(_event(_msg(10.0)), None, client=t)
+    rs = [lf.lambda_handler(_event(_msg(v)), None, client=t)["results"][0] for v in (10.0, 12.0, 20.0)]
+    assert [r["notified"] for r in rs] == [False, False, True]  # replays below threshold do not push
+    assert t.updates == [("DVP-ISS-901", 10.0, 20.0)]  # baseline came from the stored evidence, not None
+    ev = next(iter(t.issues.values()))["evidence"]
+    assert len(ev) == 4  # create + one entry per replay
+    assert [e.get("pushed") for e in ev[1:]] == [False, False, True]
+    assert [e["total_impact_usd"] for e in ev[1:]] == [10.0, 12.0, 20.0]
+    assert lf.push_baseline(ev) == 20.0  # next replay compares against the last PUSHED impact
+
+
+def test_failed_update_push_is_not_flagged_pushed(monkeypatch):
+    _clear_thresholds(monkeypatch)
+    t = CompactListTracker(push_ok=False)
+    lf.lambda_handler(_event(_msg(10.0)), None, client=t)
+    r = lf.lambda_handler(_event(_msg(30.0)), None, client=t)["results"][0]
+    assert r["notified"] is False
+    ev = next(iter(t.issues.values()))["evidence"]
+    assert ev[-1]["pushed"] is False and ev[-1]["total_impact_usd"] == 30.0
+    assert lf.push_baseline(ev) == 10.0  # failed push never moves the baseline
+    assert "push FAILED" in t.logs[-1][1]
+
+
+def test_unknown_evidence_never_overwrites_or_pushes(monkeypatch):
+    _clear_thresholds(monkeypatch)
+    t = CompactListTracker()
+    lf.lambda_handler(_event(_msg(10.0)), None, client=t)
+
+    def boom(project, issue_id):
+        raise lf.TrackerError("down")
+    t.get_issue = boom
+    r = lf.lambda_handler(_event(_msg(50.0)), None, client=t)["results"][0]
+    assert r["notified"] is False and t.updates == []
+    assert [s for s in t.sets if s[1] == "evidence"] == []  # stored evidence untouched
+
+
+def test_lambda_handler_passes_context_to_enrichment_dispatch(monkeypatch):
+    import types
+    calls = []
+    monkeypatch.setattr(lf.enrichment, "dispatch_async", lambda fn, payload: calls.append((fn, payload)))
+    t = FakeTracker()
+    ctx = types.SimpleNamespace(function_name="enceladus-sns-anomaly-responder-gamma")
+    out = lf.lambda_handler(_event(), ctx, client=t)
+    assert out["results"][0]["action"] == "created" and len(calls) == 1
+    fn, payload = calls[0]
+    assert fn == "enceladus-sns-anomaly-responder-gamma"
+    assert payload["issue_id"] == out["results"][0]["issue_id"] and payload["project"] == "devops"
