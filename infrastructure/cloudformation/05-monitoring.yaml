@@ -199,6 +199,35 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphHealthScheduleRule.Arn
 
+  # ENC-TSK-S04 (N10, DOC-F08AE0127D4E §10) — warm keeper. Invokes the existing
+  # graph_query_api health route (functional probes: Neo4j ping + keyword +
+  # vector embedding) every 5 minutes so one execution environment, its Neo4j
+  # driver pool and Bedrock client stay warm between agent sessions. The Input
+  # is the minimal API Gateway v2-shaped event: no action key, so it bypasses
+  # the aws.events/refresh_projection fallback and reaches the /health branch
+  # (unauthenticated) in lambda_handler. Provisioned concurrency is out of scope.
+  GraphQueryWarmPingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-graph-query-warm-ping${EnvironmentSuffix}"
+      Description: >
+        Warm-keeper: invokes graph_query_api health route every 5 minutes
+        (ENC-TSK-S04, N10)
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: GraphQueryWarmPingTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+          Input: '{"rawPath": "/api/v1/tracker/graphsearch/health", "requestContext": {"http": {"method": "GET"}}, "headers": {"x-warm-ping": "enceladus-graph-query-warm-ping"}}'
+
+  GraphQueryWarmPingInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GraphQueryWarmPingRule.Arn
+
   # ---------------------------------------------------------------------------
   # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
   # ---------------------------------------------------------------------------
