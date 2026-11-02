@@ -253,6 +253,15 @@ Parameters:
   # It is left empty by default so that plane resolution stays derivable from
   # EnvironmentSuffix ALONE -- which is what tools/cfn_env_resolver.py renders with,
   # and what ENC-TSK-O43 AC-1 asserts against.
+  # ENC-TSK-R84-0A (ENC-FTR-150 AC-11): the SNS anomaly responder + its topic/IAM/weekly digest rule
+  # deploy in BOTH planes. This is the per-plane kill switch (set "false" to drop the responder
+  # resources from a plane); default "true" so the prod compute deploy is a pure Add.
+  ResponderEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Deploy the SNS anomaly responder (Lambda, role, CAD topic, subscription, weekly digest rule).
+
   PlaneTrackerApiBase:
     Type: String
     Default: ""
@@ -411,6 +420,7 @@ Conditions:
   HasRecipeMcpUrlOverride: !Not [!Equals [!Ref RecipeMcpUrlOverride, ""]]
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  ResponderEnabled: !Equals [!Ref ResponderEnabled, "true"]
   HasCorsOrigin: !Not [!Equals [!Ref CorsOrigin, ""]]
   # ENC-TSK-R26: effective feed-publisher flags. ENC-TSK-R48 / ruling P100-R30 (io directive
   # 2026-10-20, no gamma soak): "auto" now resolves ON in BOTH planes; an explicit per_batch /
@@ -1779,9 +1789,10 @@ Resources:
           SNAPSTART_MAX_STALE_VERSIONS: "5"
           DRIFT_POLL_TIMEOUT: "240"
           # ENC-TSK-R83-0B / ENC-FTR-150 AC-9: gamma hands MENTIONS drift to the anomaly-responder
-          # (stable dedupe key). Unset in prod (the responder is gamma-only) -> legacy ENC-ISS path.
+          # (stable dedupe key). ENC-TSK-R84-0A: now enabled in prod too (FTR-150 AC-11); unset only
+          # when ResponderEnabled=false -> legacy ENC-ISS path.
           ANOMALY_RESPONDER_FUNCTION: !If
-            - IsGamma
+            - ResponderEnabled
             - !Sub "enceladus-sns-anomaly-responder${EnvironmentSuffix}"
             - !Ref AWS::NoValue
           # ENC-TSK-G43 / ENC-FTR-098 AC-7 — mentions_drift_audit
@@ -3011,7 +3022,7 @@ Resources:
   # ---------------------------------------------------------------------------
   CostAnomalyEventsTopic:
     Type: AWS::SNS::Topic
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       TopicName: !Sub "enceladus-cost-anomaly-events${EnvironmentSuffix}"
       DisplayName: Enceladus Cost Anomaly Detection events
@@ -3023,7 +3034,7 @@ Resources:
 
   CostAnomalyEventsTopicPolicy:
     Type: AWS::SNS::TopicPolicy
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       Topics:
         - !Ref CostAnomalyEventsTopic
@@ -3042,7 +3053,7 @@ Resources:
 
   SnsAnomalyResponderFunction:
     Type: AWS::Lambda::Function
-    Condition: IsGamma
+    Condition: ResponderEnabled
     DeletionPolicy: Retain
     Properties:
       LoggingConfig:
@@ -3064,7 +3075,10 @@ Resources:
           TRACKER_API_BASE: !If
             - HasPlaneTrackerApiBase
             - !Ref PlaneTrackerApiBase
-            - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+            - !If
+              - IsGamma
+              - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+              - !Sub "https://8nkzqkmxqc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           ANOMALY_SOURCE: aws-cad
           ANOMALY_DEFAULT_PROJECT: devops
@@ -3082,7 +3096,7 @@ Resources:
 
   SnsAnomalyResponderRole:
     Type: AWS::IAM::Role
-    Condition: IsGamma
+    Condition: ResponderEnabled
     DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "enceladus-sns-anomaly-responder-role${EnvironmentSuffix}"
@@ -3112,7 +3126,7 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-sns-anomaly-responder${EnvironmentSuffix}"
               # One small model only, via its US inference profile (+ the underlying foundation model
-              # as reached through that profile). Role is gamma-only (Condition: IsGamma).
+              # as reached through that profile). Role is gamma-only (Condition: ResponderEnabled).
               - Sid: EnrichmentBedrockInvoke
                 Effect: Allow
                 Action: bedrock:InvokeModel
@@ -3150,7 +3164,7 @@ Resources:
   # ({Records:[{Sns:{Message,TopicArn}}]}); the handler unwraps it.
   SnsAnomalyResponderSubscription:
     Type: AWS::SNS::Subscription
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       TopicArn: !Ref CostAnomalyEventsTopic
       Protocol: lambda
@@ -3158,7 +3172,7 @@ Resources:
 
   SnsAnomalyResponderSnsPermission:
     Type: AWS::Lambda::Permission
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       FunctionName: !Ref SnsAnomalyResponderFunction
       Action: lambda:InvokeFunction
@@ -3167,11 +3181,11 @@ Resources:
 
   # ENC-TSK-R83-0C (ENC-FTR-150 W3.3): weekly fixed-floor magnitude digest. Cost class C1:
   # one EventBridge rule firing one Lambda invocation per week (pay-per-use, no always-on
-  # resource; no C3). Gamma-scoped like the rest of the responder. Mondays 14:30 UTC.
+  # resource; no C3). Same plane scope as the rest of the responder (ResponderEnabled). Mondays 14:30 UTC.
   # On-demand run: aws lambda invoke --payload '{"digest_source":"cost-floor"}' (see worklog).
   CostFloorDigestSchedule:
     Type: AWS::Events::Rule
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       Name: !Sub "enceladus-cost-floor-digest-weekly${EnvironmentSuffix}"
       Description: Weekly fixed-floor magnitude digest (top N C3 resources by list price) via the SNS anomaly responder
@@ -3184,7 +3198,7 @@ Resources:
 
   CostFloorDigestSchedulePermission:
     Type: AWS::Lambda::Permission
-    Condition: IsGamma
+    Condition: ResponderEnabled
     Properties:
       FunctionName: !Ref SnsAnomalyResponderFunction
       Action: lambda:InvokeFunction
@@ -6523,9 +6537,9 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
-              # ENC-TSK-R83-0B (C0: IAM statement, no resource): invoke the gamma anomaly-responder.
+              # ENC-TSK-R83-0B (C0: IAM statement, no resource): invoke the anomaly-responder (both planes, R84-0A).
               - !If
-                - IsGamma
+                - ResponderEnabled
                 - Sid: InvokeAnomalyResponder
                   Effect: Allow
                   Action:
