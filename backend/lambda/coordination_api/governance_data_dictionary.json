@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-02.1",
-  "updated_at": "2026-11-02T06:00:00Z",
-  "last_change_summary": "ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes). PREVIOUS: ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
+  "version": "2026-11-02.2",
+  "updated_at": "2026-11-02T07:00:00Z",
+  "last_change_summary": "ENC-TSK-R80-0F (ENC-FTR-146 AC-1/2/3): coordination_api canonicalizes agent.type.register surface/model(/runtime) via agent_id_alloc.canonicalize_agent_type_fields (single importable function; normal form documented in new entity coordination.agent_type_normal_form) and find_agent_type now scans ALL pages and matches on the canonical (surface, model) pair, so a spelling variant (e.g. 'Claude Code CLI' == ENC-AGT-002) resolves to the existing type instead of minting a duplicate. Register is NOT fail-closed (ENC-FTR-146 W1.1). agent.type.register responses gain an additive normal_form object. Variant-to-canonical ENC-AGT mapping published as DOC-82CF8C268DA5. No session history or stored row is rewritten. PREVIOUS: ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes). PREVIOUS: ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7141,11 +7141,11 @@
         },
         "surface": {
           "type": "string",
-          "definition": "Agent surface (e.g. Claude Desktop, Claude Code Terminal, Cursor Cloud, Codex, Bedrock)."
+          "definition": "Canonical agent surface (e.g. claude_code_cli, claude_code_desktop, claude.ai-webui, cowork-desktop, codex-terminal, cursor-cloud-agent). Stored in the ENC-FTR-146 normal form (entity coordination.agent_type_normal_form); legacy rows may carry a spelling variant (ENC-AGT-002 'Claude Code CLI') and match the canonical form at lookup."
         },
         "model": {
           "type": "string",
-          "definition": "Model (e.g. Opus 4.8, Sonnet 4.6, Haiku 4.5)."
+          "definition": "Canonical model id, e.g. claude-opus-5-5, claude-sonnet-5-5, gpt-5-codex. Stored in the ENC-FTR-146 normal form (entity coordination.agent_type_normal_form)."
         },
         "cost_tier": {
           "type": "string",
@@ -7162,6 +7162,31 @@
         "usage_count": {
           "type": "integer",
           "definition": "Server-incremented count of sessions of this agent type. Observed telemetry, not a hand-maintained fit assertion."
+        }
+      }
+    },
+    "coordination.agent_type_normal_form": {
+      "description": "ENC-TSK-R80-0F / ENC-FTR-146 AC-1..AC-3. The ONE documented normal form for agent surface, model and runtime strings, implemented by agent_id_alloc.canonicalize_agent_type_fields(surface, model, runtime) (also canonicalize_surface / canonicalize_model / canonicalize_runtime) in coordination_api. Applied by agent.type.register and by find_agent_type (which compares the canonical form of the request against the canonical form of every stored row across ALL scan pages) so a spelling variant resolves to the existing ENC-AGT row instead of minting a new one. Stored rows and session history are never rewritten; the devops governance mart (DVP-TSK-788 AC-3/AC-4) applies the same rules read-side. Variant-to-canonical ENC-AGT mapping: DOC-82CF8C268DA5 (only ENC-AGT-002 'Claude Code CLI' is a variant; it is its own canonical row). Register is not fail-closed here (ENC-FTR-146 W1.1/W1.5 add closed enums and rejection).",
+      "fields": {
+        "key": {
+          "type": "string",
+          "definition": "key(x) = lowercase(strip(x)) with every run of characters outside [a-z0-9] collapsed to '_' and leading/trailing '_' trimmed. Empty or missing input yields ''. All functions are pure and idempotent."
+        },
+        "surface": {
+          "type": "string",
+          "definition": "canonical surface = alias table lookup on key(x), else key(x). Spellings already stored on live rows are kept as stored: claude.ai-webui, cowork-desktop, codex-terminal, cursor-cloud-agent, devin-webui, chatgpt-native-app, eventbridge-scheduler, enceladus-recipe-runner; plus claude_code_cli, claude_code_desktop, test. Aliases of claude_code_cli: claude_code, claude_code_terminal, cli (any case/separator, e.g. 'Claude Code CLI', 'claude-code-cli', 'claude-code')."
+        },
+        "model": {
+          "type": "string",
+          "definition": "canonical model = lowercase(strip(x)); whitespace and underscore runs become '-'; repeated '-' collapse; for 'claude-*' models '.' becomes '-' (claude-opus-5.5 == claude-opus-5-5); other dots are kept ('GPT-5.5 Thinking' -> gpt-5.5-thinking)."
+        },
+        "runtime": {
+          "type": "string",
+          "definition": "canonical runtime = alias lookup on key(x), else key(x). Aliases of claude_code_cli: claude_code, cli (so claude_code_cli, claude-code-cli, CLI, cli, claude-code collapse). Other runtimes (e.g. claude_code_desktop_subagent) are passed through as key(x). Session runtime values are not rewritten at register until the ENC-FTR-146 closed-enum wave."
+        },
+        "identity": {
+          "type": "string",
+          "definition": "Agent-type identity = (canonical surface, canonical model). find_agent_type tie-break: active before deprecated, then row stored in canonical spelling, then lowest ENC-AGT sequence."
         }
       }
     },
@@ -9610,6 +9635,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-11-02.2",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R80-0F (ENC-FTR-146 AC-1/2/3): coordination_api canonicalizes agent.type.register surface/model(/runtime) via agent_id_alloc.canonicalize_agent_type_fields (single importable function; normal form documented in new entity coordination.agent_type_normal_form) and find_agent_type now scans ALL pages and matches on the canonical (surface, model) pair, so a spelling variant (e.g. 'Claude Code CLI' == ENC-AGT-002) resolves to the existing type instead of minting a duplicate. Register is NOT fail-closed (ENC-FTR-146 W1.1). agent.type.register responses gain an additive normal_form object. Variant-to-canonical ENC-AGT mapping published as DOC-82CF8C268DA5. No session history or stored row is rewritten."
+    },
     {
       "version": "2026-11-02.1",
       "date": "2026-11-02",
