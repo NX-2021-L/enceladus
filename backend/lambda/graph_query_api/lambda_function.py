@@ -570,11 +570,60 @@ def _authenticate(event: Dict) -> Optional[str]:
 # Graph queries
 # ---------------------------------------------------------------------------
 
-def _node_to_dict(node) -> Dict[str, Any]:
-    """Convert a Neo4j Node to a serializable dict."""
+def _node_to_dict(node, include_embedding: bool = False) -> Dict[str, Any]:
+    """Convert a Neo4j Node to a serializable dict.
+
+    ENC-TSK-R81-0F (ENC-FTR-089 contract): the raw `embedding` vector (256 floats,
+    ~5 KB JSON) is research-only egress served ONLY by search_type=embeddings_for.
+    Every other node serialisation strips it server-side. The hybrid path is the
+    sole internal caller that opts in (include_embedding=True) because corroboration
+    reads the vectors in-process; it strips them again before responding.
+    """
     props = dict(node)
+    if not include_embedding:
+        props.pop("embedding", None)
     props["_labels"] = sorted(node.labels)
     return props
+
+
+# ENC-TSK-R81-0F: per-node byte budget for neighbors payloads (AC-2: < 1 KB).
+NEIGHBOR_NODE_MAX_BYTES = 1000
+_NEIGHBOR_STRING_FLOOR = 48
+
+
+def _compact_neighbor_node(node: Dict[str, Any], max_bytes: int = NEIGHBOR_NODE_MAX_BYTES) -> Dict[str, Any]:
+    """Bound one neighbors node to `max_bytes` of JSON without dropping identity.
+
+    Drops the embedding and any other numeric-vector property, then truncates the
+    longest string properties (with an ellipsis) until the node fits. record_id,
+    project_id, status and the other short fields are never touched in practice.
+    """
+    out = {
+        k: v for k, v in node.items()
+        if k != "embedding"
+        and not (isinstance(v, list) and len(v) > 16 and all(isinstance(x, (int, float)) for x in v))
+    }
+
+    def _size() -> int:
+        return len(json.dumps(out, default=str).encode("utf-8"))
+
+    guard = 0
+    while _size() > max_bytes and guard < 64:
+        guard += 1
+        longest_key = max(
+            (k for k, v in out.items() if isinstance(v, str) and len(v) > _NEIGHBOR_STRING_FLOOR),
+            key=lambda k: len(out[k]),
+            default=None,
+        )
+        if longest_key is None:
+            break
+        cur = out[longest_key]
+        excess = _size() - max_bytes
+        keep = max(_NEIGHBOR_STRING_FLOOR, len(cur) - excess - 8)
+        if keep >= len(cur):
+            keep = len(cur) - 1
+        out[longest_key] = cur[:keep].rstrip() + "\u2026"
+    return out
 
 
 _ALLOWED_EDGE_TYPES = frozenset({
@@ -793,12 +842,12 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
         for rec in result:
             start_node = rec.get("start")
             if start_node is not None:
-                snd = _node_to_dict(start_node)
+                snd = _compact_neighbor_node(_node_to_dict(start_node))
                 srid = snd.get("record_id", "")
                 if srid and srid not in seen_ids:
                     nodes.append(snd)
                     seen_ids.add(srid)
-            nd = _node_to_dict(rec["neighbor"])
+            nd = _compact_neighbor_node(_node_to_dict(rec["neighbor"]))
             rid = nd.get("record_id", "")
             if rid and rid not in seen_ids:
                 nodes.append(nd)
@@ -2083,7 +2132,7 @@ def _fetch_nodes_by_record_ids(
         with driver.session() as session:
             result = session.run(cypher, project_id=project_id, rids=record_ids)
             for rec in result:
-                nd = _node_to_dict(rec["n"])
+                nd = _node_to_dict(rec["n"], include_embedding=True)
                 rid = nd.get("record_id")
                 if rid:
                     out[rid] = nd
@@ -3222,6 +3271,72 @@ def _project_hybrid_compact(response_body: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _caller_attribution(event: Dict, params: Dict[str, Any]) -> Dict[str, str]:
+    """ENC-TSK-R81-0F: who issued this graphsearch call (best effort, never raises).
+
+    caller_type: 'internal' (service key), 'user' / 'agent' (JWT), 'cookie', 'unknown'.
+    caller: stable id (JWT sub/username/client_id, or a service label). session_id
+    comes from the request params (session_id/agent_session_id/wave_id) or the
+    X-Enceladus-Session / X-Enceladus-Surface headers where present.
+    """
+    caller, caller_type = "unknown", "unknown"
+    surface = ""
+    session_id = _session_id_from_params(params)
+    try:
+        headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+        surface = str(headers.get("x-enceladus-surface") or params.get("surface") or "").strip()
+        if session_id == "unassigned":
+            session_id = str(headers.get("x-enceladus-session") or "").strip() or "unassigned"
+        internal_key = headers.get("x-coordination-internal-key", "").strip()
+        if internal_key and COORDINATION_INTERNAL_API_KEY and internal_key in {
+            COORDINATION_INTERNAL_API_KEY, COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+        }:
+            caller, caller_type = (surface or "internal-service"), "internal"
+        else:
+            claims = _egress_jwt_claims(event)
+            ident = (claims.get("cognito:username") or claims.get("username")
+                     or claims.get("client_id") or claims.get("sub") or "")
+            if ident:
+                caller = str(ident)
+                caller_type = "agent" if claims.get("enc:agent_tier") else "user"
+            elif _has_enceladus_id_token(event):
+                caller, caller_type = "enceladus-cookie", "cookie"
+    except Exception:
+        logger.debug("[DEBUG] caller attribution failed (suppressed)", exc_info=True)
+    return {"caller": caller, "caller_type": caller_type, "surface": surface or "unknown",
+            "session_id": session_id}
+
+
+def _graphsearch_audit_record(
+    event: Dict, qs: Dict[str, Any], search_type: str, project_id: str,
+    result: Dict[str, Any], duration_ms: int,
+) -> Dict[str, Any]:
+    """Build the `graphsearch_query` audit line (ENC-TSK-R81-0F AC-3).
+
+    record_id: the anchor/target record (record_id, else anchor_record_id).
+    empty_neighbors: true when a neighbors query returned nothing beyond the start
+    node, so the empty-neighbors rate can be grouped by `caller` in Logs Insights.
+    """
+    nodes = result.get("nodes", [])
+    record_id = str(qs.get("record_id") or qs.get("anchor_record_id") or "")
+    audit: Dict[str, Any] = {
+        "event": "graphsearch_query",
+        "search_type": search_type,
+        "project_id": project_id,
+        "record_id": record_id,
+        **_caller_attribution(event, qs),
+        "depth": qs.get("depth"),
+        "node_count": len(nodes),
+        "edge_count": len(result.get("edges", [])),
+        "path_count": len(result.get("paths", [])),
+        "duration_ms": duration_ms,
+        "query_cypher": result.get("query_cypher", ""),
+    }
+    if search_type == "neighbors":
+        audit["empty_neighbors"] = len([n for n in nodes if n.get("record_id") != record_id]) == 0
+    return audit
+
+
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
@@ -3274,19 +3389,11 @@ def _handle_search(event: Dict) -> Dict:
     if "error" in result:
         return _error(400, result["error"])
 
-    # Audit log
+    # Audit log (ENC-TSK-R81-0F: carries record_id + caller attribution)
     logger.info(
-        json.dumps({
-            "event": "graphsearch_query",
-            "search_type": search_type,
-            "project_id": project_id,
-            "depth": qs.get("depth"),
-            "node_count": len(result.get("nodes", [])),
-            "edge_count": len(result.get("edges", [])),
-            "path_count": len(result.get("paths", [])),
-            "duration_ms": duration_ms,
-            "query_cypher": result.get("query_cypher", ""),
-        })
+        json.dumps(_graphsearch_audit_record(
+            event, qs, search_type, project_id, result, duration_ms,
+        ))
     )
 
     if search_type != "hybrid":
@@ -3606,6 +3713,25 @@ def _handle_embeddings_for(event: Dict) -> Dict:
     })
 
 
+def _graph_operating_mode(gds_plugin_present: bool, projection: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-TSK-R81-0F (ENC-ISS-541): the graph signal's OPERATING mode, not plugin presence.
+
+    Vocabulary matches hybrid's graph_algorithm: 'gds_pagerank' | 'cypher_fallback'.
+    GDS_HARD_DISABLED (ENC-ISS-465/J41) forces cypher_fallback by policy even when the
+    plugin is installed, so presence alone lies. 'disabled' is reported only when the
+    graph signal cannot run at all (not produced here; reserved for a failed probe).
+    """
+    if _GDS_HARD_DISABLED:
+        return {"mode": "cypher_fallback", "reason": "policy_gds_hard_disabled",
+                "gds_plugin_present": bool(gds_plugin_present)}
+    if gds_plugin_present:
+        warm = bool(projection.get("configured")) and bool(projection.get("exists")) and not projection.get("stale")
+        return {"mode": "gds_pagerank",
+                "reason": "standing_projection" if warm else "per_query_projection",
+                "gds_plugin_present": True}
+    return {"mode": "cypher_fallback", "reason": "gds_plugin_absent", "gds_plugin_present": False}
+
+
 def _handle_health(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch/health.
 
@@ -3637,8 +3763,10 @@ def _handle_health(event: Dict) -> Dict:
         except Exception:
             logger.warning("[WARNING] health vector probe failed", exc_info=True)
         # graph: GDS/AGA plugin reachable (cheap CALL gds.list; no projection build).
+        # ENC-TSK-R81-0F: reported below as the operating MODE, not this boolean.
+        gds_plugin_present = False
         try:
-            signals["graph"] = _check_gds_available(driver)
+            gds_plugin_present = bool(_check_gds_available(driver))
         except Exception:
             logger.warning("[WARNING] health graph probe failed", exc_info=True)
 
@@ -3651,11 +3779,16 @@ def _handle_health(event: Dict) -> Dict:
         except Exception:
             logger.warning("[WARNING] health standing-projection probe failed", exc_info=True)
 
+        graph_mode = _graph_operating_mode(gds_plugin_present, graph_projection)
+        # signals.graph is the operating mode string (truthy == the graph signal runs).
+        signals["graph"] = graph_mode["mode"]
+
         duration_ms = int((time.time() - start) * 1000)
         return _response(200, {
             "status": "healthy",
             "response_ms": duration_ms,
             "signals": signals,
+            "graph_mode": graph_mode,
             "graph_projection": graph_projection,
             "hybrid_fields_compact": True,  # ENC-TSK-Q49
         })
