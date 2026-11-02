@@ -1,10 +1,8 @@
 import { createContext, useContext, useState, type ReactNode } from 'react'
-import { Link } from '@tanstack/react-router'
 import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
 import { Modal } from '../design-system'
 import { Tabs } from './StripTabs'
-import { recordHrefForType } from '../routes/recordLink'
 import type {
   AcceptanceCriterion,
   HistoryEntry,
@@ -302,7 +300,7 @@ export function RecordDetailHub({
             {/* ENC-TSK-P63 (obs 3): the header id is a real anchor to the
                 record's own page — in the Feed preview pane this is the
                 affordance to open the full record. */}
-            <RecordLink id={recordId}>
+            <RecordLink id={recordId} copyable>
               <RecordId id={recordId} />
             </RecordLink>
             {status ? (
@@ -558,10 +556,21 @@ function inferNeighborType(id: string): RecordType {
 /** One labeled group of plain (untyped) related-record IDs, rendered as
  *  navigable rows -- clicking a neighbor goes to THAT record's own details
  *  page (graph navigable), never a modal or inline expansion. */
+const GOVERNED_ID = /^[A-Z]{2,5}-[A-Z]{2,5}-[A-Za-z0-9]+$/
+
+/** The Checkout vital: the owning session id is a copyable RecordLink (ENC-TSK-R81-0C); a non-id
+ *  owner label (e.g. an SDK name) stays plain text. */
+export function CheckoutVitalValue({ by, state }: { by: string; state?: string | null }) {
+  return (
+    <>
+      {GOVERNED_ID.test(by) ? <RecordLink id={by} copyable /> : by} ({state ?? 'checked_out'})
+    </>
+  )
+}
+
 export function NeighborGroup({
   label,
   ids,
-  projectId,
   type,
 }: {
   label: string
@@ -590,14 +599,13 @@ export function NeighborGroup({
           const t = type ?? inferNeighborType(id)
           const title = titleFor(id)
           return (
-            <li key={id}>
-              <Link
-                to={recordHrefForType(t === 'document' ? null : projectId, t, id)}
-                className="ev2-rdh__neighbor-link"
-              >
+            <li key={id} className="ev2-rdh__neighbor-row">
+              {/* ENC-TSK-R81-0C / ENC-FTR-151 AC-3/4: the id is a RecordLink with its copy
+                  button to the right; the title is a sibling so the button stays beside the id. */}
+              <RecordLink id={id} recordType={t} copyable className="ev2-rdh__neighbor-link">
                 <RecordId id={id} />
-                {title ? <span className="ev2-rdh__neighbor-title">{title}</span> : null}
-              </Link>
+              </RecordLink>
+              {title ? <span className="ev2-rdh__neighbor-title">{title}</span> : null}
             </li>
           )
         })}

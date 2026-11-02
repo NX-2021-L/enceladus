@@ -283,9 +283,10 @@
   gap: var(--space-1);
 }
 
-.ev2-rdh__neighbor-link {
+.ev2-rdh__neighbor-row {
   min-height: 44px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
@@ -294,8 +295,18 @@
   transition: border-color var(--dur-base) var(--ease-orbit);
 }
 
-.ev2-rdh__neighbor-link:hover {
+.ev2-rdh__neighbor-row:hover {
   border: var(--border-hover);
+}
+
+/* ENC-TSK-R81-0C: the id anchor inside a neighbor row (copy button is its sibling). */
+.ev2-rdh__neighbor-link {
+  text-decoration: none;
+}
+
+.ev2-rdh__typed-edge-link {
+  color: var(--accent-hover);
+  text-decoration: none;
 }
 
 .ev2-rdh__worklog-list {

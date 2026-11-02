@@ -13,4 +13,6 @@ export interface MarkdownContentProps {
    * that also knows the other project prefixes (DVP-, INT-, ...). Document views pass makeKitIdResolver.
    */
   idResolver?: IdResolver
+  /** Append a copy-ID button right of every governed id (ENC-TSK-R81-0C). MarkdownContent defaults this to true. */
+  copyIds?: boolean
 }

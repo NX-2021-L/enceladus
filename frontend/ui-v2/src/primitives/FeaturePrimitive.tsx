@@ -3,7 +3,7 @@ import type { Feature } from '../types/records'
 import { ContextNodeBadges } from '../components/ContextNodeBadges'
 import { ActiveSessionChip, CategoryChip, CheckoutChip, ComponentChips } from '../components/ChipRow'
 import { MetaRow, Metric, Prose, SectionHeading } from '../components/PrimitiveCard'
-import { EvidenceTab, NeighborsTab, RecordDetailHub, WorklogTab } from '../components/RecordDetailHub'
+import { EvidenceTab, CheckoutVitalValue, NeighborsTab, RecordDetailHub, WorklogTab } from '../components/RecordDetailHub'
 import { isCheckedOut } from '../utils/transitionArcs'
 
 export function FeaturePrimitive({ record }: { record: Feature }) {
@@ -12,7 +12,7 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
     { label: 'Project', value: record.project_id },
     ...(record.transition_type ? [{ label: 'Transition type', value: record.transition_type }] : []),
     ...(record.checked_out_by
-      ? [{ label: 'Checkout', value: `${record.checked_out_by} (${record.checkout_state ?? 'checked_out'})` }]
+      ? [{ label: 'Checkout', value: <CheckoutVitalValue by={record.checked_out_by} state={record.checkout_state} /> }]
       : []),
   ]
 

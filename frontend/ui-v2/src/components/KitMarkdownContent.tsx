@@ -1,9 +1,10 @@
-import { Children, isValidElement, type ComponentType, type ReactElement, type ReactNode } from 'react'
+import { Children, createContext, isValidElement, useContext, type ComponentType, type ReactElement, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { KitMarkdown } from '@io-kit/md/lean/react'
 import { docstore, ID_PATTERN_LOOSE, type IdResolver, type MdPlugin } from '@io-kit/md/lean'
 import { ID_TOKEN_SOURCE, resolveIdHref } from './markdownIds'
 import type { MarkdownContentProps } from './markdownContentTypes'
+import { CopyIdButton } from './CopyIdButton'
 import './markdownContent.css'
 
 /**
@@ -90,17 +91,40 @@ function Pre({ children }: Props) {
   )
 }
 
+/** ENC-TSK-R81-0C / ENC-FTR-151 AC-4: detail-page markdown (descriptions, worklog, evidence, document
+ *  bodies) puts a copy button right of every governed id. Off by default so the frozen legacy-parity
+ *  oracle (KitMarkdownContent.parity.test.tsx) keeps comparing identical DOM; MarkdownContent turns it on. */
+const CopyIdsContext = createContext(false)
+
 function Code({ className, children }: Props) {
-  if (className?.includes('kit-id')) return <span className="ev2-md__id-plain">{children}</span>
+  const copyIds = useContext(CopyIdsContext)
+  if (className?.includes('kit-id')) {
+    const plain = <span className="ev2-md__id-plain">{children}</span>
+    if (!copyIds) return plain
+    return (
+      <span className="enc-record-link-copyable">
+        {plain}
+        <CopyIdButton id={textOf(children).trim()} />
+      </span>
+    )
+  }
   return <code className="ev2-md__code">{children}</code>
 }
 
 function Anchor({ className, href, children }: Props) {
+  const copyIds = useContext(CopyIdsContext)
   if (className?.includes('kit-id') && href) {
-    return (
+    const link = (
       <Link to={href} className="ev2-md__id-link">
         {children}
       </Link>
+    )
+    if (!copyIds) return link
+    return (
+      <span className="enc-record-link-copyable">
+        {link}
+        <CopyIdButton id={textOf(children).trim()} />
+      </span>
     )
   }
   if (!href) return <>{children}</>
@@ -158,18 +182,20 @@ export const hostMarkdownComponents = {
 
 export const BLOCK_MARKER_LINE = /^[ \t]*<!--\s*enc:block:[A-Za-z0-9_-]+\s*-->[ \t]*\r?\n?/gm
 
-export default function KitMarkdownContent({ text, content, projectId, className, idResolver }: MarkdownContentProps) {
+export default function KitMarkdownContent({ text, content, projectId, className, idResolver, copyIds = false }: MarkdownContentProps) {
   const raw = text ?? content
   const source = raw ? raw.replace(BLOCK_MARKER_LINE, '') : raw
   // React Compiler memoizes this per (idResolver, projectId)
   const plugins = hostMarkdownPlugins(idResolver ?? legacyIdResolver(projectId), !!idResolver)
   if (!source || !source.trim()) return null
   return (
-    <KitMarkdown
-      source={source}
-      plugins={plugins}
-      components={hostMarkdownComponents}
-      className={`ev2-md${className ? ` ${className}` : ''}`}
-    />
+    <CopyIdsContext.Provider value={copyIds}>
+      <KitMarkdown
+        source={source}
+        plugins={plugins}
+        components={hostMarkdownComponents}
+        className={`ev2-md${className ? ` ${className}` : ''}`}
+      />
+    </CopyIdsContext.Provider>
   )
 }
