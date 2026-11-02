@@ -152,6 +152,7 @@ def normalize(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "category": "risk",
         "impact": impact,
         "breakdown": breakdown,
+        "raw_ref": payload.get("anomalyDetailsLink"),
     }
 
 
