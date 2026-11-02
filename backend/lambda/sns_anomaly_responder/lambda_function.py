@@ -290,6 +290,16 @@ def anomaly_push_body(project: str, issue_id: str, norm: Dict[str, Any]) -> Dict
     }
 
 
+def _seed_evidence(norm: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Create-time evidence: the first entry carries total_impact_usd so replays have a baseline
+    (ENC-TSK-R91). `pushed` is added only after the create push returns 2xx."""
+    evidence = [dict(e) if isinstance(e, dict) else e for e in norm["evidence"]]
+    usd = _total_impact(evidence[0]) if evidence else None
+    if usd is not None:
+        evidence[0]["total_impact_usd"] = usd
+    return evidence
+
+
 def create_body(norm: Dict[str, Any]) -> Dict[str, Any]:
     key = idempotency_key(norm)
     return {
@@ -298,7 +308,7 @@ def create_body(norm: Dict[str, Any]) -> Dict[str, Any]:
         "severity": norm.get("severity", "medium"),
         "category": norm.get("category", "risk"),
         "status": "open",
-        "evidence": norm["evidence"],
+        "evidence": _seed_evidence(norm),
         "hypothesis": (
             f"{norm['source']} reported anomaly {norm['anomaly_id']} ({_impact_line(norm)}). "
             "Deterministic intake; root-cause hypothesis is added asynchronously by enrichment."
@@ -432,6 +442,14 @@ def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
             issue_id = str(created.get("record_id") or created.get("item_id") or created.get("id") or "")
             logger.info(json.dumps({"event": "anomaly_issue_created", "key": key, "issue_id": issue_id}))
             notified = _notify_created(client, project, issue_id, norm)
+            if notified and issue_id:
+                # Truthful baseline: flag the create entry pushed ONLY after a 2xx push. Fail-open.
+                try:
+                    seeded = _seed_evidence(norm)
+                    seeded[0]["pushed"] = True
+                    client.set_field(project, issue_id, "evidence", seeded)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("create pushed-flag write failed for %s: %s", issue_id, exc)
             return {"action": "created", "key": key, "issue_id": issue_id, "project": project, "notified": notified}
         except TrackerError:
             # A concurrent delivery may have won the race (ID-service idempotency replay returns
@@ -546,7 +564,7 @@ def _run(event: Any, client: Any, context: Any = None) -> Dict[str, Any]:
                 results.append(res)
                 # Single enrichment call site: AFTER the issue exists. Async + fail-open; a dispatch
                 # failure can never fail intake or the SNS retry contract.
-                if res.get("issue_id"):
+                if res.get("action") == "created" and res.get("issue_id"):  # never on replay/closed
                     try:
                         enrichment.dispatch_async(
                             getattr(context, "function_name", "") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""),
