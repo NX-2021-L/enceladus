@@ -378,6 +378,7 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "parent_session_id": _str("Parent session id (ENC-SES-...)."),
             "status": _str("Initial session status."),
             "credential_id": _str("Optional ENC-CRED credential binding (ENC-TSK-J43)."),
+            "dry_run": _bool("If true, run the fail-closed agent_type_id/runtime gate without minting (ENC-TSK-R81-0A)."),
         },
     ),
     "agent_claim": _schema(
