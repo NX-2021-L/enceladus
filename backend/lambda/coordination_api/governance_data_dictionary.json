@@ -1,7 +1,7 @@
 {
-  "version": "2026-10-27.3",
-  "updated_at": "2026-10-27T06:00:00Z",
-  "last_change_summary": "ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
+  "version": "2026-11-02.1",
+  "updated_at": "2026-11-02T06:00:00Z",
+  "last_change_summary": "ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes). PREVIOUS: ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9610,6 +9610,11 @@
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
   "change_log": [
+    {
+      "version": "2026-11-02.1",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes)."
+    },
     {
       "version": "2026-10-27.3",
       "date": "2026-10-27",

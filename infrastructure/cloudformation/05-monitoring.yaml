@@ -165,36 +165,36 @@ Resources:
           Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
 
   # ---------------------------------------------------------------------------
-  # ENC-TSK-K43 (B66 Ph5) — Fiedler lambda-2 GraphHealth metric schedule
+  # ENC-TSK-K43 (B66 Ph5) / ENC-TSK-R80-0J (U4) — GraphHealth publish schedule
   # ---------------------------------------------------------------------------
-  # Gamma re-delivery of ENC-TSK-C10 (v3, closed). Triggers the existing
-  # devops-graph-query-api Lambda every 15 minutes (same cadence as
-  # HealthProbeScheduleRule above) with action='publish_graph_health', which
-  # computes the graph's Fiedler value (lambda2, algebraic connectivity) via
-  # the FTR-088 CSR/Fiedler _query_laplacian path (ISS-465-compliant: no GDS
-  # projection) and publishes it to the Enceladus/GraphHealth CloudWatch
-  # namespace. No new Lambda function — targets the existing graph_query_api
-  # function by ARN + Input, mirroring the ParityDriftDailyScheduleRule
-  # precedent immediately below of pointing a schedule's Input at an existing
-  # multi-action Lambda rather than minting a dedicated one.
+  # ENC-TSK-R80-0J: the publish job no longer fires the search function
+  # (devops-graph-query-api) directly every 15 minutes. The rule now targets
+  # enceladus-graph-health-metrics (02-compute.yaml GraphHealthMetricsFunction),
+  # HOURLY on both environments (W0.5 D-3 ruled; node count moves ~5/day, so 96
+  # samples/day measured noise). That function owns the Enceladus/GraphHealth
+  # publish and only calls the search function once per run, via its existing
+  # cross-Lambda action='publish_graph_health' invoke, for the bounded
+  # eigsh lambda2 compute (ISS-465-compliant: no GDS projection). Cost class
+  # C1/C2 (pay-per-use EventBridge rule + Lambda invocations; no new always-on
+  # resource). Same logical ids as before: the rule is updated in place; the
+  # invoke permission is replaced because FunctionName changes.
   GraphHealthScheduleRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "enceladus-graph-health-schedule${EnvironmentSuffix}"
       Description: >
-        Triggers graph_query_api publish_graph_health (Fiedler lambda2 ->
-        Enceladus/GraphHealth) every 15 minutes (ENC-TSK-K43)
-      ScheduleExpression: !If [IsGamma, "rate(1 hour)", "rate(15 minutes)"]  # ENC-TSK-R30: gamma 1h, prod 15m
+        Triggers enceladus-graph-health-metrics (GraphHealth publish incl. Fiedler
+        lambda2 -> Enceladus/GraphHealth) hourly (ENC-TSK-K43, moved by ENC-TSK-R80-0J)
+      ScheduleExpression: "rate(1 hour)"  # ENC-TSK-R80-0J (D-3): hourly on gamma and prod
       State: ENABLED
       Targets:
         - Id: GraphHealthMetricTarget
-          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
-          Input: '{"action": "publish_graph_health"}'
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-graph-health-metrics${EnvironmentSuffix}"
 
   GraphHealthScheduleInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphHealthScheduleRule.Arn
