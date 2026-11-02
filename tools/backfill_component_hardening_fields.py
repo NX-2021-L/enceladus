@@ -71,7 +71,7 @@ _HARDENING_FIELDS = (
 # gamma-only by design (see module docstring). No prod entry — do not add one
 # without a deliberate, separately-reviewed decision; ENC-TSK-L05 scope is gamma.
 _ENV_TO_BASE_URL = {
-    "gamma": "https://jreese.net/api/v1/coordination",
+    "gamma": "https://enceladus-gamma.jreese.net/api/v1/coordination",
 }
 
 

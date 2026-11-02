@@ -119,7 +119,7 @@ CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
 DOC_PREP_LAMBDA_NAME = os.environ.get("DOC_PREP_LAMBDA_NAME", "doc_prep")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 # ENC-FTR-037: GitHub PAT for PR merge validation (optional — public repos work without it)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API_BASE = "https://api.github.com"

@@ -20,7 +20,7 @@ Environment variables:
   SECRETS_REGION              AWS region for Secrets Manager (default: us-west-2)
   COGNITO_USER_POOL_ID        Cognito user pool ID
   COGNITO_CLIENT_ID           Cognito client ID
-  CORS_ORIGIN                 CORS allowed origin (default: https://jreese.net)
+  CORS_ORIGIN                 CORS allowed origin (default: https://enceladus.jreese.net)
   COORDINATION_INTERNAL_API_KEY  Internal API key for service-to-service auth
   OPENSEARCH_ENDPOINT            Gamma OpenSearch HTTPS URL (ENC-TSK-L43)
   OPENSEARCH_READ_ALIAS          Read alias (records_read)
@@ -65,7 +65,7 @@ except Exception:  # pragma: no cover - import guard
 
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", "us-west-2")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
 

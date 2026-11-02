@@ -12,7 +12,7 @@
       "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
       "CONFIG_BUCKET": "jreese-net",
       "CONFIG_PREFIX": "deploy-config",
-      "CORS_ORIGIN": "https://jreese.net",
+      "CORS_ORIGIN": "https://enceladus.jreese.net",
       "DEPLOY_REGION": "us-west-2",
       "DEPLOY_TABLE": "devops-deployment-manager",
       "DOC_PREP_LAMBDA_NAME": "devops-doc-prep",

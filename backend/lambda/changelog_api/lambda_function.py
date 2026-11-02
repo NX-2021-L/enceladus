@@ -110,7 +110,7 @@ COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
 )
 CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 
 MAX_HISTORY_LIMIT = 100
 DEFAULT_HISTORY_LIMIT = 20

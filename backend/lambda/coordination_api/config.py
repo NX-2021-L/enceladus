@@ -217,7 +217,7 @@ AGENT_SESSIONS_UNCLAIM_TTL_MINUTES = int(
 CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
-CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://enceladus.jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 

@@ -101,7 +101,7 @@ GITHUB_PRIVATE_KEY_SECRET = os.environ.get(
     "GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key"
 )
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
-CORS_ORIGIN = "https://jreese.net"
+CORS_ORIGIN = "https://enceladus.jreese.net"
 GITHUB_API_BASE = "https://api.github.com"
 
 # Allowed owner/repo pairs (safety guardrail — gates issue creation AND webhook DPL creation)
