@@ -962,6 +962,71 @@ def _b64_array(arr, np_dtype: str) -> str:
     ).decode("ascii")
 
 
+LAPLACIAN_BFS_MAX_HOPS = 64
+LAPLACIAN_BFS_MAX_VISITED = 50000
+
+
+def _laplacian_giant_component_sample(driver, project_id: str, limit: int) -> Optional[Dict]:
+    """ENC-TSK-R80-0J (U4): sample the project's giant component for lambda2.
+
+    The previous default took the alphabetically-first ``limit`` record_ids, so a
+    single zero-degree stub (or any vertex whose neighbors fell outside the
+    slice) made the induced subgraph disconnected and lambda2 identically 0.
+    This seeds a BFS at the highest-degree non-placeholder vertex, walks the whole
+    connected component level by level, and keeps the first ``limit`` vertices in
+    BFS order. Every kept vertex (after the seed) was reached through an earlier
+    kept vertex, so the induced subgraph is connected by construction.
+
+    Returns {ids, component_size, component_coverage, query_cypher} or None when
+    no seed resolves (caller falls back to the degree-filtered legacy query).
+    component_coverage = len(ids) / component_size (1.0 when the whole giant
+    component fits under ``limit``).
+    """
+    seed_cypher = (
+        "MATCH (n)-[]-(m) "
+        "WHERE n.project_id = $project_id AND m.project_id = $project_id "
+        "AND coalesce(n.is_placeholder, false) = false "
+        "AND coalesce(m.is_placeholder, false) = false "
+        "RETURN n.record_id AS seed, count(m) AS d ORDER BY d DESC, seed LIMIT 1"
+    )
+    hop_cypher = (
+        "MATCH (a)-[]-(b) "
+        "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+        "AND a.record_id IN $frontier "
+        "AND coalesce(b.is_placeholder, false) = false "
+        "RETURN DISTINCT b.record_id AS nbr"
+    )
+    with driver.session() as session:
+        seed = None
+        for rec in session.run(seed_cypher, project_id=project_id):
+            seed = rec.get("seed")
+            break
+        if not seed:
+            return None
+        order: List[str] = [seed]
+        seen = {seed}
+        frontier = [seed]
+        for _ in range(LAPLACIAN_BFS_MAX_HOPS):
+            if not frontier or len(seen) >= LAPLACIAN_BFS_MAX_VISITED:
+                break
+            found = set()
+            for rec in session.run(hop_cypher, project_id=project_id, frontier=frontier):
+                nbr = rec.get("nbr")
+                if nbr and nbr not in seen:
+                    found.add(nbr)
+            frontier = sorted(found)  # deterministic; parents always precede children
+            seen.update(frontier)
+            order.extend(frontier)
+    component_size = len(order)
+    ids = order[:limit]
+    return {
+        "ids": ids,
+        "component_size": component_size,
+        "component_coverage": round(len(ids) / component_size, 6) if component_size else 0.0,
+        "query_cypher": f"{seed_cypher} ;; {hop_cypher}",
+    }
+
+
 def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
     """Resolve the ordered vertex set for the induced subgraph.
 
@@ -1005,10 +1070,18 @@ def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
         )
         run_params = {"project_id": project_id, "q": vertex_set_query, "limit": limit}
     else:
+        # ENC-TSK-R80-0J: default selection samples the giant component (BFS),
+        # not the alphabetically-first ids. If no seed resolves, fall back to the
+        # first ids restricted to non-isolated (degree >= 1) vertices.
+        sampled = _laplacian_giant_component_sample(driver, project_id, limit)
+        if sampled is not None:
+            sampled["sampling"] = "giant_component_bfs"
+            return sampled
         cypher = (
             "MATCH (n) "
             "WHERE n.project_id = $project_id "
             "AND coalesce(n.is_placeholder, false) = false "
+            "AND (n)-[]-() "
             "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
         )
         run_params = {"project_id": project_id, "limit": limit}
@@ -1016,7 +1089,7 @@ def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
     with driver.session() as session:
         result = session.run(cypher, **run_params)
         ids = [rec["rid"] for rec in result if rec.get("rid")]
-    return {"ids": ids, "query_cypher": cypher}
+    return {"ids": ids, "query_cypher": cypher, "sampling": "explicit_or_filtered"}
 
 
 def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
@@ -1178,6 +1251,9 @@ def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
             "n": n,
             "k": k_req,
             "edge_count": len(pairs),
+            "sampling": selection.get("sampling"),
+            "component_size": selection.get("component_size"),
+            "component_coverage": selection.get("component_coverage"),
             "normalization": normalization,
             "formula": formula,
             "weighted": False,

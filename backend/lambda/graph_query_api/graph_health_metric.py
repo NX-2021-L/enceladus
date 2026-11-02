@@ -149,6 +149,7 @@ def compute_fiedler_value(
             "error": reason,
             "invalid_reason": invalid_reason,
             "lambda2_raw": lambda2,
+            "component_coverage": laplacian_meta.get("component_coverage"),
             "n": n,
             "limit": limit,
             "project_id": project_id,
@@ -159,6 +160,9 @@ def compute_fiedler_value(
         "lambda2": lambda2,
         "lambda0": float(eigenvalues[0]),
         "n": n,
+        "component_coverage": laplacian_meta.get("component_coverage"),
+        "component_size": laplacian_meta.get("component_size"),
+        "sampling": laplacian_meta.get("sampling"),
         "edge_count": laplacian_meta.get("edge_count"),
         "eig_method": laplacian_meta.get("eig_method"),
         "normalization": laplacian_meta.get("normalization"),
@@ -230,6 +234,11 @@ def run_publish_graph_health(
         "[%s] GraphHealth publish: %d/%d project(s) published to %s",
         "SUCCESS" if ok else "WARNING", published, len(projects), GRAPH_HEALTH_NAMESPACE,
     )
+    for r in results:
+        logger.info(
+            "[INFO] GraphHealth component_coverage=%s project_id=%s",
+            r.get("component_coverage"), r.get("project_id"),
+        )
     return {"ok": ok, "published": published, "namespace": GRAPH_HEALTH_NAMESPACE, "results": results}
 
 
