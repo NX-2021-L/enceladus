@@ -166,15 +166,40 @@ async function callTool(name: string, args: Json, signal?: AbortSignal): Promise
     /* non-JSON stays a string */
   }
   const un = unwrapRpc(res.status, rpc)
-  if (un.status >= 400) throw new Error(`${name} failed (${un.status})`)
+  if (un.status >= 400) throw new Error(`${name} failed (HTTP ${un.status}): ${describeProblem(un.body)}`)
   return un.body
+}
+
+/** Human-readable cause out of an RFC 9457 problem / string / unknown body (never throws). */
+function describeProblem(body: unknown): string {
+  if (typeof body === 'string') return body.slice(0, 200) || 'no detail'
+  if (isRecord(body)) {
+    const msg = body.detail ?? body.title ?? body.message ?? body.error
+    if (typeof msg === 'string' && msg) return msg.slice(0, 200)
+  }
+  return 'no detail'
+}
+
+/**
+ * The hash out of a `search` -> governance.hash payload. The server wraps the read in a result envelope
+ * (`{success, result:{governance_hash}}`), older/other shapes are flat (`{governance_hash}` / `{hash}`).
+ */
+export function extractGovernanceHash(payload: unknown): string {
+  if (!isRecord(payload)) return ''
+  for (const node of [payload, payload.result]) {
+    if (isRecord(node)) {
+      const h = node.governance_hash ?? node.hash
+      if (typeof h === 'string' && h.trim()) return h.trim()
+    }
+  }
+  return ''
 }
 
 /** Current governance hash (search -> governance.hash), required by every governed write. */
 export async function fetchGovernanceHash(signal?: AbortSignal): Promise<string> {
   const gh = await callTool('search', { action: 'governance.hash', arguments: {} }, signal)
-  const hash = isRecord(gh) ? String(gh.governance_hash ?? gh.hash ?? '') : ''
-  if (!hash) throw new Error('governance hash unavailable')
+  const hash = extractGovernanceHash(gh)
+  if (!hash) throw new Error('governance hash unavailable: the governance.hash response carried no hash')
   return hash
 }
 
@@ -184,9 +209,7 @@ export async function fetchGovernanceHash(signal?: AbortSignal): Promise<string>
  * through `search` -> governance.hash first. dry_run:false with an idempotency key per (source, target).
  */
 export async function relateRecords(sourceId: string, targetId: string, signal?: AbortSignal): Promise<void> {
-  const gh = await callTool('search', { action: 'governance.hash', arguments: {} }, signal)
-  const hash = isRecord(gh) ? String(gh.governance_hash ?? gh.hash ?? '') : ''
-  if (!hash) throw new Error('governance hash unavailable')
+  const hash = await fetchGovernanceHash(signal)
   await callTool(
     'execute',
     {
