@@ -1990,6 +1990,16 @@ def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
     )
 
 
+KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_title_ft")
+_LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
+
+
+def _lucene_escape(token: str) -> str:
+    """Escape Lucene query syntax characters in a single token; neutralise bare AND/OR/NOT."""
+    esc = "".join("\\" + c if c in _LUCENE_SPECIAL else c for c in token)
+    return esc.lower()
+
+
 def _hybrid_keyword_ranks(
     driver,
     project_id: str,
@@ -1997,16 +2007,19 @@ def _hybrid_keyword_ranks(
     top_n: int,
     record_type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Keyword signal via case-insensitive title/description/intent contains.
+    """Keyword signal over record titles (ENC-TSK-R81-0E, DOC-52FE56D6F529 U2).
 
-    Uses a scoring tiebreaker: title match scores higher than description
-    match. Graceful when the fulltext index is absent — falls back to
-    CONTAINS which is correct (though slower) on a <1k-node corpus.
+    Primary path: ``db.index.fulltext.queryNodes`` on the TITLE-ONLY fulltext
+    index ``governed_record_title_ft`` (tools/neo4j-migrations/002-*). Fallback
+    (index absent / procedure error): title-only per-token CONTAINS scan, which
+    is correct but slower. ``intent`` and ``description`` are not projected onto
+    prod graph nodes and are no longer queried (ruling D-1).
     """
     if not query_text:
         return []
 
     label_filter = ""
+    label = ""
     if record_type_filter:
         label_map = {
             "task": "Task",
@@ -2039,38 +2052,58 @@ def _hybrid_keyword_ranks(
     if not tokens:
         return []
 
+    ft_query = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_cypher = (
+        "CALL db.index.fulltext.queryNodes($index_name, $ft_query) YIELD node, score "
+        "WHERE node.project_id = $project_id "
+        "AND ($label IS NULL OR $label IN labels(node)) "
+        "RETURN node.record_id AS rid, score ORDER BY score DESC LIMIT $limit"
+    )
     cypher = (
         f"MATCH (n{label_filter}) "
         "WHERE n.project_id = $project_id "
-        "AND ANY(t IN $tokens WHERE "
-        "  toLower(coalesce(n.title, '')) CONTAINS t "
-        "  OR toLower(coalesce(n.intent, '')) CONTAINS t "
-        "  OR toLower(coalesce(n.description, '')) CONTAINS t) "
+        "AND ANY(t IN $tokens WHERE toLower(coalesce(n.title, '')) CONTAINS t) "
         "WITH n, reduce(s = 0.0, t IN $tokens | s "
         "  + (CASE WHEN toLower(coalesce(n.title, '')) CONTAINS t THEN 3.0 ELSE 0.0 END) "
-        "  + (CASE WHEN toLower(coalesce(n.intent, '')) CONTAINS t THEN 2.0 ELSE 0.0 END) "
-        "  + (CASE WHEN toLower(coalesce(n.description, '')) CONTAINS t THEN 1.0 ELSE 0.0 END) "
         ") AS score "
         "WHERE score > 0.0 "
         "RETURN n.record_id AS rid, score ORDER BY score DESC LIMIT $limit"
     )
-    ranked: List[Dict[str, Any]] = []
+
+    def _collect(result) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for idx, rec in enumerate(result, start=1):
+            rid = rec.get("rid")
+            if not rid:
+                continue
+            out.append({
+                "record_id": rid,
+                "score": float(rec.get("score") or 0.0),
+                "rank": idx,
+            })
+        return out
+
     try:
         with driver.session() as session:
+            try:
+                return _collect(session.run(
+                    ft_cypher,
+                    index_name=KEYWORD_FULLTEXT_INDEX,
+                    ft_query=ft_query,
+                    project_id=project_id,
+                    label=label or None,
+                    limit=top_n,
+                ))
+            except Exception:
+                logger.warning(
+                    "[INFO] fulltext keyword path unavailable; falling back to title CONTAINS",
+                    exc_info=True,
+                )
             result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
-            for idx, rec in enumerate(result, start=1):
-                rid = rec.get("rid")
-                if not rid:
-                    continue
-                ranked.append({
-                    "record_id": rid,
-                    "score": float(rec.get("score") or 0.0),
-                    "rank": idx,
-                })
+            return _collect(result)
     except Exception:
         logger.exception("[ERROR] keyword signal scoring failed")
         return []
-    return ranked
 
 
 def _rrf_fuse(
