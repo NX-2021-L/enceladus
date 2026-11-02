@@ -422,6 +422,25 @@ NODE_PROPERTIES = [
     "item_id_provenance",
 ]
 
+# ENC-TSK-S05 (N5a): free-text fields projected onto governed nodes so the keyword
+# (fulltext) signal sees the same text the vector signal embeds. Value = max chars.
+# These are projection-only: build_embedding_text / embedding_text_hash are unchanged.
+TEXT_PROJECTION_CAPS = {"intent": 1000, "description": 2000}
+
+
+def _text_projection_props(record: Dict[str, Any]) -> Dict[str, str]:
+    """Return capped string ``intent`` / ``description`` props; omit empty or non-string values."""
+    out: Dict[str, str] = {}
+    for key, cap in TEXT_PROJECTION_CAPS.items():
+        val = record.get(key)
+        if not isinstance(val, str):
+            continue
+        val = val.strip()
+        if val:
+            out[key] = val[:cap]
+    return out
+
+
 # ENC-ISS-543: terminal lifecycle values that MUST project to Neo4j on close paths.
 # Matches tracker/checkout terminal sets (task->closed, feature->production/deprecated,
 # plan->complete, issue->closed, etc.).
@@ -598,6 +617,7 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
 
     props = {k: record.get(k) for k in NODE_PROPERTIES if record.get(k) is not None}
     props["record_id"] = record_id
+    props.update(_text_projection_props(record))
 
     # ENC-ISS-543: ``SET n += $props`` alone leaves stale ``status`` when a later
     # checkout-release MODIFY omits the field from the deserialized dict. Always
