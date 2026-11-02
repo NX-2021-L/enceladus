@@ -4688,6 +4688,29 @@ def _resolve_project_for_record_id(record_id: str) -> Optional[str]:
     return None
 
 
+def _plan_objective_status(obj_id: str, plan_project_id: str) -> str:
+    """ENC-ISS-887: status of one objective for the ENC-ISS-155 plan completion gate.
+
+    A plan may hold objectives from other projects (ENC-PLN-102 holds DVP-TSK-*), so
+    the owning project comes from the id prefix; the plan's own project is the
+    fallback only for an unknown prefix. Returns the lower-cased status,
+    "NOT_FOUND", or "CHECK_FAILED".
+    """
+    try:
+        obj_prefix = obj_id.split("-")[1].upper() if "-" in obj_id else "TSK"
+        type_prefix_map = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+        obj_type = type_prefix_map.get(obj_prefix, "task")
+        obj_project = _resolve_project_for_record_id(obj_id) or plan_project_id
+        obj_key = {"project_id": {"S": obj_project}, "record_id": {"S": f"{obj_type}#{obj_id}"}}
+        obj_item = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=obj_key, ConsistentRead=True).get("Item")
+        if not obj_item:
+            return "NOT_FOUND"
+        return (obj_item.get("status", {}).get("S", "") or "").strip().lower()
+    except Exception as exc:
+        logger.warning("Failed to check objective %s status: %s", obj_id, exc)
+        return "CHECK_FAILED"
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle governance helpers (ENC-FTR-022)
 # ---------------------------------------------------------------------------
@@ -6147,23 +6170,9 @@ def _handle_update_field(
             terminal_statuses = {"closed", "completed", "complete", "archived"}
             lagging = []
             for obj_id in objective_ids:
-                try:
-                    obj_prefix = obj_id.split("-")[1].upper() if "-" in obj_id else "TSK"
-                    type_prefix_map = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
-                    obj_type = type_prefix_map.get(obj_prefix, "task")
-                    obj_sk = f"{obj_type}#{obj_id}"
-                    obj_key = {"project_id": {"S": project_id}, "record_id": {"S": obj_sk}}
-                    obj_resp = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=obj_key, ConsistentRead=True)
-                    obj_item = obj_resp.get("Item")
-                    if not obj_item:
-                        lagging.append({"id": obj_id, "status": "NOT_FOUND"})
-                        continue
-                    obj_status = (obj_item.get("status", {}).get("S", "") or "").strip().lower()
-                    if obj_status not in terminal_statuses:
-                        lagging.append({"id": obj_id, "status": obj_status})
-                except Exception as exc:
-                    logger.warning("Failed to check objective %s status: %s", obj_id, exc)
-                    lagging.append({"id": obj_id, "status": "CHECK_FAILED"})
+                obj_status = _plan_objective_status(obj_id, project_id)
+                if obj_status not in terminal_statuses:
+                    lagging.append({"id": obj_id, "status": obj_status})
             if lagging:
                 lagging_summary = ", ".join(f"{l['id']} ({l['status']})" for l in lagging)
                 return _tracker_field_validation_error(
