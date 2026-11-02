@@ -2052,7 +2052,12 @@ def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
     )
 
 
-KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_title_ft")
+# ENC-TSK-S12 (N5c, ruling P103-R4): the keyword signal queries the sibling fulltext index
+# over title, intent and description with Lucene per-field boosts. The title-only index is
+# kept as the first fallback; per-token title CONTAINS is the last resort.
+KEYWORD_FULLTEXT_TITLE_INDEX = "governed_record_title_ft"
+KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_text_ft")
+KEYWORD_FIELD_BOOSTS = (("title", 3), ("intent", 2), ("description", 1))
 _LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
 
 
@@ -2069,13 +2074,13 @@ def _hybrid_keyword_ranks(
     top_n: int,
     record_type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Keyword signal over record titles (ENC-TSK-R81-0E, DOC-52FE56D6F529 U2).
+    """Keyword signal over title, intent and description (ENC-TSK-S12 / N5c).
 
-    Primary path: ``db.index.fulltext.queryNodes`` on the TITLE-ONLY fulltext
-    index ``governed_record_title_ft`` (tools/neo4j-migrations/002-*). Fallback
-    (index absent / procedure error): title-only per-token CONTAINS scan, which
-    is correct but slower. ``intent`` and ``description`` are not projected onto
-    prod graph nodes and are no longer queried (ruling D-1).
+    Primary path: ``db.index.fulltext.queryNodes`` on ``KEYWORD_FULLTEXT_INDEX``
+    (default ``governed_record_text_ft``) with Lucene field boosts title^3,
+    intent^2, description^1. Fallbacks, in order: the title-only index
+    ``governed_record_title_ft`` (plain query), then per-token title CONTAINS.
+    Each fallback fires when the previous index is absent or errors.
     """
     if not query_text:
         return []
@@ -2114,7 +2119,14 @@ def _hybrid_keyword_ranks(
     if not tokens:
         return []
 
-    ft_query = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_plain = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_boosted = " OR ".join(f"{field}:({ft_plain})^{boost}" for field, boost in KEYWORD_FIELD_BOOSTS)
+    # (index, query): the title-only index has no intent/description fields, so it gets the plain query.
+    ft_attempts = [
+        (KEYWORD_FULLTEXT_INDEX, ft_plain if KEYWORD_FULLTEXT_INDEX == KEYWORD_FULLTEXT_TITLE_INDEX else ft_boosted)
+    ]
+    if KEYWORD_FULLTEXT_INDEX != KEYWORD_FULLTEXT_TITLE_INDEX:
+        ft_attempts.append((KEYWORD_FULLTEXT_TITLE_INDEX, ft_plain))
     ft_cypher = (
         "CALL db.index.fulltext.queryNodes($index_name, $ft_query) YIELD node, score "
         "WHERE node.project_id = $project_id "
@@ -2147,20 +2159,22 @@ def _hybrid_keyword_ranks(
 
     try:
         with driver.session() as session:
-            try:
-                return _collect(session.run(
-                    ft_cypher,
-                    index_name=KEYWORD_FULLTEXT_INDEX,
-                    ft_query=ft_query,
-                    project_id=project_id,
-                    label=label or None,
-                    limit=top_n,
-                ))
-            except Exception:
-                logger.warning(
-                    "[INFO] fulltext keyword path unavailable; falling back to title CONTAINS",
-                    exc_info=True,
-                )
+            for index_name, ft_query in ft_attempts:
+                try:
+                    return _collect(session.run(
+                        ft_cypher,
+                        index_name=index_name,
+                        ft_query=ft_query,
+                        project_id=project_id,
+                        label=label or None,
+                        limit=top_n,
+                    ))
+                except Exception:
+                    logger.warning(
+                        "[INFO] fulltext keyword index %s unavailable; trying next fallback",
+                        index_name,
+                        exc_info=True,
+                    )
             result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
             return _collect(result)
     except Exception:
