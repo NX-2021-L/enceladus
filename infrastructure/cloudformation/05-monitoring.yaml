@@ -280,6 +280,32 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphQueryWarmPingRule.Arn
 
+  # ENC-TSK-S14 (N4, DOC-F08AE0127D4E §10 D-B) — daily FTR-108 flow_weight refresh.
+  # Invokes graph_query_api action=refresh_flow_weight (router -> flow_weight_refresh).
+  # The handler is gated by FLOW_WEIGHT_REFRESH_ENABLED (code default: gamma true,
+  # prod false), so the prod rule is pre-wired and logs a noop until the flag flips.
+  # Cost class C1: one daily invocation; no new always-on resource.
+  GraphFlowWeightRefreshRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-graph-flow-weight-refresh${EnvironmentSuffix}"
+      Description: >
+        Daily FTR-108 flow_weight refresh via graph_query_api (ENC-TSK-S14, N4)
+      ScheduleExpression: "cron(30 9 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: GraphFlowWeightRefreshTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+          Input: '{"action": "refresh_flow_weight"}'
+
+  GraphFlowWeightRefreshInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GraphFlowWeightRefreshRule.Arn
+
   # ---------------------------------------------------------------------------
   # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
   # ---------------------------------------------------------------------------

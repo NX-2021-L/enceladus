@@ -2005,6 +2005,18 @@ def _handle_feed_selection(event: Dict) -> Dict[str, Any]:
     return {"ok": True, "selection": selection}
 
 
+def _flow_weight_refresh_enabled() -> bool:
+    """ENC-TSK-S14 (N4, DOC-F08AE0127D4E section 10 D-B): FLOW_WEIGHT_REFRESH_ENABLED
+    kill switch. Env var wins when set; otherwise the code default is keyed on the
+    environment: gamma ("-gamma" function name / ENVIRONMENT_SUFFIX) true, prod false."""
+    raw = os.environ.get("FLOW_WEIGHT_REFRESH_ENABLED")
+    if raw is not None and raw.strip():
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    suffix = os.environ.get("ENVIRONMENT_SUFFIX", "")
+    return fn.endswith("-gamma") or suffix == "-gamma"
+
+
 def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     """ENC-FTR-108 Ph2 (ENC-TSK-J02) out-of-band flow_weight refresh entrypoint.
     Mirrors _handle_refresh_projection's contract: invoked by an EventBridge
@@ -2016,6 +2028,9 @@ def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     relationships in batched, watermarked Cypher. See flow_weight_refresh.py
     for the full design (delta/mu defaults, watermark storage, idempotency).
     """
+    if not _flow_weight_refresh_enabled():
+        logger.info("[INFO] refresh_flow_weight noop: FLOW_WEIGHT_REFRESH_ENABLED=false")
+        return {"status": "noop", "reason": "FLOW_WEIGHT_REFRESH_ENABLED=false"}
     try:
         import flow_weight_refresh as _fwr
     except Exception:
