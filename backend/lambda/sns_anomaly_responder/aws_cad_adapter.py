@@ -67,6 +67,20 @@ def is_significant(impact_usd: Optional[float], impact_pct: Optional[float], th:
     return impact_pct >= th["min_impact_pct"]
 
 
+_CLOSED_STATES = {"CLOSED", "RESOLVED", "ENDED", "COMPLETED"}
+
+
+def is_closed_signal(payload: Dict[str, Any]) -> bool:
+    """ENC-FTR-150 AC-5: a CAD anomaly-closed signal (explicit state/status field or closed flag).
+    An ongoing anomaly's anomalyEndDate is merely the latest observed day, so it is NOT used."""
+    if payload.get("closed") is True:
+        return True
+    for key in ("anomalyStatus", "status", "state", "anomalyState"):
+        if str(payload.get(key) or "").strip().upper() in _CLOSED_STATES:
+            return True
+    return False
+
+
 def _breakdown(root_causes: Any) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not isinstance(root_causes, list):
@@ -141,7 +155,7 @@ def normalize(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "breakdown": breakdown,
         }
     ]
-    return {
+    out = {
         "source": SOURCE,
         "anomaly_id": anomaly_id,
         "project": os.environ.get("ANOMALY_DEFAULT_PROJECT", DEFAULT_PROJECT).strip() or DEFAULT_PROJECT,
@@ -154,6 +168,9 @@ def normalize(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "breakdown": breakdown,
         "raw_ref": payload.get("anomalyDetailsLink"),
     }
+    if is_closed_signal(payload):
+        out["lifecycle"] = "closed"
+    return out
 
 
 def parse(message: str) -> List[Dict[str, Any]]:
@@ -173,6 +190,9 @@ def parse(message: str) -> List[Dict[str, Any]]:
         if norm is None:
             continue
         imp = norm["impact"]
+        if norm.get("lifecycle") == "closed":
+            out.append(norm)  # closed signals bypass the significance gate: they annotate an existing issue
+            continue
         if not is_significant(imp["total_impact_usd"], imp["total_impact_pct"], th):
             norm["suppressed"] = True
             continue
