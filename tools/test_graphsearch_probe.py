@@ -24,6 +24,8 @@ class ProbeHelpers(unittest.TestCase):
     def test_parse_audit(self):
         line = "[INFO]\t2026-11-02T00:00:00Z\treq\t" + json.dumps(FULL)
         self.assertEqual(gp.parse_audit(line)["vector_ms"], 10)
+        wrapped = json.dumps({"level": "INFO", "message": json.dumps(FULL)})
+        self.assertEqual(gp.parse_audit(wrapped)["graph_ms"], 20)
         self.assertIsNone(gp.parse_audit("no json here"))
         self.assertIsNone(gp.parse_audit("x {bad"))
 
