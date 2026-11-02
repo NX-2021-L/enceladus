@@ -128,3 +128,11 @@ def test_unavailable_is_retried_after_short_ttl_not_cached_for_an_hour():
 def test_no_cost_explorer_on_mcp_path():
     source = open(_load_server(ENCELADUS_MCP_INTERFACE_MODE="code").__file__, encoding="utf-8").read()
     assert 'client("ce"' not in source and "get_cost_and_usage" not in source
+
+
+def test_unsettled_regression_null_is_not_coerced_to_false():
+    """ENC-TSK-R80-0D: regression null (unsettled window) must survive compaction; settled fields pass through."""
+    server = _server()
+    payload = _health(server, _StubS3({**_DIGEST, "regression": None, "settled": False, "settled_day": "2026-10-30"}))
+    digest = payload["cost_digest"]
+    assert digest["regression"] is None and digest["settled"] is False and digest["settled_day"] == "2026-10-30"

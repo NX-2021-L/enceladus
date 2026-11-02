@@ -9,7 +9,8 @@ CloudWatch metrics, and writes a compact JSON digest to the governance bucket:
 
 Consumers (ENC-TSK-R32 connection_health) read the TOP-LEVEL fields only:
 
-    date, prior_day_date, prior_day_spend, median_7d, regression, top_deltas,
+    date, prior_day_date, prior_day_spend, median_7d, regression, settled, settled_day,
+    settled_day_spend, top_deltas,
     feed_publisher_invocations, invalidation_paths_mtd, invalidation_free_tier,
     jreese_net_bytes{current,noncurrent}, devops_agentcli_compute_bytes{current,noncurrent},
     tracker_rru_wcu{rru,wcu}, generated_at, ce_calls
@@ -67,6 +68,9 @@ LOGGER.setLevel(logging.INFO)
 CE_MAX_CALLS = 3  # ruling A13: <= 3 Cost Explorer calls per invocation
 CE_REGION = "us-east-1"  # Cost Explorer is a global service served from us-east-1
 BASELINE_DAYS = 7
+# ENC-TSK-R80-0D: Cost Explorer T-1 is unsettled when the digest runs (provisioned/C3 usage reads 0.0), so the
+# regression/top-delta comparison uses T-2. The 7-day baseline is the 7 days before that settled day.
+SETTLEMENT_LAG_DAYS = 2
 REGRESSION_MULTIPLIER = 1.2
 TOP_DELTAS = 5
 INVALIDATION_FREE_TIER = 1000  # CloudFront free tier: 1,000 invalidation paths / month
@@ -189,11 +193,29 @@ def compute_spend(
     )
 
 
+def compute_settled(
+    totals: Dict[str, float], settled_day: date
+) -> Tuple[Optional[float], Optional[float], Optional[bool], bool]:
+    """(settled_day_spend, median_7d, regression, settled). ENC-TSK-R80-0D.
+
+    The comparison day is the settled day (T-2), never the unsettled T-1. `settled` is True only when
+    Cost Explorer returned a positive total for that day; otherwise regression is None (unknown) and is
+    NEVER False -- an unsettled window must not look like a clean bill of health.
+    """
+    spend, median, regression = compute_spend(totals, settled_day)
+    settled = bool(spend is not None and spend > 0)
+    return spend, median, (regression if settled else None), settled
+
+
 def compute_top_deltas(
     matrix: Dict[str, Dict[str, Tuple[float, float]]], prior_day: date, limit: int = TOP_DELTAS
 ) -> List[Dict[str, Any]]:
-    """Top usage-type cost deltas: prior day vs the mean of the 7 days before it (largest |delta|)."""
+    """Top usage-type cost deltas: `prior_day` (callers pass the SETTLED day) vs the mean of the 7 days
+    before it (largest |delta|). The row key stays "prior_day" for shape compatibility. When no usage type
+    has positive cost on that day the day is unsettled and no deltas are reported (it would read 0.0 everywhere)."""
     prior_key = prior_day.isoformat()
+    if not any(by_day.get(prior_key, (0.0, 0.0))[0] > 0 for by_day in matrix.values()):
+        return []
     baseline_keys = [(prior_day - timedelta(days=i)).isoformat() for i in range(1, BASELINE_DAYS + 1)]
     rows: List[Dict[str, Any]] = []
     for usage_type, by_day in matrix.items():
@@ -612,7 +634,9 @@ def build_digest(
     prior_day = today - timedelta(days=1)
     # MTD is "through the prior day": on the 1st this is the whole previous month.
     month_start = prior_day.replace(day=1)
-    window_start = today - timedelta(days=BASELINE_DAYS + 1)  # 8 days ending at the prior day
+    settled_day = today - timedelta(days=SETTLEMENT_LAG_DAYS)
+    # 9 days ending at the prior day: the settled day (T-2) plus its 7-day baseline. Same CE calls as before.
+    window_start = today - timedelta(days=BASELINE_DAYS + SETTLEMENT_LAG_DAYS)
 
     # CE call 1 -- daily totals
     totals = daily_totals(
@@ -622,7 +646,8 @@ def build_digest(
             Metrics=["UnblendedCost"],
         )
     )
-    prior_spend, median_7d, regression = compute_spend(totals, prior_day)
+    prior_spend = compute_spend(totals, prior_day)[0]
+    settled_spend, median_7d, regression, settled = compute_settled(totals, settled_day)
 
     # CE call 2 (+ at most one pagination follow-up) -- usage types; also feeds invalidation MTD
     usage_start = min(month_start, window_start)
@@ -645,7 +670,12 @@ def build_digest(
         "prior_day_spend": prior_spend,
         "median_7d": median_7d,
         "regression": regression,
-        "top_deltas": compute_top_deltas(matrix, prior_day),
+        # ENC-TSK-R80-0D (additive): regression/median_7d/top_deltas compare settled_day (T-2), not prior_day_date
+        # (T-1, unsettled at run time). settled=false => regression is null, never false.
+        "settled": settled,
+        "settled_day": settled_day.isoformat(),
+        "settled_day_spend": settled_spend,
+        "top_deltas": compute_top_deltas(matrix, settled_day),
         "feed_publisher_invocations": None,
         "invalidation_paths_mtd": invalidation_paths_mtd(matrix, month_start, prior_day),
         "invalidation_free_tier": INVALIDATION_FREE_TIER,
