@@ -2302,10 +2302,22 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
 
     result_set = set(result_rids)
 
+    # ENC-TSK-S08 (N1): in record mode the anchor is itself a member of its own
+    # result set. shortestPath((a)-[*]-(a)) errors in Neo4j (start and end node
+    # are the same), which made every call land in the except branch below
+    # (gamma S02 baseline: pathway_status=failed on 31/31 calls). Exclude the
+    # anchor from the target set, both in Python and in the Cypher.
+    targets = [r for r in result_rids if r and r != anchor_record_id]
+    if not targets:
+        logger.info("[INFO] pathway edge reconstruction skipped: no targets besides anchor=%s",
+                    anchor_record_id)
+        return [], [], [anchor_record_id]
+
     def _walk():
         cypher = (
             "MATCH (anchor {record_id: $rid, project_id: $pid}) "
             "MATCH (target) WHERE target.record_id IN $rids AND target.project_id = $pid "
+            "AND target.record_id <> $rid "
             f"MATCH path = shortestPath((anchor)-[:{_PATHWAY_WALK_EDGE_UNION}*1..3]-(target)) "
             "UNWIND relationships(path) AS rel "
             "WITH DISTINCT elementId(rel) AS edge_id, type(rel) AS etype, "
@@ -2315,7 +2327,7 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
         rows = []
         with driver.session() as session:
             res = session.run(cypher, rid=anchor_record_id, pid=project_id,
-                              rids=list(result_rids))
+                              rids=targets)
             for r in res:
                 rows.append((r["edge_id"], r["etype"], r["s"], r["e"]))
         return rows

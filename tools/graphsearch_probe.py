@@ -46,7 +46,12 @@ def parse_audit(message: str) -> Optional[Dict[str, Any]]:
         obj = json.loads(message[i:])
     except ValueError:
         return None
-    return obj if isinstance(obj, dict) else None
+    if not isinstance(obj, dict):
+        return None
+    inner = obj.get("message")  # Lambda JSON logging wraps the audit line as a string
+    if isinstance(inner, str) and "graphsearch_query" in inner:
+        return parse_audit(inner)
+    return obj
 
 
 def aggregate(audits: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]:
@@ -100,18 +105,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--profile", choices=sorted(LOG_GROUPS), required=True)
     ap.add_argument("--anchors-file")
     ap.add_argument("--sample", type=int, default=30)
+    ap.add_argument("--since", type=int, help="epoch start of the Logs window (re-read; use with --sample 0)")
     ap.add_argument("--top-n", type=int, default=20)
     ap.add_argument("--settle-s", type=int, default=25)
     ap.add_argument("--json", action="store_true", help="(default output is JSON; accepted for symmetry)")
     a = ap.parse_args(argv)
     import boto3  # deferred so helpers are importable without boto3 for offline tests
 
-    if a.anchors_file:
+    if a.sample == 0 and not a.anchors_file:
+        anchors = []
+    elif a.anchors_file:
         with open(a.anchors_file) as fh:
             anchors = [ln.strip() for ln in fh if ln.strip()]
     else:
         anchors = sample_ids(a.profile, a.sample)
-    start = int(time.time()) - 2
+    start = a.since or int(time.time()) - 2
     walls: List[float] = []
     failures = 0
     for rid in anchors:
@@ -124,7 +132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ok = False
         walls.append((time.perf_counter() - t0) * 1000)
         failures += 0 if ok else 1  # not-found anchors are tolerated, only counted
-    time.sleep(a.settle_s)
+    time.sleep(a.settle_s if anchors else 0)
     end = int(time.time()) + 1
     logs = boto3.Session(profile_name="enceladus-agent", region_name="us-west-2").client("logs")
     group = LOG_GROUPS[a.profile]
