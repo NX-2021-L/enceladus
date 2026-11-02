@@ -26,7 +26,6 @@ Environment variables:
   OPENSEARCH_READ_ALIAS          Read alias (records_read)
   OPENSEARCH_SECRET_NAME         Secrets Manager secret for query user
   OPENSEARCH_USERNAME            OpenSearch security-plugin username (query)
-  FEED_API_BASE                  Base URL for feed/corpus facet fallback
   BEDROCK_REGION              AWS region for Bedrock (default: us-west-2)
 """
 
@@ -39,7 +38,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs
 
 import corroboration
@@ -2368,6 +2367,39 @@ def _maybe_emit_stigmergic_trace(
         logger.exception("[ERROR] stigmergic trace build failed (suppressed)")
 
 
+_FACET_FIELDS = ("project_id", "record_type", "status", "priority")
+FACETS_SOURCE_FUSED = "fused_candidates"
+
+
+def _facets_from_candidates(
+    nodes: Iterable[Dict[str, Any]], project_id: str = ""
+) -> Dict[str, Dict[str, int]]:
+    """ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): query-relative facet counts.
+
+    Counts {project_id, record_type, status, priority} over the fused candidate
+    set resolved inside _query_hybrid. Pure in-process computation: no outbound
+    request, no feed base. Every facet field is always present (empty dict when
+    the candidate set carries no value for it) so the response shape is stable.
+    """
+    facets: Dict[str, Dict[str, int]] = {f: {} for f in _FACET_FIELDS}
+    for node in nodes:
+        if not node:
+            continue
+        values = {
+            "project_id": node.get("project_id") or project_id,
+            "record_type": node.get("record_type")
+            or next(iter(str(l).lower() for l in (node.get("_labels") or [])), None),
+            "status": node.get("status"),
+            "priority": node.get("priority"),
+        }
+        for field, raw in values.items():
+            if raw in (None, ""):
+                continue
+            key = str(raw)
+            facets[field][key] = facets[field].get(key, 0) + 1
+    return facets
+
+
 def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     """Phase 1 hybrid retrieval: vector + graph + keyword fused via RRF.
 
@@ -2396,6 +2428,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
                               k_corr, b_corr, final_score, final_rank}},
         "corroboration_alpha": 0.02,
         "s_top":             <max fused_score in this call>,
+        "facets":            {project_id|record_type|status|priority: {value: n}}
+                             computed over the fused candidate set (always present),
+        "facets_source":     "fused_candidates",
       }
 
     ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
@@ -2526,10 +2561,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     keyword_ranks: List[Dict[str, Any]] = []
     keyword_available = False
     keyword_source = "unavailable"
-    facets: Dict[str, Dict[str, int]] = {}
-    facets_source: Optional[str] = None
     if query_text:
-        os_ranks, os_facets, os_err = opensearch_keyword.hybrid_keyword_ranks(
+        os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
             project_id,
             query_text,
             top_n=HYBRID_SIGNAL_TOP_N,
@@ -2539,8 +2572,6 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             keyword_ranks = os_ranks
             keyword_available = bool(keyword_ranks)
             keyword_source = "opensearch"
-            facets = os_facets
-            facets_source = "opensearch"
         else:
             logger.warning(
                 "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
@@ -2555,16 +2586,6 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             )
             keyword_available = bool(keyword_ranks)
             keyword_source = "neo4j_fallback"
-            fallback_facets, fb_err = opensearch_keyword.fetch_feed_corpus_facets(
-                project_id=project_id,
-                query_text=query_text,
-                record_type_filter=record_type_filter,
-            )
-            if fallback_facets:
-                facets = fallback_facets
-                facets_source = "feed_corpus"
-            elif fb_err:
-                logger.warning("[WARNING] feed/corpus facet fallback failed: %s", fb_err)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -2629,8 +2650,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             # surfaced for observability parity with energy_lambda_weights.
             "corroboration_alpha": corroboration_alpha,
             "s_top": 0.0,
-            "facets": facets,
-            "facets_source": facets_source,
+            # ENC-TSK-R80-0I: facets are always present; empty candidate set.
+            "facets": _facets_from_candidates([], project_id),
+            "facets_source": FACETS_SOURCE_FUSED,
             "keyword_source": keyword_source,
         }
 
@@ -2642,6 +2664,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+    # ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): facets over the fused candidate set,
+    # in-process. Replaces the OpenSearch aggregations and the prod-to-gamma
+    # feed/corpus HTTP fallback (W0.5 D-2: query-relative, no prod feed base).
+    facets = _facets_from_candidates(
+        (node_by_rid.get(rid) for rid in top_rids), project_id
+    )
 
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
     # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
@@ -2873,7 +2901,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "corroboration_alpha": corroboration_alpha,
         "s_top": s_top,
         "facets": facets,
-        "facets_source": facets_source,
+        "facets_source": FACETS_SOURCE_FUSED,
         "keyword_source": keyword_source,
     }
 # without forcing an import at module load time (deploy packages the helper at

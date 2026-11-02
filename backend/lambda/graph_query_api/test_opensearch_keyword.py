@@ -107,7 +107,7 @@ class TestHybridKeywordRanks(unittest.TestCase):
         self.assertEqual(len(ranks), 2)
         self.assertEqual(ranks[0]["record_id"], "ENC-TSK-001")
         self.assertEqual(ranks[0]["rank"], 1)
-        self.assertEqual(facets["record_type"]["task"], 1)
+        # ENC-TSK-R80-0I: facets are computed in-process by _query_hybrid, not here.
 
     def test_returns_error_when_opensearch_fails(self):
         with mock.patch.object(okw, "opensearch_configured", return_value=True), mock.patch.object(
@@ -201,36 +201,6 @@ class TestFeedSelectionMsearch(unittest.TestCase):
         self.assertIsNone(err)
         self.assertNotIn("enceladus#task", selection)
         self.assertEqual(selection["enceladus#issue"], ["ENC-ISS-010"])
-
-
-class TestFeedCorpusFacetFallback(unittest.TestCase):
-    def test_parses_feed_corpus_facets(self):
-        payload = {
-            "facets": {
-                "record_type": {"task": 5},
-                "status": {"open": 4},
-                "priority": {"P1": 2},
-                "project_id": {"enceladus": 5},
-            }
-        }
-        body = json.dumps(payload).encode("utf-8")
-
-        class FakeResp:
-            def read(self):
-                return body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        with mock.patch.object(okw, "COORDINATION_INTERNAL_API_KEY", "test-key"), mock.patch(
-            "urllib.request.urlopen", return_value=FakeResp()
-        ):
-            facets, err = okw.fetch_feed_corpus_facets(project_id="enceladus", query_text="foo")
-        self.assertIsNone(err)
-        self.assertEqual(facets["record_type"]["task"], 5)
 
 
 if __name__ == "__main__":
