@@ -59,6 +59,11 @@ API_ROOT = os.environ.get("COORDINATION_API_BASE", "").rstrip("/") or (
 MAX_LOOKUP_PAGES = int(os.environ.get("ANOMALY_LOOKUP_MAX_PAGES", "10") or 10)
 MAX_EVIDENCE_ENTRIES = 20
 LOOKUP_STATUSES = ("open", "in-progress", "closed")
+# ENC-TSK-R82-0C (FTR-150 AC-5 / FTR-100 AC-4): update-push thresholds, read at CALL time from env
+# (a Lambda configuration change, never a code change). Push on a re-delivery iff total impact
+# reached >= RATIO x the last-pushed impact OR grew by >= ABS_USD dollars since the last push.
+DEFAULT_UPDATE_PUSH_RATIO = 2.0
+DEFAULT_UPDATE_PUSH_ABS_USD = 5.0
 
 # AC-8 seam: source name -> adapter module (SOURCE + parse(message) -> [normalized]).
 ADAPTERS = source_adapters.REGISTRY  # AdapterRegistry (dict subclass); see source_adapters.py contract
@@ -160,6 +165,20 @@ class TrackerClient:
 
     def notify_anomaly(self, project: str, issue_id: str, norm: Dict[str, Any]) -> Dict[str, Any]:
         return _http("POST", f"{API_ROOT}/coordination/notifications/anomaly", anomaly_push_body(project, issue_id, norm))
+
+    def notify_anomaly_update(self, project: str, issue_id: str, norm: Dict[str, Any],
+                              prior_usd: Optional[float]) -> Dict[str, Any]:
+        """ENC-TSK-R82-0C: threshold-crossing re-delivery push via the same anomaly notify route
+        (route ignores unknown keys; `update`/`prior_total_impact_usd` are advisory)."""
+        impact = (norm.get("impact") or {}).get("total_impact_usd")
+        services = sorted({str(r.get("service")) for ev in norm.get("evidence") or [] if isinstance(ev, dict)
+                           for r in ev.get("breakdown") or [] if r.get("service")})
+        base = TRACKER_API_BASE[: -len("/tracker")] if TRACKER_API_BASE.endswith("/tracker") else TRACKER_API_BASE
+        return _http("POST", f"{base}/coordination/notifications/anomaly", {
+            "issue_id": issue_id, "project_id": project, "service": ", ".join(services[:3]) or "unknown",
+            "total_impact_usd": impact if isinstance(impact, (int, float)) else None,
+            "severity": norm.get("severity", "medium"), "update": True, "prior_total_impact_usd": prior_usd,
+        })
 
     def list_issues(self, project: str, status: str, cursor: str = "") -> Dict[str, Any]:
         url = f"{TRACKER_API_BASE}/{project}?type=issue&status={status}&page_size=200"
@@ -269,11 +288,90 @@ def _notify_created(client: Any, project: str, issue_id: str, norm: Dict[str, An
         return False
 
 
+def _env_nonneg_float(name: str, default: float) -> float:
+    try:
+        val = float(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return val if val >= 0 else default
+
+
+def update_push_thresholds() -> Dict[str, float]:
+    """Runtime-configurable (ENC-FTR-100 AC-4): ANOMALY_UPDATE_PUSH_RATIO, ANOMALY_UPDATE_PUSH_ABS_USD.
+    Invalid / negative values fall back to the defaults (2x, $5)."""
+    return {
+        "ratio": _env_nonneg_float("ANOMALY_UPDATE_PUSH_RATIO", DEFAULT_UPDATE_PUSH_RATIO),
+        "abs_usd": _env_nonneg_float("ANOMALY_UPDATE_PUSH_ABS_USD", DEFAULT_UPDATE_PUSH_ABS_USD),
+    }
+
+
+def _total_impact(ev: Any) -> Optional[float]:
+    v = ((ev or {}).get("impact") or {}).get("total_impact_usd") if isinstance(ev, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def push_baseline(prior: List[Dict[str, Any]]) -> Optional[float]:
+    """Impact at the LAST PUSH: the newest evidence entry flagged `pushed`, else the first entry
+    (the create-time push). Comparing to the last push, not the last delivery, stops a slow creep
+    of sub-threshold re-sends from ever escaping notification."""
+    for ev in reversed(prior):
+        if ev.get("pushed") and _total_impact(ev) is not None:
+            return _total_impact(ev)
+    return _total_impact(prior[0]) if prior else None
+
+
+def should_push_update(prior_usd: Optional[float], new_usd: Optional[float],
+                       th: Optional[Dict[str, float]] = None) -> bool:
+    """FTR-150 AC-5: push only when impact crossed the threshold; unknown impact never pushes."""
+    if new_usd is None:
+        return False
+    th = th or update_push_thresholds()
+    if prior_usd is None:
+        return new_usd >= th["abs_usd"]
+    if new_usd - prior_usd >= th["abs_usd"]:
+        return True
+    return prior_usd > 0 and new_usd >= th["ratio"] * prior_usd
+
+
+def _notify_updated(client: Any, project: str, issue_id: str, norm: Dict[str, Any],
+                    prior_usd: Optional[float]) -> bool:
+    """Threshold-crossing re-delivery push; same route as the create push. Never fails intake."""
+    sender = getattr(client, "notify_anomaly_update", None)
+    if sender is None or not issue_id:
+        return False
+    try:
+        sender(project, issue_id, norm, prior_usd)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("anomaly update push failed for %s: %s", issue_id, exc)
+        return False
+
+
+def process_closed_signal(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
+    """FTR-150 AC-5: a source anomaly-closed signal appends a worklog entry to the existing issue
+    and NEVER changes its status (a human closes it). Never creates; no push."""
+    key = idempotency_key(norm)
+    project = norm["project"]
+    existing = find_existing(client, project, key)
+    if existing is None:
+        logger.info(json.dumps({"event": "anomaly_closed_signal_unmatched", "key": key}))
+        return {"action": "closed_signal_unmatched", "key": key, "project": project}
+    issue_id = _record_id(existing)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    client.log(project, issue_id, (
+        f"[INFO] {key} reported CLOSED by source at {now}: {_impact_line(norm)}. "
+        "Issue left open for human review (anomaly-closed never auto-closes)."))
+    logger.info(json.dumps({"event": "anomaly_closed_signal_logged", "key": key, "issue_id": issue_id}))
+    return {"action": "closed_logged", "key": key, "issue_id": issue_id, "project": project}
+
+
 def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
     """Source-agnostic create-or-replay. Exactly one issue per {source}:{anomaly_id}."""
     key = idempotency_key(norm)
     project = norm["project"]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if norm.get("lifecycle") == "closed":
+        return process_closed_signal(norm, client)
     existing = find_existing(client, project, key)
     if existing is None:
         try:
@@ -291,12 +389,18 @@ def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
     issue_id = _record_id(existing)
     prior = [e for e in (existing.get("evidence") or []) if isinstance(e, dict)]
     new_ev = norm["evidence"][0]
+    prior_usd = push_baseline(prior)
+    push = should_push_update(prior_usd, _total_impact(new_ev))
+    if push:
+        new_ev = dict(new_ev, pushed=True)  # becomes the baseline for the next threshold check
     if not prior or (prior[-1].get("impact") or {}) != new_ev.get("impact"):
         merged = (prior + [new_ev])[-MAX_EVIDENCE_ENTRIES:]
         client.set_field(project, issue_id, "evidence", merged)
-    client.log(project, issue_id, f"[INFO] {key} re-delivered at {now}: {_impact_line(norm)}")
-    logger.info(json.dumps({"event": "anomaly_issue_replayed", "key": key, "issue_id": issue_id}))
-    return {"action": "replayed", "key": key, "issue_id": issue_id, "project": project}
+    client.log(project, issue_id, f"[INFO] {key} re-delivered at {now}: {_impact_line(norm)}"
+               + (f" (push threshold crossed; prior pushed impact={prior_usd})" if push else " (below push threshold; no push)"))
+    notified = _notify_updated(client, project, issue_id, norm, prior_usd) if push else False
+    logger.info(json.dumps({"event": "anomaly_issue_replayed", "key": key, "issue_id": issue_id, "pushed": notified}))
+    return {"action": "replayed", "key": key, "issue_id": issue_id, "project": project, "notified": notified}
 
 
 def _select_adapter(event_source: str) -> Any:

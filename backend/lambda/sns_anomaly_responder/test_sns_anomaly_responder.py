@@ -231,3 +231,77 @@ def test_push_failure_does_not_fail_intake():
     t = NoPush()
     out = lf.lambda_handler(_event(), None, client=t)
     assert out["results"][0] == {**out["results"][0], "action": "created", "notified": False} and t.creates == 1
+# ---- ENC-TSK-R82-0C: update-push thresholds + anomaly-closed worklog + runtime config ----
+class PushTracker(FakeTracker):
+    def __init__(self):
+        super().__init__()
+        self.updates = []
+
+    def notify_anomaly_update(self, project, issue_id, norm, prior_usd):
+        self.updates.append((issue_id, prior_usd, norm["impact"]["total_impact_usd"]))
+        return {}
+
+
+def _msg(total, **extra):
+    body = json.loads(FIXTURE)
+    body["impact"]["totalImpact"] = total
+    body.update(extra)
+    return json.dumps(body)
+
+
+def _seed(total=10.0):
+    t = PushTracker()
+    lf.lambda_handler(_event(_msg(total)), None, client=t)
+    return t
+
+
+def test_update_below_threshold_no_push(monkeypatch):
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_RATIO", raising=False)
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_ABS_USD", raising=False)
+    t = _seed(10.0)
+    r = lf.lambda_handler(_event(_msg(12.0)), None, client=t)["results"][0]
+    assert r["action"] == "replayed" and r["notified"] is False and t.updates == []
+    assert "no push" in t.logs[-1][1]
+
+
+def test_update_absolute_and_ratio_cross_push(monkeypatch):
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_RATIO", raising=False)
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_ABS_USD", raising=False)
+    t = _seed(10.0)
+    assert lf.lambda_handler(_event(_msg(15.5)), None, client=t)["results"][0]["notified"] is True  # +5.5 abs
+    assert t.updates == [("DVP-ISS-901", 10.0, 15.5)]
+    # baseline is now the last PUSH (15.5): +2 is below, 2x(15.5)=31 is the ratio gate
+    assert lf.lambda_handler(_event(_msg(17.5)), None, client=t)["results"][0]["notified"] is False
+    assert lf.lambda_handler(_event(_msg(31.0)), None, client=t)["results"][0]["notified"] is True
+
+
+def test_creep_cannot_escape_threshold(monkeypatch):
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_RATIO", raising=False)
+    monkeypatch.delenv("ANOMALY_UPDATE_PUSH_ABS_USD", raising=False)
+    t = _seed(100.0)
+    pushed = [lf.lambda_handler(_event(_msg(v)), None, client=t)["results"][0]["notified"]
+              for v in (102.0, 104.0, 106.0)]  # each +2 over previous delivery, +6 over last push
+    assert pushed == [False, False, True]
+
+
+def test_threshold_configurable_without_code_change(monkeypatch):
+    monkeypatch.setenv("ANOMALY_UPDATE_PUSH_ABS_USD", "1")
+    monkeypatch.setenv("ANOMALY_UPDATE_PUSH_RATIO", "10")
+    t = _seed(10.0)
+    assert lf.lambda_handler(_event(_msg(11.5)), None, client=t)["results"][0]["notified"] is True
+    monkeypatch.setenv("ANOMALY_UPDATE_PUSH_ABS_USD", "junk")  # invalid -> default $5
+    assert lf.update_push_thresholds()["abs_usd"] == 5.0
+
+
+def test_closed_signal_logs_and_does_not_close(monkeypatch):
+    t = _seed(10.0)
+    r = lf.lambda_handler(_event(_msg(10.0, anomalyStatus="CLOSED")), None, client=t)["results"][0]
+    assert r["action"] == "closed_logged" and t.creates == 1
+    assert t.issues["DVP-ISS-901"]["status"] == "open" and "CLOSED by source" in t.logs[-1][1]
+    assert t.updates == []
+
+
+def test_closed_signal_without_issue_creates_nothing():
+    t = PushTracker()
+    r = lf.lambda_handler(_event(_msg(0.1, anomalyStatus="CLOSED")), None, client=t)["results"][0]
+    assert r["action"] == "closed_signal_unmatched" and t.creates == 0

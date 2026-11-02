@@ -55,6 +55,7 @@ class NormalizedAnomaly(TypedDict, total=False):
     priority: str
     category: str
     raw_ref: Any
+    lifecycle: str  # optional: "closed" = source-side anomaly-closed signal (FTR-150 AC-5); absent = open/active
 
 
 @runtime_checkable
