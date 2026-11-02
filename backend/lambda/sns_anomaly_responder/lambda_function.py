@@ -340,6 +340,8 @@ def update_push_thresholds() -> Dict[str, float]:
 
 def _total_impact(ev: Any) -> Optional[float]:
     v = ((ev or {}).get("impact") or {}).get("total_impact_usd") if isinstance(ev, dict) else None
+    if v is None and isinstance(ev, dict):
+        v = ev.get("total_impact_usd")
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
@@ -398,6 +400,24 @@ def process_closed_signal(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
     return {"action": "closed_logged", "key": key, "issue_id": issue_id, "project": project}
 
 
+def _prior_evidence(client: Any, project: str, issue_id: str, listed: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Full evidence list of the canonical issue (ENC-TSK-R91). Prefers a fresh GET (the list view is
+    a compact projection without evidence); falls back to the listed record only if it carries an
+    evidence list. None => unknown (caller must not overwrite or push)."""
+    getter = getattr(client, "get_issue", None)
+    if getter is not None:
+        try:
+            rec = getter(project, issue_id)
+            rec = rec.get("record", rec) if isinstance(rec, dict) else {}
+            if isinstance(rec.get("evidence"), list):
+                return [e for e in rec["evidence"] if isinstance(e, dict)]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("anomaly replay: full-record fetch failed for %s: %s", issue_id, exc)
+    if isinstance(listed.get("evidence"), list):
+        return [e for e in listed["evidence"] if isinstance(e, dict)]
+    return None
+
+
 def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
     """Source-agnostic create-or-replay. Exactly one issue per {source}:{anomaly_id}."""
     key = idempotency_key(norm)
@@ -420,18 +440,30 @@ def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
             if existing is None:
                 raise
     issue_id = _record_id(existing)
-    prior = [e for e in (existing.get("evidence") or []) if isinstance(e, dict)]
+    # ENC-TSK-R91: the tracker list is a COMPACT projection (no evidence), so the baseline MUST come
+    # from the full record. Unknown evidence => no evidence write (it would clobber the stored list)
+    # and no push.
+    prior = _prior_evidence(client, project, issue_id, existing)
+    if prior is None:
+        logger.warning("anomaly replay for %s: evidence unavailable; skipping evidence update and push", issue_id)
+        client.log(project, issue_id, f"[INFO] {key} re-delivered at {now}: {_impact_line(norm)}"
+                   " (prior evidence unavailable; no evidence update, no push)")
+        return {"action": "replayed", "key": key, "issue_id": issue_id, "project": project, "notified": False}
     new_ev = norm["evidence"][0]
+    new_usd = _total_impact(new_ev)
     prior_usd = push_baseline(prior)
-    push = should_push_update(prior_usd, _total_impact(new_ev))
-    if push:
-        new_ev = dict(new_ev, pushed=True)  # becomes the baseline for the next threshold check
-    if not prior or (prior[-1].get("impact") or {}) != new_ev.get("impact"):
-        merged = (prior + [new_ev])[-MAX_EVIDENCE_ENTRIES:]
-        client.set_field(project, issue_id, "evidence", merged)
-    client.log(project, issue_id, f"[INFO] {key} re-delivered at {now}: {_impact_line(norm)}"
-               + (f" (push threshold crossed; prior pushed impact={prior_usd})" if push else " (below push threshold; no push)"))
+    push = should_push_update(prior_usd, new_usd)
+    # `pushed` is truthful: only a 2xx push makes this entry the baseline for the next threshold check.
     notified = _notify_updated(client, project, issue_id, norm, prior_usd) if push else False
+    entry = dict(new_ev, pushed=bool(notified))
+    if new_usd is not None:
+        entry["total_impact_usd"] = new_usd
+    merged = (prior + [entry])[-MAX_EVIDENCE_ENTRIES:]
+    client.set_field(project, issue_id, "evidence", merged)
+    outcome = ("no push" if not push else (f"push threshold crossed; prior pushed impact={prior_usd}; pushed"
+                                           if notified else f"push threshold crossed; prior pushed impact={prior_usd}; push FAILED"))
+    client.log(project, issue_id, f"[INFO] {key} re-delivered at {now}: {_impact_line(norm)}"
+               + (f" ({outcome})" if push else " (below push threshold; no push)"))
     logger.info(json.dumps({"event": "anomaly_issue_replayed", "key": key, "issue_id": issue_id, "pushed": notified}))
     return {"action": "replayed", "key": key, "issue_id": issue_id, "project": project, "notified": notified}
 
@@ -486,13 +518,13 @@ def lambda_handler(event: Any, context: Any, client: Optional[Any] = None,
         if is_enrich:
             # ENC-TSK-R83-0A: async enrichment leg (self-invoked after intake). Never raises (fail-open).
             return {"enrichment": enrichment.enrich(event["enrichment_request"], client)}
-        return _run(event, client)
+        return _run(event, client, context)
     finally:
         if owns_identity and identity is not None:
             retire_identity(identity)
 
 
-def _run(event: Any, client: Any) -> Dict[str, Any]:
+def _run(event: Any, client: Any, context: Any = None) -> Dict[str, Any]:
     if isinstance(event, dict) and event.get("digest_source"):
         return run_scheduled_digest(event, client)  # ENC-TSK-R83-0C weekly schedule
     results: List[Dict[str, Any]] = []
