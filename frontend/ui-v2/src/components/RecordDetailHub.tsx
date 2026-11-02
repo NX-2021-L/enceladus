@@ -3,6 +3,7 @@ import { RecordId } from './RecordId'
 import { StatusChip } from './StatusChip'
 import { Modal } from '../design-system'
 import { Tabs } from './StripTabs'
+import { RecordMetadataPanel } from './RecordMetadataPanel'
 import type {
   AcceptanceCriterion,
   HistoryEntry,
@@ -49,6 +50,8 @@ export interface RecordMutationContext {
   transitionType?: string | null
   checkedOut: boolean
   syncVersion?: number
+  /** ENC-TSK-R82-0E -- raw record; when present an "Edit metadata" tab (schema_form) is offered. */
+  metadata?: Record<string, unknown>
 }
 
 export interface HubAction {
@@ -269,6 +272,23 @@ export function RecordDetailHub({
     ...(neighbors ? [{ id: 'neighbors', label: 'Neighbors', content: neighbors }] : []),
     ...(worklog ? [{ id: 'worklog', label: 'Worklog', content: worklog }] : []),
     ...(evidence ? [{ id: 'evidence', label: 'Evidence', content: evidence }] : []),
+    ...(mutation?.metadata
+      ? [
+          {
+            id: 'metadata',
+            label: 'Edit metadata',
+            content: (
+              <RecordMetadataPanel
+                projectId={mutation.projectId}
+                recordType={mutation.recordType}
+                recordId={mutation.recordId}
+                record={mutation.metadata}
+                syncVersion={mutation.syncVersion}
+              />
+            ),
+          },
+        ]
+      : []),
   ]
 
   function renderActionButtons() {
