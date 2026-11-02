@@ -153,7 +153,15 @@ def _appconfig_energy_config() -> Dict[str, object]:
     port = os.environ.get("AWS_APPCONFIG_EXTENSION_HTTP_PORT", "2772")
     app = os.environ.get("APPCONFIG_APPLICATION", "enceladus")
     env = os.environ.get("APPCONFIG_ENVIRONMENT", "production")
-    cfg = os.environ.get("ENERGY_FUNCTION_APPCONFIG_CONFIGURATION", "energy-function")
+    cfg = os.environ.get("ENERGY_FUNCTION_APPCONFIG_CONFIGURATION", "").strip()
+    if not cfg:
+        # ENC-TSK-R80-0C / ENC-ISS-506: opt-in only. The profile does not exist
+        # on prod or gamma (its IaC in 09-appconfig-governance.yaml cannot be
+        # created by the CFN deploy role), so an unconditional fetch logged a
+        # failed AppConfig session on every invocation and always fell through
+        # to the env/default path anyway. Set the env var to the profile name
+        # once the profile is provisioned.
+        return {}
     url = f"http://localhost:{port}/applications/{app}/environments/{env}/configurations/{cfg}"
     try:
         with urllib.request.urlopen(url, timeout=1) as resp:  # noqa: S310 — localhost extension
