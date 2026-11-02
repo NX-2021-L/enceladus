@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import aws_cad_adapter
+import source_adapters
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -45,7 +46,7 @@ MAX_EVIDENCE_ENTRIES = 20
 LOOKUP_STATUSES = ("open", "in-progress", "closed")
 
 # AC-8 seam: source name -> adapter module (SOURCE + parse(message) -> [normalized]).
-ADAPTERS: Dict[str, Any] = {aws_cad_adapter.SOURCE: aws_cad_adapter}
+ADAPTERS = source_adapters.REGISTRY  # AdapterRegistry (dict subclass); see source_adapters.py contract
 
 
 class TrackerError(RuntimeError):
@@ -190,7 +191,7 @@ def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
 
 
 def _select_adapter(event_source: str) -> Any:
-    return ADAPTERS.get(os.environ.get("ANOMALY_SOURCE", aws_cad_adapter.SOURCE)) or ADAPTERS[aws_cad_adapter.SOURCE]
+    return ADAPTERS.resolve(os.environ.get("ANOMALY_SOURCE"), aws_cad_adapter.SOURCE)
 
 
 def lambda_handler(event: Any, context: Any, client: Optional[Any] = None) -> Dict[str, Any]:
@@ -202,7 +203,7 @@ def lambda_handler(event: Any, context: Any, client: Optional[Any] = None) -> Di
         sns = record.get("Sns") or {}
         adapter = _select_adapter(str(sns.get("TopicArn") or ""))
         try:
-            anomalies = adapter.parse(sns.get("Message") or "")
+            anomalies = source_adapters.parse_message(adapter, sns.get("Message") or "")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"normalize: {exc}")
             continue
