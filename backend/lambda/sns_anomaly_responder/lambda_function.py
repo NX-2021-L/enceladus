@@ -240,6 +240,8 @@ def find_existing(client: Any, project: str, key: str) -> Optional[Dict[str, Any
 
 def _impact_line(norm: Dict[str, Any]) -> str:
     i = norm.get("impact") or {}
+    if "total_impact_usd" not in i:  # non-CAD source: generic, deterministic rendering
+        return "impact=" + json.dumps(i, sort_keys=True, default=str)
     return (
         f"total_impact_usd={i.get('total_impact_usd')} actual={i.get('total_actual_spend_usd')} "
         f"expected={i.get('total_expected_spend_usd')} pct={i.get('total_impact_pct')}"
@@ -408,8 +410,14 @@ def process_anomaly(norm: Dict[str, Any], client: Any) -> Dict[str, Any]:
     return {"action": "replayed", "key": key, "issue_id": issue_id, "project": project, "notified": notified}
 
 
-def _select_adapter(event_source: str) -> Any:
-    return ADAPTERS.resolve(os.environ.get("ANOMALY_SOURCE"), aws_cad_adapter.SOURCE)
+def _select_adapter(event_source: Any) -> Any:
+    """Per-record source (SNS MessageAttributes.anomaly_source, ENC-TSK-R83-0B) wins over the
+    ANOMALY_SOURCE env default, so one responder serves every registered source."""
+    per_record = ""
+    if isinstance(event_source, dict):
+        attr = (event_source.get("MessageAttributes") or {}).get("anomaly_source") or {}
+        per_record = str(attr.get("Value") or "").strip()
+    return ADAPTERS.resolve(per_record or os.environ.get("ANOMALY_SOURCE"), aws_cad_adapter.SOURCE)
 
 
 def lambda_handler(event: Any, context: Any, client: Optional[Any] = None,
@@ -448,7 +456,7 @@ def _run(event: Any, client: Any) -> Dict[str, Any]:
     suppressed = 0
     for record in (event or {}).get("Records") or []:
         sns = record.get("Sns") or {}
-        adapter = _select_adapter(str(sns.get("TopicArn") or ""))
+        adapter = _select_adapter(sns)
         try:
             anomalies = source_adapters.parse_message(adapter, sns.get("Message") or "")
         except Exception as exc:  # noqa: BLE001

@@ -126,9 +126,11 @@ def parse_message(adapter: Any, message: str) -> List[Dict[str, Any]]:
 
 def build_default_registry(extra: Iterable[Any] = ()) -> AdapterRegistry:
     import aws_cad_adapter  # local import: keeps this module import-cycle free
+    import mentions_drift_adapter
 
     reg = AdapterRegistry()
     reg.register(aws_cad_adapter)
+    reg.register(mentions_drift_adapter)  # ENC-TSK-R83-0B / FTR-150 AC-9
     for adapter in extra:
         reg.register(adapter)
     return reg
