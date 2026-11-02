@@ -335,6 +335,12 @@
       "deploy_script": "backend/lambda/scoring_service/deploy.sh"
     },
     {
+      "function_name": "enceladus-sns-anomaly-responder",
+      "lambda_dir": "backend/lambda/sns_anomaly_responder",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/sns_anomaly_responder/deploy.sh"
+    },
+    {
       "function_name": "enceladus-stale-checkout-monitor",
       "lambda_dir": "backend/lambda/stale_checkout_monitor",
       "workflow_file": ".github/workflows/_deploy.yml",

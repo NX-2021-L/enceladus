@@ -112,6 +112,7 @@ function_name_map:
   reference_search: devops-reference-search-gamma
   rhythm_cycle: enceladus-rhythm-cycle-gamma
   scoring_service: enceladus-scoring-service-gamma
+  sns_anomaly_responder: enceladus-sns-anomaly-responder-gamma
   stale_checkout_monitor: enceladus-stale-checkout-monitor-gamma
   titan_embedding_backfill: devops-titan-embedding-backfill-gamma
   tracker_mutation: devops-tracker-mutation-api-gamma

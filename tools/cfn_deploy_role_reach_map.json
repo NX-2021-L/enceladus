@@ -266,6 +266,13 @@
       "reach": "baseline",
       "notes": "Present on v4/main and deployed by this role today, so its reach is demonstrated by the stacks themselves. No ARN shape mapped yet: tier-1 only. Upgrade to tier 2 by adding create_actions + arn + name_property when this type's grant is narrowed or a reach question arises."
     },
+    "AWS::SNS::TopicPolicy": {
+      "reach": "verified",
+      "create_actions": [
+        "sns:SetTopicAttributes"
+      ],
+      "notes": "ENC-TSK-R81-0B: a topic policy is applied through sns:SetTopicAttributes (Policy attribute), granted by SnsTopicOps (04-github-roles.yaml) on enceladus-* topics in us-west-2; the only declaration is enceladus-cost-anomaly-events{suffix}. Has no ARN of its own, so tier-1 only."
+    },
     "AWS::SNS::Topic": {
       "reach": "verified",
       "create_actions": [
