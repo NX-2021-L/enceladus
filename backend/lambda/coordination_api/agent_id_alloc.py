@@ -267,6 +267,7 @@ def mint_session_id(
     status: str = "allocated",
     claimed_at: str = "",
     credential_id: str = "",
+    increment_usage: bool = False,
     caller_payload: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mint a server-allocated ENC-SES-NNN and persist the session node. Returns the
@@ -280,6 +281,11 @@ def mint_session_id(
     authenticated with. It is written ONLY when provided, so the frozen value-identity
     shape (``SESSION_NODE_PROPERTIES``) is preserved for the credential-less path; the
     revoke cascade (``revoke_credential``) reaps sessions carrying a bound credential_id.
+
+    ``increment_usage`` (ENC-TSK-R81-0H / ENC-FTR-146 AC-6) makes the mint a two-item
+    TransactWriteItems: the session Put plus ``ADD usage_count 1`` on the ACTIVE agent-type
+    row, so the counter moves if and only if the session row is written (a rejected or
+    raced register never increments).
     """
     _assert_no_caller_id(caller_payload, "session_id")
     if status not in SESSION_STATUSES:
@@ -319,7 +325,10 @@ def mint_session_id(
         if credential_id:
             item["credential_id"] = credential_id
         try:
-            _put_node(AGENT_SESSIONS_TABLE, "session_id", item)
+            if increment_usage:
+                _put_session_and_increment_usage(item, agent_type_id)
+            else:
+                _put_node(AGENT_SESSIONS_TABLE, "session_id", item)
             logger.info("[INFO] Minted session id %s (agent_type=%s)", session_id, agent_type_id)
             return item
         except ClientError as exc:
@@ -330,6 +339,54 @@ def mint_session_id(
     raise IdAllocationError(
         f"Failed minting session id after {_MINT_MAX_ATTEMPTS} attempts: {last_exc}"
     )
+
+
+def usage_increment_update(agent_type_id: str) -> Dict[str, Any]:
+    """TransactWriteItems ``Update`` that ADDs 1 to ``usage_count`` on an ACTIVE agent-type row.
+
+    ``status`` is aliased through ExpressionAttributeNames (ENC-TSK-P89: reserved-word /
+    path collisions in UpdateExpression). ``ADD`` creates the attribute at 1 when absent.
+    """
+    return {
+        "TableName": AGENT_TYPES_TABLE,
+        "Key": {"agent_type_id": _serialize(agent_type_id)},
+        "UpdateExpression": "ADD #uc :one",
+        "ConditionExpression": "attribute_exists(agent_type_id) AND #st = :active",
+        "ExpressionAttributeNames": {"#uc": "usage_count", "#st": "status"},
+        "ExpressionAttributeValues": {":one": _serialize(1), ":active": _serialize("active")},
+    }
+
+
+def _put_session_and_increment_usage(item: Dict[str, Any], agent_type_id: str) -> None:
+    """Atomically write the session node and bump the agent type's usage_count.
+
+    Raises ClientError(ConditionalCheckFailedException) when the SESSION id collided (the
+    mint loop retries) and ValueError when the agent-type row is missing/inactive.
+    """
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": AGENT_SESSIONS_TABLE,
+                "Item": {k: _serialize(v) for k, v in item.items()},
+                "ConditionExpression": "attribute_not_exists(session_id)",
+            }},
+            {"Update": usage_increment_update(agent_type_id)},
+        ])
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            reasons = exc.response.get("CancellationReasons") or []
+            codes = [(r or {}).get("Code") for r in reasons]
+            if len(codes) > 1 and codes[1] == "ConditionalCheckFailed":
+                raise ValueError(
+                    f"agent_type_id {agent_type_id!r} is not an active agent type; "
+                    "session not minted, usage_count unchanged"
+                ) from exc
+            if codes and codes[0] == "ConditionalCheckFailed":
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "session id collision"}},
+                    "TransactWriteItems",
+                ) from exc
+        raise
 
 
 # ---------------------------------------------------------------------------
