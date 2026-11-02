@@ -170,3 +170,10 @@ class RegisterHandlerVariantTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_sns_anomaly_responder_surface_is_allowed():
+    """ENC-TSK-R82-0A: the Lambda responder surface passes the closed surface enum."""
+    from agent_id_alloc import canonicalize_surface, validate_surface
+    assert canonicalize_surface("sns-anomaly-responder") == "sns-anomaly-responder"
+    assert validate_surface("sns-anomaly-responder") == "sns-anomaly-responder"

@@ -51,7 +51,12 @@ TRACKER_API_BASE = os.environ.get(
 ).rstrip("/")
 PROVIDER = "sns-anomaly-responder"
 # ENC-TSK-R82-0A: identity (fail-closed register/claim) + notify.
-AGENT_TYPE_ID = os.environ.get("ANOMALY_AGENT_TYPE_ID", "ENC-AGT-00R")
+# Agent-type ids are per-environment (prod ENC-AGT-00R does not exist on gamma): resolved at
+# cold start via env override else idempotent agent.type.register, cached per container.
+TYPE_SURFACE = "sns-anomaly-responder"
+TYPE_MODEL = "deterministic-no-llm"
+TYPE_COST_TIER = "low"
+_TYPE_ID_CACHE: Dict[str, str] = {}
 AGENT_RUNTIME = os.environ.get("ANOMALY_AGENT_RUNTIME", "aws_lambda")
 PARENT_SESSION_ID = os.environ.get("ANOMALY_PARENT_SESSION_ID", "root")
 # https://<apigw>/api/v1  (tracker + coordination share one API Gateway per plane)
@@ -101,6 +106,26 @@ def _http(method: str, url: str, body: Optional[Dict[str, Any]] = None) -> Dict[
         raise TrackerError(f"{method} {url} failed: {exc}") from exc
 
 
+def resolve_agent_type_id(http: Callable[..., Dict[str, Any]] = _http) -> str:
+    """ANOMALY_AGENT_TYPE_ID env wins; else find-or-mint via agent.type.register (once per container).
+
+    Fail-closed: any error or missing id raises TrackerError before any mutation."""
+    override = os.environ.get("ANOMALY_AGENT_TYPE_ID", "").strip()
+    if override:
+        return override
+    cached = _TYPE_ID_CACHE.get("id")
+    if cached:
+        return cached
+    resp = http("POST", f"{API_ROOT}/coordination/agents/types", {
+        "surface": TYPE_SURFACE, "model": TYPE_MODEL, "cost_tier": TYPE_COST_TIER,
+    })
+    type_id = str((resp.get("agent_type") or {}).get("agent_type_id") or "").strip()
+    if not type_id:
+        raise TrackerError("agent.type.register returned no agent_type_id; refusing to mutate")
+    _TYPE_ID_CACHE["id"] = type_id
+    return type_id
+
+
 class Identity:
     """Per-invocation agent identity: minted session, its SCI and the invocation's governance hash."""
 
@@ -120,21 +145,22 @@ def acquire_identity(http: Callable[..., Dict[str, Any]] = _http) -> Identity:
     governance_hash = str(gov.get("governance_hash") or "").strip()
     if not governance_hash:
         raise TrackerError("governance hash unavailable; refusing to mutate")
+    agent_type_id = resolve_agent_type_id(http)
     reg = http("POST", f"{API_ROOT}/coordination/agents/sessions", {
-        "agent_type_id": AGENT_TYPE_ID, "runtime": AGENT_RUNTIME, "parent_session_id": PARENT_SESSION_ID,
+        "agent_type_id": agent_type_id, "runtime": AGENT_RUNTIME, "parent_session_id": PARENT_SESSION_ID,
     })
     session_id = str((reg.get("session") or {}).get("session_id") or "").strip()
     if not session_id:
         raise TrackerError("agent.register returned no session_id")
     claim = http("POST", f"{API_ROOT}/coordination/agents/sessions/claim", {
-        "session_id": session_id, "expected_agent_type_id": AGENT_TYPE_ID,
+        "session_id": session_id, "expected_agent_type_id": agent_type_id,
     })
     sci = str(claim.get("sci") or "").strip()
     if not sci:
         raise TrackerError(f"agent.claim returned no SCI for {session_id}")
     logger.info(json.dumps({"event": "anomaly_identity_acquired", "session_id": session_id,
-                            "agent_type_id": AGENT_TYPE_ID}))
-    return Identity(session_id, sci, governance_hash, AGENT_TYPE_ID)
+                            "agent_type_id": agent_type_id}))
+    return Identity(session_id, sci, governance_hash, agent_type_id)
 
 
 def retire_identity(identity: Identity, http: Callable[..., Dict[str, Any]] = _http) -> None:

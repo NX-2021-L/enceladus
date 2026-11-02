@@ -3,6 +3,7 @@ The SnapStart fixture is a reconstruction of the 2026-04-22 SEV1 shape (FTR-100 
 import json
 import os
 import pathlib
+import pytest
 import sys
 
 HERE = pathlib.Path(__file__).parent
@@ -138,7 +139,8 @@ def test_second_adapter_stub_needs_no_primitive_change():  # AC-8 seam
 
 class FakeApi:
     """Scripted internal-key HTTP: records every call, answers governance/register/claim/mutations."""
-    def __init__(self, register_error=None):
+    def __init__(self, register_error=None, type_error=False):
+        self.type_error = type_error
         self.calls = []
         self.register_error = register_error
         self.issues = {}
@@ -147,6 +149,10 @@ class FakeApi:
         self.calls.append((method, url, body))
         if url.endswith("/governance/hash"):
             return {"governance_hash": "g" * 64}
+        if url.endswith("/agents/types") and method == "POST":
+            if self.type_error:
+                raise lf.TrackerError("POST types -> HTTP 422")
+            return {"agent_type": {"agent_type_id": "ENC-AGT-00R"}, "created": False}
         if url.endswith("/agents/sessions") and method == "POST":
             if self.register_error:
                 raise lf.TrackerError("POST register -> HTTP 422: agent-type-not-active")
@@ -305,3 +311,31 @@ def test_closed_signal_without_issue_creates_nothing():
     t = PushTracker()
     r = lf.lambda_handler(_event(_msg(0.1, anomalyStatus="CLOSED")), None, client=t)["results"][0]
     assert r["action"] == "closed_signal_unmatched" and t.creates == 0
+
+
+def test_type_resolution_env_override_wins(monkeypatch):
+    monkeypatch.setenv("ANOMALY_AGENT_TYPE_ID", "ENC-AGT-ZZZ")
+    monkeypatch.setattr(lf, "_TYPE_ID_CACHE", {})
+    api = FakeApi()
+    assert lf.resolve_agent_type_id(api) == "ENC-AGT-ZZZ"
+    assert api.calls == []
+
+
+def test_type_resolution_once_per_container(monkeypatch):
+    monkeypatch.delenv("ANOMALY_AGENT_TYPE_ID", raising=False)
+    monkeypatch.setattr(lf, "_TYPE_ID_CACHE", {})
+    api = FakeApi()
+    assert lf.resolve_agent_type_id(api) == "ENC-AGT-00R"
+    assert lf.resolve_agent_type_id(api) == "ENC-AGT-00R"
+    posts = [c for c in api.calls if c[1].endswith("/agents/types")]
+    assert len(posts) == 1
+    assert posts[0][2] == {"surface": "sns-anomaly-responder", "model": "deterministic-no-llm", "cost_tier": "low"}
+
+
+def test_type_resolution_failure_fails_closed(monkeypatch):
+    monkeypatch.delenv("ANOMALY_AGENT_TYPE_ID", raising=False)
+    monkeypatch.setattr(lf, "_TYPE_ID_CACHE", {})
+    api = FakeApi(type_error=True)
+    with pytest.raises(lf.TrackerError):
+        lf.acquire_identity(api)
+    assert not any(c[1].endswith("/agents/sessions") for c in api.calls)
