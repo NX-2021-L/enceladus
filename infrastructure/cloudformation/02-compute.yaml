@@ -2990,6 +2990,133 @@ Resources:
       SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-R81-0B (ENC-FTR-150 AC-1/AC-3, ENC-PLN-102 W1.2): SNS anomaly responder.
+  # AWS Cost Anomaly Detection -> SNS topic -> Lambda -> deterministic normalize -> idempotent
+  # governed issue create (dedupe key {source}:{anomaly_id}). Gamma-only until the io-gated
+  # prod promote (FTR-150 AC-11). Cost class C0: Lambda + SNS topic/subscription are pay-per-use,
+  # no always-on resource. Code is managed outside CloudFormation (Gen2 matrix / _deploy.yml).
+  # Wiring the CAD subscription itself (ce:CreateAnomalySubscription, SNS subscriber, IMMEDIATE
+  # frequency) is a separate privileged step; the topic policy below already trusts
+  # costalerts.amazonaws.com for this account.
+  # ---------------------------------------------------------------------------
+  CostAnomalyEventsTopic:
+    Type: AWS::SNS::Topic
+    Condition: IsGamma
+    Properties:
+      TopicName: !Sub "enceladus-cost-anomaly-events${EnvironmentSuffix}"
+      DisplayName: Enceladus Cost Anomaly Detection events
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  CostAnomalyEventsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: IsGamma
+    Properties:
+      Topics:
+        - !Ref CostAnomalyEventsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCostAnomalyDetectionPublish
+            Effect: Allow
+            Principal:
+              Service: costalerts.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref CostAnomalyEventsTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  SnsAnomalyResponderFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+      FunctionName: !Sub "enceladus-sns-anomaly-responder${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - arm64
+      Role: !GetAtt SnsAnomalyResponderRole.Arn
+      Environment:
+        Variables:
+          TRACKER_API_BASE: !If
+            - HasPlaneTrackerApiBase
+            - !Ref PlaneTrackerApiBase
+            - !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ANOMALY_SOURCE: aws-cad
+          ANOMALY_DEFAULT_PROJECT: devops
+          CAD_MIN_IMPACT_USD: "1.0"
+          CAD_MIN_IMPACT_PCT: "35"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  SnsAnomalyResponderRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-sns-anomaly-responder-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sns-anomaly-responder-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-sns-anomaly-responder${EnvironmentSuffix}:*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: sns-anomaly-responder
+
+  # Lambda-protocol SNS subscriptions deliver the standard Notification envelope
+  # ({Records:[{Sns:{Message,TopicArn}}]}); the handler unwraps it.
+  SnsAnomalyResponderSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: IsGamma
+    Properties:
+      TopicArn: !Ref CostAnomalyEventsTopic
+      Protocol: lambda
+      Endpoint: !GetAtt SnsAnomalyResponderFunction.Arn
+
+  SnsAnomalyResponderSnsPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref SnsAnomalyResponderFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref CostAnomalyEventsTopic
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-R24 (ENC-PLN-100 C1.7, BRD FR-2, rulings A4/A13): Daily Cost Digest producer.
   # Writes s3://jreese-net/governance/cost-digest/{latest,YYYY-MM-DD}.json once a day
   # (cron 15 13 * * ? * UTC). Ruling A13: <= 3 Cost Explorer calls per invocation, enforced

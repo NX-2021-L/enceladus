@@ -1,0 +1,2 @@
+# ENC-TSK-R81-0B sns_anomaly_responder -- no third-party deps.
+# Stdlib only (urllib); boto3 not required on this path.
