@@ -92,7 +92,7 @@ export function createDocstoreContentSource(opts: DocstoreSourceOptions): Conten
           return await get(newId)
         } catch (e) {
           if (e instanceof DocumentWriteError) throw new ContentError('validation', e.message)
-          throw e
+          throw new ContentError('validation', e instanceof Error ? e.message : String(e))
         }
       }
       const ifMatch = hashes.get(id)

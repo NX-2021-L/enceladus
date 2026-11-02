@@ -45,6 +45,16 @@ export interface PatchDocumentInput {
   caused_by?: string
 }
 
+/** Governance hash for a write; a failure surfaces its real cause (never a bare generic string). */
+async function writeHash(): Promise<string> {
+  try {
+    return await fetchGovernanceHash()
+  } catch (e) {
+    if (e instanceof SessionExpiredError) throw e
+    throw new DocumentWriteError(502, 'GOVERNANCE_HASH_UNAVAILABLE', e instanceof Error ? e.message : String(e))
+  }
+}
+
 async function send(method: 'PUT' | 'PATCH', url: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await fetch(url, {
     method,
@@ -60,7 +70,7 @@ async function send(method: 'PUT' | 'PATCH', url: string, body: Record<string, u
     throw new DocumentWriteError(
       res.status,
       String(env.code ?? `HTTP_${res.status}`),
-      String(env.message ?? env.error ?? `Document write failed (${res.status})`),
+      `${String(env.message ?? env.error ?? 'Document write failed')} (HTTP ${res.status})`,
       (env.details ?? {}) as Record<string, unknown>,
     )
   }
@@ -69,7 +79,7 @@ async function send(method: 'PUT' | 'PATCH', url: string, body: Record<string, u
 
 /** documents.put: returns the server-assigned DOC id. */
 export async function createDocument(input: CreateDocumentInput): Promise<string> {
-  const governance_hash = await fetchGovernanceHash()
+  const governance_hash = await writeHash()
   const data = await send('PUT', `${API_BASE}/documents`, { ...input, governance_hash })
   const id = String(data.document_id ?? (data.document as Record<string, unknown> | undefined)?.document_id ?? '')
   if (!id) throw new DocumentWriteError(502, 'NO_DOCUMENT_ID', 'The document API did not return a document id.')
@@ -78,6 +88,6 @@ export async function createDocument(input: CreateDocumentInput): Promise<string
 
 /** documents.patch (whole-document) with the If-Match content-hash precondition. */
 export async function patchDocument(documentId: string, input: PatchDocumentInput): Promise<void> {
-  const governance_hash = await fetchGovernanceHash()
+  const governance_hash = await writeHash()
   await send('PATCH', `${API_BASE}/documents/${encodeURIComponent(documentId)}`, { ...input, governance_hash })
 }
