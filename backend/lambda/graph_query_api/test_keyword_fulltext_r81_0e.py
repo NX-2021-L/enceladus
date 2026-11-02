@@ -1,4 +1,4 @@
-"""ENC-TSK-R81-0E: keyword signal uses the title-only fulltext index with CONTAINS fallback."""
+"""ENC-TSK-R81-0E (updated by S12): keyword signal fulltext path with CONTAINS fallback."""
 import os
 import sys
 import unittest
@@ -42,16 +42,16 @@ class KeywordFulltextTests(unittest.TestCase):
         self.assertEqual([r["rank"] for r in out], [1, 2])
         cypher, kw = d.calls[0]
         self.assertIn("db.index.fulltext.queryNodes", cypher)
-        self.assertEqual(kw["index_name"], "governed_record_title_ft")
+        self.assertEqual(kw["index_name"], "governed_record_text_ft")
         self.assertEqual(kw["label"], "Task")
-        self.assertEqual(kw["ft_query"], "graph OR search OR \\(fast\\)")
+        self.assertIn("title:(graph OR search OR \\(fast\\))^3", kw["ft_query"])
         self.assertEqual(len(d.calls), 1)
 
     def test_falls_back_to_title_contains_without_intent_description(self):
         d = _Driver(fail_fulltext=True)
         out = lf._hybrid_keyword_ranks(d, "enceladus", "graph search", 5)
         self.assertEqual([r["record_id"] for r in out], ["ENC-TSK-9"])
-        cypher, _ = d.calls[1]
+        cypher, _ = d.calls[2]
         self.assertIn("CONTAINS", cypher)
         self.assertNotIn("intent", cypher)
         self.assertNotIn("description", cypher)

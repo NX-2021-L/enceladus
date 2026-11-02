@@ -32,6 +32,21 @@ After running a migration, capture the `SHOW VECTOR INDEXES` (or equivalent)
 introspection output and attach it to the originating tracker task's
 `live_validation_evidence` field.
 
+## 003 - fulltext over title, intent, description (ENC-TSK-S05 / ENC-TSK-S06)
+
+`003-fulltext-governed-records-fields.cypher` creates the sibling fulltext index
+`governed_record_text_ft` (`IF NOT EXISTS`) over `title`, `intent` and
+`description` on the same labels as 002. It does not drop or replace the
+title-only `governed_record_title_ft`. Prerequisite: `graph_sync` projects
+`intent`/`description` (ENC-TSK-S05) and the node backfill has run. Run:
+
+```bash
+AWS_PROFILE=product-lead \
+NEO4J_SECRET_NAME=enceladus/neo4j/auradb-credentials \
+python3 tools/backfill_graph.py --region us-west-2 \
+  --run-migration tools/neo4j-migrations/003-fulltext-governed-records-fields.cypher
+```
+
 ## Governance
 
 This directory is not under a registered component in the component registry

@@ -36,14 +36,17 @@ import hashlib
 import json
 import logging
 import os
+import queue
+import threading
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs
 
 import corroboration
 import dedup_convergence
 import energy_function
+import inproc_ppr
 import opensearch_keyword
 
 logger = logging.getLogger(__name__)
@@ -168,6 +171,39 @@ FSRS_T3_THRESHOLD = 0.7
 # Graph damping factor per LSN-029 implementation contract.
 PPR_DAMPING_FACTOR = 0.85
 PPR_MAX_ITERATIONS = 25
+
+# ENC-TSK-S13 (PLN-103 W2.1 / N12): graph-signal engine selector. 'inproc_ppr'
+# scores anchors with Andersen-Chung-Lang push over a cached edge-list projection
+# (inproc_ppr.py); 'cypher_fallback' keeps the Neo4j weighted-hop walk. Resolved
+# per call: GRAPH_SIGNAL_MODE env wins, else the code default is keyed on the
+# environment (gamma Lambda names end '-gamma' -> inproc_ppr; prod -> cypher_fallback).
+_GRAPH_SIGNAL_MODES = ("inproc_ppr", "cypher_fallback")
+PPR_ALPHA = 1.0 - PPR_DAMPING_FACTOR
+PPR_EPSILON = 1e-4
+# ENC-TSK-S13 (N3): an anchor whose degree exceeds this walks *1..2 (not *1..3) in
+# the Cypher fallback, so an ENC-FTR-062-class hub cannot fan out over the graph.
+try:
+    HUB_DEGREE_THRESHOLD = int(os.environ.get("HUB_DEGREE_THRESHOLD", "150"))
+except ValueError:
+    HUB_DEGREE_THRESHOLD = 150
+FALLBACK_MAX_HOPS = 3
+FALLBACK_HUB_HOPS = 2
+
+
+def _default_graph_signal_mode() -> str:
+    env = os.environ.get("GRAPH_SIGNAL_MODE", "").strip().lower()
+    if env in _GRAPH_SIGNAL_MODES:
+        return env
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip().lower()
+    return "inproc_ppr" if fn.endswith("-gamma") else "cypher_fallback"
+
+
+def _resolve_graph_signal_mode(params: Optional[Dict]) -> str:
+    """Per-request override (internal/agent-gated upstream) else the env default."""
+    override = str((params or {}).get("graph_signal_mode") or "").strip().lower()
+    if override in _GRAPH_SIGNAL_MODES:
+        return override
+    return _default_graph_signal_mode()
 
 # Cache the GDS availability probe so every hybrid call does not re-probe.
 _GDS_PROBE_CACHE_TTL_SECONDS = 300
@@ -449,20 +485,49 @@ def _rebuild_neo4j_driver():
         except Exception:
             logger.warning("[WARNING] Bolt driver close raised during rebuild", exc_info=True)
     _neo4j_driver = None
+    _invalidate_driver_liveness()
     return _get_neo4j_driver()
+
+
+# ENC-TSK-S19 (PLN-103 N15): skip the verify_connectivity Bolt round-trip when this
+# driver was proven live within DRIVER_LIVENESS_TTL_S (default 60). Wall-clock
+# (time.time) is used on purpose: it advances across a Lambda freeze, so a thawed
+# container whose pool may be NAT-killed (350 s) re-verifies instead of trusting a
+# stale stamp. Any rebuild/failure resets the stamp.
+try:
+    DRIVER_LIVENESS_TTL_S = float(os.environ.get("DRIVER_LIVENESS_TTL_S", "60"))
+except ValueError:
+    DRIVER_LIVENESS_TTL_S = 60.0
+_driver_verified: Tuple[int, float] = (0, 0.0)  # (id(driver), time.time() at verify)
+
+
+def _mark_driver_verified(driver) -> None:
+    global _driver_verified
+    _driver_verified = (id(driver), time.time())
+
+
+def _invalidate_driver_liveness() -> None:
+    """Forget the liveness stamp (call after any query failure on the pool)."""
+    global _driver_verified
+    _driver_verified = (0, 0.0)
 
 
 def _ensure_live_driver(driver):
     """Probe the Bolt pool and rebuild on failure.
 
     Returns a driver with at least one proven-live connection, or None if
-    rebuild also failed. Cheap on the happy path (one round-trip); only
-    rebuilds when the pool has decayed.
+    rebuild also failed. Cheap on the happy path (one round-trip, skipped when
+    the driver was verified within DRIVER_LIVENESS_TTL_S); only rebuilds when
+    the pool has decayed.
     """
     if driver is None:
         return _get_neo4j_driver()
+    vid, vat = _driver_verified
+    if DRIVER_LIVENESS_TTL_S > 0 and vid == id(driver) and 0 <= time.time() - vat < DRIVER_LIVENESS_TTL_S:
+        return driver
     try:
         driver.verify_connectivity()
+        _mark_driver_verified(driver)
         return driver
     except Exception as exc:
         logger.warning(
@@ -1385,6 +1450,70 @@ def _compute_query_embedding(query_text: str) -> Optional[List[float]]:
         return None
 
 
+# ENC-TSK-S10 (PLN-103 W1.3 / N14): record-mode anchor-embedding reuse. When the
+# hybrid call carries anchor_record_id and the query text is the record-derived
+# one (MCP context.py: normalized "<title> <intent>"[:300]), the anchor node's
+# stored 256-d embedding is used to query the HNSW indexes instead of a Titan
+# round trip. `vector_source` is an internal/agent-only per-request override.
+_VECTOR_SOURCES = ("auto", "anchor", "titan")
+
+
+def _normalize_embedding(value: Any) -> Optional[List[float]]:
+    """Return value as a non-empty list of floats, else None (never raises)."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    try:
+        return [float(x) for x in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_anchor_embedding(driver, project_id: str, anchor_record_id: str):
+    """One Cypher read: (stored embedding | None, record-derived query text)."""
+    try:
+        with driver.session() as session:
+            rec = session.run(
+                "MATCH (a) WHERE a.record_id = $rid AND a.project_id = $project_id "
+                "RETURN a.embedding AS embedding, a.title AS title, a.intent AS intent LIMIT 1",
+                rid=anchor_record_id,
+                project_id=project_id,
+            ).single()
+        if rec is None:
+            return None, ""
+        title, intent = rec.get("title"), rec.get("intent")
+        derived = ""
+        if isinstance(title, str):
+            derived = " ".join(f"{title} {intent if isinstance(intent, str) else ''}".split())[:300].strip()
+        return _normalize_embedding(rec.get("embedding")), derived
+    except Exception:
+        logger.warning("[WARNING] anchor embedding read failed for %s", anchor_record_id, exc_info=True)
+        return None, ""
+
+
+def _resolve_query_embedding(driver, project_id: str, query_text: str,
+                             anchor_record_id: str, params: Dict) -> Tuple[Optional[List[float]], str]:
+    """Pick the vector-signal query embedding. Returns (embedding, vector_source).
+
+    vector_source: 'anchor' (stored anchor embedding, no Bedrock call), 'titan'
+    (Titan V2 query embedding) or 'titan_fallback' (anchor path was eligible but the
+    node had no usable embedding).
+    """
+    mode = str(params.get("vector_source") or "auto").strip().lower()
+    if mode not in _VECTOR_SOURCES:
+        mode = "auto"
+    fallback = False
+    if anchor_record_id and mode != "titan":
+        stored, derived = _read_anchor_embedding(driver, project_id, anchor_record_id)
+        if mode == "anchor" or (derived and query_text == derived):
+            if stored is not None:
+                return stored, "anchor"
+            fallback = True
+    return _compute_query_embedding(query_text), ("titan_fallback" if fallback else "titan")
+
+
+_VECTOR_LABEL_MAX_WORKERS = 6  # ENC-TSK-S20: bounded pool for per-label HNSW queries
+
+
 def _hybrid_vector_ranks(
     driver,
     project_id: str,
@@ -1405,19 +1534,25 @@ def _hybrid_vector_ranks(
     else:
         labels_to_query = list(LABEL_VECTOR_INDEXES.keys())
 
-    by_rid: Dict[str, Dict[str, Any]] = {}
-    for label in labels_to_query:
+    # ENC-TSK-S20 (PLN-103 N16 / P103-R17): the per-label HNSW queries are independent,
+    # so run them concurrently (bounded pool, ONE session per label query - sessions are
+    # not thread-safe, the driver is). Results are merged in the original label order, so
+    # dedup (highest score wins, first label wins ties) and ranking match the sequential
+    # implementation exactly. A failing label degrades only that label.
+    cypher = (
+        "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
+        "YIELD node, score "
+        "WHERE node.project_id = $project_id "
+        # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
+        # recall signal so a twin no longer competes with its canonical - the
+        # central precision@1 fix (DOC-DF651F07D5C2 section 3).
+        "AND node.superseded_by IS NULL "
+        "RETURN node.record_id AS rid, score, labels(node) AS labels"
+    )
+
+    def _query_label(label: str) -> List[Any]:
         index_name = LABEL_VECTOR_INDEXES[label]
-        cypher = (
-            "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
-            "YIELD node, score "
-            "WHERE node.project_id = $project_id "
-            # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
-            # recall signal so a twin no longer competes with its canonical — the
-            # central precision@1 fix (DOC-DF651F07D5C2 §3).
-            "AND node.superseded_by IS NULL "
-            "RETURN node.record_id AS rid, score, labels(node) AS labels"
-        )
+        rows: List[Any] = []
         try:
             with driver.session() as session:
                 result = session.run(
@@ -1429,19 +1564,28 @@ def _hybrid_vector_ranks(
                 )
                 for rec in result:
                     rid = rec.get("rid")
-                    if not rid:
-                        continue
-                    score = float(rec.get("score") or 0.0)
-                    prev = by_rid.get(rid)
-                    if prev is None or score > prev["score"]:
-                        by_rid[rid] = {
-                            "record_id": rid,
-                            "score": score,
-                            "label": label,
-                        }
+                    if rid:
+                        rows.append((rid, float(rec.get("score") or 0.0)))
         except Exception as exc:
-            # Index missing or unreachable — log and continue with other labels.
+            # Index missing or unreachable - log and continue with other labels.
             logger.warning("[WARNING] vector index %s query failed: %s", index_name, exc)
+            return []
+        return rows
+
+    if len(labels_to_query) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(labels_to_query), _VECTOR_LABEL_MAX_WORKERS)
+        ) as _pool:
+            per_label_rows = list(_pool.map(_query_label, labels_to_query))
+    else:
+        per_label_rows = [_query_label(lb) for lb in labels_to_query]
+
+    by_rid: Dict[str, Dict[str, Any]] = {}
+    for label, rows in zip(labels_to_query, per_label_rows):
+        for rid, score in rows:
+            prev = by_rid.get(rid)
+            if prev is None or score > prev["score"]:
+                by_rid[rid] = {"record_id": rid, "score": score, "label": label}
 
     ranked = sorted(by_rid.values(), key=lambda d: d["score"], reverse=True)
     for idx, item in enumerate(ranked, start=1):
@@ -1603,11 +1747,55 @@ def _hybrid_graph_ranks_gds(
     return ranked
 
 
+def _hybrid_graph_ranks_inproc(
+    driver,
+    project_id: str,
+    anchor_record_id: str,
+    top_n: int,
+) -> List[Dict[str, Any]]:
+    """ENC-TSK-S13 (N12): Personalized PageRank by forward push over the cached
+    edge-list projection. Returns [] (caller falls back to the Cypher walk) when
+    the projection cannot be loaded, the anchor is absent from it, or on any error.
+    """
+    try:
+        proj = inproc_ppr.get_projection(
+            driver, project_id, GRAPH_EDGE_WEIGHTS, GRAPH_FALLBACK_DEFAULT_WEIGHT,
+            _GDS_FLOW_WEIGHT_PROPERTY,
+        )
+        if proj is None:
+            return []
+        return inproc_ppr.push_ppr(
+            proj, [anchor_record_id], top_n, alpha=PPR_ALPHA, epsilon=PPR_EPSILON,
+        )
+    except Exception:
+        logger.exception("[ERROR] in-process PPR graph-signal scoring failed")
+        return []
+
+
+def _anchor_degree(driver, project_id: str, anchor_record_id: str) -> int:
+    """One count query: relationships of the governed edge types touching the anchor.
+    Returns 0 on any failure (treated as a non-hub: the full 3-hop walk)."""
+    edge_union = "|".join(list(GRAPH_EDGE_WEIGHTS.keys()))
+    try:
+        with driver.session() as session:
+            rec = session.run(
+                f"MATCH (a)-[r:{edge_union}]-() "
+                f"WHERE a.record_id = $rid AND a.project_id = $project_id "
+                f"RETURN count(r) AS degree",
+                rid=anchor_record_id, project_id=project_id,
+            ).single()
+        return int(rec["degree"]) if rec is not None else 0
+    except Exception:
+        logger.warning("[WARNING] anchor degree precheck failed for %s", anchor_record_id, exc_info=True)
+        return 0
+
+
 def _hybrid_graph_ranks_cypher_fallback(
     driver,
     project_id: str,
     anchor_record_id: str,
     top_n: int,
+    hop_info: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Fallback graph-signal scoring using native Cypher weighted hop sum.
 
@@ -1619,6 +1807,12 @@ def _hybrid_graph_ranks_cypher_fallback(
     edge_union = "|".join(list(GRAPH_EDGE_WEIGHTS.keys()))
     # Decay factor across hop distance — mimics the damping behavior of PPR.
     decay = PPR_DAMPING_FACTOR
+    # ENC-TSK-S13 (N3): hub safety bound. Only this walk is bounded; GDS is not.
+    max_hops = FALLBACK_MAX_HOPS
+    if _anchor_degree(driver, project_id, anchor_record_id) > HUB_DEGREE_THRESHOLD:
+        max_hops = FALLBACK_HUB_HOPS
+    if hop_info is not None:
+        hop_info["hop_bound"] = max_hops
 
     # Cypher-side weight CASE for edge types.
     weight_case_parts = []
@@ -1630,7 +1824,7 @@ def _hybrid_graph_ranks_cypher_fallback(
     )
 
     cypher = (
-        f"MATCH path = (anchor)-[:{edge_union}*1..3]-(neighbor) "
+        f"MATCH path = (anchor)-[:{edge_union}*1..{max_hops}]-(neighbor) "
         f"WHERE anchor.record_id = $rid AND anchor.project_id = $project_id "
         f"AND neighbor.project_id = $project_id "
         f"AND neighbor.record_id <> $rid "
@@ -1943,6 +2137,18 @@ def _handle_feed_selection(event: Dict) -> Dict[str, Any]:
     return {"ok": True, "selection": selection}
 
 
+def _flow_weight_refresh_enabled() -> bool:
+    """ENC-TSK-S14 (N4, DOC-F08AE0127D4E section 10 D-B): FLOW_WEIGHT_REFRESH_ENABLED
+    kill switch. Env var wins when set; otherwise the code default is keyed on the
+    environment: gamma ("-gamma" function name / ENVIRONMENT_SUFFIX) true, prod false."""
+    raw = os.environ.get("FLOW_WEIGHT_REFRESH_ENABLED")
+    if raw is not None and raw.strip():
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    suffix = os.environ.get("ENVIRONMENT_SUFFIX", "")
+    return fn.endswith("-gamma") or suffix == "-gamma"
+
+
 def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     """ENC-FTR-108 Ph2 (ENC-TSK-J02) out-of-band flow_weight refresh entrypoint.
     Mirrors _handle_refresh_projection's contract: invoked by an EventBridge
@@ -1954,6 +2160,9 @@ def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     relationships in batched, watermarked Cypher. See flow_weight_refresh.py
     for the full design (delta/mu defaults, watermark storage, idempotency).
     """
+    if not _flow_weight_refresh_enabled():
+        logger.info("[INFO] refresh_flow_weight noop: FLOW_WEIGHT_REFRESH_ENABLED=false")
+        return {"status": "noop", "reason": "FLOW_WEIGHT_REFRESH_ENABLED=false"}
     try:
         import flow_weight_refresh as _fwr
     except Exception:
@@ -1990,7 +2199,12 @@ def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
     )
 
 
-KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_title_ft")
+# ENC-TSK-S12 (N5c, ruling P103-R4): the keyword signal queries the sibling fulltext index
+# over title, intent and description with Lucene per-field boosts. The title-only index is
+# kept as the first fallback; per-token title CONTAINS is the last resort.
+KEYWORD_FULLTEXT_TITLE_INDEX = "governed_record_title_ft"
+KEYWORD_FULLTEXT_INDEX = os.environ.get("KEYWORD_FULLTEXT_INDEX", "governed_record_text_ft")
+KEYWORD_FIELD_BOOSTS = (("title", 3), ("intent", 2), ("description", 1))
 _LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
 
 
@@ -2006,14 +2220,19 @@ def _hybrid_keyword_ranks(
     query_text: str,
     top_n: int,
     record_type_filter: Optional[str] = None,
+    timings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Keyword signal over record titles (ENC-TSK-R81-0E, DOC-52FE56D6F529 U2).
+    """Keyword signal over title, intent and description (ENC-TSK-S12 / N5c).
 
-    Primary path: ``db.index.fulltext.queryNodes`` on the TITLE-ONLY fulltext
-    index ``governed_record_title_ft`` (tools/neo4j-migrations/002-*). Fallback
-    (index absent / procedure error): title-only per-token CONTAINS scan, which
-    is correct but slower. ``intent`` and ``description`` are not projected onto
-    prod graph nodes and are no longer queried (ruling D-1).
+    ENC-TSK-S20: when ``timings`` is given it receives keyword_fulltext_ms (time in the
+    fulltext index attempts), keyword_fallback_ms (time in the per-token CONTAINS
+    fallback) and keyword_rows (rows returned).
+
+    Primary path: ``db.index.fulltext.queryNodes`` on ``KEYWORD_FULLTEXT_INDEX``
+    (default ``governed_record_text_ft``) with Lucene field boosts title^3,
+    intent^2, description^1. Fallbacks, in order: the title-only index
+    ``governed_record_title_ft`` (plain query), then per-token title CONTAINS.
+    Each fallback fires when the previous index is absent or errors.
     """
     if not query_text:
         return []
@@ -2052,7 +2271,14 @@ def _hybrid_keyword_ranks(
     if not tokens:
         return []
 
-    ft_query = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_plain = " OR ".join(_lucene_escape(t) for t in tokens)
+    ft_boosted = " OR ".join(f"{field}:({ft_plain})^{boost}" for field, boost in KEYWORD_FIELD_BOOSTS)
+    # (index, query): the title-only index has no intent/description fields, so it gets the plain query.
+    ft_attempts = [
+        (KEYWORD_FULLTEXT_INDEX, ft_plain if KEYWORD_FULLTEXT_INDEX == KEYWORD_FULLTEXT_TITLE_INDEX else ft_boosted)
+    ]
+    if KEYWORD_FULLTEXT_INDEX != KEYWORD_FULLTEXT_TITLE_INDEX:
+        ft_attempts.append((KEYWORD_FULLTEXT_TITLE_INDEX, ft_plain))
     ft_cypher = (
         "CALL db.index.fulltext.queryNodes($index_name, $ft_query) YIELD node, score "
         "WHERE node.project_id = $project_id "
@@ -2083,24 +2309,39 @@ def _hybrid_keyword_ranks(
             })
         return out
 
+    def _note(**fields: Any) -> None:
+        if timings is not None:
+            timings.update(fields)
+
+    _kt0 = time.perf_counter()
     try:
         with driver.session() as session:
-            try:
-                return _collect(session.run(
-                    ft_cypher,
-                    index_name=KEYWORD_FULLTEXT_INDEX,
-                    ft_query=ft_query,
-                    project_id=project_id,
-                    label=label or None,
-                    limit=top_n,
-                ))
-            except Exception:
-                logger.warning(
-                    "[INFO] fulltext keyword path unavailable; falling back to title CONTAINS",
-                    exc_info=True,
-                )
+            for index_name, ft_query in ft_attempts:
+                try:
+                    _rows = _collect(session.run(
+                        ft_cypher,
+                        index_name=index_name,
+                        ft_query=ft_query,
+                        project_id=project_id,
+                        label=label or None,
+                        limit=top_n,
+                    ))
+                    _note(keyword_fulltext_ms=_ms_since(_kt0), keyword_fallback_ms=0,
+                          keyword_rows=len(_rows))
+                    return _rows
+                except Exception:
+                    logger.warning(
+                        "[INFO] fulltext keyword index %s unavailable; trying next fallback",
+                        index_name,
+                        exc_info=True,
+                    )
+            _kt1 = time.perf_counter()
+            _ft_ms = int((_kt1 - _kt0) * 1000)
             result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
-            return _collect(result)
+            _rows = _collect(result)
+            _note(keyword_fulltext_ms=_ft_ms, keyword_fallback_ms=_ms_since(_kt1),
+                  keyword_rows=len(_rows))
+            return _rows
     except Exception:
         logger.exception("[ERROR] keyword signal scoring failed")
         return []
@@ -2228,6 +2469,140 @@ def _apply_fsrs_t3_filter(
 _PATHWAY_WALK_EDGE_UNION = "|".join(GRAPH_EDGE_WEIGHTS.keys())
 
 
+# ENC-TSK-S02 (PLN-103 W0.1 / N2): per-signal telemetry for the hybrid
+# `graphsearch_query` audit line. `_query_hybrid` fills a private per-thread dict
+# that `_graphsearch_audit_record` consumes, so the response body is unchanged.
+_HYBRID_TELEMETRY = threading.local()
+_HYBRID_TELEMETRY_FIELDS = (
+    "vector_ms", "graph_ms", "keyword_ms", "facets_ms", "pathway_ms",
+    "graph_candidates", "keyword_candidates", "graph_algorithm",
+    "pathway_status", "query_hash",
+    "hop_bound",  # ENC-TSK-S13 (N3): Cypher-fallback walk depth (2 for a hub anchor, else 3)
+)
+
+
+# ENC-TSK-S10: which path produced the vector query embedding (additive audit field).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + ("vector_source",)
+# ENC-TSK-S20: keyword sub-timers (0 unless the Neo4j keyword arm ran).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + (
+    "keyword_fulltext_ms", "keyword_fallback_ms", "keyword_rows",
+)
+
+# ENC-TSK-S19 (PLN-103 N15): non-signal stage timers (additive audit fields).
+_HYBRID_TELEMETRY_FIELDS = _HYBRID_TELEMETRY_FIELDS + (
+    "preflight_ms", "node_fetch_ms", "rank_cpu_ms", "emit_ms",
+)
+
+
+# ENC-TSK-S19 (PLN-103 N15): fire-and-forget telemetry emits. A module-level
+# single-worker daemon thread drains a bounded queue (64); a full queue drops the
+# emit with a log line and worker exceptions are swallowed + logged, so telemetry
+# is best-effort and never delays or fails a response. NOTE: Lambda may freeze
+# background threads once the response returns. To keep that acceptable the next
+# hybrid invocation calls _flush_async_emits() first, which (when the last enqueue
+# was long enough ago that the worker was probably frozen) briefly waits for the
+# thawed worker to drain what is pending. Anything still lost on container
+# recycle is accepted: telemetry is best-effort.
+ASYNC_EMIT_QUEUE_MAX = 64
+ASYNC_EMIT_FLUSH_TIMEOUT_S = 0.25
+ASYNC_EMIT_FLUSH_IDLE_S = 2.0
+_ASYNC_EMIT_QUEUE: "queue.Queue" = queue.Queue(maxsize=ASYNC_EMIT_QUEUE_MAX)
+_async_emit_worker: Optional[threading.Thread] = None
+_async_emit_lock = threading.Lock()
+_async_emit_last_enqueue = 0.0
+
+
+def _async_emit_loop() -> None:
+    while True:
+        fn, args, kwargs = _ASYNC_EMIT_QUEUE.get()
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("[ERROR] async telemetry emit failed (suppressed)")
+        finally:
+            _ASYNC_EMIT_QUEUE.task_done()
+
+
+def _emit_async(fn, *args, **kwargs) -> bool:
+    """Enqueue fn(*args, **kwargs) on the background emitter. True if queued."""
+    global _async_emit_worker, _async_emit_last_enqueue
+    try:
+        with _async_emit_lock:
+            if _async_emit_worker is None or not _async_emit_worker.is_alive():
+                _async_emit_worker = threading.Thread(
+                    target=_async_emit_loop, name="graphsearch-emit", daemon=True)
+                _async_emit_worker.start()
+        _ASYNC_EMIT_QUEUE.put_nowait((fn, args, kwargs))
+        _async_emit_last_enqueue = time.time()
+        return True
+    except queue.Full:
+        logger.warning("[WARNING] async telemetry queue full (%d); emit dropped", ASYNC_EMIT_QUEUE_MAX)
+        return False
+    except Exception:
+        logger.exception("[ERROR] async telemetry enqueue failed (suppressed)")
+        return False
+
+
+def _flush_async_emits(timeout_s: Optional[float] = None) -> None:
+    """Give a possibly-thawed worker a bounded chance to drain pending emits."""
+    if _ASYNC_EMIT_QUEUE.unfinished_tasks == 0:
+        return
+    timeout_s = ASYNC_EMIT_FLUSH_TIMEOUT_S if timeout_s is None else timeout_s
+    deadline = time.time() + timeout_s
+    while _ASYNC_EMIT_QUEUE.unfinished_tasks and time.time() < deadline:
+        time.sleep(0.005)
+
+
+def _emit_hybrid_telemetry_async(record_fn, trace_kwargs: Dict[str, Any]) -> None:
+    """Build the pathway record synchronously (cheap, snapshots inputs) and ship
+    the S3 put + stigmergic trace on the background worker. Sets emit_ms to the
+    enqueue cost only."""
+    _t0 = time.perf_counter()
+    try:
+        record = record_fn()
+
+        def _run() -> None:
+            _emit_pathway_telemetry(record)
+            _maybe_emit_stigmergic_trace(**trace_kwargs)
+
+        _emit_async(_run)
+    except Exception:
+        logger.exception("[ERROR] hybrid telemetry enqueue failed (suppressed)")
+    _hybrid_telemetry_set(emit_ms=_ms_since(_t0))
+
+
+def _hybrid_telemetry_begin(query_hash: str = "") -> Dict[str, Any]:
+    tel: Dict[str, Any] = {
+        "vector_ms": 0, "graph_ms": 0, "keyword_ms": 0, "facets_ms": 0,
+        "pathway_ms": 0, "graph_candidates": 0, "keyword_candidates": 0,
+        "graph_algorithm": "unavailable", "pathway_status": "skipped",
+        "query_hash": query_hash,
+        "preflight_ms": 0, "node_fetch_ms": 0, "rank_cpu_ms": 0, "emit_ms": 0,
+        "keyword_fulltext_ms": 0, "keyword_fallback_ms": 0, "keyword_rows": 0,
+    }
+    _HYBRID_TELEMETRY.current = tel
+    return tel
+
+
+def _hybrid_telemetry_set(**fields: Any) -> None:
+    tel = getattr(_HYBRID_TELEMETRY, "current", None)
+    if tel is not None:
+        tel.update(fields)
+
+
+def _hybrid_telemetry_take() -> Dict[str, Any]:
+    """Pop this thread's telemetry (never leaks into a later request)."""
+    tel = getattr(_HYBRID_TELEMETRY, "current", None)
+    _HYBRID_TELEMETRY.current = None
+    if tel is None:
+        tel = {}
+    return {k: tel.get(k) for k in _HYBRID_TELEMETRY_FIELDS}
+
+
+def _ms_since(t0: float) -> int:
+    return int((time.perf_counter() - t0) * 1000)
+
+
 def _derive_intent_signature(query_text: str, anchor_record_id: str,
                              record_type: Optional[str]) -> str:
     """Deterministic intent fingerprint for AC-1 telemetry when the caller does not
@@ -2255,14 +2630,27 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
     Returns: (edges_traversed, edge_participation, node_sequence)
     """
     if not anchor_record_id or not result_rids:
+        _hybrid_telemetry_set(pathway_status="skipped")
         return [], [], ([anchor_record_id] if anchor_record_id else [])
 
     result_set = set(result_rids)
+
+    # ENC-TSK-S08 (N1): in record mode the anchor is itself a member of its own
+    # result set. shortestPath((a)-[*]-(a)) errors in Neo4j (start and end node
+    # are the same), which made every call land in the except branch below
+    # (gamma S02 baseline: pathway_status=failed on 31/31 calls). Exclude the
+    # anchor from the target set, both in Python and in the Cypher.
+    targets = [r for r in result_rids if r and r != anchor_record_id]
+    if not targets:
+        logger.info("[INFO] pathway edge reconstruction skipped: no targets besides anchor=%s",
+                    anchor_record_id)
+        return [], [], [anchor_record_id]
 
     def _walk():
         cypher = (
             "MATCH (anchor {record_id: $rid, project_id: $pid}) "
             "MATCH (target) WHERE target.record_id IN $rids AND target.project_id = $pid "
+            "AND target.record_id <> $rid "
             f"MATCH path = shortestPath((anchor)-[:{_PATHWAY_WALK_EDGE_UNION}*1..3]-(target)) "
             "UNWIND relationships(path) AS rel "
             "WITH DISTINCT elementId(rel) AS edge_id, type(rel) AS etype, "
@@ -2272,7 +2660,7 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
         rows = []
         with driver.session() as session:
             res = session.run(cypher, rid=anchor_record_id, pid=project_id,
-                              rids=list(result_rids))
+                              rids=targets)
             for r in res:
                 rows.append((r["edge_id"], r["etype"], r["s"], r["e"]))
         return rows
@@ -2285,12 +2673,15 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
             "[WARNING] pathway edge reconstruction exceeded %.1fs for anchor=%s — "
             "emitting empty edge telemetry", _PATHWAY_EDGE_DEADLINE_S, anchor_record_id,
         )
+        _hybrid_telemetry_set(pathway_status="timeout")
         return [], [], [anchor_record_id]
     except Exception:
         logger.warning("[WARNING] pathway edge reconstruction failed", exc_info=True)
+        _hybrid_telemetry_set(pathway_status="failed")
         return [], [], [anchor_record_id]
     finally:
         _pex.shutdown(wait=False)
+    _hybrid_telemetry_set(pathway_status="ok")
 
     edges_traversed: List[Dict[str, Any]] = []
     participation: Dict[str, Dict[str, Any]] = {}
@@ -2540,6 +2931,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     intent_signature = str(params.get("intent_signature", "")).strip()
     if not intent_signature:
         intent_signature = _derive_intent_signature(query_text, anchor_record_id, record_type_filter)
+    # ENC-TSK-S02: query_hash = sha256 hex of (query, anchor, record_type) — the
+    # FTR-082 derivation, computed even when the caller supplied an explicit signature.
+    _tel = _hybrid_telemetry_begin(
+        _derive_intent_signature(query_text, anchor_record_id, record_type_filter)[len("sha256:"):]
+    )
 
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
@@ -2548,6 +2944,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): resolve the energy-function lambda
     # weights once per call (not once per candidate) so a single hybrid call
     # never re-probes AppConfig more than once.
+    _pf_t0 = time.perf_counter()
+    if time.time() - _async_emit_last_enqueue > ASYNC_EMIT_FLUSH_IDLE_S:
+        _flush_async_emits()  # ENC-TSK-S19: drain emits stranded by a Lambda freeze
     energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
 
     # ENC-TSK-I92 / ENC-TSK-Q46 (ENC-FTR-110, ENC-ISS-836): resolve the
@@ -2565,109 +2964,161 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # driver. On failure, rebuild rebinds the module-global so subsequent
     # handler invocations also pick up the fresh pool.
     driver = _ensure_live_driver(driver)
+    _tel["preflight_ms"] = _ms_since(_pf_t0)
     if driver is None:
         return {"error": "neo4j driver unavailable after rebuild attempt"}
 
-    # ---- Vector signal -----------------------------------------------------
-    vector_ranks: List[Dict[str, Any]] = []
-    vector_available = False
-    if query_text:
-        query_embedding = _compute_query_embedding(query_text)
-        if query_embedding is not None:
-            vector_ranks = _hybrid_vector_ranks(
-                driver,
-                project_id,
-                query_embedding,
-                k_per_label=HYBRID_SIGNAL_TOP_N,
-                record_type_filter=record_type_filter,
+    # ---- Signals (ENC-TSK-S09 / PLN-103 N13: run concurrently) --------------
+    # Vector (embed + HNSW), graph and keyword run in ONE 3-worker executor and
+    # are fused once all three return or the graph deadline lapses. Every signal
+    # function opens its OWN `driver.session()` (the driver is thread-safe,
+    # sessions are not), so no session is shared across the workers. Per-signal
+    # *_ms is measured inside each task (S02 telemetry contract); the caller's
+    # duration_ms still covers the whole call. Failure semantics are unchanged:
+    # vector/keyword exceptions propagate, a graph exception or timeout degrades
+    # the graph signal only (the worker is abandoned, shutdown wait=False).
+    def _vector_task():
+        _t = time.perf_counter()
+        ranks: List[Dict[str, Any]] = []
+        available = False
+        if query_text:
+            query_embedding, _tel["vector_source"] = _resolve_query_embedding(
+                driver, project_id, query_text, anchor_record_id, params,
             )
-            vector_available = True
-        else:
-            logger.info("[INFO] vector signal skipped — embedding computation unavailable")
-
-    # ---- Graph signal ------------------------------------------------------
-    graph_ranks: List[Dict[str, Any]] = []
-    graph_available = False
-    graph_algorithm = "unavailable"
-    if anchor_record_id:
-        # ENC-ISS-311 / ENC-TSK-G98: the GDS path builds a per-query Aura Graph
-        # Analytics session (gds.graph.project {memory:'2GB'}) whose creation can
-        # blow past the synchronous read budget and hang the whole hybrid response.
-        # Run the graph signal under a hard wall-clock deadline; on timeout degrade
-        # to an empty graph signal (graph_algorithm='timeout') so vector+keyword
-        # still return via RRF. The worker thread is abandoned on timeout (shutdown
-        # wait=False) — the Bolt call finishes/errors in the background without
-        # blocking the handler.
-        def _graph_signal():
-            # ENC-FTR-101 (Option B): try the warm standing projection first
-            # (reattach + gds.pageRank.stream; no per-query projection build). On
-            # miss/unconfigured/error it returns [] and we fall back to the
-            # per-query path, then the Cypher proxy — all under the deadline.
-            warm_ranks = _hybrid_graph_ranks_gds_warm(
-                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
-            )
-            if warm_ranks:
-                return warm_ranks, "gds_pagerank"
-            if _check_gds_available(driver):
-                gds_ranks = _hybrid_graph_ranks_gds(
-                    driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+            if query_embedding is not None:
+                ranks = _hybrid_vector_ranks(
+                    driver,
+                    project_id,
+                    query_embedding,
+                    k_per_label=HYBRID_SIGNAL_TOP_N,
+                    record_type_filter=record_type_filter,
                 )
-                if gds_ranks:
-                    return gds_ranks, "gds_pagerank"
-            cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
+                available = True
+            else:
+                logger.info("[INFO] vector signal skipped — embedding computation unavailable")
+        return ranks, available, _ms_since(_t)
+
+    def _graph_task():
+        # ENC-FTR-101 (Option B): try the warm standing projection first
+        # (reattach + gds.pageRank.stream; no per-query projection build). On
+        # miss/unconfigured/error it returns [] and we fall back to the
+        # per-query path, then the Cypher proxy — all under the deadline.
+        # ENC-ISS-311 / ENC-TSK-G98: the GDS path can blow past the synchronous
+        # read budget, hence the hard wall-clock deadline applied by the caller.
+        _t = time.perf_counter()
+        # ENC-TSK-S13 (N12): in-process PPR first when the mode selects it. An
+        # explicit per-request 'cypher_fallback' skips GDS too (A/B overlap checks).
+        _mode = _resolve_graph_signal_mode(params)
+        if _mode == "inproc_ppr":
+            inproc_ranks = _hybrid_graph_ranks_inproc(
                 driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
             )
-            if cypher_ranks:
-                return cypher_ranks, "cypher_fallback"
-            return [], "unavailable"
-
-        _gex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            graph_ranks, graph_algorithm = _gex.submit(_graph_signal).result(
-                timeout=_GRAPH_SIGNAL_DEADLINE_S
+            if inproc_ranks:
+                return inproc_ranks, "inproc_ppr", _ms_since(_t)
+        elif str((params or {}).get("graph_signal_mode") or "").strip().lower() == "cypher_fallback":
+            _hop: Dict[str, Any] = {}
+            forced = _hybrid_graph_ranks_cypher_fallback(
+                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N, hop_info=_hop,
             )
-            graph_available = bool(graph_ranks)
-        except concurrent.futures.TimeoutError:
-            logger.warning(
-                "[WARNING] graph signal exceeded %.1fs deadline for anchor=%s — "
-                "degrading to vector+keyword", _GRAPH_SIGNAL_DEADLINE_S, anchor_record_id,
-            )
-            graph_ranks, graph_available, graph_algorithm = [], False, "timeout"
-        except Exception:
-            logger.exception("[ERROR] graph signal computation failed")
-            graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
-        finally:
-            _gex.shutdown(wait=False)
-
-    # ---- Keyword signal (ENC-TSK-L43: OpenSearch primary, Neo4j fallback) --
-    keyword_ranks: List[Dict[str, Any]] = []
-    keyword_available = False
-    keyword_source = "unavailable"
-    if query_text:
-        os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
-            project_id,
-            query_text,
-            top_n=HYBRID_SIGNAL_TOP_N,
-            record_type_filter=record_type_filter,
+            _tel["hop_bound"] = _hop.get("hop_bound")
+            return (forced, "cypher_fallback", _ms_since(_t)) if forced else ([], "unavailable", _ms_since(_t))
+        warm_ranks = _hybrid_graph_ranks_gds_warm(
+            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
         )
-        if os_err is None:
-            keyword_ranks = os_ranks
-            keyword_available = bool(keyword_ranks)
-            keyword_source = "opensearch"
-        else:
-            logger.warning(
-                "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
-                os_err,
+        if warm_ranks:
+            return warm_ranks, "gds_pagerank", _ms_since(_t)
+        if _check_gds_available(driver):
+            gds_ranks = _hybrid_graph_ranks_gds(
+                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
             )
-            keyword_ranks = _hybrid_keyword_ranks(
-                driver,
+            if gds_ranks:
+                return gds_ranks, "gds_pagerank", _ms_since(_t)
+        _hop = {}
+        cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
+            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N, hop_info=_hop,
+        )
+        _tel["hop_bound"] = _hop.get("hop_bound")
+        if cypher_ranks:
+            return cypher_ranks, "cypher_fallback", _ms_since(_t)
+        return [], "unavailable", _ms_since(_t)
+
+    def _keyword_task():
+        # ENC-TSK-L43: OpenSearch primary, Neo4j fallback.
+        _t = time.perf_counter()
+        ranks: List[Dict[str, Any]] = []
+        available = False
+        source = "unavailable"
+        if query_text:
+            os_ranks, _os_facets_unused, os_err = opensearch_keyword.hybrid_keyword_ranks(
                 project_id,
                 query_text,
                 top_n=HYBRID_SIGNAL_TOP_N,
                 record_type_filter=record_type_filter,
             )
-            keyword_available = bool(keyword_ranks)
-            keyword_source = "neo4j_fallback"
+            if os_err is None:
+                ranks = os_ranks
+                available = bool(ranks)
+                source = "opensearch"
+            else:
+                logger.warning(
+                    "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
+                    os_err,
+                )
+                ranks = _hybrid_keyword_ranks(
+                    driver,
+                    project_id,
+                    query_text,
+                    top_n=HYBRID_SIGNAL_TOP_N,
+                    record_type_filter=record_type_filter,
+                    timings=_tel,
+                )
+                available = bool(ranks)
+                source = "neo4j_fallback"
+        return ranks, available, source, _ms_since(_t)
+
+    vector_ranks: List[Dict[str, Any]] = []
+    vector_available = False
+    graph_ranks: List[Dict[str, Any]] = []
+    graph_available = False
+    graph_algorithm = "unavailable"
+    keyword_ranks: List[Dict[str, Any]] = []
+    keyword_available = False
+    keyword_source = "unavailable"
+
+    _sig_t0 = time.perf_counter()
+    _sex = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    try:
+        _vfut = _sex.submit(_vector_task)
+        _gfut = _sex.submit(_graph_task) if anchor_record_id else None
+        _kfut = _sex.submit(_keyword_task)
+
+        # Vector and keyword have no deadline (exceptions propagate, as before).
+        vector_ranks, vector_available, _tel["vector_ms"] = _vfut.result()
+        keyword_ranks, keyword_available, keyword_source, _tel["keyword_ms"] = _kfut.result()
+
+        if _gfut is not None:
+            # The deadline runs from submit, so what is left after waiting on the
+            # other two signals is the graph signal's remaining budget.
+            _remaining = max(0.0, _GRAPH_SIGNAL_DEADLINE_S - (time.perf_counter() - _sig_t0))
+            try:
+                graph_ranks, graph_algorithm, _tel["graph_ms"] = _gfut.result(timeout=_remaining)
+                graph_available = bool(graph_ranks)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[WARNING] graph signal exceeded %.1fs deadline for anchor=%s — "
+                    "degrading to vector+keyword", _GRAPH_SIGNAL_DEADLINE_S, anchor_record_id,
+                )
+                graph_ranks, graph_available, graph_algorithm = [], False, "timeout"
+                _tel["graph_ms"] = _ms_since(_sig_t0)
+            except Exception:
+                logger.exception("[ERROR] graph signal computation failed")
+                graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
+                _tel["graph_ms"] = _ms_since(_sig_t0)
+    finally:
+        _sex.shutdown(wait=False)
+    _tel["graph_candidates"] = len(graph_ranks)
+    _tel["graph_algorithm"] = graph_algorithm
+    _tel["keyword_candidates"] = len(keyword_ranks)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -2687,23 +3138,25 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         # AC-1: emit telemetry even for zero-result retrievals (no edges/nodes).
         # ENC-TSK-I98: lambda weights are still logged even with zero candidates
         # so the AppConfig-resolved values used for this call are auditable.
-        _emit_pathway_telemetry(_build_pathway_telemetry_record(
-            wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
-            anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
-            edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
-            signal_availability=_sig_avail, retrieval_records=[],
-            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
-        ))
-        _maybe_emit_stigmergic_trace(
-            project_id=project_id,
-            params=params,
-            event_type="retrieval",
-            result={"pathway": {"node_sequence": []}, "nodes": []},
-            outcome_signal={
-                "result_count": 0,
-                "graph_algorithm": graph_algorithm,
-                "signal_availability": _sig_avail,
-            },
+        _emit_hybrid_telemetry_async(
+            lambda: _build_pathway_telemetry_record(
+                wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+                anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
+                edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
+                signal_availability=_sig_avail, retrieval_records=[],
+                lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
+            ),
+            dict(
+                project_id=project_id,
+                params=dict(params),
+                event_type="retrieval",
+                result={"pathway": {"node_sequence": []}, "nodes": []},
+                outcome_signal={
+                    "result_count": 0,
+                    "graph_algorithm": graph_algorithm,
+                    "signal_availability": _sig_avail,
+                },
+            ),
         )
         return {
             "nodes": [],
@@ -2745,13 +3198,18 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
+    _nf_t0 = time.perf_counter()
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+    _tel["node_fetch_ms"] = _ms_since(_nf_t0)
+    _rank_t0 = time.perf_counter()  # ENC-TSK-S19: rank_cpu_ms = facets+energy+corroboration+filter
     # ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): facets over the fused candidate set,
     # in-process. Replaces the OpenSearch aggregations and the prod-to-gamma
     # feed/corpus HTTP fallback (W0.5 D-2: query-relative, no prod feed base).
+    _t0 = time.perf_counter()
     facets = _facets_from_candidates(
         (node_by_rid.get(rid) for rid in top_rids), project_id
     )
+    _tel["facets_ms"] = _ms_since(_t0)
 
     # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
     # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
@@ -2888,9 +3346,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # reconstruct the graph edges connecting the anchor to the resolved result set.
     # Bounded + fully degradable; never perturbs `nodes`/RRF above.
     result_rids = [n.get("record_id") for n in nodes if n.get("record_id")]
+    _tel["rank_cpu_ms"] = _ms_since(_rank_t0)
+    _t0 = time.perf_counter()
     edges_traversed, edge_participation, node_sequence = _reconstruct_pathway_edges(
         driver, project_id, anchor_record_id, result_rids,
     )
+    _tel["pathway_ms"] = _ms_since(_t0)
 
     summary = (
         f"Hybrid: {len(nodes)} nodes "
@@ -2923,28 +3384,30 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # else CloudWatch fallback). Carries the AC-10 edge_participation list.
     # ENC-TSK-I98: additively carries the per-record energy breakdown (AC-2)
     # alongside everything FTR-082 already logs here.
-    _emit_pathway_telemetry(_build_pathway_telemetry_record(
-        wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
-        anchor_record_id=anchor_record_id, node_sequence=node_sequence,
-        edges_traversed=edges_traversed, edge_participation=edge_participation,
-        result_count=len(nodes), graph_algorithm=graph_algorithm,
-        signal_availability=_sig_avail, retrieval_records=retrieval_records,
-        lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
-    ))
-    _maybe_emit_stigmergic_trace(
-        project_id=project_id,
-        params=params,
-        event_type="retrieval",
-        result={
-            "pathway": {"node_sequence": node_sequence},
-            "nodes": nodes,
-            "edges": edges_traversed,
-        },
-        outcome_signal={
-            "result_count": len(nodes),
-            "graph_algorithm": graph_algorithm,
-            "signal_availability": _sig_avail,
-        },
+    _emit_hybrid_telemetry_async(
+        lambda: _build_pathway_telemetry_record(
+            wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+            anchor_record_id=anchor_record_id, node_sequence=node_sequence,
+            edges_traversed=edges_traversed, edge_participation=edge_participation,
+            result_count=len(nodes), graph_algorithm=graph_algorithm,
+            signal_availability=_sig_avail, retrieval_records=retrieval_records,
+            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
+        ),
+        dict(
+            project_id=project_id,
+            params=dict(params),
+            event_type="retrieval",
+            result={
+                "pathway": {"node_sequence": list(node_sequence)},
+                "nodes": [dict(n) for n in nodes],
+                "edges": list(edges_traversed),
+            },
+            outcome_signal={
+                "result_count": len(nodes),
+                "graph_algorithm": graph_algorithm,
+                "signal_availability": _sig_avail,
+            },
+        ),
     )
 
     return {
@@ -3365,9 +3828,44 @@ def _graphsearch_audit_record(
         "duration_ms": duration_ms,
         "query_cypher": result.get("query_cypher", ""),
     }
+    if search_type == "hybrid":
+        # ENC-TSK-S02 (PLN-103 N2): per-signal timing/candidate/pathway telemetry.
+        audit.update(_hybrid_telemetry_take())
     if search_type == "neighbors":
         audit["empty_neighbors"] = len([n for n in nodes if n.get("record_id") != record_id]) == 0
     return audit
+
+
+def _emit_graphsearch_emf(record: Dict[str, Any]) -> None:
+    """ENC-TSK-S11 (N11, DOC-F08AE0127D4E §10): emit CloudWatch EMF for the audit record.
+
+    Printed (not logged) so the Lambda JSON log formatter does not wrap the object and
+    CloudWatch extracts Enceladus/GraphSearch metrics from the top-level `_aws` block.
+    SearchDurationMs for hybrid and neighbors; HybridPathwayFailed (0/1) for hybrid.
+    Never raises; kill switch GRAPHSEARCH_EMF_ENABLED (default "true").
+    """
+    try:
+        if os.environ.get("GRAPHSEARCH_EMF_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
+            return
+        st = record.get("search_type")
+        if st not in ("hybrid", "neighbors"):
+            return
+        metrics = [{"Name": "SearchDurationMs", "Unit": "Milliseconds"}]
+        emf: Dict[str, Any] = {"SearchType": st, "SearchDurationMs": float(record.get("duration_ms") or 0)}
+        if st == "hybrid":
+            metrics.append({"Name": "HybridPathwayFailed", "Unit": "Count"})
+            emf["HybridPathwayFailed"] = 1 if record.get("pathway_status") == "failed" else 0
+        emf["_aws"] = {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": "Enceladus/GraphSearch",
+                "Dimensions": [["SearchType"]],
+                "Metrics": metrics,
+            }],
+        }
+        print(json.dumps(emf), flush=True)
+    except Exception:  # noqa: BLE001 - metrics must never break a request
+        pass
 
 
 def _handle_search(event: Dict) -> Dict:
@@ -3407,6 +3905,23 @@ def _handle_search(event: Dict) -> Dict:
                        code="GRAPH_UNAVAILABLE", retryable=True,
                        fallback_hint="Use search(action='tracker.list') or search(action='tracker.get') for direct DynamoDB access.")
 
+    # ENC-TSK-S10: vector_source is an internal/agent-only override; strip it otherwise.
+    if "vector_source" in qs:
+        _vs = str(qs.get("vector_source") or "").strip().lower()
+        if _vs in _VECTOR_SOURCES and _caller_attribution(event, qs)["caller_type"] in ("internal", "agent"):
+            qs["vector_source"] = _vs
+        else:
+            qs.pop("vector_source", None)
+
+    # ENC-TSK-S13: graph_signal_mode is an internal/agent-only per-request override
+    # (same gate as vector_source); anyone else gets the environment default.
+    if "graph_signal_mode" in qs:
+        _gm = str(qs.get("graph_signal_mode") or "").strip().lower()
+        if _gm in _GRAPH_SIGNAL_MODES and _caller_attribution(event, qs)["caller_type"] in ("internal", "agent"):
+            qs["graph_signal_mode"] = _gm
+        else:
+            qs.pop("graph_signal_mode", None)
+
     handler_fn = SEARCH_HANDLERS[search_type]
     start = time.time()
 
@@ -3423,11 +3938,11 @@ def _handle_search(event: Dict) -> Dict:
         return _error(400, result["error"])
 
     # Audit log (ENC-TSK-R81-0F: carries record_id + caller attribution)
-    logger.info(
-        json.dumps(_graphsearch_audit_record(
-            event, qs, search_type, project_id, result, duration_ms,
-        ))
+    _audit = _graphsearch_audit_record(
+        event, qs, search_type, project_id, result, duration_ms,
     )
+    logger.info(json.dumps(_audit))
+    _emit_graphsearch_emf(_audit)  # ENC-TSK-S11 (N11)
 
     if search_type != "hybrid":
         _maybe_emit_stigmergic_trace(
@@ -3813,6 +4328,23 @@ def _handle_health(event: Dict) -> Dict:
             logger.warning("[WARNING] health standing-projection probe failed", exc_info=True)
 
         graph_mode = _graph_operating_mode(gds_plugin_present, graph_projection)
+        # ENC-TSK-S13 (N12): when inproc_ppr is the active mode the health ping also
+        # warms the projection cache (N10 pings every 5 min, TTL is 10) and the
+        # operating mode reports inproc_ppr; an unloadable cache keeps the old mode.
+        if _default_graph_signal_mode() == "inproc_ppr":
+            try:
+                _proj = inproc_ppr.get_projection(
+                    driver, _HEALTH_PROBE_PROJECT, GRAPH_EDGE_WEIGHTS,
+                    GRAPH_FALLBACK_DEFAULT_WEIGHT, _GDS_FLOW_WEIGHT_PROPERTY,
+                )
+                if _proj is not None:
+                    graph_mode = {
+                        "mode": "inproc_ppr", "reason": "projection_cache",
+                        "gds_plugin_present": bool(gds_plugin_present),
+                        "cache": inproc_ppr.cache_stats(),
+                    }
+            except Exception:
+                logger.warning("[WARNING] health inproc_ppr warm failed", exc_info=True)
         # signals.graph is the operating mode string (truthy == the graph signal runs).
         signals["graph"] = graph_mode["mode"]
 
