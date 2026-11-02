@@ -4015,6 +4015,34 @@ def _handle_close_wave(event: Dict[str, Any]) -> Dict[str, Any]:
     })
 
 
+def _init_clients_at_module_load() -> None:
+    """ENC-TSK-R81-0D (U3): warm the Secrets Manager client, Neo4j driver and
+    Bedrock runtime client during the Lambda init phase (full-CPU burst) so a
+    cold invocation does not pay for them serially. Lazy-safe: every step is
+    individually guarded; on any failure the per-invocation getters
+    (_get_neo4j_driver, embedding.get_bedrock_runtime) re-initialise on demand,
+    so a cold start can never crash at import.
+    """
+    try:
+        _get_secretsmanager()
+        _get_neo4j_driver()
+    except Exception:
+        logger.warning("[WARNING] module-load neo4j init failed; falling back to per-invocation init", exc_info=True)
+    try:
+        import embedding as _embedding
+
+        _embedding.get_bedrock_runtime()
+    except Exception:
+        logger.warning("[WARNING] module-load bedrock init failed; falling back to per-invocation init", exc_info=True)
+
+
+if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    try:
+        _init_clients_at_module_load()
+    except Exception:  # never fail import
+        pass
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 proxy handler."""
     # ENC-FTR-087 Phase 1: wave-close drift emission via direct invoke / event.

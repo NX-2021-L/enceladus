@@ -2404,7 +2404,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-R81-0D (U3): 256 -> 1024 MB
       # ENC-TSK-F36 / ENC-ISS-268: raised from 10s to 180s. Worst-case Bolt
       # pool rebuild after a NAT 350s idle-kill can take ~60-120s; the prior
       # 10s CFN value was shadowed by deploy.sh's 30s update anyway. The
