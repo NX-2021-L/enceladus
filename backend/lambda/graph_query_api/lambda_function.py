@@ -45,6 +45,7 @@ from urllib.parse import parse_qs
 import corroboration
 import dedup_convergence
 import energy_function
+import inproc_ppr
 import opensearch_keyword
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,39 @@ FSRS_T3_THRESHOLD = 0.7
 # Graph damping factor per LSN-029 implementation contract.
 PPR_DAMPING_FACTOR = 0.85
 PPR_MAX_ITERATIONS = 25
+
+# ENC-TSK-S13 (PLN-103 W2.1 / N12): graph-signal engine selector. 'inproc_ppr'
+# scores anchors with Andersen-Chung-Lang push over a cached edge-list projection
+# (inproc_ppr.py); 'cypher_fallback' keeps the Neo4j weighted-hop walk. Resolved
+# per call: GRAPH_SIGNAL_MODE env wins, else the code default is keyed on the
+# environment (gamma Lambda names end '-gamma' -> inproc_ppr; prod -> cypher_fallback).
+_GRAPH_SIGNAL_MODES = ("inproc_ppr", "cypher_fallback")
+PPR_ALPHA = 1.0 - PPR_DAMPING_FACTOR
+PPR_EPSILON = 1e-4
+# ENC-TSK-S13 (N3): an anchor whose degree exceeds this walks *1..2 (not *1..3) in
+# the Cypher fallback, so an ENC-FTR-062-class hub cannot fan out over the graph.
+try:
+    HUB_DEGREE_THRESHOLD = int(os.environ.get("HUB_DEGREE_THRESHOLD", "150"))
+except ValueError:
+    HUB_DEGREE_THRESHOLD = 150
+FALLBACK_MAX_HOPS = 3
+FALLBACK_HUB_HOPS = 2
+
+
+def _default_graph_signal_mode() -> str:
+    env = os.environ.get("GRAPH_SIGNAL_MODE", "").strip().lower()
+    if env in _GRAPH_SIGNAL_MODES:
+        return env
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip().lower()
+    return "inproc_ppr" if fn.endswith("-gamma") else "cypher_fallback"
+
+
+def _resolve_graph_signal_mode(params: Optional[Dict]) -> str:
+    """Per-request override (internal/agent-gated upstream) else the env default."""
+    override = str((params or {}).get("graph_signal_mode") or "").strip().lower()
+    if override in _GRAPH_SIGNAL_MODES:
+        return override
+    return _default_graph_signal_mode()
 
 # Cache the GDS availability probe so every hybrid call does not re-probe.
 _GDS_PROBE_CACHE_TTL_SECONDS = 300
@@ -1665,11 +1699,55 @@ def _hybrid_graph_ranks_gds(
     return ranked
 
 
+def _hybrid_graph_ranks_inproc(
+    driver,
+    project_id: str,
+    anchor_record_id: str,
+    top_n: int,
+) -> List[Dict[str, Any]]:
+    """ENC-TSK-S13 (N12): Personalized PageRank by forward push over the cached
+    edge-list projection. Returns [] (caller falls back to the Cypher walk) when
+    the projection cannot be loaded, the anchor is absent from it, or on any error.
+    """
+    try:
+        proj = inproc_ppr.get_projection(
+            driver, project_id, GRAPH_EDGE_WEIGHTS, GRAPH_FALLBACK_DEFAULT_WEIGHT,
+            _GDS_FLOW_WEIGHT_PROPERTY,
+        )
+        if proj is None:
+            return []
+        return inproc_ppr.push_ppr(
+            proj, [anchor_record_id], top_n, alpha=PPR_ALPHA, epsilon=PPR_EPSILON,
+        )
+    except Exception:
+        logger.exception("[ERROR] in-process PPR graph-signal scoring failed")
+        return []
+
+
+def _anchor_degree(driver, project_id: str, anchor_record_id: str) -> int:
+    """One count query: relationships of the governed edge types touching the anchor.
+    Returns 0 on any failure (treated as a non-hub: the full 3-hop walk)."""
+    edge_union = "|".join(list(GRAPH_EDGE_WEIGHTS.keys()))
+    try:
+        with driver.session() as session:
+            rec = session.run(
+                f"MATCH (a)-[r:{edge_union}]-() "
+                f"WHERE a.record_id = $rid AND a.project_id = $project_id "
+                f"RETURN count(r) AS degree",
+                rid=anchor_record_id, project_id=project_id,
+            ).single()
+        return int(rec["degree"]) if rec is not None else 0
+    except Exception:
+        logger.warning("[WARNING] anchor degree precheck failed for %s", anchor_record_id, exc_info=True)
+        return 0
+
+
 def _hybrid_graph_ranks_cypher_fallback(
     driver,
     project_id: str,
     anchor_record_id: str,
     top_n: int,
+    hop_info: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Fallback graph-signal scoring using native Cypher weighted hop sum.
 
@@ -1681,6 +1759,12 @@ def _hybrid_graph_ranks_cypher_fallback(
     edge_union = "|".join(list(GRAPH_EDGE_WEIGHTS.keys()))
     # Decay factor across hop distance — mimics the damping behavior of PPR.
     decay = PPR_DAMPING_FACTOR
+    # ENC-TSK-S13 (N3): hub safety bound. Only this walk is bounded; GDS is not.
+    max_hops = FALLBACK_MAX_HOPS
+    if _anchor_degree(driver, project_id, anchor_record_id) > HUB_DEGREE_THRESHOLD:
+        max_hops = FALLBACK_HUB_HOPS
+    if hop_info is not None:
+        hop_info["hop_bound"] = max_hops
 
     # Cypher-side weight CASE for edge types.
     weight_case_parts = []
@@ -1692,7 +1776,7 @@ def _hybrid_graph_ranks_cypher_fallback(
     )
 
     cypher = (
-        f"MATCH path = (anchor)-[:{edge_union}*1..3]-(neighbor) "
+        f"MATCH path = (anchor)-[:{edge_union}*1..{max_hops}]-(neighbor) "
         f"WHERE anchor.record_id = $rid AND anchor.project_id = $project_id "
         f"AND neighbor.project_id = $project_id "
         f"AND neighbor.record_id <> $rid "
@@ -2327,6 +2411,7 @@ _HYBRID_TELEMETRY_FIELDS = (
     "vector_ms", "graph_ms", "keyword_ms", "facets_ms", "pathway_ms",
     "graph_candidates", "keyword_candidates", "graph_algorithm",
     "pathway_status", "query_hash",
+    "hop_bound",  # ENC-TSK-S13 (N3): Cypher-fallback walk depth (2 for a hub anchor, else 3)
 )
 
 
@@ -2763,6 +2848,22 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         # ENC-ISS-311 / ENC-TSK-G98: the GDS path can blow past the synchronous
         # read budget, hence the hard wall-clock deadline applied by the caller.
         _t = time.perf_counter()
+        # ENC-TSK-S13 (N12): in-process PPR first when the mode selects it. An
+        # explicit per-request 'cypher_fallback' skips GDS too (A/B overlap checks).
+        _mode = _resolve_graph_signal_mode(params)
+        if _mode == "inproc_ppr":
+            inproc_ranks = _hybrid_graph_ranks_inproc(
+                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+            )
+            if inproc_ranks:
+                return inproc_ranks, "inproc_ppr", _ms_since(_t)
+        elif str((params or {}).get("graph_signal_mode") or "").strip().lower() == "cypher_fallback":
+            _hop: Dict[str, Any] = {}
+            forced = _hybrid_graph_ranks_cypher_fallback(
+                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N, hop_info=_hop,
+            )
+            _tel["hop_bound"] = _hop.get("hop_bound")
+            return (forced, "cypher_fallback", _ms_since(_t)) if forced else ([], "unavailable", _ms_since(_t))
         warm_ranks = _hybrid_graph_ranks_gds_warm(
             driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
         )
@@ -2774,9 +2875,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             )
             if gds_ranks:
                 return gds_ranks, "gds_pagerank", _ms_since(_t)
+        _hop = {}
         cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
-            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+            driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N, hop_info=_hop,
         )
+        _tel["hop_bound"] = _hop.get("hop_bound")
         if cypher_ranks:
             return cypher_ranks, "cypher_fallback", _ms_since(_t)
         return [], "unavailable", _ms_since(_t)
@@ -3643,6 +3746,15 @@ def _handle_search(event: Dict) -> Dict:
         else:
             qs.pop("vector_source", None)
 
+    # ENC-TSK-S13: graph_signal_mode is an internal/agent-only per-request override
+    # (same gate as vector_source); anyone else gets the environment default.
+    if "graph_signal_mode" in qs:
+        _gm = str(qs.get("graph_signal_mode") or "").strip().lower()
+        if _gm in _GRAPH_SIGNAL_MODES and _caller_attribution(event, qs)["caller_type"] in ("internal", "agent"):
+            qs["graph_signal_mode"] = _gm
+        else:
+            qs.pop("graph_signal_mode", None)
+
     handler_fn = SEARCH_HANDLERS[search_type]
     start = time.time()
 
@@ -4049,6 +4161,23 @@ def _handle_health(event: Dict) -> Dict:
             logger.warning("[WARNING] health standing-projection probe failed", exc_info=True)
 
         graph_mode = _graph_operating_mode(gds_plugin_present, graph_projection)
+        # ENC-TSK-S13 (N12): when inproc_ppr is the active mode the health ping also
+        # warms the projection cache (N10 pings every 5 min, TTL is 10) and the
+        # operating mode reports inproc_ppr; an unloadable cache keeps the old mode.
+        if _default_graph_signal_mode() == "inproc_ppr":
+            try:
+                _proj = inproc_ppr.get_projection(
+                    driver, _HEALTH_PROBE_PROJECT, GRAPH_EDGE_WEIGHTS,
+                    GRAPH_FALLBACK_DEFAULT_WEIGHT, _GDS_FLOW_WEIGHT_PROPERTY,
+                )
+                if _proj is not None:
+                    graph_mode = {
+                        "mode": "inproc_ppr", "reason": "projection_cache",
+                        "gds_plugin_present": bool(gds_plugin_present),
+                        "cache": inproc_ppr.cache_stats(),
+                    }
+            except Exception:
+                logger.warning("[WARNING] health inproc_ppr warm failed", exc_info=True)
         # signals.graph is the operating mode string (truthy == the graph signal runs).
         signals["graph"] = graph_mode["mode"]
 
