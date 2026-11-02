@@ -199,6 +199,58 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphHealthScheduleRule.Arn
 
+  # ENC-TSK-S11 (N11, DOC-F08AE0127D4E §10) — graph search latency/health alarms.
+  # Metrics are EMF-emitted by graph_query_api (Enceladus/GraphSearch, dimension
+  # SearchType); no metric filters. Cost: 3 custom metrics (hybrid duration,
+  # neighbors duration, hybrid pathway-failed) x $0.30 + 2 alarms x $0.10 ~ $1.10/mo.
+  GraphSearchHybridP95Over4sAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-graphsearch-hybrid-p95-over-4s${EnvironmentSuffix}"
+      AlarmDescription: >
+        Hybrid graph search p95 duration above 4000 ms for 3 consecutive
+        5-minute periods (ENC-TSK-S11, N11).
+      Namespace: Enceladus/GraphSearch
+      MetricName: SearchDurationMs
+      Dimensions:
+        - Name: SearchType
+          Value: hybrid
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 4000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  GraphSearchPathwayFailureRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-graphsearch-pathway-failure-rate${EnvironmentSuffix}"
+      AlarmDescription: >
+        Hybrid pathway failure rate (average of 0/1 HybridPathwayFailed) above 5%
+        for 3 consecutive 5-minute periods (ENC-TSK-S11, N11).
+      Namespace: Enceladus/GraphSearch
+      MetricName: HybridPathwayFailed
+      Dimensions:
+        - Name: SearchType
+          Value: hybrid
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 0.05
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
   # ENC-TSK-S04 (N10, DOC-F08AE0127D4E §10) — warm keeper. Invokes the existing
   # graph_query_api health route (functional probes: Neo4j ping + keyword +
   # vector embedding) every 5 minutes so one execution environment, its Neo4j
