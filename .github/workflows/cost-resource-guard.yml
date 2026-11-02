@@ -14,6 +14,9 @@ on:
       - main
     paths:
       - "infrastructure/**"
+      - "tools/cost_resource_guard*"
+      - "tools/test_cost_resource_guard.py"
+      - ".github/workflows/cost-resource-guard.yml"
 
 permissions:
   contents: read
@@ -47,6 +50,9 @@ jobs:
 
       - name: Guard self-tests
         run: python3 -m unittest tools.test_cost_resource_guard
+
+      - name: Non-prod C3 latent-capability scan (DVP-TSK-B89; label does not bypass)
+        run: python3 tools/cost_resource_guard.py --scan-nonprod
 
       - name: Diff templates for persistent-cost additions
         run: |
