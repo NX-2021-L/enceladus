@@ -2388,6 +2388,24 @@ Resources:
         - Key: Component
           Value: search
 
+  # ENC-TSK-R80-0C / DOC-52FE56D6F529 U7 (cost rule 5: every log group carries a
+  # retention). The log groups already exist (auto-created by Lambda, unbounded
+  # retention), so they must be ADOPTED, not created: run cfn-resource-import.yml
+  # (mode=import) with infrastructure/cloudformation/resource-import-graph-query-api-loggroup.json
+  # (prod, stack enceladus-compute) or ...-loggroup-gamma.json (gamma,
+  # enceladus-compute-gamma) BEFORE the compute-stack deploy ships this resource;
+  # a plain deploy would fail AlreadyExists. Retain so a rollback never deletes logs.
+  # Deliberately no DependsOn on the function: touching the live function resource
+  # would add a non-import change to the import change-set. Cost class C0 (retention
+  # lowers storage).
+  GraphQueryApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/devops-graph-query-api${EnvironmentSuffix}"
+      RetentionInDays: 30
+
   GraphQueryApiFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
