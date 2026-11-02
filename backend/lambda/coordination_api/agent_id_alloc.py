@@ -1509,6 +1509,8 @@ _SURFACE_CANONICAL: Dict[str, str] = {
     "chatgpt_native_app": "chatgpt-native-app",
     "eventbridge_scheduler": "eventbridge-scheduler",
     "enceladus_recipe_runner": "enceladus-recipe-runner",
+    # ENC-TSK-R82-0A: Lambda responder surface (matches the live prod ENC-AGT-00R row).
+    "sns_anomaly_responder": "sns-anomaly-responder",
 }
 
 _RUNTIME_CANONICAL: Dict[str, str] = {
