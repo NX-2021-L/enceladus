@@ -30,7 +30,7 @@ export function MarkdownContent(props: MarkdownContentProps) {
         </div>
       }
     >
-      <KitMarkdownContent {...props} />
+      <KitMarkdownContent {...props} copyIds={props.copyIds ?? true} />
     </Suspense>
   )
 }

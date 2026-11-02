@@ -1,6 +1,5 @@
-import { Link } from '@tanstack/react-router'
 import type { TypedRelationshipEdge } from '../types/records'
-import { recordHrefForType } from '../routes/recordLink'
+import { RecordLink } from './RecordLink'
 
 const RELATIONSHIP_LABELS: Record<string, string> = {
   'blocks': 'Blocks',
@@ -24,7 +23,6 @@ function detectRecordType(id: string): 'task' | 'issue' | 'feature' | 'lesson' |
 }
 
 export function TypedRelationshipSection({
-  projectId,
   edges,
 }: {
   projectId: string
@@ -69,12 +67,12 @@ export function TypedRelationshipSection({
               const targetType = detectRecordType(edge.target_id)
               return (
                 <li key={`${relType}-${edge.target_id}`} style={{ marginBottom: 'var(--space-1)' }}>
-                  <Link
-                    to={recordHrefForType(projectId, targetType, edge.target_id)}
-                    style={{ color: 'var(--accent-hover)', textDecoration: 'none' }}
-                  >
-                    {edge.target_id}
-                  </Link>
+                  <RecordLink
+                    id={edge.target_id}
+                    recordType={targetType}
+                    copyable
+                    className="ev2-rdh__typed-edge-link"
+                  />
                   {edge.reason ? (
                     <span style={{ color: 'var(--fg-muted)', fontSize: 'var(--text-xs)' }}>
                       {' '}
