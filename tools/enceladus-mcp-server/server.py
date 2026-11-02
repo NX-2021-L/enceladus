@@ -9662,7 +9662,8 @@ async def _agent_register(args: dict) -> list[TextContent]:
     payload: Dict[str, Any] = {}
     # ENC-TSK-J43: credential_id is an optional binding to an ENC-CRED credential; it is
     # only forwarded when supplied, so omitting it is fully backward-compatible.
-    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id"):
+    # ENC-TSK-R81-0A: dry_run forwards so a dry-run gets the same fail-closed rejection.
+    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id", "dry_run"):
         if args.get(key) is not None:
             payload[key] = args[key]
     result = _coordination_api_request("POST", "/agents/sessions", payload=payload)

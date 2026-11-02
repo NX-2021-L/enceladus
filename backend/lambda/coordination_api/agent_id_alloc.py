@@ -1502,6 +1502,131 @@ def canonicalize_agent_type_fields(
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed identity gate (ENC-TSK-R81-0A / ENC-FTR-146 AC-4 / AC-5)
+# ---------------------------------------------------------------------------
+#
+# agent.register / agent.claim accept an agent_type_id ONLY when it names an ACTIVE row in
+# the agent-type directory. Free text ("claude-code", "coord-lead") is rejected, never
+# mapped. surface (agent.type.register) and runtime (agent.register) are closed enums over
+# the W0.6 normal form. The runtime enum was derived from the live agent-sessions table
+# (2026-11-02 scan, 898 rows) so every runtime family in current use still registers; a
+# caller that appends a free-text descriptor ("claude.ai-webui coordination-lead ...") or
+# passes a mapping carrying a "surface" key resolves to its canonical family.
+AGENT_TYPE_ID_PATTERN = re.compile(r"^ENC-AGT-[0-9A-Z]{3,}$")
+
+ALLOWED_SURFACES = frozenset(set(_SURFACE_CANONICAL.values()) | {"test"})
+
+ALLOWED_RUNTIMES = frozenset({
+    "claude_code_cli", "claude_code_cli_subagent", "claude_code_desktop",
+    "claude_code_desktop_subagent", "claude_code_remote", "claude_ai_webui",
+    "cowork_desktop", "cursor", "cursor_desktop", "cursor_cloud_agent", "cursor_webui",
+    "cursor_ide", "cursor_terminal", "cursor_composer", "codex_terminal", "codex_desktop",
+    "devin_webui", "chatgpt_native_app", "recipe_runner", "enceladus_recipe_runner",
+    "eventbridge_scheduler", "claude_agent_sdk", "claude_routine", "test",
+})
+
+# Exact-key aliases (never prefix-matched) -> canonical runtime.
+_RUNTIME_ALIASES: Dict[str, str] = {
+    "claude_code": "claude_code_cli",
+    "cli": "claude_code_cli",
+    "claude_code_terminal": "claude_code_cli",
+    "claude_ai": "claude_ai_webui",
+    "claude_ai_web": "claude_ai_webui",
+    "webui": "claude_ai_webui",
+    "claude_cowork_desktop": "cowork_desktop",
+    "cursor_cloud": "cursor_cloud_agent",
+    "codex": "codex_terminal",
+    "chatgpt": "chatgpt_native_app",
+    "devin": "devin_webui",
+}
+# Longest canonical runtime first so claude_code_cli_subagent_x wins over claude_code_cli.
+_RUNTIME_PREFIX_ORDER = tuple(sorted(ALLOWED_RUNTIMES, key=len, reverse=True))
+_EMBEDDED_SURFACE = re.compile(r"""['"]?surface['"]?\s*[:=]\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+
+
+class AgentFieldRejected(ValueError):
+    """A register/claim/type-register field failed the fail-closed identity gate."""
+
+    def __init__(self, field: str, value: Any, reason: str, message: str,
+                 allowed: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.value = value
+        self.reason = reason
+        self.allowed = allowed or []
+
+
+def _runtime_from_key(key: str) -> str:
+    if key in ALLOWED_RUNTIMES:
+        return key
+    if key in _RUNTIME_ALIASES:
+        return _RUNTIME_ALIASES[key]
+    for canon in _RUNTIME_PREFIX_ORDER:
+        if key.startswith(canon + "_"):
+            return canon
+    return ""
+
+
+def resolve_runtime(value: Any) -> str:
+    """Return the canonical runtime for ``value`` or raise AgentFieldRejected (closed enum)."""
+    if isinstance(value, Mapping):
+        value = value.get("surface") or value.get("runtime") or ""
+    raw = str(value or "")
+    resolved = _runtime_from_key(_normal_key(raw))
+    if not resolved:
+        embedded = _EMBEDDED_SURFACE.search(raw)
+        if embedded:
+            resolved = _runtime_from_key(_normal_key(embedded.group(1)))
+    if not resolved:
+        allowed = sorted(ALLOWED_RUNTIMES)
+        raise AgentFieldRejected(
+            "runtime", raw, "not_in_enum",
+            f"runtime {raw!r} is not an allowed runtime; allowed: {allowed}", allowed,
+        )
+    return resolved
+
+
+def validate_surface(value: Any) -> str:
+    """Return the canonical surface for ``value`` or raise AgentFieldRejected (closed enum)."""
+    surface = canonicalize_surface(value)
+    if surface not in ALLOWED_SURFACES:
+        allowed = sorted(ALLOWED_SURFACES)
+        raise AgentFieldRejected(
+            "surface", str(value or ""), "not_in_enum",
+            f"surface {value!r} is not an allowed surface; allowed: {allowed}", allowed,
+        )
+    return surface
+
+
+def require_active_agent_type(agent_type_id: Any) -> Dict[str, Any]:
+    """FK gate: return the ACTIVE agent-type row for ``agent_type_id`` or raise.
+
+    Free text is rejected before any lookup (never mapped to a row); an unknown or
+    deprecated id is rejected after a consistent read of the directory.
+    """
+    aid = str(agent_type_id or "").strip()
+    if not AGENT_TYPE_ID_PATTERN.match(aid):
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "not_an_agent_type_id",
+            f"agent_type_id {aid!r} is not an ENC-AGT id; free-text agent types are "
+            "rejected, not mapped. Pick an active id from agent.type.list.",
+        )
+    row = get_agent_type(aid)
+    if row is None:
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "unknown",
+            f"agent_type_id {aid!r} does not exist; pick an active id from agent.type.list.",
+        )
+    if row.get("status") != "active":
+        raise AgentFieldRejected(
+            "agent_type_id", aid, "inactive",
+            f"agent_type_id {aid!r} is not active (status={row.get('status')!r}); "
+            "pick an active id from agent.type.list.",
+        )
+    return row
+
+
+# ---------------------------------------------------------------------------
 # Agent-credential lifecycle — CRED-<uuid4hex> (ENC-TSK-J04 / ENC-FTR-074 Ph3)
 # ---------------------------------------------------------------------------
 #
