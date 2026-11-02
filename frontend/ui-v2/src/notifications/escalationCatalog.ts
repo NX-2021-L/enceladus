@@ -1,5 +1,5 @@
-/** DVP-TSK-A24 (E4-R28/R31): one catalog group, one type per gate kind. */
-import type { NotifyCatalog, NotifyType } from '@io-kit/notify'
+/** DVP-TSK-A24 (E4-R28/R31): one catalog group, one type per gate kind. ENC-TSK-R80-0G adds the anomaly type (ENC-FTR-150 AC-7). */
+import { ANOMALY_GROUP_ID, ANOMALY_TYPE_ID, anomalyNotifyType, type NotifyCatalog, type NotifyType } from '@io-kit/notify'
 
 const KINDS: { id: string; label: string; desc: string }[] = [
   { id: 'acceptance', label: 'Acceptance', desc: 'A task awaits acceptance evidence sign-off' },
@@ -26,8 +26,8 @@ for (const k of KINDS) {
 }
 
 export const escalationCatalog: NotifyCatalog = {
-  groups: [{ id: 'escalations', label: 'Escalations' }],
-  types,
+  groups: [{ id: 'escalations', label: 'Escalations' }, { id: ANOMALY_GROUP_ID, label: 'Anomalies' }],
+  types: { ...types, [ANOMALY_TYPE_ID]: anomalyNotifyType },
   levels: { generic: 'Generic', detailed: 'Detailed', hint: 'Detailed shows the project, kind and summary on the lock screen.' },
   extraFields: [
     {
@@ -35,5 +35,5 @@ export const escalationCatalog: NotifyCatalog = {
       options: ['low', 'medium', 'high', 'critical'].map((v) => ({ value: v, label: v })),
     },
   ],
-  sample: { risk: 'high', project_id: 'devops', kind: 'escalation', summary: 'Rotate signing key' },
+  sample: { risk: 'high', project_id: 'devops', kind: 'escalation', summary: 'Rotate signing key', service: 'AWS Lambda', impact: '$41.20' },
 }
