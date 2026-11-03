@@ -80,6 +80,9 @@ export default function DocumentEditorHost({ documentId, defaultProjectId, onSav
             post={post}
             source={source}
             onClose={onClose}
+            // ENC-ISS-888: a new document already has the whole page, and the Project/Subtype selects above it must stay
+            // reachable on a phone, so create mode never switches to the kit's full-screen modal.
+            {...(creating ? { fullScreenBelow: 0 } : {})}
             onSaved={(saved) => onSaved(post.id === NEW_DOCUMENT_ID ? saved.id : post.id)}
           />
         )}

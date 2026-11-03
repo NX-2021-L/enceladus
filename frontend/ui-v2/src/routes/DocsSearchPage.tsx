@@ -2,13 +2,14 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch } from '@tanstack/react-router'
 import type { Query } from '@io-kit/search'
-import { Alert } from '../design-system'
+import { Alert, Button } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
+import { PageHeader } from '../components/PageHeader'
 import { SearchSplitPage } from '../search/SearchSplitPage'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useDocsDeltaWhileMounted, useEnceladusCorpus } from '../search/CorpusProvider'
 import { CorpusRefreshButton } from '../search/CorpusRefreshButton'
-import { NewDocumentButton } from '../documents/NewDocumentButton'
+import { NewDocumentPanel } from '../documents/NewDocumentPanel'
 import { hostSearchSource } from '../search/enceladusSearchSource'
 import { DOCS_PROPERTIES } from '../search/propertyDefs'
 import { rowToHit } from '../search/rowHit'
@@ -36,6 +37,7 @@ export default function DocsSearchPage() {
     tokens: project ? [{ propertyKey: 'project_id', operator: '=', value: project }] : [],
   }))
   const [sortId, setSortId] = useState('updated')
+  const [creating, setCreating] = useState(false)
   const corpus = useEnceladusCorpus()
   useDocsDeltaWhileMounted()
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
@@ -49,6 +51,17 @@ export default function DocsSearchPage() {
     </div>
   ) : null
 
+  // ENC-ISS-888: New document takes the page in place of the list (as Edit document takes the reader), never the
+  // header actions row. Query and sort live here, so Cancel brings the list back as it was.
+  if (creating) {
+    return (
+      <div className="docs-route">
+        <PageHeader title="New document" />
+        <NewDocumentPanel defaultProjectId={project || undefined} onClose={() => setCreating(false)} />
+      </div>
+    )
+  }
+
   // R16: the same split frame as /feed, single column (docs has a list and no reader): header across, pinned search
   // rows, results in their own scroller from 960px; one page scroll below.
   return (
@@ -58,7 +71,7 @@ export default function DocsSearchPage() {
       above={stale}
       actions={
         <>
-          <NewDocumentButton defaultProjectId={project || undefined} />
+          <Button onClick={() => setCreating(true)}>New document</Button>
           <CorpusRefreshButton />
         </>
       }
