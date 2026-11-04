@@ -230,6 +230,13 @@ def _idem_purge(now: float) -> None:
 
 
 
+def _truthy_dry_run(value: Any) -> bool:
+    """Fail-safe dry_run coercion: only an explicit false-like value is non-dry."""
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off", "none", "null")
+    return bool(value)
+
+
 def register_actions(actions: Dict[str, Dict[str, Any]]) -> None:
     global EXECUTE_ACTIONS
     EXECUTE_ACTIONS = actions
@@ -342,6 +349,13 @@ async def _execute_steps(args: dict, idempotency_key: str = "") -> list[TextCont
         step_args = {}
         if isinstance(raw_step.get("arguments"), dict):
             step_args.update(raw_step["arguments"])
+        # ENC-ISS-755: a client may send dry_run inside ``arguments`` instead of on the step.
+        # No governed handler implements it, so honoring it here is the only safe reading: a
+        # truthy value (fail-safe for "true"/"1" strings) makes this a dry step and is never
+        # forwarded. A falsy value is left in place (the default) and forwarded unchanged.
+        arguments_dry_run = _truthy_dry_run(step_args.get("dry_run")) if "dry_run" in step_args else False
+        if arguments_dry_run:
+            step_args.pop("dry_run", None)
         # ENC-ISS-855: server-fixed argument values (plan.create -> record_type=plan). A
         # conflicting caller value is rejected on BOTH the dry-run and the real path, since
         # schema validation only runs on dry runs.
@@ -368,7 +382,7 @@ async def _execute_steps(args: dict, idempotency_key: str = "") -> list[TextCont
                 break
             continue
         step_args.update(entry.get("inject") or {})
-        step_dry_run = overall_dry_run or bool(raw_step.get("dry_run", False))
+        step_dry_run = overall_dry_run or _truthy_dry_run(raw_step.get("dry_run", False)) or arguments_dry_run
         summary = {
             "tool": entry["tool"],
             "arguments": step_args,
