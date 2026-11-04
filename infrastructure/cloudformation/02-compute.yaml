@@ -806,6 +806,10 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt DocumentApiRole.Arn
+      # ENC-TSK-S26-0A (BRD DOC-E32D0ED08473 s7.2): active X-Ray tracing so the document-api hop
+      # appears in the write-path trace (correlation_id is propagated by the MCP server).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         - !If
@@ -5805,6 +5809,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-document-api${EnvironmentSuffix}*"
+              # ENC-TSK-S26-0A: required by TracingConfig Mode=Active on DocumentApiFunction.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBDocuments
                 Effect: Allow
                 Action:
@@ -5978,6 +5989,16 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
+              # ENC-TSK-S26-0A: gamma writes land under the S3EnvPrefix ("gamma/") in jreese-net;
+              # without this the 2026-11-04 gamma project-create rolled back on the reference write.
+              # Scoped to the reference prefix only (resolves to the statement above on prod).
+              - Sid: S3ReferenceWriteEnvPrefix
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}mobile/v1/reference/*"
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -8732,6 +8753,10 @@ Resources:
       SnapStart:
         ApplyOn: PublishedVersions
       Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-coordination-api-lambda-role-gamma"
+      # ENC-TSK-S26-0A: active X-Ray tracing. The out-of-band role above already carries the
+      # XRayTracing statement (CoordinationApiRole, ENC-TSK-K45 / B66 AC-1).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arm64)
@@ -10483,6 +10508,56 @@ Resources:
   # ---------------------------------------------------------------------------
 
   # --- end ENC-TSK-O59 / ENC-ISS-648 forward-port ------------------------------
+
+  # ENC-TSK-S26-0C: write-bench in-region client arm (BRD DOC-E32D0ED08473 7.3). GAMMA ONLY and
+  # on-demand: no triggers, no schedule, no provisioned concurrency -> zero idle cost (cost rule-block C1).
+  # It only makes outbound HTTPS calls to mcp-gamma.jreese.net (host hard-allowlisted in the handler), so
+  # the role carries CloudWatch Logs write access and nothing else (no DynamoDB, S3, or secrets).
+  WriteBenchClientRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    Properties:
+      RoleName: !Sub "devops-write-bench-client-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: devops-write-bench-client-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-write-bench-client${EnvironmentSuffix}*"
+
+  WriteBenchClientFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-write-bench-client${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - arm64
+      Role: !GetAtt WriteBenchClientRole.Arn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: write-bench
 
 Outputs:
   CoordinationApiFunctionArn:

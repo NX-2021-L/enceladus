@@ -1,6 +1,7 @@
 """Runtime bindings for decomposed code-mode meta-tool handlers."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 InvokeRawTool = Callable[..., Awaitable[Dict[str, Any]]]
@@ -24,6 +25,10 @@ class McpRuntime:
     # DVP-TSK-843: returns the unwrapped per-action contracts for search(actions.schemas).
     action_catalog: Optional[ActionCatalog] = None
 
+
+# ENC-TSK-S26-0A: 1-based execute step index for the step currently invoking a raw tool
+# (None outside execute). Read by server._invoke_raw_tool for the [WRITE-AUDIT] line.
+EXECUTE_STEP_INDEX: ContextVar[Optional[int]] = ContextVar("enc_execute_step_index", default=None)
 
 RUNTIME = McpRuntime()
 

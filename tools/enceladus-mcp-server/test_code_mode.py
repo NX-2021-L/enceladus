@@ -346,6 +346,88 @@ def test_execute_dry_run_resolves_without_calling_mutation_handler():
     assert calls["tracker_set"] == 0
 
 
+import pytest
+
+
+def _execute_with_counting_handler(server, tool, steps, top_level=None):
+    calls = []
+
+    async def _handler(args):
+        calls.append(dict(args))
+        return server._result_text({"success": True})
+
+    server._TOOL_HANDLERS[tool] = _handler
+    arguments = {"steps": steps}
+    if top_level is not None:
+        arguments["dry_run"] = top_level
+    with patch.dict(os.environ, {"COORDINATION_ALLOWED_RAW_TOOLS": tool}, clear=False):
+        payload = json.loads(_run(server.call_tool("execute", arguments))[0].text)
+    return payload, calls
+
+
+_MUTATION_STEPS = {
+    "tracker.set": ("tracker_set", {"record_id": "ENC-TSK-852", "field": "priority", "value": "P1"}),
+    "documents.put": ("documents_put", {"project_id": "enceladus", "title": "t", "content": "# DOC\nbody", "description": "d"}),
+    "checkout.advance": ("advance_task_status", {"record_id": "ENC-TSK-852", "target_status": "committed", "provider": "ENC-SES-000", "sci": "ENC-SES-000"}),
+}
+
+
+@pytest.mark.parametrize("dry_location", ["step", "arguments"])
+@pytest.mark.parametrize("action", sorted(_MUTATION_STEPS))
+def test_execute_step_level_dry_run_never_invokes_mutation_iss755(action, dry_location):
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    tool, base_args = _MUTATION_STEPS[action]
+    arguments = {**base_args, "governance_hash": "abc123"}
+    step = {"action": action, "arguments": arguments}
+    if dry_location == "step":
+        step["dry_run"] = True
+    else:
+        arguments["dry_run"] = True
+
+    payload, calls = _execute_with_counting_handler(server, tool, [step])
+
+    assert calls == [], f"{action} was invoked despite {dry_location}-level dry_run"
+    assert payload["step_results"][0]["status"] == "dry_run", payload
+    assert payload["step_results"][0]["resolved_call"]["action"] == action
+    assert payload["underlying_calls"][0]["status"] == "dry_run"
+
+
+def test_execute_step_dry_run_only_short_circuits_that_step_and_keeps_on_error_iss755():
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    args = {"record_id": "ENC-TSK-852", "field": "priority", "value": "P1", "governance_hash": "abc123"}
+    payload, calls = _execute_with_counting_handler(
+        server,
+        "tracker_set",
+        [
+            {"action": "tracker.set", "dry_run": True, "arguments": dict(args)},
+            {"action": "tracker.set", "arguments": dict(args)},
+            {"action": "tracker.set", "arguments": {**args, "dry_run": False}},
+        ],
+    )
+
+    statuses = [s["status"] for s in payload["step_results"]]
+    assert statuses == ["dry_run", "success", "success"], payload
+    assert len(calls) == 2
+
+
+def test_execute_top_level_dry_run_short_circuits_every_step_iss755():
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    args = {"record_id": "ENC-TSK-852", "field": "priority", "value": "P1", "governance_hash": "abc123"}
+    payload, calls = _execute_with_counting_handler(
+        server, "tracker_set", [{"action": "tracker.set", "arguments": dict(args)}] * 2, top_level=True
+    )
+    assert calls == []
+    assert [s["status"] for s in payload["step_results"]] == ["dry_run", "dry_run"]
+
+
+def test_execute_tool_description_states_dry_run_levels_iss755():
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    tools = _run(server.list_tools())
+    description = next(_tool_dump(t)["description"] for t in tools if t.name == "execute")
+    lowered = description.lower()
+    assert "top-level dry_run" in lowered and "step-level dry_run" in lowered and "arguments.dry_run" in lowered and "never invokes" in lowered
+
+
 def test_canonical_governance_hash_ddb_reads_same_record_as_coordination_api():
     """ENC-TSK-I29 / AC#1: the MCP write-validation path resolves the governance
     hash from the same canonical governance-version record the coordination API

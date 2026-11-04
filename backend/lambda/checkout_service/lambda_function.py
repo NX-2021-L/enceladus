@@ -84,6 +84,8 @@ import logging
 import os
 import re
 import time
+
+_WA_T0 = time.perf_counter()  # ENC-TSK-S26-0A: init_ms origin
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -141,6 +143,140 @@ except Exception:  # noqa: BLE001 — also catches RuntimeError/OSError from cff
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+import base64
+import platform
+import sys
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-S26-0A: write-path audit line ([WRITE-AUDIT]) + correlation_id.
+# Duplicated per Lambda (stdlib only, no shared layer change). One JSON line per
+# mutating request; correlation_id arrives as header X-Correlation-Id or body
+# field correlation_id (the body field is stripped before routing).
+# ---------------------------------------------------------------------------
+_WA_COLD = True
+_WA: Dict[str, Any] = {}  # per-invocation state (Lambda runs one request at a time)
+
+
+def _wa_hdr(event: Dict, name: str) -> str:
+    for k, v in (event.get("headers") or {}).items():
+        if str(k).lower() == name:
+            return str(v or "").strip()
+    return ""
+
+
+def _wa_begin(event: Dict, context: Any, surface: str) -> None:
+    global _WA_COLD
+    cold, _WA_COLD = _WA_COLD, False
+    _WA.clear()
+    _WA.update({
+        "surface": surface, "t0": time.perf_counter(), "cold_start": cold, "ddb_ops": 0, "ddb_ms": 0.0,
+        "ddb_retries": 0, "t": {}, "version_seq": None, "extra": {},
+        "request_id": str(getattr(context, "aws_request_id", "") or ""),
+        "memory_mb": getattr(context, "memory_limit_in_mb", None),
+        "function_version": getattr(context, "function_version", None),
+        "correlation_id": _wa_hdr(event, "x-correlation-id"),
+        "idempotency_key": _wa_hdr(event, "idempotency-key"),
+    })
+    raw = event.get("body")
+    if isinstance(raw, str) and event.get("isBase64Encoded"):
+        try:
+            raw = base64.b64decode(raw).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return
+    if isinstance(raw, str) and ("correlation_id" in raw or "idempotency_key" in raw):
+        try:
+            b = json.loads(raw)
+        except ValueError:
+            return
+        if isinstance(b, dict):
+            if "correlation_id" in b:  # accepted, stripped from every field write
+                cid = str(b.pop("correlation_id") or "").strip()
+                _WA["correlation_id"] = _WA["correlation_id"] or cid
+                event["body"], event["isBase64Encoded"] = json.dumps(b), False
+            _WA["idempotency_key"] = _WA["idempotency_key"] or str(b.get("idempotency_key") or "")
+
+
+def _wa_timed(key: str):
+    def deco(fn):
+        def inner(*a, **k):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **k)
+            finally:
+                if _WA:
+                    _WA["t"][key] = _WA["t"].get(key, 0.0) + (time.perf_counter() - t) * 1000
+        inner.__name__, inner.__doc__ = fn.__name__, fn.__doc__
+        return inner
+    return deco
+
+
+def _wa_ddb_attach(client: Any) -> None:
+    try:
+        client.meta.events.register("before-call.dynamodb", _wa_ddb_before)
+        client.meta.events.register("after-call.dynamodb", _wa_ddb_after)
+    except Exception:  # noqa: BLE001 - audit must never break a write
+        pass
+
+
+def _wa_ddb_before(**_kw: Any) -> None:
+    if _WA:
+        _WA["_ts"] = time.perf_counter()
+
+
+def _wa_ddb_after(parsed: Any = None, **_kw: Any) -> None:
+    if _WA:
+        _WA["ddb_ops"] += 1
+        _WA["ddb_ms"] += (time.perf_counter() - _WA.pop("_ts", time.perf_counter())) * 1000
+        _WA["ddb_retries"] += int(((parsed or {}).get("ResponseMetadata") or {}).get("RetryAttempts") or 0)
+
+
+def _wa_find_id(resp: Any) -> str:
+    try:
+        d = json.loads(resp.get("body") or "{}")
+        for _ in range(2):
+            if not isinstance(d, dict):
+                break
+            for k in ("record_id", "item_id", "document_id", "id"):
+                if d.get(k):
+                    return str(d[k]).split("#")[-1]
+            d = next((v for v in d.values() if isinstance(v, dict)), None)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Optional[Dict] = None) -> None:
+    try:
+        if not _WA:
+            return
+        st = _WA
+        total = (time.perf_counter() - st["t0"]) * 1000
+        outcome = "success" if status < 400 else ("rejected" if status < 500 else "error")
+        t = st["t"]
+        line = {
+            "correlation_id": st["correlation_id"] or None, "request_id": st["request_id"], "tool": tool,
+            "project_id": project_id or None, "record_id": record_id or None,
+            "idempotency_key": st["idempotency_key"] or None, "surface": st["surface"],
+            "attempt_outcome": outcome, "success": outcome == "success", "http_status": status,
+            "server_total_ms": int(total), "cold_start": st["cold_start"],
+            "init_ms": _WA_INIT_MS if st["cold_start"] else 0,
+            "t_auth_ms": int(t.get("t_auth_ms", 0)), "t_validate_ms": int(t.get("t_validate_ms", 0)),
+            "t_counter_ms": int(t.get("t_counter_ms", 0)), "t_ddb_ms": int(st["ddb_ms"]),
+            "ddb_ops": st["ddb_ops"], "ddb_retries": st["ddb_retries"],
+            "memory_mb": st["memory_mb"], "runtime": sys.version.split()[0], "arch": platform.machine(),
+            "function_version": st["function_version"], "hops": 1, "version_seq": st["version_seq"],
+            "t_ack": int(time.time() * 1000),
+        }
+        line.update({k: (int(v) if k.startswith("t_") and k.endswith("_ms") else v) for k, v in t.items()
+                     if k not in line})
+        line.update(st.get("extra") or {})
+        line.update(extra or {})
+        print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        _WA.clear()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -216,6 +352,7 @@ _PRIMARY_INTERNAL_KEY = (
 # DynamoDB client for checkout token storage
 # ---------------------------------------------------------------------------
 _ddb = boto3.client("dynamodb", region_name=CHECKOUT_TOKENS_REGION)
+_wa_ddb_attach(_ddb)  # ENC-TSK-S26-0A
 
 # ---------------------------------------------------------------------------
 # GitHub App installation token (ENC-TSK-B26)
@@ -485,6 +622,7 @@ def _is_authenticated(event: dict) -> bool:
 # Tracker API calls
 # ---------------------------------------------------------------------------
 
+@_wa_timed("t_invoke_ms")
 def _tracker_request(
     method: str,
     path: str,
@@ -499,6 +637,11 @@ def _tracker_request(
     }
     if CHECKOUT_SERVICE_KEY:
         headers["X-Checkout-Service-Key"] = CHECKOUT_SERVICE_KEY
+    _wa_cid = _WA.get("correlation_id")
+    if _wa_cid:  # ENC-TSK-S26-0A: forward correlation_id to the nested tracker call
+        headers["X-Correlation-Id"] = _wa_cid
+        if isinstance(payload, dict) and method.upper() in ("POST", "PUT", "PATCH"):
+            data = json.dumps({**payload, "correlation_id": _wa_cid}).encode()
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
@@ -4439,7 +4582,7 @@ def _parse_path(raw_path: str) -> dict:
     return {"route": "unknown"}
 
 
-def lambda_handler(event: dict, context: Any) -> dict:
+def _lambda_handler_inner(event: dict, context: Any) -> dict:
     """HTTP API Gateway entry point."""
     method = (event.get("requestContext", {}).get("http", {}).get("method") or
               event.get("httpMethod") or "GET").upper()
@@ -4628,3 +4771,41 @@ def handler_auto_checkout(event: dict, context: Any) -> dict:
         "checked_out_count": len(checked_out),
         "error_count": len(errors),
     }
+
+
+def _wa_tool_for(method: str, raw_path: str) -> Tuple[str, str, str]:
+    parsed = _parse_path(raw_path)
+    action = str(parsed.get("action") or "")
+    if parsed.get("route") == "task_action":
+        tool = {
+            ("checkout", "POST"): "checkout.task", ("checkout", "DELETE"): "checkout.release",
+            ("advance", "POST"): "checkout.advance", ("log", "POST"): "checkout.append_worklog",
+        }.get((action, method), f"checkout.{action}")
+        return tool, parsed["project_id"], parsed["task_id"]
+    if parsed.get("route") == "plan_action":
+        return f"checkout.plan_{action}", parsed["project_id"], parsed["plan_id"]
+    return f"checkout.{parsed.get('route', 'unknown')}", "", ""
+
+
+def lambda_handler(event: dict, context: Any) -> dict:
+    """ENC-TSK-S26-0A wrapper: one [WRITE-AUDIT] line per mutating request, correlation_id forwarded."""
+    method = ""
+    if isinstance(event, dict):
+        method = str(
+            (event.get("requestContext") or {}).get("http", {}).get("method") or event.get("httpMethod", "")
+        ).upper()
+    if method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return _lambda_handler_inner(event, context)
+    _wa_begin(event, context, "checkout_service")
+    raw_path = ((event.get("requestContext") or {}).get("http", {}).get("path") or event.get("path") or "/")
+    tool, project_id, record_id = _wa_tool_for(method, raw_path)
+    status = 500
+    try:
+        resp = _lambda_handler_inner(event, context)
+        status = int((resp or {}).get("statusCode", 200))
+        return resp
+    finally:
+        _wa_emit(tool, project_id, record_id, status)
+
+
+_WA_INIT_MS = int((time.perf_counter() - _WA_T0) * 1000)

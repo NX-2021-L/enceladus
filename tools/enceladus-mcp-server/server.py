@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
 import logging
 import os
+import platform
 import re
 import ssl
 import sys
@@ -37,6 +39,8 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+_MODULE_T0 = time.perf_counter()  # ENC-TSK-S26-0A: cold-start init_ms baseline
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -1418,11 +1422,20 @@ async def _invoke_raw_tool(
     if require_allowlist and not _raw_tool_allowed(tool_name):
         raise PermissionError(f"Raw tool '{tool_name}' is outside the current session boundary")
 
-    handler = _TOOL_HANDLERS.get(tool_name)
-    if handler is None:
-        raise ValueError(f"Unknown raw tool '{tool_name}'")
+    def _lookup() -> Any:
+        found = _TOOL_HANDLERS.get(tool_name)
+        if found is None:
+            raise ValueError(f"Unknown raw tool '{tool_name}'")
+        return found
 
-    content = await handler(arguments or {})
+    # ENC-TSK-S26-0A: every execute step (and any direct write tool) emits one [WRITE-AUDIT] line.
+    step_index = _EXECUTE_STEP_INDEX.get()
+    if step_index is not None or tool_name in WRITE_AUDIT_TOOLS:
+        content = await _run_handler_with_write_audit(
+            tool_name, arguments or {}, step_index=step_index, handler_lookup=_lookup,
+        )
+    else:
+        content = await _lookup()(arguments or {})
     status = _tool_result_status(content)
     return {
         "tool": tool_name,
@@ -1588,6 +1601,208 @@ def _tool_error_code(content: list[TextContent]) -> str:
     return "tool_error"
 
 
+# -------------------------------------------------------------------
+# ENC-TSK-S26-0A: write-path audit lines ([WRITE-AUDIT]), correlation_id, EMF
+# -------------------------------------------------------------------
+WRITE_AUDIT_PREFIX = "[WRITE-AUDIT]"
+WRITE_AUDIT_EMF_NAMESPACE = "Enceladus/WritePath"
+CORRELATION_HEADER = "X-Correlation-Id"
+# inbound client header -> audit-line field (BRD DOC-E32D0ED08473 s7.2)
+CLIENT_AUDIT_HEADERS = {
+    "x-enc-t-client-start": "t_client_start",
+    "x-enc-client-session-reused": "client_session_reused",
+    "x-enc-client-session-init-ms": "client_session_init_ms",
+    "x-enc-client-tls-new": "client_tls_new",
+    "x-enc-client-serialize-ms": "client_serialize_ms",
+    "x-enc-surface": "surface",
+}
+# Write-capable tool handlers audited when called directly (execute steps are always audited).
+WRITE_AUDIT_TOOLS = frozenset({
+    "tracker_create", "tracker_set", "documents_put", "documents_patch",
+    "checkout_task", "release_task", "advance_task_status", "append_worklog",
+})
+_RECORD_ID_ARGS = ("record_id", "task_id", "issue_id", "feature_id", "plan_id", "document_id", "id")
+
+_cold_start_pending = True  # flipped by the first Lambda invocation in this container
+_REQUEST_CTX: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "enc_write_audit_request_ctx", default=None
+)  # mutable per-invocation dict (shared with child tasks)
+_CALL_STATE: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "enc_write_audit_call_state", default=None
+)  # mutable per-tool-call dict (governance + invoke timings)
+
+
+def _begin_request_context(context: Any = None) -> Dict[str, Any]:
+    """Called at Lambda entry: captures aws_request_id and consumes the cold-start flag."""
+    global _cold_start_pending
+    cold = _cold_start_pending
+    _cold_start_pending = False
+    rid = str(getattr(context, "aws_request_id", "") or "") or str(uuid.uuid4())
+    ctx: Dict[str, Any] = {
+        "request_id": rid,
+        "correlation_id": "",
+        "client": {},
+        "cold_start": cold,
+        "init_ms": int((time.perf_counter() - _MODULE_T0) * 1000) if cold else 0,
+    }
+    _REQUEST_CTX.set(ctx)
+    return ctx
+
+
+def _absorb_request_headers(headers: Optional[Dict[str, Any]]) -> None:
+    """Once inbound headers are known: correlation_id (accepted or minted) + client passthrough fields."""
+    ctx = _REQUEST_CTX.get()
+    if ctx is None:
+        ctx = _begin_request_context(None)
+    lowered = {str(k).lower(): v for k, v in (headers or {}).items()}
+    ctx["correlation_id"] = str(lowered.get(CORRELATION_HEADER.lower()) or "").strip() or str(uuid.uuid4())
+    for header, field in CLIENT_AUDIT_HEADERS.items():
+        if lowered.get(header) not in (None, ""):
+            ctx["client"][field] = lowered[header]
+
+
+def _current_correlation_id() -> str:
+    ctx = _REQUEST_CTX.get()
+    if ctx is None:
+        ctx = _begin_request_context(None)
+    if not ctx.get("correlation_id"):
+        ctx["correlation_id"] = str(uuid.uuid4())
+    return str(ctx["correlation_id"])
+
+
+def _with_correlation(
+    headers: Dict[str, str], payload: Optional[Dict[str, Any]], method: str
+) -> Optional[Dict[str, Any]]:
+    """Set X-Correlation-Id on outbound headers (in place); return payload carrying correlation_id for POST/PUT/PATCH."""
+    cid = _current_correlation_id()
+    headers[CORRELATION_HEADER] = cid
+    if isinstance(payload, dict) and method.upper() in ("POST", "PUT", "PATCH") and "correlation_id" not in payload:
+        return {**payload, "correlation_id": cid}
+    return payload
+
+
+def _note_invoke(ms: float) -> None:
+    """Accumulate urlopen round-trip time into the active tool call's t_invoke_ms."""
+    state = _CALL_STATE.get()
+    if state is not None:
+        state["t_invoke_ms"] = state.get("t_invoke_ms", 0.0) + ms
+
+
+def _write_audit_line(fields: Dict[str, Any]) -> None:
+    """Emit one `[WRITE-AUDIT] {json}` line plus an EMF envelope (Enceladus/WritePath, dimension tool).
+
+    stdout in Lambda (CloudWatch); stderr elsewhere so the stdio MCP transport is never corrupted.
+    """
+    in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("ENCELADUS_WRITE_AUDIT_STDOUT"))
+    stream = sys.stdout if in_lambda else sys.stderr
+    try:
+        print(f"{WRITE_AUDIT_PREFIX} {json.dumps(fields, sort_keys=True, default=str)}", file=stream, flush=True)
+        emf = {
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [{
+                    "Namespace": WRITE_AUDIT_EMF_NAMESPACE,
+                    "Dimensions": [["tool"]],
+                    "Metrics": [
+                        {"Name": "server_total_ms", "Unit": "Milliseconds"},
+                        {"Name": "cold_start", "Unit": "Count"},
+                    ],
+                }],
+            },
+            "tool": str(fields.get("tool") or "unknown"),
+            "server_total_ms": fields.get("server_total_ms") or 0,
+            "cold_start": 1 if fields.get("cold_start") else 0,
+        }
+        print(json.dumps(emf, sort_keys=True), file=stream, flush=True)
+    except Exception:  # audit must never break a write
+        logger.debug("write-audit emit failed", exc_info=True)
+
+
+def _audit_attempt_outcome(content: Any) -> str:
+    """success | rejected (governance/validation refusal) | error (ENC-TSK-S26-0A; query pack S26-0D reads `success`)."""
+    try:
+        if _tool_result_status(content) == "success":
+            return "success"
+        code = _tool_error_code(content)
+        text = str(getattr(content[0], "text", "") if content else "").lower()
+        if code in ("governance_stale", "governance_hash_missing", "record_not_found") or any(
+            m in text for m in ("http 400", "http 403", "http 404", "http 409", "http 412", "http 422", "rejected")
+        ):
+            return "rejected"
+    except Exception:
+        pass
+    return "error"
+
+
+def _build_write_audit_fields(
+    name: str, args: Dict[str, Any], step_index: Optional[int], *,
+    server_total_ms: int, t_route_ms: int, state: Dict[str, Any],
+) -> Dict[str, Any]:
+    ctx = _REQUEST_CTX.get() or _begin_request_context(None)
+    record_id = next((str(args[k]) for k in _RECORD_ID_ARGS if args.get(k)), None)
+    idem = next((str(args[k]) for k in ("idempotency_key", "Idempotency-Key", "idempotencyKey") if args.get(k)), None)
+    gov_in = str(args.get("governance_hash") or "")
+    fields: Dict[str, Any] = {
+        "correlation_id": _current_correlation_id(),
+        "request_id": ctx["request_id"],
+        "session_id": args.get("active_agent_session_id") or None,
+        "tool": name,
+        "project_id": args.get("project_id") or None,
+        "record_id": record_id,
+        "idempotency_key": idem,
+        "execute_step_index": step_index,
+        "surface": "mcp_server",
+        "attempt_outcome": state.get("attempt_outcome", "error"),
+        "success": state.get("attempt_outcome", "error") == "success",
+        "dry_run": bool(args.get("dry_run")),
+        "server_total_ms": server_total_ms,
+        "cold_start": bool(ctx.get("cold_start")),
+        "init_ms": int(ctx.get("init_ms") or 0),
+        "hops": 1,
+        "t_route_ms": t_route_ms,
+        "t_governance_ms": int(state.get("t_governance_ms", 0)),
+        "governance_cache_hit": state.get("governance_cache_hit"),
+        "governance_hash_in": gov_in[:16] or None,
+        "governance_hash_verified": bool(state.get("governance_hash_verified", False)),
+        "t_invoke_ms": int(state.get("t_invoke_ms", 0)),
+        "memory_mb": os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE"),
+        "runtime": sys.version.split()[0],
+        "arch": platform.machine(),
+        "function_version": os.environ.get("AWS_LAMBDA_FUNCTION_VERSION"),
+    }
+    fields.update(ctx.get("client") or {})  # client "surface" header overrides the default when sent
+    return fields
+
+
+async def _run_handler_with_write_audit(
+    name: str, args: Dict[str, Any], *, step_index: Optional[int], handler_lookup: Any,
+) -> Any:
+    """Look up and await a tool handler, emitting one write-audit line. handler_lookup() returns the handler or raises."""
+    state: Dict[str, Any] = {}
+    token = _CALL_STATE.set(state)
+    started = time.perf_counter()
+    t_route_ms = 0
+    try:
+        handler = handler_lookup()
+        t_route_ms = int((time.perf_counter() - started) * 1000)
+        result = await handler(args)
+        state["attempt_outcome"] = _audit_attempt_outcome(result)
+        return result
+    except BaseException:
+        state.setdefault("attempt_outcome", "error")
+        raise
+    finally:
+        _CALL_STATE.reset(token)
+        try:
+            _write_audit_line(_build_write_audit_fields(
+                name, args, step_index,
+                server_total_ms=int((time.perf_counter() - started) * 1000),
+                t_route_ms=t_route_ms, state=state,
+            ))
+        except Exception:
+            logger.debug("write-audit build failed", exc_info=True)
+
+
 def _audit_tool_invocation(
     name: str,
     arguments: Dict[str, Any],
@@ -1714,11 +1929,30 @@ def _current_governance_hash_for_validation(provided: str) -> str:
     return current
 
 
+def _timed_governance_validation(provided: str) -> str:
+    """_current_governance_hash_for_validation + write-audit timing (t_governance_ms, cache hit)."""
+    state = _CALL_STATE.get()
+    cache_hit = (
+        bool(_governance_hash_api_cache)
+        and (time.time() - _governance_hash_api_cache_at) < _GOVERNANCE_HASH_API_TTL
+    )
+    started = time.perf_counter()
+    try:
+        current = _current_governance_hash_for_validation(provided)
+    finally:
+        if state is not None:
+            state["t_governance_ms"] = state.get("t_governance_ms", 0) + (time.perf_counter() - started) * 1000
+            state["governance_cache_hit"] = bool(cache_hit)
+    if state is not None:
+        state["governance_hash_verified"] = provided == current
+    return current
+
+
 def _require_governance_hash(args: dict) -> Optional[str]:
     provided = str(args.get("governance_hash") or "").strip()
     if not provided:
         return "Missing governance_hash for write-capable MCP tool call"
-    current = _current_governance_hash_for_validation(provided)
+    current = _timed_governance_validation(provided)
     if provided != current:
         return "GOVERNANCE_STALE: provided governance_hash does not match current governance bundle"
     return None
@@ -1732,7 +1966,7 @@ def _require_governance_hash_envelope(args: dict) -> Optional[Dict[str, Any]]:
             "Missing governance_hash for write-capable MCP tool call",
             retryable=False,
         )
-    current = _current_governance_hash_for_validation(provided)
+    current = _timed_governance_validation(provided)
     if provided != current:
         fresh_local = _compute_governance_hash(force_refresh=True)
         return _error_payload(
@@ -2195,6 +2429,7 @@ def _document_api_request(
         for key, value in extra_headers.items():
             if value:
                 headers[key] = str(value)
+    payload = _with_correlation(headers, payload, method)  # ENC-TSK-S26-0A
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
@@ -2202,6 +2437,7 @@ def _document_api_request(
         body = None
 
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
+    _t_invoke = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
             text = resp.read().decode("utf-8")
@@ -2217,6 +2453,8 @@ def _document_api_request(
         return _error_payload("UPSTREAM_ERROR", f"Document API unreachable: {exc}", retryable=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return _error_payload("INTERNAL_ERROR", f"Document API request failed: {exc}", retryable=False)
+    finally:
+        _note_invoke((time.perf_counter() - _t_invoke) * 1000)
 
 
 def _tracker_api_request(
@@ -2237,6 +2475,7 @@ def _tracker_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
+    payload = _with_correlation(headers, payload, method)  # ENC-TSK-S26-0A
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
@@ -2260,6 +2499,7 @@ def _tracker_api_request(
         if key:
             attempt_headers["X-Coordination-Internal-Key"] = key
         req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
+        _t_invoke = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
                 text = resp.read().decode("utf-8")
@@ -2277,6 +2517,8 @@ def _tracker_api_request(
             return _error_payload("UPSTREAM_ERROR", f"Tracker API unreachable: {exc}", retryable=True)
         except Exception as exc:
             return _error_payload("INTERNAL_ERROR", f"Tracker API request failed: {exc}", retryable=False)
+        finally:
+            _note_invoke((time.perf_counter() - _t_invoke) * 1000)
 
     return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
@@ -2294,6 +2536,7 @@ def _checkout_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
+    payload = _with_correlation(headers, payload, method)  # ENC-TSK-S26-0A
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body: Optional[bytes] = json.dumps(payload).encode("utf-8")
@@ -2311,6 +2554,7 @@ def _checkout_api_request(
         if key:
             attempt_headers["X-Coordination-Internal-Key"] = key
         req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
+        _t_invoke = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
                 text = resp.read().decode("utf-8")
@@ -2328,6 +2572,8 @@ def _checkout_api_request(
             return _error_payload("UPSTREAM_ERROR", f"Checkout service unreachable: {exc}", retryable=True)
         except Exception as exc:
             return _error_payload("INTERNAL_ERROR", f"Checkout API request failed: {exc}", retryable=False)
+        finally:
+            _note_invoke((time.perf_counter() - _t_invoke) * 1000)
         break
 
     return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
@@ -3590,8 +3836,10 @@ def _code_mode_tool_catalog() -> list[Tool]:
             name="execute",
             description=(
                 "Governed workflow runner for ordered mutation or lifecycle steps. "
-                "Each step resolves through existing MCP/HTTP handlers, supports dry_run, "
-                "and returns per-step status with resolved underlying calls. Failures also carry "
+                "Each step resolves through existing MCP/HTTP handlers and returns per-step status "
+                "with resolved underlying calls. Top-level dry_run short-circuits every step; "
+                "step-level dry_run (or arguments.dry_run) short-circuits that step only. A dry step "
+                "never invokes the underlying tool and returns a ResolvedCall. Failures carry "
                 "RFC 9457 problem details (errors[].pointer)."
             ),
             inputSchema={
@@ -5662,7 +5910,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 error_code="unknown_tool",
             )
             return result
-        result = await handler(args)
+        if name in WRITE_AUDIT_TOOLS:  # ENC-TSK-S26-0A (execute steps are audited in _invoke_raw_tool)
+            result = await _run_handler_with_write_audit(
+                name, args, step_index=_EXECUTE_STEP_INDEX.get(), handler_lookup=lambda: handler,
+            )
+        else:
+            result = await handler(args)
         status = _tool_result_status(result)
         _audit_tool_invocation(
             name,
@@ -8468,7 +8721,7 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
 # --- Code Mode Meta-Tools (ENC-FTR-044 / ENC-TSK-L09 decomposition) ---
 from mcp_server.actions import ActionFeatureFlags, build_action_registries
 from mcp_server.catalog import build_action_catalog, tool_annotations as _catalog_tool_annotations
-from mcp_server.runtime import bind_runtime
+from mcp_server.runtime import EXECUTE_STEP_INDEX as _EXECUTE_STEP_INDEX, bind_runtime
 from mcp_server.tools.context import get_compact_context_meta, recipe_record_kind
 from mcp_server.tools.coordination import coordination_meta, register_actions as register_coordination_actions
 from mcp_server.tools.execute import execute, register_actions as register_execute_actions
@@ -11925,6 +12178,7 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3. Build ASGI scope from Lambda Function URL event
     headers_raw = event.get("headers", {}) or {}
+    _absorb_request_headers(headers_raw)  # ENC-TSK-S26-0A: correlation_id + client passthrough
     asgi_headers = [(k.encode(), v.encode()) for k, v in headers_raw.items()]
     req_ctx = (event.get("requestContext") or {}).get("http", {})
     path = req_ctx.get("path", "/mcp")
@@ -11983,6 +12237,7 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    _begin_request_context(context)  # ENC-TSK-S26-0A: aws_request_id + cold-start flag
     if MCP_TRANSPORT != "streamable_http":
         return {
             "statusCode": 400,
