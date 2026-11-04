@@ -85,10 +85,12 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 _WA_T0 = time.perf_counter()  # ENC-TSK-S26-0A: init_ms origin
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
@@ -159,6 +161,7 @@ import sys
 # ---------------------------------------------------------------------------
 _WA_COLD = True
 _WA: Dict[str, Any] = {}  # per-invocation state (Lambda runs one request at a time)
+_WA_LOCK = threading.Lock()  # ENC-TSK-S39-0B: nested reads may run on worker threads
 
 
 def _wa_hdr(event: Dict, name: str) -> str:
@@ -174,7 +177,7 @@ def _wa_begin(event: Dict, context: Any, surface: str) -> None:
     _WA.clear()
     _WA.update({
         "surface": surface, "t0": time.perf_counter(), "cold_start": cold, "ddb_ops": 0, "ddb_ms": 0.0,
-        "ddb_retries": 0, "t": {}, "version_seq": None, "extra": {},
+        "ddb_retries": 0, "t": {}, "version_seq": None, "extra": {}, "nested_requests": 0,
         "request_id": str(getattr(context, "aws_request_id", "") or ""),
         "memory_mb": getattr(context, "memory_limit_in_mb", None),
         "function_version": getattr(context, "function_version", None),
@@ -213,7 +216,10 @@ def _wa_timed(key: str):
                 return fn(*a, **k)
             finally:
                 if _WA:
-                    _WA["t"][key] = _WA["t"].get(key, 0.0) + (time.perf_counter() - t) * 1000
+                    with _WA_LOCK:
+                        _WA["t"][key] = _WA["t"].get(key, 0.0) + (time.perf_counter() - t) * 1000
+                        if key == "t_invoke_ms":  # ENC-TSK-S39-0B: one per nested tracker request
+                            _WA["nested_requests"] = _WA.get("nested_requests", 0) + 1
         inner.__name__, inner.__doc__ = fn.__name__, fn.__doc__
         return inner
     return deco
@@ -274,6 +280,7 @@ def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Opt
             "ddb_ops": st["ddb_ops"], "ddb_retries": st["ddb_retries"],
             "memory_mb": st["memory_mb"], "runtime": sys.version.split()[0], "arch": platform.machine(),
             "function_version": st["function_version"], "hops": 1, "version_seq": st["version_seq"],
+            "nested_requests": st.get("nested_requests", 0),
             "t_ack": int(time.time() * 1000),
         }
         line.update({k: (int(v) if k.startswith("t_") and k.endswith("_ms") else v) for k, v in t.items()
@@ -1766,7 +1773,9 @@ def _session_terminal_state(session: Optional[dict]) -> Tuple[bool, str]:
 # Route handlers
 # ---------------------------------------------------------------------------
 
-def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
+def _handle_checkout(
+    project_id: str, task_id: str, body: dict, prefetched_task: Optional[dict] = None
+) -> dict:
     """POST .../checkout — Atomic checkout + advance to in-progress.
 
     ENC-TSK-F41 / DOC-546B896390EA §5: every successful invocation of this
@@ -1811,7 +1820,12 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     # state (checkout lock, status mutation, CAI token). This surfaces
     # incompatibilities at the earliest enforcement point, before
     # transition_type becomes immutable per ENC-FTR-060.
-    pre_status, pre_task = _get_task(project_id, task_id)
+    # ENC-TSK-S39-0B: checkout.advance(target_status=in-progress) has just read the
+    # task and wrote nothing since; reuse that record instead of a second GET.
+    if prefetched_task is not None:
+        pre_status, pre_task = 200, prefetched_task
+    else:
+        pre_status, pre_task = _get_task(project_id, task_id)
     if pre_status != 200:
         return _error(pre_status, pre_task.get("error", f"Task not found: {task_id}"))
 
@@ -1939,10 +1953,13 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     # If the transition_type is later mutated between checkout and advance, the
     # advance will be rejected as a governance integrity violation.
     checkout_transition_type = (task.get("transition_type") or "github_pr_deploy").strip().lower()
-    _set_task_field(
-        project_id, task_id, "checkout_transition_type", checkout_transition_type,
-        provider=provider,
-    )
+    # ENC-TSK-S39-0B: a re-checkout of a task already carrying this exact stamp
+    # (read in this request) has nothing to write; skip the zero-information PATCH.
+    if (pre_task.get("checkout_transition_type") or "").strip().lower() != checkout_transition_type:
+        _set_task_field(
+            project_id, task_id, "checkout_transition_type", checkout_transition_type,
+            provider=provider,
+        )
 
     # ENC-TSK-F41: observe checkout_count on the returned record — this value
     # reflects the atomic increment that tracker_mutation performed as part of
@@ -3042,11 +3059,16 @@ def _validate_subtask_gate(
         return None
 
     lagging: list = []
-    for child_id in subtask_ids:
-        child_id = str(child_id).strip()
-        if not child_id:
-            continue
-        child_status_code, child_task = _get_task(project_id, child_id)
+    child_ids = [c for c in (str(x).strip() for x in subtask_ids) if c]
+    # ENC-TSK-S39-0B: the child reads are independent; issue them concurrently
+    # (same request count, ~1 round trip of wall time instead of N). Results are
+    # consumed in the original order so the lagging list is unchanged.
+    if len(child_ids) > 1:
+        with ThreadPoolExecutor(max_workers=min(8, len(child_ids))) as pool:
+            child_results = list(pool.map(lambda cid: _get_task(project_id, cid), child_ids))
+    else:
+        child_results = [_get_task(project_id, cid) for cid in child_ids]
+    for child_id, (child_status_code, child_task) in zip(child_ids, child_results):
         if child_status_code != 200:
             lagging.append((child_id, "not_found"))
             continue
@@ -3436,10 +3458,11 @@ def _increment_failure_count(
         project_id, task_id, "advance_failure_count", new_count,
         provider=provider or "checkout-service-assistant",
     )
-    _set_task_field(
-        project_id, task_id, "advance_failure_gate", gate,
-        provider=provider or "checkout-service-assistant",
-    )
+    if current_gate != gate:  # ENC-TSK-S39-0B: unchanged gate -> nothing to write
+        _set_task_field(
+            project_id, task_id, "advance_failure_gate", gate,
+            provider=provider or "checkout-service-assistant",
+        )
     return new_count
 
 
@@ -3757,8 +3780,8 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     response_extras: dict = {}
 
     if target_status == "in-progress":
-        # Delegate to checkout handler (checkout + advance)
-        return _handle_checkout(project_id, task_id, body)
+        # Delegate to checkout handler (checkout + advance); ENC-TSK-S39-0B: reuse the task read above
+        return _handle_checkout(project_id, task_id, body, prefetched_task=task)
 
     elif target_status == "coding-complete":
         if not active_session:
