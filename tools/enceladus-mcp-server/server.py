@@ -174,6 +174,14 @@ S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_P
 # ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
 GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
 GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
+# ENC-TSK-S28-0C: in-process governance cache keyed by content hash. A request hash equal to the cached hash validates
+# with no network call until the entry is older than this probe TTL, after which the canonical record is re-read.
+GOVERNANCE_PROBE_TTL_S = float(os.environ.get("GOVERNANCE_PROBE_TTL_S", "300"))
+# Best-effort canonical read at module init; 0/false skips it.
+# Default: on inside Lambda (cold start), off elsewhere so imports never trigger credential lookups.
+GOVERNANCE_CACHE_PRELOAD = os.environ.get(
+    "GOVERNANCE_CACHE_PRELOAD", "1" if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else "0"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -1910,32 +1918,76 @@ def _cache_governance_hash(value: str) -> None:
     global _governance_hash_api_cache, _governance_hash_api_cache_at
     _governance_hash_api_cache = value
     _governance_hash_api_cache_at = time.time()
+    _gov_cache_store(value)
+
+
+# ENC-TSK-S28-0C: verified-hash cache. {hash, loaded_at}; only ever populated from the canonical record, the
+# governance-update response, or (fallback) the legacy resolver. Validation stays strict: a hash is accepted only if
+# it equals the cached hash AND the entry is younger than GOVERNANCE_PROBE_TTL_S, else the source is re-read.
+_GOV_CACHE: Dict[str, Any] = {"hash": "", "loaded_at": 0.0}
+
+
+def _gov_cache_store(value: str) -> None:
+    _GOV_CACHE["hash"] = value
+    _GOV_CACHE["loaded_at"] = time.time()
+
+
+def _gov_cache_fresh() -> bool:
+    return bool(_GOV_CACHE["hash"]) and (time.time() - float(_GOV_CACHE["loaded_at"])) < GOVERNANCE_PROBE_TTL_S
+
+
+def _gov_cache_would_hit(provided: str) -> bool:
+    return _gov_cache_fresh() and provided == _GOV_CACHE["hash"]
+
+
+def _gov_refetch_verified() -> str:
+    """One authoritative read: canonical version record, else the legacy resolver chain (cache bypassed)."""
+    global _governance_hash_api_cache, _governance_hash_api_cache_at
+    try:
+        h = _get_canonical_governance_hash_ddb()
+        if h:
+            _governance_hash_api_cache, _governance_hash_api_cache_at = h, time.time()
+            _gov_cache_store(h)
+            return h
+    except Exception:
+        pass
+    # Fallback: whatever _get_governance_hash_via_api falls back to today. Drop its 60 s cache first so a rotation
+    # cannot be masked by a stale legacy entry.
+    _governance_hash_api_cache, _governance_hash_api_cache_at = None, 0.0
+    h = _get_governance_hash_via_api()
+    _gov_cache_store(h)
+    return h
+
+
+def _gov_cache_preload() -> None:
+    if not GOVERNANCE_CACHE_PRELOAD:
+        return
+    try:
+        _gov_cache_store(_get_canonical_governance_hash_ddb())
+    except Exception:
+        pass  # cold cache; first validation fetches
 
 
 def _current_governance_hash_for_validation(provided: str) -> str:
-    """Resolve current governance hash with stale-cache self-healing.
+    """Resolve the current governance hash for validation (ENC-TSK-S28-0C).
 
-    Primary compare uses API/health hash. If it mismatches the provided hash,
-    perform one forced local recomputation from governance resources.
+    Hit: provided == cached hash and entry younger than GOVERNANCE_PROBE_TTL_S -> no network call.
+    Otherwise (mismatch, cold, or TTL probe due): exactly one re-read of the canonical record (legacy resolver on
+    failure), cache updated; the caller rejects if the provided hash still differs.
     """
-    current = _get_governance_hash_via_api()
-    if provided == current:
-        return current
-
-    fresh_local = _compute_governance_hash(force_refresh=True)
-    if provided == fresh_local:
-        _cache_governance_hash(fresh_local)
-        return fresh_local
+    if _gov_cache_would_hit(provided):
+        return _GOV_CACHE["hash"]
+    current = _gov_refetch_verified()
     return current
+
+
+_gov_cache_preload()
 
 
 def _timed_governance_validation(provided: str) -> str:
     """_current_governance_hash_for_validation + write-audit timing (t_governance_ms, cache hit)."""
     state = _CALL_STATE.get()
-    cache_hit = (
-        bool(_governance_hash_api_cache)
-        and (time.time() - _governance_hash_api_cache_at) < _GOVERNANCE_HASH_API_TTL
-    )
+    cache_hit = _gov_cache_would_hit(provided)
     started = time.perf_counter()
     try:
         current = _current_governance_hash_for_validation(provided)
