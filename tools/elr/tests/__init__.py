@@ -28,3 +28,8 @@ _elr_config.ELR_KEY_FILE_DEFAULT = str(
     Path(_tempfile.gettempdir()) / f"elr-tests-no-key-file-{_os.getpid()}"
 )
 _os.environ.setdefault("ENCELADUS_INTERNAL_API_KEY", "test-fixture-key-not-a-real-secret")
+
+# ENC-TSK-S26-0B: transport calls append to a local timing ledger; keep the
+# suite from writing to a developer's real ~/.enceladus (tests of the ledger
+# itself set ELR_LEDGER / ELR_LEDGER_PATH explicitly).
+_os.environ.setdefault("ELR_LEDGER", "0")

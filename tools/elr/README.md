@@ -53,6 +53,20 @@ key-scraping wrapper). Usage: `~/.enceladus/elr/elr <subcommand> [args]`.
   `ENCELADUS_HEALTH_API_URL`, `ENCELADUS_GRAPH_QUERY_API_BASE`
 - `ENCELADUS_MCP_GATEWAY_URL`, `ENCELADUS_MCP_BEARER_TOKEN` / `ENCELADUS_MCP_API_KEY`
 
+## Client timing headers and ledger (ENC-TSK-S26-0B)
+
+Every `InternalClient` and `McpHttpClient` request sends seven timing headers
+(BRD DOC-E32D0ED08473 section 7.2 `client_side`): `X-Correlation-Id`,
+`X-Enc-T-Client-Start` (epoch ms), `X-Enc-Client-Session-Reused` (`0`/`1`),
+`X-Enc-Client-Session-Init-Ms`, `X-Enc-Client-Tls-New` (`0`/`1`),
+`X-Enc-Client-Serialize-Ms` and `X-Enc-Surface` (`elr`). One JSON line per call
+is appended to `~/.enceladus/elr/ledger/client_timing.jsonl`, keyed by
+`correlation_id` (timings, `response_bytes`, method/verb, host, status; never a
+header value, so no key or bearer token). Env knobs: `ELR_CORRELATION_ID`
+(honoured instead of minting a uuid4 per call), `ELR_LEDGER_PATH` (override the
+file), `ELR_LEDGER=0` (disable). `client_tls_new` is `1` on every call until
+connection reuse lands (W2.2).
+
 ## Run
 
 ```
