@@ -88,16 +88,21 @@ class WriteAuditTests(unittest.TestCase):
                 mock.patch.object(tm, "_get_ddb", return_value=object()):
             tm._WA.clear()
             tm._WA["correlation_id"] = "corr-x"
+            tm._WA["write_tool"] = "tracker.set"
             item = {}
             tm._stamp_version_seq_on_create_item(item)
             self.assertEqual(item["correlation_id"], {"S": "corr-x"})
+            self.assertEqual(item["write_tool"], {"S": "tracker.set"})
             expr, vals = tm._version_seq_update_parts()
             self.assertIn("correlation_id = :wa_cid", expr)
             self.assertEqual(vals[":wa_cid"], {"S": "corr-x"})
+            self.assertIn("write_tool = :wa_tool", expr)
+            self.assertEqual(vals[":wa_tool"], {"S": "tracker.set"})
             self.assertEqual(tm._WA["version_seq"], 7)
             tm._WA.clear()
             expr2, vals2 = tm._version_seq_update_parts()
             self.assertNotIn("correlation_id", expr2)
+            self.assertNotIn("write_tool", expr2)
 
 
 if __name__ == "__main__":

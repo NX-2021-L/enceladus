@@ -52,6 +52,10 @@ class GraphSyncWriteAuditTests(unittest.TestCase):
         self.assertEqual((m["Namespace"], m["Dimensions"], [x["Name"] for x in m["Metrics"]]),
                          ("Enceladus/WritePath", [["tool"]], ["governed_lag_ms"]))
         self.assertEqual(emf[0]["tool"], "unknown")
+        rec2 = {"messageId": "m2", "body": json.dumps({"eventName": "MODIFY", "dynamodb": {"NewImage": _image(
+            correlation_id="corr-g", write_tool="documents.patch")}})}
+        lines2, emf2 = self._run([rec2])
+        self.assertEqual((lines2[0]["tool"], emf2[0]["tool"]), ("documents.patch", "documents.patch"))
 
     def test_t_ack_attribute_preferred_and_non_governed_skipped(self):
         gov = {"eventName": "INSERT", "dynamodb": {"NewImage": {**_image(), "t_ack": {"N": "1000"}}}}

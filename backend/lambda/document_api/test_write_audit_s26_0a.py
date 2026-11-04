@@ -68,9 +68,12 @@ class DocumentWriteAuditTests(unittest.TestCase):
         with mock.patch.object(da, "_allocate_document_version_seq", return_value=5):
             da._WA.clear()
             da._WA["correlation_id"] = "corr-p"
+            da._WA["write_tool"] = "documents.patch"
             clauses, vals = da._document_version_seq_update_parts()
             self.assertIn("correlation_id = :wa_cid", clauses)
             self.assertEqual(vals[":wa_cid"], {"S": "corr-p"})
+            self.assertIn("write_tool = :wa_tool", clauses)
+            self.assertEqual(vals[":wa_tool"], {"S": "documents.patch"})
             self.assertEqual(da._WA["version_seq"], 5)
             da._WA.clear()
 

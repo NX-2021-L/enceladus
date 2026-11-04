@@ -1280,6 +1280,8 @@ def _get_ddb():
 def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
     if _WA.get("correlation_id"):  # ENC-TSK-S26-0A: correlation_id lands on the item
         item["correlation_id"] = {"S": _WA["correlation_id"]}
+    if _WA.get("write_tool"):  # ENC-TSK-S26-0A: governed_lag_ms `tool` dimension source
+        item["write_tool"] = {"S": _WA["write_tool"]}
     if not _VERSION_SEQ_AVAILABLE:
         return
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
@@ -1295,9 +1297,15 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
     expr, vals = version_seq_update_clause(seq)
     if _WA:
         _WA["version_seq"] = seq
-    cid = _WA.get("correlation_id")
-    if cid and expr:  # ENC-TSK-S26-0A: correlation_id lands on the item (SET, before any ADD)
-        return expr + ", correlation_id = :wa_cid", {**vals, ":wa_cid": {"S": cid}}
+    cid, wtool = _WA.get("correlation_id"), _WA.get("write_tool")
+    if expr and (cid or wtool):  # ENC-TSK-S26-0A: correlation_id + write_tool land on the item (SET, before any ADD)
+        vals = dict(vals)
+        if cid:
+            expr += ", correlation_id = :wa_cid"
+            vals[":wa_cid"] = {"S": cid}
+        if wtool:
+            expr += ", write_tool = :wa_tool"
+            vals[":wa_tool"] = {"S": wtool}
     return expr, vals
 
 
@@ -11312,6 +11320,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     _wa_begin(event, context, "tracker_mutation")
     path = event.get("rawPath") or event.get("path", "")
     tool, project_id, record_id = _wa_tool_for(method, path)
+    _WA["write_tool"] = tool  # stamped on the item beside correlation_id
     status = 500
     resp: Any = None
     try:

@@ -2729,6 +2729,8 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
 
     if _WA.get("correlation_id"):  # ENC-TSK-S26-0A
         item["correlation_id"] = {"S": _WA["correlation_id"]}
+    if _WA.get("write_tool"):  # governed_lag_ms `tool` dimension source
+        item["write_tool"] = {"S": _WA["write_tool"]}
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
     except Exception as exc:
@@ -4198,6 +4200,9 @@ def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
         if _WA.get("correlation_id"):
             clauses.append("correlation_id = :wa_cid")
             vals[":wa_cid"] = {"S": _WA["correlation_id"]}
+        if _WA.get("write_tool"):
+            clauses.append("write_tool = :wa_tool")
+            vals[":wa_tool"] = {"S": _WA["write_tool"]}
     return clauses, vals
 
 
@@ -5346,6 +5351,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         tool, doc_id = "documents.patch", segs[-1]
     else:
         tool = "documents.put"
+    _WA["write_tool"] = tool  # stamped on the item beside correlation_id
     status = 500
     resp: Any = None
     try:

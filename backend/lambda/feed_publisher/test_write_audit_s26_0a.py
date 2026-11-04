@@ -16,9 +16,11 @@ def _ago(seconds):
     return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _record(message_id="m1", cid="corr-f", receive="2"):
+def _record(message_id="m1", cid="corr-f", receive="2", write_tool="tracker.create"):
     image = {"item_id": {"S": "ENC-TSK-2"}, "version_seq": {"N": "5"},
              "updated_at": {"S": _ago(2)}, "correlation_id": {"S": cid}}
+    if write_tool:
+        image["write_tool"] = {"S": write_tool}
     return {"messageId": message_id, "attributes": {"ApproximateReceiveCount": receive},
             "body": json.dumps({"eventName": "MODIFY", "dynamodb": {"Keys": {"record_id": {"S": "task#ENC-TSK-2"}},
                                                                    "NewImage": image}})}
@@ -46,6 +48,9 @@ class FeedPublisherWriteAuditTests(unittest.TestCase):
         self.assertEqual(line["governed_lag_ms"], line["t_projection_done"] - line["t_ack"])
         self.assertEqual(len(emf), 1)
         self.assertEqual(emf[0]["governed_lag_ms"], line["governed_lag_ms"])
+        self.assertEqual((line["tool"], emf[0]["tool"]), ("tracker.create", "tracker.create"))
+        lines, emf = self._run("per_batch", {"batchItemFailures": []}, [_record(write_tool=None)])
+        self.assertEqual((lines[0]["tool"], emf[0]["tool"]), ("unknown", "unknown"))
 
     def test_failed_record_error_and_coalesced_mark_has_no_metric(self):
         lines, emf = self._run("per_batch", {"batchItemFailures": [{"itemIdentifier": "m1"}]}, [_record()])
