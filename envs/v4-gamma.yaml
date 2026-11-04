@@ -118,6 +118,7 @@ function_name_map:
   tracker_mutation: devops-tracker-mutation-api-gamma
   unlearning: enceladus-unlearning-gamma
   user_preferences_api: enceladus-user-preferences-api-gamma
+  write_bench_client: devops-write-bench-client-gamma
 
 # ENC-ISS-663 / ENC-TSK-P03. A function in lambda_workflow_manifest.json that is
 # absent from function_name_map above is SILENTLY SKIPPED by the deploy step --
