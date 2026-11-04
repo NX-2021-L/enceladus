@@ -66,7 +66,7 @@ def make(seed=26):
             **stages,
             "governance_cache_hit": not cold, "governance_hash_in": GOV_HASH,
             "governance_hash_verified": True, "idempotency_hit": False,
-            "ddb_ops": ops, "ddb_retries": 0, "memory_mb": 1024, "runtime": "python3.11",
+            "ddb_ops": ops, "ddb_retries": 0, "memory_mb": 1024, "runtime": "python3-managed",
             "arch": "arm64", "function_version": "42", "success": True,
             "receipt_hash": hashlib.sha256(f"idem-{i:04d}".encode()).hexdigest()[:16],
         }
