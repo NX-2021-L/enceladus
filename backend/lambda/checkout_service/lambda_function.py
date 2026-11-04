@@ -27,6 +27,8 @@ Auth:
 
 Environment variables:
     TRACKER_API_BASE              default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker (direct APIGW, avoids Cloudflare 1010)
+    CHECKOUT_TRACKER_INVOKE_MODE  direct | http (ENC-TSK-S39-0A; default gamma -> direct, prod/local -> http): direct = lambda:InvokeFunction of devops-tracker-mutation-api<suffix>:live
+    TRACKER_TOOL_FUNCTION         override tracker Lambda name for the direct invoke (default devops-tracker-mutation-api[-gamma])
     COORDINATION_INTERNAL_API_KEY  internal key for calling tracker API
     COORDINATION_INTERNAL_API_KEYS CSV of accepted internal keys (multi-key support)
     CHECKOUT_SERVICE_KEY          secret this service presents to tracker_mutation (X-Checkout-Service-Key)
@@ -96,6 +98,7 @@ import urllib.error
 from urllib.parse import unquote
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from enceladus_shared.github_app_auth import (
@@ -177,6 +180,11 @@ def _wa_begin(event: Dict, context: Any, surface: str) -> None:
         "function_version": getattr(context, "function_version", None),
         "correlation_id": _wa_hdr(event, "x-correlation-id"),
         "idempotency_key": _wa_hdr(event, "idempotency-key"),
+        # ENC-TSK-S39-0A: X-Enc-* client-audit headers, passed through on the direct tracker invoke.
+        "enc_headers": {
+            str(k).lower(): str(v) for k, v in (event.get("headers") or {}).items()
+            if str(k).lower().startswith("x-enc-") and v not in (None, "")
+        },
     })
     raw = event.get("body")
     if isinstance(raw, str) and event.get("isBase64Encoded"):
@@ -622,13 +630,240 @@ def _is_authenticated(event: dict) -> bool:
 # Tracker API calls
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S39-0A (W3b.1): direct qualified invoke checkout_service -> tracker_mutation :live.
+# Mirrors the ENC-TSK-S28-0F adapter in tools/enceladus-mcp-server/server.py (different deployable,
+# so duplicated rather than imported). The HTTP path stays as a fallback that fires ONLY when the
+# invoke provably never reached the tool Lambda; once the tool has run, whatever it returned
+# (including 4xx/5xx and FunctionError) is the result, so a write can never execute twice.
+# ---------------------------------------------------------------------------
+TRACKER_INVOKE_QUALIFIER = "live"
+_TRACKER_FUNCTION_DEFAULT = "devops-tracker-mutation-api"
+_TRACKER_INVOKE_FALLBACK_CODES = frozenset({
+    "ResourceNotFoundException", "AccessDeniedException", "TooManyRequestsException", "ThrottlingException",
+    "EC2ThrottledException",
+})
+_TRACKER_INVOKE_NOT_DELIVERED = frozenset({
+    "EndpointConnectionError", "ConnectTimeoutError", "NoCredentialsError",
+})
+_lambda_client = None
+
+
+class _TrackerInvokeUnavailable(Exception):
+    """The invoke could not be delivered to the tracker Lambda; caller falls back to HTTP once."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def _is_gamma_environment() -> bool:
+    suffix = (os.environ.get("ENVIRONMENT_SUFFIX") or os.environ.get("ENV_SUFFIX") or "").strip().lower()
+    if suffix:
+        return suffix.lstrip("-") == "gamma"
+    return os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip().lower().endswith("-gamma")
+
+
+def _tracker_invoke_mode() -> str:
+    """`direct` | `http`. Env CHECKOUT_TRACKER_INVOKE_MODE wins; default gamma -> direct, prod/local -> http."""
+    explicit = os.environ.get("CHECKOUT_TRACKER_INVOKE_MODE", "").strip().lower()
+    if explicit in ("direct", "http"):
+        return explicit
+    return "direct" if _is_gamma_environment() else "http"
+
+
+def _tracker_function_name() -> str:
+    configured = os.environ.get("TRACKER_TOOL_FUNCTION", "").strip()
+    return configured or f"{_TRACKER_FUNCTION_DEFAULT}{'-gamma' if _is_gamma_environment() else ''}"
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client(
+            "lambda",
+            region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or CHECKOUT_TOKENS_REGION,
+            # No SDK retries: a retried synchronous invoke of a write could apply it twice.
+            config=Config(retries={"max_attempts": 1, "mode": "standard"}, connect_timeout=3, read_timeout=25),
+        )
+    return _lambda_client
+
+
+def _wa_note_invoke_mode(mode: str, reason: str = "") -> None:
+    """Record how the tracker call travelled on the [WRITE-AUDIT] line (direct_fallback is sticky)."""
+    if not _WA:
+        return
+    extra = _WA.setdefault("extra", {})
+    if extra.get("invoke_mode") == "direct_fallback":
+        return
+    extra["invoke_mode"] = mode
+    extra["hops"] = 1 if mode == "direct" else 2
+    if reason:
+        extra["invoke_fallback_reason"] = reason[:200]
+
+
+def _tracker_key_candidates() -> list:
+    keys: list = []
+    for key in [_PRIMARY_INTERNAL_KEY, *_INTERNAL_API_KEYS]:
+        if key and key not in keys:
+            keys.append(key)
+    return keys or [""]
+
+
+def _build_tracker_event(
+    method: str, path: str, body: Optional[dict], headers: Dict[str, str], query: str = ""
+) -> Dict[str, Any]:
+    """Synthesize the API Gateway v2 (payload 2.0) event tracker_mutation parses."""
+    event_headers = {str(k).lower(): str(v) for k, v in (headers or {}).items() if v is not None}
+    for k, v in (_WA.get("enc_headers") or {}).items():  # X-Enc-* passthrough
+        event_headers.setdefault(k, v)
+    method = method.upper()
+    cid = event_headers.get("x-correlation-id") or str(uuid.uuid4())
+    event_headers.setdefault("x-correlation-id", cid)
+    event: Dict[str, Any] = {
+        "version": "2.0",
+        "routeKey": "$default",
+        "rawPath": path,
+        "rawQueryString": query,
+        "headers": event_headers,
+        "requestContext": {
+            "http": {
+                "method": method,
+                "path": path,
+                "protocol": "HTTP/1.1",
+                "sourceIp": "127.0.0.1",
+                "userAgent": event_headers.get("user-agent", "enceladus-checkout-service"),
+            },
+            "routeKey": "$default",
+            "stage": "$default",
+            "requestId": cid,
+        },
+        "isBase64Encoded": False,
+    }
+    if query:
+        event["queryStringParameters"] = dict(urllib.parse.parse_qsl(query, keep_blank_values=True))
+    if body is not None:
+        event["body"] = json.dumps(body)
+    return event
+
+
+def _invoke_tracker_lambda_raw(event: Dict[str, Any]) -> Tuple[int, str]:
+    """Synchronous RequestResponse invoke of `<tracker function>:live`; returns (statusCode, body text).
+
+    Raises _TrackerInvokeUnavailable ONLY when the request provably never reached the tool Lambda.
+    """
+    qualified = f"{_tracker_function_name()}:{TRACKER_INVOKE_QUALIFIER}"
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=qualified,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(event).encode("utf-8"),
+        )
+    except Exception as exc:
+        if isinstance(exc, ClientError):
+            code = str((exc.response or {}).get("Error", {}).get("Code", ""))
+            if code in _TRACKER_INVOKE_FALLBACK_CODES:
+                raise _TrackerInvokeUnavailable(code, str(exc)) from exc
+        name = type(exc).__name__
+        if name in _TRACKER_INVOKE_NOT_DELIVERED:
+            raise _TrackerInvokeUnavailable(name, str(exc)) from exc
+        raise  # ambiguous (e.g. read timeout): the tool may have run
+    payload_stream = resp.get("Payload")
+    raw = payload_stream.read() if hasattr(payload_stream, "read") else (payload_stream or b"")
+    text_raw = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+    if resp.get("FunctionError"):
+        # The function RAN and failed: never fall back. Surface the tool's own envelope when it made one.
+        try:
+            err = json.loads(text_raw)
+        except (ValueError, TypeError):
+            err = {}
+        if isinstance(err, dict) and isinstance(err.get("error_envelope"), dict):
+            return 500, json.dumps(err)
+        message = f"{(err or {}).get('errorType', 'FunctionError')}: {(err or {}).get('errorMessage', 'tracker Lambda failed')}" \
+            if isinstance(err, dict) else "FunctionError: tracker Lambda failed"
+        return 500, json.dumps({"error": message})
+    try:
+        out = json.loads(text_raw)
+    except (ValueError, TypeError):
+        out = None
+    if not isinstance(out, dict) or "statusCode" not in out:
+        # The tool ran but returned something unusable: report, do NOT re-run the write over HTTP.
+        return 502, json.dumps({"error": "Tracker Lambda returned an invalid response (no statusCode)"})
+    text = out.get("body") or ""
+    if out.get("isBase64Encoded") and text:
+        text = base64.b64decode(text).decode("utf-8")
+    if not isinstance(text, str):
+        text = json.dumps(text)
+    return int(out["statusCode"]), text
+
+
+def _tracker_request_direct(method: str, path: str, payload: Optional[dict]) -> Tuple[int, dict]:
+    """Direct-invoke twin of _tracker_request_http. Raises _TrackerInvokeUnavailable only before delivery."""
+    route, _, query = path.partition("?")
+    full_path = f"{urllib.parse.urlparse(TRACKER_API_BASE).path.rstrip('/')}{route}"
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if CHECKOUT_SERVICE_KEY:
+        headers["X-Checkout-Service-Key"] = CHECKOUT_SERVICE_KEY
+    body = payload
+    _wa_cid = _WA.get("correlation_id")
+    if _wa_cid:
+        headers["X-Correlation-Id"] = _wa_cid
+        if isinstance(payload, dict) and method.upper() in ("POST", "PUT", "PATCH"):
+            body = {**payload, "correlation_id": _wa_cid}
+    keys = _tracker_key_candidates()
+    status, text = 503, ""
+    try:
+        for idx, key in enumerate(keys):
+            attempt_headers = dict(headers)
+            if key:
+                attempt_headers["X-Coordination-Internal-Key"] = key
+            status, text = _invoke_tracker_lambda_raw(_build_tracker_event(method, full_path, body, attempt_headers, query))
+            if status in (401, 403) and key and idx < len(keys) - 1:
+                continue  # internal-key rotation: try the next accepted key
+            break
+    except _TrackerInvokeUnavailable:
+        raise
+    except Exception as exc:  # ambiguous outcome: do NOT retry over HTTP
+        logger.error("Tracker direct invoke failed (%s %s): %s", method, path, exc)
+        return 503, {"error": f"Tracker API unavailable: {exc}"}
+    try:
+        parsed = json.loads(text) if text else {}
+    except ValueError:
+        parsed = {"error": text or f"HTTP {status}"}
+    return status, parsed
+
+
 @_wa_timed("t_invoke_ms")
 def _tracker_request(
     method: str,
     path: str,
     payload: Optional[dict] = None,
 ) -> Tuple[int, dict]:
-    """Make an HTTP request to the tracker API. Returns (status_code, body_dict)."""
+    """Call tracker_mutation. Returns (status_code, body_dict).
+
+    ENC-TSK-S39-0A: direct qualified Lambda invoke when CHECKOUT_TRACKER_INVOKE_MODE=direct (gamma default),
+    API Gateway HTTP otherwise; HTTP is also the fallback when the invoke never reached the tool Lambda.
+    """
+    if _tracker_invoke_mode() == "direct":
+        try:
+            result = _tracker_request_direct(method, path, payload)
+            _wa_note_invoke_mode("direct")
+            return result
+        except _TrackerInvokeUnavailable as exc:
+            logger.warning("Tracker direct invoke unavailable (%s); falling back to HTTP once: %s", exc.reason, exc.detail[:200])
+            _wa_note_invoke_mode("direct_fallback", exc.reason)
+            return _tracker_request_http(method, path, payload)
+    _wa_note_invoke_mode("http")
+    return _tracker_request_http(method, path, payload)
+
+
+def _tracker_request_http(
+    method: str,
+    path: str,
+    payload: Optional[dict] = None,
+) -> Tuple[int, dict]:
+    """Make an HTTP request to the tracker API (API Gateway). Returns (status_code, body_dict)."""
     url = f"{TRACKER_API_BASE}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
     headers: dict = {
