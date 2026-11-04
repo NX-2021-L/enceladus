@@ -12243,6 +12243,12 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
 def _warm_clients() -> None:
     if not os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or not _BOTO_AVAILABLE:
         return
+    if os.environ.get("AWS_LAMBDA_INITIALIZATION_TYPE") == "snap-start":
+        # A client built during the SnapStart init phase would freeze the snapshot-time credentials; leave the lazy
+        # memoized getters to build it after restore so it resolves fresh ones.
+        logger.info("[INFO] boto3 client warm-up skipped (SnapStart init: lazy post-restore build)")
+        return
+    logger.info("[INFO] boto3 client warm-up: eager init-time build")
     for getter in (_get_ddb, _get_s3):
         try:
             getter()
