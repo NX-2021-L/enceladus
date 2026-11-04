@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pathlib
+import random
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -232,6 +233,94 @@ def run_nodes_only(driver, entity_records: List[Dict[str, Any]], sleep_ms: int =
     return len(batch)
 
 
+def phase2_sequence(
+    entity_records: List[Dict[str, Any]],
+    relationship_records: List[Dict[str, Any]],
+    seed: Optional[int] = None,
+) -> List[tuple]:
+    """Phase 2 work list as ``(kind, record)`` pairs, ``kind`` in {"entity", "relationship"}.
+
+    Without a seed: entity reconciles first, then relationship records (historic order).
+    With a seed (ENC-TSK-S33): entity reconciles and relationship records are interleaved
+    in a deterministic ``random.Random(seed)`` permutation. With owner-scoped reconcile
+    deployed, two different seeds must yield identical ``--edge-type-counts`` output
+    (the ENC-TSK-S34 acceptance check).
+    """
+    items = [("entity", r) for r in entity_records] + [("relationship", r) for r in relationship_records]
+    if seed is not None:
+        random.Random(seed).shuffle(items)
+    return items
+
+
+def _owner_class(edge_type: str) -> str:
+    """Classify an edge type against graph_sync's declared ownership (ENC-TSK-S33)."""
+    own = GS.EDGE_OWNERSHIP
+    if edge_type in own["start"]:
+        return "start"
+    if any(edge_type in v for v in own["end"].values()):
+        return "end"
+    if edge_type in own["external"]:
+        return "external"
+    if edge_type in set(GS.RELATIONSHIP_TYPE_TO_EDGE_LABEL.values()):
+        return "relationship_record"
+    return "residue"
+
+
+def edge_type_counts(driver) -> Dict[str, Any]:
+    """Read-only per-type edge counts, split by marker (ENC-TSK-S33, spec section 4).
+
+    ``marked``    : record-owned edges carrying ``source`` and no ``source_id``
+    ``unmarked``  : legacy edges with neither ``source`` nor ``source_id``
+    ``source_id`` : relationship-record-owned edges
+    ``shared_triples`` : (type, a, b) triples held by two or more parallel edges
+    Types outside every owner class and outside RELATIONSHIP_TYPE_TO_EDGE_LABEL are
+    reported under ``residue``.
+    """
+    totals_q = (
+        "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS total, "
+        "sum(CASE WHEN r.source_id IS NOT NULL THEN 1 ELSE 0 END) AS source_id, "
+        "sum(CASE WHEN r.source_id IS NULL AND r.source IS NOT NULL THEN 1 ELSE 0 END) AS marked, "
+        "sum(CASE WHEN r.source_id IS NULL AND r.source IS NULL THEN 1 ELSE 0 END) AS unmarked"
+    )
+    shared_q = (
+        "MATCH (a)-[r]->(b) WITH type(r) AS t, a, b, count(*) AS c WHERE c > 1 "
+        "RETURN t, count(*) AS shared_triples"
+    )
+    with driver.session() as session:
+        total_rows = [dict(row) for row in session.run(totals_q)]
+        shared_rows = [dict(row) for row in session.run(shared_q)]
+    shared = {row["t"]: int(row["shared_triples"]) for row in shared_rows}
+    types: Dict[str, Any] = {}
+    for row in sorted(total_rows, key=lambda r: r["t"]):
+        etype = row["t"]
+        types[etype] = {
+            "total": int(row["total"]),
+            "marked": int(row["marked"]),
+            "unmarked": int(row["unmarked"]),
+            "source_id": int(row["source_id"]),
+            "shared_triples": shared.get(etype, 0),
+            "owner": _owner_class(etype),
+        }
+    return {
+        "total_edges": sum(v["total"] for v in types.values()),
+        "types": types,
+        "residue": sorted(t for t, v in types.items() if v["owner"] == "residue"),
+    }
+
+
+def _validate_args(parser, args) -> None:
+    """Reject unsafe flag combinations before any AWS or Neo4j call."""
+    if args.shuffle_seed is not None:
+        if args.wipe_existing:
+            parser.error("--shuffle-seed cannot be combined with --wipe-existing "
+                         "(a wipe drops MUTATED/agent/recipe edges and embeddings the replay never rebuilds)")
+        if args.nodes_only:
+            parser.error("--shuffle-seed applies to the edge phase; it cannot be combined with --nodes-only")
+    if args.edge_type_counts and (args.wipe_existing or args.nodes_only or args.shuffle_seed is not None
+                                  or args.run_migration):
+        parser.error("--edge-type-counts is read-only and cannot be combined with write or replay flags")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backfill Neo4j graph from governed DynamoDB tables")
     parser.add_argument("--region", default="us-west-2")
@@ -257,7 +346,15 @@ def main():
                         help="Run SHOW VECTOR INDEXES and print each index's name, state, "
                              "labels, properties, and (dimensions, similarity_function). "
                              "Implies skip-backfill; exits after printing.")
+    parser.add_argument("--shuffle-seed", type=int, default=None,
+                        help="Permute the phase 2 replay order (entity reconciles and relationship "
+                             "records interleaved) with random.Random(N). Refused with --wipe-existing "
+                             "(ENC-TSK-S33).")
+    parser.add_argument("--edge-type-counts", action="store_true",
+                        help="Read-only: print per-edge-type counts (marked / unmarked / source_id, "
+                             "shared triples, residue) as JSON and exit (ENC-TSK-S33).")
     args = parser.parse_args()
+    _validate_args(parser, args)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
@@ -265,6 +362,15 @@ def main():
 
     # Migration / verification fast paths -- run before the DynamoDB scan and
     # exit without touching the tracker table or backfilling any records.
+    if args.edge_type_counts:
+        creds = get_neo4j_credentials(secret_name, args.region)
+        driver = get_neo4j_driver(creds)
+        try:
+            print(json.dumps(edge_type_counts(driver), indent=2, sort_keys=True))
+        finally:
+            driver.close()
+        return
+
     if args.run_migration or args.verify_vector_indexes:
         logger.info("[INFO] Connecting to Neo4j (secret=%s, region=%s)...",
                     secret_name, args.region)
@@ -337,22 +443,19 @@ def main():
     # Phase 2: Reconcile all edges
     logger.info("[START] Reconciling edges...")
     start = time.time()
+    sequence = phase2_sequence(entity_records, relationship_records, args.shuffle_seed)
+    if args.shuffle_seed is not None:
+        logger.info("[INFO] Phase 2 order shuffled (seed=%d, %d items)", args.shuffle_seed, len(sequence))
     with driver.session() as session:
-        for i, record in enumerate(entity_records, 1):
-            session.execute_write(GS._reconcile_edges, record)
-            if i % 100 == 0:
-                logger.info("[INFO] Entity edges reconciled: %d / %d", i, len(entity_records))
-        for i, record in enumerate(relationship_records, 1):
-            if str(record.get("status") or "").strip() == "archived":
+        for i, (kind, record) in enumerate(sequence, 1):
+            if kind == "entity":
+                session.execute_write(GS._reconcile_edges, record)
+            elif str(record.get("status") or "").strip() == "archived":
                 session.execute_write(GS._delete_relationship_edge, record.get("record_id", ""))
             else:
                 session.execute_write(GS._upsert_relationship_edge, record)
             if i % 100 == 0:
-                logger.info(
-                    "[INFO] Relationship edges reconciled: %d / %d",
-                    i,
-                    len(relationship_records),
-                )
+                logger.info("[INFO] Edges reconciled: %d / %d", i, len(sequence))
     logger.info("[END] Edges reconciled in %.1fs", time.time() - start)
 
     node_count, edge_count = report_counts(driver)
