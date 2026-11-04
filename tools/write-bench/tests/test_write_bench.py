@@ -208,5 +208,49 @@ class CompareTests(unittest.TestCase):
             compare.compare(["a"] * 4, ["b"], resamples=10)
 
 
+class GovernanceHashOverrideTests(unittest.TestCase):
+    H = "ab" * 32
+
+    def _args(self, gh=None):
+        import bench
+        return bench, bench.parse_args(["--env", "gamma", "--project", "x"] + (["--governance-hash", gh] if gh else []))
+
+    def _resolve(self, gh=None, env=None):
+        bench, args = self._args(gh)
+        calls = []
+        orig = bench.fetch_governance_hash
+        bench.fetch_governance_hash = lambda s: calls.append(1) or "cd" * 32
+        old = os.environ.pop("BENCH_GOVERNANCE_HASH", None)
+        if env is not None:
+            os.environ["BENCH_GOVERNANCE_HASH"] = env
+        try:
+            return bench.resolve_governance_hash(args, object()), calls
+        finally:
+            bench.fetch_governance_hash = orig
+            os.environ.pop("BENCH_GOVERNANCE_HASH", None)
+            if old is not None:
+                os.environ["BENCH_GOVERNANCE_HASH"] = old
+
+    def test_cli_override_skips_fetch(self):
+        (gh, src), calls = self._resolve(gh="  " + self.H + "\n")
+        self.assertEqual((gh, src, calls), (self.H, "override", []))
+
+    def test_env_override_skips_fetch_and_cli_wins(self):
+        (gh, src), calls = self._resolve(env=self.H)
+        self.assertEqual((gh, src, calls), (self.H, "override", []))
+        (gh, _), _ = self._resolve(gh="ef" * 32, env=self.H)
+        self.assertEqual(gh, "ef" * 32)
+
+    def test_default_fetches(self):
+        (gh, src), calls = self._resolve()
+        self.assertEqual((gh, src, calls), ("cd" * 32, "connection_health", [1]))
+
+    def test_invalid_override_exits_nonzero(self):
+        for bad in ("xyz", "AB" * 32, "ab" * 31):
+            with self.assertRaises(SystemExit) as cm:
+                self._resolve(gh=bad)
+            self.assertNotIn(cm.exception.code, (0, None))
+
+
 if __name__ == "__main__":
     unittest.main()

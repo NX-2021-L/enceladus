@@ -25,6 +25,10 @@ BENCH_BEARER_TOKEN=... python3 tools/write-bench/bench.py --env gamma --arm long
     --series warm --project <bench-sink> --n 3 --warmup 0 --pace 1 --out results/smoke.json
 ```
 
+`--governance-hash <64-hex>` (or env `BENCH_GOVERNANCE_HASH`; CLI wins) skips the `system.connection_health` fetch and
+uses the given hash; use it when gamma reads report the prod hash but writes validate the gamma hash (ENC-ISS-893,
+writes fail GOVERNANCE_STALE). Results meta records `governance_hash_source` (`override` | `connection_health`).
+
 `--dry-run` prints the plan and payload sizes with no network and no token.
 
 ## Prod refusal (hard allowlist)
