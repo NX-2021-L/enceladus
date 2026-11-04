@@ -447,42 +447,55 @@ Resources:
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
 
-  OpenSearchIndexerIteratorAgeAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Condition: IsGamma
-    Properties:
-      AlarmName: !Sub "enceladus-devops-opensearch-indexer-iteratorage${EnvironmentSuffix}"
-      AlarmDescription: "ENC-TSK-S28-0E: devops-opensearch-indexer IteratorAge p95 > 60s over 5 min"
-      Namespace: AWS/Lambda
-      MetricName: IteratorAge
-      Dimensions:
-        - Name: FunctionName
-          Value: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
-      ExtendedStatistic: p95
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 60000
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-      AlarmActions: !If
-        - HasSnsTopic
-        - [!Ref SnsTopicArn]
-        - !Ref "AWS::NoValue"
-
-  # ENC-TSK-S28-0E: ONE Metrics Insights alarm over every on-failure / DLQ queue (O7 alarm envelope).
+  # ENC-TSK-S28-0E: ONE metric-math alarm over the two tested on-failure destinations (O7 alarm envelope).
   WritePathOnFailureDepthAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "enceladus-write-path-onfailure-depth${EnvironmentSuffix}"
-      AlarmDescription: "ENC-TSK-S28-0E: an on-failure/DLQ queue (AppSync feed publisher, graph-sync, search-index CDC) has visible messages."
-      Metrics:
-        - Id: q1
-          ReturnData: true
-          Period: 300
-          Expression: !If
-            - IsGamma
-            - !Sub "SELECT MAX(ApproximateNumberOfMessagesVisible) FROM SCHEMA(\"AWS/SQS\", QueueName) WHERE QueueName IN ('devops-appsync-feed-publisher-dlq${EnvironmentSuffix}', 'devops-graph-sync-tracker-onfailure${EnvironmentSuffix}', 'devops-graph-sync-documents-onfailure${EnvironmentSuffix}', 'devops-search-index-cdc-dlq${EnvironmentSuffix}')"
-            - !Sub "SELECT MAX(ApproximateNumberOfMessagesVisible) FROM SCHEMA(\"AWS/SQS\", QueueName) WHERE QueueName IN ('devops-appsync-feed-publisher-dlq${EnvironmentSuffix}')"
+      AlarmDescription: "ENC-TSK-S28-0E: the AppSync feed publisher DLQ or (gamma) the graph-sync tracker on-failure queue has visible messages."
+      Metrics: !If
+        - IsGamma
+        -
+            - Id: m1
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: m2
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-graph-sync-tracker-onfailure${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: e1
+              ReturnData: true
+              Expression: "MAX([m1,m2])"
+        -
+            - Id: m1
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: e1
+              ReturnData: true
+              Expression: "MAX([m1])"
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
