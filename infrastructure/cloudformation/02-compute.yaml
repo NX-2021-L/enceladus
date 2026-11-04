@@ -1065,6 +1065,15 @@ Resources:
             # require Query/Scan, so no index ARN is included. Do not broaden without confirming
             # the role actually needs index access.
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+          # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
+          # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
+          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          - Sid: InvokeTrackerMutationLive
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
@@ -8866,6 +8875,17 @@ Resources:
           # ENC-TSK-O44: ENCELADUS_COORDINATION_API_URL removed here too -- same unread-key class.
           # Zero code readers on either ref; removing an env var nothing reads is functionally inert.
           ENCELADUS_TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
+          # ENC-ISS-893 / ENC-TSK-S42: server.py falls back to PROD defaults for every base not set,
+          # so the gamma code-mode MCP routed these planes to production. Same gamma literals as
+          # enceladus-mcp-streaming-gateway-gamma; names match what server.py reads.
+          ENCELADUS_PROJECTS_API_BASE: https://enceladus-gamma.jreese.net/api/v1/coordination/projects
+          ENCELADUS_DOCUMENT_API_BASE: https://enceladus-gamma.jreese.net/api/v1/documents
+          CHECKOUT_SERVICE_API_BASE: https://enceladus-gamma.jreese.net/api/v1/checkout
+          ENCELADUS_COORDINATION_API_BASE: https://enceladus-gamma.jreese.net/api/v1/coordination
+          ENCELADUS_GOVERNANCE_API_BASE: https://enceladus-gamma.jreese.net/api/v1/governance
+          ENCELADUS_DEPLOY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/deploy
+          ENCELADUS_CHANGELOG_API_BASE: https://enceladus-gamma.jreese.net/api/v1/changelog
+          ENCELADUS_GITHUB_API_BASE: https://enceladus-gamma.jreese.net/api/v1/github
           ENCELADUS_GRAPH_QUERY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch
           # ENC-TSK-F63 AC-1 / ENC-ISS-313 H02 audit: flags are migrating to AppConfig, but the
           # AppConfig application/environment are not yet provisioned on this stack (IDs empty),

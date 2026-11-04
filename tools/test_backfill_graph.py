@@ -82,3 +82,117 @@ def test_nodes_only_never_reconciles_edges_and_honours_limit(monkeypatch):
     many = [{"record_type": "task", "record_id": f"ENC-TSK-{i}", "project_id": "enceladus"} for i in range(250)]
     assert backfill_graph.run_nodes_only(driver, many, sleep_ms=200) == 250
     assert sleeps == [0.2, 0.2]
+
+
+# --- ENC-TSK-S33: --shuffle-seed and --edge-type-counts ------------------------------
+
+def _items():
+    ents = [{"record_id": f"E{i}", "record_type": "task"} for i in range(40)]
+    rels = [{"record_id": f"rel#E{i}#relates-to#E{i + 1}", "record_type": "relationship"} for i in range(20)]
+    return ents, rels
+
+
+def test_phase2_sequence_default_order_is_entities_then_relationships():
+    ents, rels = _items()
+    seq = backfill_graph.phase2_sequence(ents, rels)
+    assert [k for k, _ in seq] == ["entity"] * 40 + ["relationship"] * 20
+
+
+def test_phase2_sequence_seeded_permutation_is_deterministic_and_complete():
+    ents, rels = _items()
+    a = backfill_graph.phase2_sequence(ents, rels, seed=1)
+    b = backfill_graph.phase2_sequence(ents, rels, seed=1)
+    c = backfill_graph.phase2_sequence(ents, rels, seed=2)
+    ids = lambda seq: [r["record_id"] for _, r in seq]  # noqa: E731
+    assert ids(a) == ids(b)
+    assert ids(a) != ids(c)
+    assert sorted(ids(a)) == sorted(r["record_id"] for r in ents + rels)
+    kinds = [k for k, _ in a]
+    assert kinds != ["entity"] * 40 + ["relationship"] * 20  # interleaved, not grouped
+
+
+def _fake_driver(total_rows, shared_rows):
+    from unittest.mock import MagicMock
+
+    session = MagicMock()
+
+    def run(query, *a, **k):
+        assert "DELETE" not in query and "SET " not in query and "MERGE" not in query  # read-only
+        return total_rows if "AS total" in query else shared_rows
+
+    session.run.side_effect = run
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value = session
+    return driver
+
+
+def test_edge_type_counts_shape_and_residue_report():
+    total = [
+        {"t": "RELATED_TO", "total": 10, "marked": 6, "unmarked": 1, "source_id": 3},
+        {"t": "INFORMS", "total": 4, "marked": 4, "unmarked": 0, "source_id": 0},
+        {"t": "MUTATED", "total": 5, "marked": 0, "unmarked": 5, "source_id": 0},
+        {"t": "BLOCKS", "total": 2, "marked": 0, "unmarked": 0, "source_id": 2},
+        {"t": "LEGACY_GHOST", "total": 7, "marked": 0, "unmarked": 7, "source_id": 0},
+    ]
+    shared = [{"t": "RELATED_TO", "shared_triples": 3}]
+    out = backfill_graph.edge_type_counts(_fake_driver(total, shared))
+    assert out["total_edges"] == 28
+    assert out["residue"] == ["LEGACY_GHOST"]
+    rt = out["types"]["RELATED_TO"]
+    assert (rt["total"], rt["marked"], rt["unmarked"], rt["source_id"]) == (10, 6, 1, 3)
+    assert rt["shared_triples"] == 3 and rt["owner"] == "start"
+    assert out["types"]["INFORMS"]["owner"] == "end"
+    assert out["types"]["MUTATED"]["owner"] == "external"
+    assert out["types"]["BLOCKS"]["owner"] == "relationship_record"
+    assert out["types"]["INFORMS"]["shared_triples"] == 0
+    import json
+    json.dumps(out)  # JSON serialisable
+
+
+def _run_main(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["backfill_graph.py", *argv])
+    backfill_graph.main()
+
+
+def test_wipe_guard_refuses_shuffle_seed_with_wipe_existing(monkeypatch, capsys):
+    import pytest
+
+    def boom(*a, **k):
+        raise AssertionError("must refuse before touching AWS or Neo4j")
+
+    monkeypatch.setattr(backfill_graph, "get_neo4j_credentials", boom)
+    monkeypatch.setattr(backfill_graph, "_load_projection_records", boom)
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, "--shuffle-seed", "1", "--wipe-existing")
+    assert exc.value.code == 2
+    assert "--wipe-existing" in capsys.readouterr().err
+
+
+def test_edge_type_counts_refuses_write_flags(monkeypatch):
+    import pytest
+
+    for extra in (["--wipe-existing"], ["--nodes-only"], ["--shuffle-seed", "3"]):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "--edge-type-counts", *extra)
+        assert exc.value.code == 2
+
+
+def test_edge_type_counts_cli_prints_json_and_skips_dynamodb(monkeypatch, capsys):
+    import json
+
+    def boom(*a, **k):
+        raise AssertionError("--edge-type-counts must not scan DynamoDB")
+
+    closed = []
+
+    class _Drv:
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(backfill_graph, "_load_projection_records", boom)
+    monkeypatch.setattr(backfill_graph, "get_neo4j_credentials", lambda *a, **k: {})
+    monkeypatch.setattr(backfill_graph, "get_neo4j_driver", lambda creds: _Drv())
+    monkeypatch.setattr(backfill_graph, "edge_type_counts", lambda d: {"total_edges": 0, "types": {}, "residue": []})
+    _run_main(monkeypatch, "--edge-type-counts")
+    assert json.loads(capsys.readouterr().out) == {"total_edges": 0, "types": {}, "residue": []}
+    assert closed == [True]
