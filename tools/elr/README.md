@@ -64,8 +64,27 @@ is appended to `~/.enceladus/elr/ledger/client_timing.jsonl`, keyed by
 `correlation_id` (timings, `response_bytes`, method/verb, host, status; never a
 header value, so no key or bearer token). Env knobs: `ELR_CORRELATION_ID`
 (honoured instead of minting a uuid4 per call), `ELR_LEDGER_PATH` (override the
-file), `ELR_LEDGER=0` (disable). `client_tls_new` is `1` on every call until
-connection reuse lands (W2.2).
+file), `ELR_LEDGER=0` (disable). `client_tls_new` is `1` only when the call
+opened a new connection (always `1` with `ELR_LONG_LIVED=0`).
+
+## Long-lived session mode (ENC-TSK-S28-0B)
+
+On by default. Within one ELR process `InternalClient` and `McpHttpClient` keep
+an `http.client` connection alive per host (`elr_lib/keepalive.py`; one
+connection in sequential use, extra ones only for concurrent threads), and
+`McpHttpClient` runs `initialize` + `notifications/initialized` once, then
+reuses the `Mcp-Session-Id` and the connection for every later `tools/call`.
+`elr batch_get` and `elr compact_context` build a single client per process, so
+every id or section after the first rides the established connection. A
+connection the server dropped (`RemoteDisconnected`, reset, broken pipe) is
+reopened once and the call replayed, but only for idempotent calls (GET, or a
+`tools/call` sent with an `Idempotency-Key`); a write is never replayed.
+Ledger rows: `client_session_reused` is true on every MCP call after the first,
+`client_session_init_ms` is the one-time handshake cost, `client_tls_new` is
+true only on a call that opened a connection. The MCP server also caches its
+`tools/list` response per warm container. `ELR_LONG_LIVED=0` restores one
+urllib connection and one handshake-free call per request. See
+`docs/elr/stateless-mcp-evaluation.md` for the stateless-MCP evaluation.
 
 ## Run
 

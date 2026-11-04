@@ -33,3 +33,10 @@ _os.environ.setdefault("ENCELADUS_INTERNAL_API_KEY", "test-fixture-key-not-a-rea
 # suite from writing to a developer's real ~/.enceladus (tests of the ledger
 # itself set ELR_LEDGER / ELR_LEDGER_PATH explicitly).
 _os.environ.setdefault("ELR_LEDGER", "0")
+
+# ENC-TSK-S28-0B: the long-lived (keep-alive http.client) transport is the
+# production default; the legacy suite mocks urllib.request.urlopen, so it
+# runs in per-call mode. Keep-alive tests opt in with ELR_LONG_LIVED=1.
+from elr_lib import keepalive as _elr_keepalive  # noqa: E402
+
+_elr_keepalive.DEFAULT_LONG_LIVED = "0"
