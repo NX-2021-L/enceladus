@@ -43,7 +43,6 @@ from typing import Any, Dict, List, Optional, Tuple
 _MODULE_T0 = time.perf_counter()  # ENC-TSK-S26-0A: cold-start init_ms baseline
 
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import (
     CallToolResult,
     Resource,
@@ -174,6 +173,14 @@ S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_P
 # ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
 GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
 GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
+# ENC-TSK-S28-0C: in-process governance cache keyed by content hash. A request hash equal to the cached hash validates
+# with no network call until the entry is older than this probe TTL, after which the canonical record is re-read.
+GOVERNANCE_PROBE_TTL_S = float(os.environ.get("GOVERNANCE_PROBE_TTL_S", "300"))
+# Best-effort canonical read at module init; 0/false skips it.
+# Default: on inside Lambda (cold start), off elsewhere so imports never trigger credential lookups.
+GOVERNANCE_CACHE_PRELOAD = os.environ.get(
+    "GOVERNANCE_CACHE_PRELOAD", "1" if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else "0"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -1688,6 +1695,28 @@ def _note_invoke(ms: float) -> None:
         state["t_invoke_ms"] = state.get("t_invoke_ms", 0.0) + ms
 
 
+def _note_invoke_mode(mode: str) -> None:
+    """ENC-TSK-S28-0F: record how the active tool call reached a write tool Lambda (direct | http | direct_fallback).
+
+    direct_fallback outranks everything (it is the signal ops alarm on); otherwise the first write wins.
+    """
+    state = _CALL_STATE.get()
+    if state is None:
+        return
+    if mode == "direct_fallback" or not state.get("invoke_mode"):
+        state["invoke_mode"] = mode
+
+
+def _write_audit_note(fields: Dict[str, Any]) -> None:
+    """Emit a bare `[WRITE-AUDIT] {json}` line (no EMF): used for direct-invoke fallback events."""
+    in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("ENCELADUS_WRITE_AUDIT_STDOUT"))
+    stream = sys.stdout if in_lambda else sys.stderr
+    try:
+        print(f"{WRITE_AUDIT_PREFIX} {json.dumps(fields, sort_keys=True, default=str)}", file=stream, flush=True)
+    except Exception:  # audit must never break a write
+        logger.debug("write-audit note emit failed", exc_info=True)
+
+
 def _write_audit_line(fields: Dict[str, Any]) -> None:
     """Emit one `[WRITE-AUDIT] {json}` line plus an EMF envelope (Enceladus/WritePath, dimension tool).
 
@@ -1758,7 +1787,8 @@ def _build_write_audit_fields(
         "server_total_ms": server_total_ms,
         "cold_start": bool(ctx.get("cold_start")),
         "init_ms": int(ctx.get("init_ms") or 0),
-        "hops": 1,
+        "invoke_mode": state.get("invoke_mode", "none"),  # ENC-TSK-S28-0F: direct | http | direct_fallback | none
+        "hops": 1 if state.get("invoke_mode", "none") in ("direct", "none") else 2,
         "t_route_ms": t_route_ms,
         "t_governance_ms": int(state.get("t_governance_ms", 0)),
         "governance_cache_hit": state.get("governance_cache_hit"),
@@ -1910,32 +1940,76 @@ def _cache_governance_hash(value: str) -> None:
     global _governance_hash_api_cache, _governance_hash_api_cache_at
     _governance_hash_api_cache = value
     _governance_hash_api_cache_at = time.time()
+    _gov_cache_store(value)
+
+
+# ENC-TSK-S28-0C: verified-hash cache. {hash, loaded_at}; only ever populated from the canonical record, the
+# governance-update response, or (fallback) the legacy resolver. Validation stays strict: a hash is accepted only if
+# it equals the cached hash AND the entry is younger than GOVERNANCE_PROBE_TTL_S, else the source is re-read.
+_GOV_CACHE: Dict[str, Any] = {"hash": "", "loaded_at": 0.0}
+
+
+def _gov_cache_store(value: str) -> None:
+    _GOV_CACHE["hash"] = value
+    _GOV_CACHE["loaded_at"] = time.time()
+
+
+def _gov_cache_fresh() -> bool:
+    return bool(_GOV_CACHE["hash"]) and (time.time() - float(_GOV_CACHE["loaded_at"])) < GOVERNANCE_PROBE_TTL_S
+
+
+def _gov_cache_would_hit(provided: str) -> bool:
+    return _gov_cache_fresh() and provided == _GOV_CACHE["hash"]
+
+
+def _gov_refetch_verified() -> str:
+    """One authoritative read: canonical version record, else the legacy resolver chain (cache bypassed)."""
+    global _governance_hash_api_cache, _governance_hash_api_cache_at
+    try:
+        h = _get_canonical_governance_hash_ddb()
+        if h:
+            _governance_hash_api_cache, _governance_hash_api_cache_at = h, time.time()
+            _gov_cache_store(h)
+            return h
+    except Exception:
+        pass
+    # Fallback: whatever _get_governance_hash_via_api falls back to today. Drop its 60 s cache first so a rotation
+    # cannot be masked by a stale legacy entry.
+    _governance_hash_api_cache, _governance_hash_api_cache_at = None, 0.0
+    h = _get_governance_hash_via_api()
+    _gov_cache_store(h)
+    return h
+
+
+def _gov_cache_preload() -> None:
+    if not GOVERNANCE_CACHE_PRELOAD:
+        return
+    try:
+        _gov_cache_store(_get_canonical_governance_hash_ddb())
+    except Exception:
+        pass  # cold cache; first validation fetches
 
 
 def _current_governance_hash_for_validation(provided: str) -> str:
-    """Resolve current governance hash with stale-cache self-healing.
+    """Resolve the current governance hash for validation (ENC-TSK-S28-0C).
 
-    Primary compare uses API/health hash. If it mismatches the provided hash,
-    perform one forced local recomputation from governance resources.
+    Hit: provided == cached hash and entry younger than GOVERNANCE_PROBE_TTL_S -> no network call.
+    Otherwise (mismatch, cold, or TTL probe due): exactly one re-read of the canonical record (legacy resolver on
+    failure), cache updated; the caller rejects if the provided hash still differs.
     """
-    current = _get_governance_hash_via_api()
-    if provided == current:
-        return current
-
-    fresh_local = _compute_governance_hash(force_refresh=True)
-    if provided == fresh_local:
-        _cache_governance_hash(fresh_local)
-        return fresh_local
+    if _gov_cache_would_hit(provided):
+        return _GOV_CACHE["hash"]
+    current = _gov_refetch_verified()
     return current
+
+
+_gov_cache_preload()
 
 
 def _timed_governance_validation(provided: str) -> str:
     """_current_governance_hash_for_validation + write-audit timing (t_governance_ms, cache hit)."""
     state = _CALL_STATE.get()
-    cache_hit = (
-        bool(_governance_hash_api_cache)
-        and (time.time() - _governance_hash_api_cache_at) < _GOVERNANCE_HASH_API_TTL
-    )
+    cache_hit = _gov_cache_would_hit(provided)
     started = time.perf_counter()
     try:
         current = _current_governance_hash_for_validation(provided)
@@ -2402,6 +2476,260 @@ def _deploy_history_direct(project_id: str, limit: int = 10) -> Dict[str, Any]:
     return {"success": True, "project_id": project_id, "deployments": results[:limit]}
 
 
+# -------------------------------------------------------------------
+# ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): direct qualified invoke of the write tool Lambdas
+# -------------------------------------------------------------------
+# The MCP Lambda reaches tracker_mutation / document_api / checkout_service over CloudFront + API Gateway.
+# In `direct` mode a mutating call instead synthesizes the API Gateway v2 HTTP event those handlers already
+# parse and invokes `<function>:live` (the QUALIFIED alias: never $LATEST, never unqualified) synchronously.
+# The handlers authenticate the internal key and validate governance_hash themselves; a direct invoke is
+# never treated as pre-validated.
+WRITE_TOOL_INVOKE_QUALIFIER = "live"
+_DIRECT_INVOKE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_TOOL_FUNCTION_DEFAULTS = {
+    "tracker": ("TRACKER_TOOL_FUNCTION", "devops-tracker-mutation-api"),
+    "document": ("DOCUMENT_TOOL_FUNCTION", "devops-document-api"),
+    "checkout": ("CHECKOUT_TOOL_FUNCTION", "enceladus-checkout-service"),
+}
+# Invoke errors that mean "the invoke never reached the function" (the write did not run): safe to retry once over
+# HTTP. FunctionError is NOT here: the function ran, so retrying could apply a write twice.
+_TOOL_INVOKE_FALLBACK_CODES = frozenset({
+    "ResourceNotFoundException", "AccessDeniedException", "TooManyRequestsException", "ThrottlingException",
+    "EC2ThrottledException", "ServiceException",
+})
+_lambda_client = None
+
+
+class _ToolInvokeUnavailable(Exception):
+    """The direct Lambda invoke could not deliver/complete the request; caller falls back to HTTP once."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def _is_gamma_environment() -> bool:
+    suffix = (os.environ.get("ENVIRONMENT_SUFFIX") or os.environ.get("ENV_SUFFIX") or "").strip().lower()
+    if suffix:
+        return suffix.lstrip("-") == "gamma"
+    return os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip().lower().endswith("-gamma")
+
+
+def _write_tool_invoke_mode() -> str:
+    """`direct` | `http`. Env WRITE_TOOL_INVOKE_MODE wins; default gamma -> direct, prod/local -> http (P103-R5 pattern)."""
+    explicit = os.environ.get("WRITE_TOOL_INVOKE_MODE", "").strip().lower()
+    if explicit in ("direct", "http"):
+        return explicit
+    return "direct" if _is_gamma_environment() else "http"
+
+
+def _tool_function_name(kind: str) -> str:
+    env_name, default = _TOOL_FUNCTION_DEFAULTS[kind]
+    configured = os.environ.get(env_name, "").strip()
+    return configured or f"{default}{'-gamma' if _is_gamma_environment() else ''}"
+
+
+def _get_lambda_client():
+    """Module-level Lambda client (built at init when direct mode is on; lazy otherwise)."""
+    global _lambda_client
+    if _lambda_client is None:
+        if not _BOTO_AVAILABLE:
+            raise RuntimeError("boto3 is not installed. Run: pip install boto3")
+        _lambda_client = boto3.client(
+            "lambda",
+            region_name=AWS_REGION,
+            # No SDK retries: a retried synchronous invoke of a write could apply it twice.
+            config=Config(retries={"max_attempts": 1, "mode": "standard"}, connect_timeout=3, read_timeout=25),
+        )
+    return _lambda_client
+
+
+def _build_tool_event(
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]],
+    headers: Dict[str, str],
+    query: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Synthesize the API Gateway v2 (payload 2.0) event the tool Lambdas parse."""
+    qs = urllib.parse.urlencode({k: v for k, v in (query or {}).items() if v is not None})
+    event_headers = {str(k).lower(): str(v) for k, v in (headers or {}).items() if v is not None}
+    event_headers.setdefault("x-correlation-id", _current_correlation_id())
+    ctx = _REQUEST_CTX.get() or {}
+    for header, field in CLIENT_AUDIT_HEADERS.items():  # X-Enc-* passthrough
+        value = (ctx.get("client") or {}).get(field)
+        if value not in (None, ""):
+            event_headers.setdefault(header, str(value))
+    method = method.upper()
+    event: Dict[str, Any] = {
+        "version": "2.0",
+        "routeKey": "$default",
+        "rawPath": path,
+        "rawQueryString": qs,
+        "headers": event_headers,
+        "requestContext": {
+            "http": {
+                "method": method,
+                "path": path,
+                "protocol": "HTTP/1.1",
+                "sourceIp": "127.0.0.1",
+                "userAgent": event_headers.get("user-agent", HTTP_USER_AGENT),
+            },
+            "routeKey": "$default",
+            "stage": "$default",
+            "requestId": event_headers["x-correlation-id"],
+        },
+        "isBase64Encoded": False,
+    }
+    if qs:
+        event["queryStringParameters"] = dict(urllib.parse.parse_qsl(qs, keep_blank_values=True))
+    if body is not None:
+        event["body"] = json.dumps(body)
+    return event
+
+
+def _invoke_tool_lambda_raw(function_name: str, event: Dict[str, Any]) -> Tuple[int, str]:
+    """Synchronous RequestResponse invoke of `<function_name>:live`; returns (statusCode, body text)."""
+    qualified = function_name if function_name.endswith(f":{WRITE_TOOL_INVOKE_QUALIFIER}") else (
+        f"{function_name}:{WRITE_TOOL_INVOKE_QUALIFIER}"
+    )
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=qualified,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(event).encode("utf-8"),
+        )
+    except Exception as exc:
+        if _BOTO_AVAILABLE and isinstance(exc, ClientError):
+            code = str((exc.response or {}).get("Error", {}).get("Code", ""))
+            if code in _TOOL_INVOKE_FALLBACK_CODES:
+                raise _ToolInvokeUnavailable(code, str(exc)) from exc
+        name = type(exc).__name__
+        # Request provably not delivered (connect-level) -> safe to retry over HTTP; a read timeout is ambiguous.
+        if name in ("EndpointConnectionError", "ConnectTimeoutError", "NoCredentialsError", "RuntimeError"):
+            raise _ToolInvokeUnavailable(name, str(exc)) from exc
+        raise
+    payload_stream = resp.get("Payload")
+    raw = payload_stream.read() if hasattr(payload_stream, "read") else (payload_stream or b"")
+    if resp.get("FunctionError"):
+        # The function RAN and failed: never fall back (a write could run twice). Surface the tool's own
+        # error envelope as-is when it produced one; otherwise wrap Lambda's {errorType, errorMessage}.
+        try:
+            err = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+        except (ValueError, UnicodeDecodeError):
+            err = {}
+        if isinstance(err, dict) and isinstance(err.get("error_envelope"), dict):
+            return 500, json.dumps(err)
+        message = f"{(err or {}).get('errorType', 'FunctionError')}: {(err or {}).get('errorMessage', 'tool Lambda failed')}"
+        return 500, json.dumps({
+            "success": False, "error": message,
+            "error_envelope": {"code": "INTERNAL_ERROR", "message": message, "retryable": False,
+                               "details": {"function_error": str(resp.get("FunctionError"))}},
+        })
+    try:
+        out = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise _ToolInvokeUnavailable("InvalidResponse", str(exc)) from exc
+    if not isinstance(out, dict) or "statusCode" not in out:
+        raise _ToolInvokeUnavailable("InvalidResponse", "tool Lambda response has no statusCode")
+    text = out.get("body") or ""
+    if out.get("isBase64Encoded") and text:
+        text = base64.b64decode(text).decode("utf-8")
+    if not isinstance(text, str):
+        text = json.dumps(text)
+    return int(out["statusCode"]), text
+
+
+def _translate_tool_response(status: int, text: str) -> Dict[str, Any]:
+    """Map {statusCode, body} to exactly what the HTTP helpers return today."""
+    if status < 300:
+        try:
+            return json.loads(text) if text else {"success": True}
+        except Exception as exc:  # parity with the HTTP helpers' generic fallback
+            return _error_payload("INTERNAL_ERROR", f"Tool Lambda response was not JSON: {exc}", retryable=False)
+    try:
+        parsed = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        parsed = {"error": text or f"HTTP {status}"}
+    return _normalize_legacy_error_payload(parsed, status)
+
+
+def _invoke_tool_lambda(
+    function_name: str,
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]],
+    headers: Dict[str, str],
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Direct invoke of `<function_name>:live`; returns what the HTTP helper would. Raises _ToolInvokeUnavailable."""
+    status, text = _invoke_tool_lambda_raw(function_name, _build_tool_event(method, path, body, headers, query))
+    return _translate_tool_response(status, text)
+
+
+def _try_direct_tool_call(
+    kind: str,
+    method: str,
+    base: str,
+    route: str,
+    payload: Optional[Dict[str, Any]],
+    query: Optional[Dict[str, Any]],
+    headers: Dict[str, str],
+    key_candidates: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Return the direct-invoke result, or None when the caller should use HTTP (mode off, read, or fallback)."""
+    if method.upper() not in _DIRECT_INVOKE_METHODS:
+        return None  # reads keep the HTTP path; only the write path goes direct
+    if _write_tool_invoke_mode() != "direct":
+        _note_invoke_mode("http")
+        return None
+    function_name = _tool_function_name(kind)
+    path = f"{urllib.parse.urlparse(base).path.rstrip('/')}{route}"
+    _t_invoke = time.perf_counter()
+    try:
+        keys = key_candidates or [""]
+        for idx, key in enumerate(keys):
+            attempt_headers = dict(headers)
+            if key:
+                attempt_headers["X-Coordination-Internal-Key"] = key
+            event = _build_tool_event(method, path, payload, attempt_headers, query)
+            status, text = _invoke_tool_lambda_raw(function_name, event)
+            if status in (401, 403) and key and idx < len(keys) - 1:
+                continue
+            _note_invoke_mode("direct")
+            return _translate_tool_response(status, text)
+    except _ToolInvokeUnavailable as exc:
+        _note_invoke_mode("direct_fallback")
+        _write_audit_note({
+            "audit_kind": "invoke_fallback",
+            "invoke_mode": "direct_fallback",
+            "attempt_outcome": "error",  # S26-0D counters exclude audit_kind invoke_fallback lines
+            "success": False,
+            "correlation_id": _current_correlation_id(),
+            "tool_function": f"{function_name}:{WRITE_TOOL_INVOKE_QUALIFIER}",
+            "method": method.upper(),
+            "path": path,
+            "fallback_reason": exc.reason,
+            "fallback_detail": exc.detail[:300],
+            "surface": "mcp_server",
+        })
+        return None
+    except Exception as exc:  # ambiguous outcome (e.g. read timeout): do NOT retry a write over HTTP
+        _note_invoke_mode("direct")
+        return _error_payload("UPSTREAM_ERROR", f"Tool Lambda invoke failed: {exc}", retryable=True)
+    finally:
+        _note_invoke((time.perf_counter() - _t_invoke) * 1000)
+    return None
+
+
+if _write_tool_invoke_mode() == "direct" and _BOTO_AVAILABLE:
+    try:
+        _get_lambda_client()  # build at init (SnapStart-captured) so the first write does not pay client setup
+    except Exception:  # pragma: no cover - never break import
+        pass
+
+
 def _document_api_request(
     method: str,
     path: str = "",
@@ -2435,6 +2763,15 @@ def _document_api_request(
         body = json.dumps(payload).encode("utf-8")
     else:
         body = None
+
+    # ENC-TSK-S28-0F: direct qualified (:live) invoke on the write path; None -> HTTP below.
+    direct = _try_direct_tool_call(
+        "document", method, DOCUMENT_API_BASE, route, payload, query,
+        {k: v for k, v in headers.items() if k != "X-Coordination-Internal-Key"},
+        [DOCUMENT_API_INTERNAL_API_KEY or ""],
+    )
+    if direct is not None:
+        return direct
 
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
     _t_invoke = time.perf_counter()
@@ -2494,6 +2831,11 @@ def _tracker_api_request(
     if not key_candidates:
         key_candidates.append("")
 
+    # ENC-TSK-S28-0F: direct qualified (:live) invoke on the write path; None -> HTTP below.
+    direct = _try_direct_tool_call("tracker", method, TRACKER_API_BASE, route, payload, query, headers, key_candidates)
+    if direct is not None:
+        return direct
+
     for idx, key in enumerate(key_candidates):
         attempt_headers = dict(headers)
         if key:
@@ -2542,6 +2884,16 @@ def _checkout_api_request(
         body: Optional[bytes] = json.dumps(payload).encode("utf-8")
     else:
         body = None
+
+    # ENC-TSK-S28-0F: direct qualified (:live) invoke on the write path; None -> HTTP below.
+    direct = _try_direct_tool_call(
+        "checkout", method, CHECKOUT_SERVICE_API_BASE, route, payload, None, headers,
+        [str(c or "").strip() for c in (
+            TRACKER_API_INTERNAL_API_KEY, *TRACKER_API_INTERNAL_API_KEYS, *COMMON_INTERNAL_API_KEYS, "",
+        )],
+    )
+    if direct is not None:
+        return direct
 
     for candidate in (
         TRACKER_API_INTERNAL_API_KEY,
@@ -11133,6 +11485,8 @@ async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     logger.info("[START] Enceladus MCP Server v%s", SERVER_VERSION)
 
+    from mcp.server.stdio import stdio_server  # ENC-TSK-S28-0A: stdio-only entry point; lazy keeps Lambda init lean
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
@@ -12233,6 +12587,29 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
         "body": resp_body.decode("utf-8", errors="replace"),
         "isBase64Encoded": False,
     }
+
+
+# ENC-TSK-S28-0A (BRD DOC-E32D0ED08473 W1.1): construct the write-path boto3 clients at module import so a cold start
+# pays the client/service-model load during init (inside the SnapStart snapshot when enabled) instead of on the first
+# request. The lazy getters stay the single accessors (same singletons, same config); each warm-up is failure-isolated
+# and Lambda-only, so unit tests and local stdio runs see no behavior change.
+def _warm_clients() -> None:
+    if not os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or not _BOTO_AVAILABLE:
+        return
+    if os.environ.get("AWS_LAMBDA_INITIALIZATION_TYPE") == "snap-start":
+        # A client built during the SnapStart init phase would freeze the snapshot-time credentials; leave the lazy
+        # memoized getters to build it after restore so it resolves fresh ones.
+        logger.info("[INFO] boto3 client warm-up skipped (SnapStart init: lazy post-restore build)")
+        return
+    logger.info("[INFO] boto3 client warm-up: eager init-time build")
+    for getter in (_get_ddb, _get_s3):
+        try:
+            getter()
+        except Exception:  # noqa: BLE001 - warm-up is best-effort; the lazy getter retries on first use
+            pass
+
+
+_warm_clients()
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
