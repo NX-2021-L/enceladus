@@ -1065,6 +1065,15 @@ Resources:
             # require Query/Scan, so no index ARN is included. Do not broaden without confirming
             # the role actually needs index access.
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+          # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
+          # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
+          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          - Sid: InvokeTrackerMutationLive
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
