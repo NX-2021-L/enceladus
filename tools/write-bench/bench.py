@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -70,6 +71,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--aws-region", default="us-west-2")
     ap.add_argument("--cold-functions", default=",".join(DEFAULT_COLD_FUNCTIONS))
     ap.add_argument("--lambda-name", default=GAMMA_LAMBDA)
+    ap.add_argument("--governance-hash", default=None,
+                    help="64-hex governance hash to use instead of fetching it via system.connection_health "
+                         "(env BENCH_GOVERNANCE_HASH is the fallback; CLI wins). ENC-ISS-893: gamma MCP reads can "
+                         "report the PROD hash while its write validator checks the GAMMA hash.")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and one sample payload per op; no network")
     return ap.parse_args(argv)
 
@@ -202,6 +207,20 @@ def cold_bump(functions: List[str], profile: Optional[str], region: str, timeout
 
 # ---------------------------------------------------------------- main loop
 
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def resolve_governance_hash(args: argparse.Namespace, admin) -> tuple:
+    """Return (hash, source). Override (CLI, then BENCH_GOVERNANCE_HASH) skips the fetch."""
+    raw = args.governance_hash if args.governance_hash is not None else os.environ.get("BENCH_GOVERNANCE_HASH")
+    if raw is not None and raw.strip() != "":
+        gh = raw.strip()
+        if not _HEX64.match(gh):
+            raise SystemExit("error: --governance-hash / BENCH_GOVERNANCE_HASH must be 64 lowercase hex characters")
+        return gh, "override"
+    return fetch_governance_hash(admin), "connection_health"
+
+
 def run(args: argparse.Namespace) -> dict:
     token = load_token(args.token_file)
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -215,13 +234,13 @@ def run(args: argparse.Namespace) -> dict:
     warmup = args.warmup if args.series == "warm" else 0
 
     admin = wire.LongLivedSession(args.mcp_url, token)
-    gh = fetch_governance_hash(admin)
+    gh, gh_source = resolve_governance_hash(args, admin)
     pool = ensure_pool(admin, pool_path(out, args.project), args.project, args.pool_size, gh)
     admin.close()
 
     meta = {"run_id": run_id, "env": "gamma", "mcp_host": wire.ALLOWED_HOST, "series": args.series, "arms": arms,
             "operations": ops, "n": n, "warmup": warmup, "pace_s": args.pace, "project": args.project,
-            "pool_size": len(pool), "governance_hash": gh, "started": datetime.now(timezone.utc).isoformat(),
+            "pool_size": len(pool), "governance_hash": gh, "governance_hash_source": gh_source, "started": datetime.now(timezone.utc).isoformat(),
             "cold_functions": args.cold_functions.split(",") if args.series == "cold" else None}
     calls: List[dict] = []
     cold_fns = [f for f in args.cold_functions.split(",") if f]
