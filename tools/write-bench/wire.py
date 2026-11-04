@@ -130,6 +130,10 @@ OPERATIONS = [
     "execute_20_independent",
 ]
 
+# Opt-in (not in the default --ops): needs 20 DISTINCT pool records (ENC-TSK-S46-0B).
+BURST_OPERATIONS = ["execute_20_independent_burst"]
+ALL_OPERATIONS = OPERATIONS + BURST_OPERATIONS
+
 IDEMPOTENT_VALUE = "write-bench idempotent description (no semantic content)"
 
 
@@ -171,6 +175,10 @@ def build_operation(op: str, project: str, pool: List[str], governance_hash: str
     if op == "execute_10_chained":
         return "execute", execute_args(_set_steps(pool, 10, governance_hash, chained=True))
     if op == "execute_20_independent":
+        return "execute", execute_args(_set_steps(pool, 20, governance_hash, chained=False))
+    if op == "execute_20_independent_burst":
+        if len(set(pool)) < 20:
+            raise ValueError("execute_20_independent_burst needs 20 distinct pool records")
         return "execute", execute_args(_set_steps(pool, 20, governance_hash, chained=False))
     raise ValueError(f"unknown operation {op!r}")
 

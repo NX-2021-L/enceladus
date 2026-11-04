@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import projection  # noqa: E402
 import stats  # noqa: E402
 import wire  # noqa: E402
 
@@ -67,6 +68,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--pace", type=float, default=5.0, help="seconds slept after each call (default 5; 1 for smoke)")
     ap.add_argument("--pool-size", type=int, default=10)
     ap.add_argument("--ops", default=",".join(wire.OPERATIONS), help="comma list subset of operations")
+    ap.add_argument("--projection-lag", default="auto", choices=["auto", "off"],
+                    help="auto (default): after each tracker_*/execute_* write poll tracker.get every 100 ms until "
+                         "projection_status==projected or the cap; documents_* never polled. off: no read-back.")
+    ap.add_argument("--projection-cap", type=float, default=projection.CAP_S, help="per-call poll cap in seconds (default 60)")
     ap.add_argument("--aws-profile", default=None, help="AWS profile (cold series bumps; Lambda arm invoke). Cold needs product-lead.")
     ap.add_argument("--aws-region", default="us-west-2")
     ap.add_argument("--cold-functions", default=",".join(DEFAULT_COLD_FUNCTIONS))
@@ -227,7 +232,7 @@ def run(args: argparse.Namespace) -> dict:
     out = args.out or os.path.join("results", f"{run_id}.json")
     ops = [o for o in args.ops.split(",") if o]
     for o in ops:
-        if o not in wire.OPERATIONS:
+        if o not in wire.ALL_OPERATIONS:
             raise SystemExit(f"error: unknown operation {o!r}")
     arms = ARMS if args.arm == "all" else [args.arm]
     n = args.n if args.n is not None else (40 if args.series == "cold" else 300)
@@ -235,12 +240,17 @@ def run(args: argparse.Namespace) -> dict:
 
     admin = wire.LongLivedSession(args.mcp_url, token)
     gh, gh_source = resolve_governance_hash(args, admin)
-    pool = ensure_pool(admin, pool_path(out, args.project), args.project, args.pool_size, gh)
+    pool_n = max(args.pool_size, projection.BURST_SIZE) if projection.BURST_OP in ops else args.pool_size
+    pool = ensure_pool(admin, pool_path(out, args.project), args.project, pool_n, gh)
     admin.close()
+    lag_on = args.projection_lag != "off"
+    reader = wire.LongLivedSession(args.mcp_url, token) if lag_on else None
+    read_fn = projection.make_read_fn(reader) if reader else None
+    dead_cells: Dict[tuple, int] = {}  # (arm, op) -> consecutive read_unavailable calls
 
     meta = {"run_id": run_id, "env": "gamma", "mcp_host": wire.ALLOWED_HOST, "series": args.series, "arms": arms,
             "operations": ops, "n": n, "warmup": warmup, "pace_s": args.pace, "project": args.project,
-            "pool_size": len(pool), "governance_hash": gh, "governance_hash_source": gh_source, "started": datetime.now(timezone.utc).isoformat(),
+            "pool_size": len(pool), "projection_lag": args.projection_lag, "projection_cap_s": args.projection_cap, "governance_hash": gh, "governance_hash_source": gh_source, "started": datetime.now(timezone.utc).isoformat(),
             "cold_functions": args.cold_functions.split(",") if args.series == "cold" else None}
     calls: List[dict] = []
     cold_fns = [f for f in args.cold_functions.split(",") if f]
@@ -270,6 +280,14 @@ def run(args: argparse.Namespace) -> dict:
                     rec = call_per_process(args.mcp_url, token, tool, arguments, corr)
                 else:
                     rec = lam.call(args.mcp_url, token, tool, arguments, corr)
+                skip = dead_cells.get((arm, op), 0) >= 3 and rnd >= warmup
+                projection.annotate_call(rec, op, tool, arguments, None if skip else read_fn, cap_s=args.projection_cap)
+                if skip:
+                    rec["projection_skipped"] = "read_unavailable_x3"
+                elif rec.get("projection_blocked_reason") == "read_unavailable":
+                    dead_cells[(arm, op)] = dead_cells.get((arm, op), 0) + 1
+                elif "projection_polls" in rec:
+                    dead_cells[(arm, op)] = 0
                 rec.pop("payload", None)
                 rec.update({"operation": op, "arm": arm, "series": args.series, "round": rnd, "warmup": rnd < warmup,
                             "cold_bump_s": bump_s,
@@ -283,7 +301,11 @@ def run(args: argparse.Namespace) -> dict:
         if long_sess:
             long_sess.close()
     meta["finished"] = datetime.now(timezone.utc).isoformat()
+    if reader:
+        reader.close()
     meta["summary"] = stats.summarize_run(calls)
+    for key, lag in projection.summarize_lag(calls).items():
+        meta["summary"].setdefault(key, {})["projection_lag_ms"] = lag
     checkpoint()
     log(f"wrote {out}")
     return {"meta": meta, "calls": calls}
@@ -292,6 +314,7 @@ def run(args: argparse.Namespace) -> dict:
 def dry_run(args: argparse.Namespace) -> None:
     gh = "DRY-RUN-HASH"
     pool = [f"BENCH-TSK-{i:03d}" for i in range(1, args.pool_size + 1)]
+    pool = pool + [f"BENCH-TSK-{i:03d}" for i in range(len(pool) + 1, 21)]
     for op in args.ops.split(","):
         tool, arguments = wire.build_operation(op, args.project, pool, gh, nonce="dryrun")
         steps = arguments.get("steps", [])

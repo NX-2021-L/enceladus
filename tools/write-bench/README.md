@@ -101,6 +101,28 @@ than its own interval, investigate before pooling"): the "outside every other ru
 outlier instead of also flagging the runs that agree with each other. Investigate divergent cells before
 trusting the pooled number.
 
+## Projection lag and the burst cell (ENC-TSK-S46-0B)
+
+`--projection-lag auto` (default) | `off`. After each successful `tracker_*` / `execute_*` write the bench polls
+the touched record(s) with `search` `tracker.get` on a separate long-lived reader session (outside the timed
+write) every 100 ms until `projection_status == "projected"` or `--projection-cap` seconds (default 60).
+`documents_*` cells are never polled. Per call: `projection_lag_ms` (= first observing poll's receipt time minus the
+write response's `t_ack`, ms epoch; for multi-record writes the MAX over records; falls back to `t_client_end`,
+flagged `t_ack_source`), `projection_polls`, `projection_timed_out` (lag is then null), and
+`projection_blocked_reason: "read_unavailable"` when every poll failed (a non-success read counts as "not yet
+projected"; ENC-ISS-893 makes ZNC-* reads fail until ENC-TSK-S42). After 3 consecutive read_unavailable calls in
+an (arm, op) cell the rest of that cell skips polling (`projection_skipped`) to bound run time.
+The summary adds `projection_lag_ms` (p50/p95 + 10,000-resample bootstrap CIs, timed_out, blocked status) under
+each cell; `compare.py` automatically adds a `projection_lag` section and table for cells present in both sides.
+Caveat: repeated `tracker_set` on a pool record that is already `projected` reads near-zero lag until the
+projector marks the new version non-projected.
+
+Opt-in operation `execute_20_independent_burst` (`--ops execute_20_independent_burst`): 20 independent
+`tracker.set` steps over 20 DISTINCT pool records in one `execute` (pool auto-grows to 20). A tool-level failure
+(e.g. gamma ZNC ids before ENC-TSK-S42) marks the call `status: "blocked"` with `blocked_reason`, `ok` false (never
+counted as latency); a fully blocked cell reports `status: "blocked"`. It is not in the default `--ops`, so
+existing cells are unchanged.
+
 ## Tests
 
 `python3 -m unittest discover -s tools/write-bench/tests -v` (no network).
