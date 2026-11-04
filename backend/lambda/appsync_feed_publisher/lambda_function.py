@@ -933,6 +933,59 @@ def _is_s28_meta_row(stream_record: Any) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S46-0A (BRD DOC-735D82EA6E0E 7.1/9.2): per-record feed lag clock on a [WRITE-AUDIT]
+# line (audit line ONLY; t_feed_published is never written to the DynamoDB item, io decision
+# E3). One line per governed record (image carries correlation_id or version_seq). The derived
+# feed_projection_lag_ms = t_feed_published - t_ack is computed by the query pack, not here.
+# ---------------------------------------------------------------------------
+_WA_COLD = True  # True only for the first handler invocation in this container
+
+
+def _wa_val(image: Dict[str, Any], key: str) -> Any:
+    v = (image or {}).get(key)
+    if isinstance(v, dict):
+        return v.get("S") if "S" in v else v.get("N")
+    return None
+
+
+def _wa_iso_ms(value: Any) -> Optional[int]:
+    try:
+        import datetime as _dt
+        return int(_dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wa_emit(record: Dict[str, Any], t_batch_start: int, position: int, cold: bool,
+             publish_ms: Optional[float], t_published: Optional[int], ok: bool) -> None:
+    """Never raises; silent for non-governed records."""
+    try:
+        d = record.get("dynamodb") or {}
+        image = d.get("NewImage") or {}
+        cid, vseq = _wa_val(image, "correlation_id"), _wa_val(image, "version_seq")
+        if not image or (not cid and vseq is None):
+            return
+        t_ack = _wa_val(image, "t_ack")
+        if t_ack is None:
+            t_ack = _wa_iso_ms(_wa_val(image, "updated_at"))
+        rid = _wa_val(image, "item_id") or _wa_val(image, "document_id") or str(_wa_val(image, "record_id") or "").split("#")[-1]
+        line = {
+            "consumer": "appsync_feed_publisher", "surface": "appsync_feed_publisher",
+            "correlation_id": cid or None, "record_id": rid or None,
+            "version_seq": int(vseq) if vseq is not None else None, "event_name": record.get("eventName"),
+            "attempt_outcome": "success" if ok else "error", "success": ok,
+            "projection_phase": "published" if ok else "failed",
+            "t_ack": int(t_ack) if t_ack is not None else None, "t_batch_start": t_batch_start,
+            "batch_position": position, "cold_start": cold,
+            "publish_ms": round(publish_ms, 3) if publish_ms is not None else None,
+            "t_feed_published": t_published if ok else None,
+        }
+        print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
+    except Exception:  # noqa: BLE001 - audit must never break publishing
+        pass
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """DynamoDB Streams entry point.
 
@@ -940,6 +993,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     collected and reported so only failed records are retried. Records with no
     resolvable recordId are skipped (not failed) since they can never succeed.
     """
+    global _WA_COLD
+    wa_t_batch = int(time.time() * 1000)  # ENC-TSK-S46-0A
+    wa_cold, _WA_COLD = _WA_COLD, False
     records = event.get("Records", []) or []
     logger.info(
         "appsync_feed_publisher: invoked records=%d dry_run=%s endpoint_set=%s",
@@ -972,6 +1028,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 continue
 
             full_body = build_full_record_body(record)
+            wa_p0 = time.perf_counter()
 
             if DRY_RUN:
                 logger.info(
@@ -984,6 +1041,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 )
             else:
                 publish_to_appsync(payload, full_body)
+                _wa_emit(record, wa_t_batch, batch_counter, wa_cold, (time.perf_counter() - wa_p0) * 1000.0,
+                         int(time.time() * 1000), True)
             published += 1
         except Exception as exc:  # noqa: BLE001 — isolate per-record failure
             logger.error(
@@ -992,6 +1051,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 exc,
                 exc_info=True,
             )
+            _wa_emit(record, wa_t_batch, batch_counter, wa_cold, None, None, False)
             if _is_permanent_publish_error(exc):
                 # ENC-ISS-531: retrying this exact payload will never
                 # succeed. Skip (do NOT report as a batch failure) so

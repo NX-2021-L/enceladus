@@ -270,6 +270,39 @@ def compute(lines, reports, window_start, window_end, grace_min=15, dlq_depth=0)
             lag_by_tool[c.get("tool") or tool_of.get(c.get("correlation_id")) or "unknown"].append(lag)
     governed_lag = [{"tool": t, "n": len(v), "p50": pct(v, 50), "p95": pct(v, 95)} for t, v in sorted(lag_by_tool.items())]
 
+    # --- ENC-TSK-S46-0A: per-consumer stage clocks and derived lags (BRD 7.1). Derived values are
+    # computed HERE, never in the Lambdas. governed_lag_ms stays as the compatibility alias.
+    by_consumer = defaultdict(list)
+    for c in consumers:
+        by_consumer[c.get("consumer")].append(c)
+
+    def _diff(c, later, earlier):
+        a, b = num(c.get(later)), num(c.get(earlier))
+        return None if a is None or b is None else max(0.0, a - b)
+
+    def _col(rows, fn):
+        return [fn(c) for c in rows]
+
+    def _row(label, v):
+        return {f"{label}_p50": pct(v, 50), f"{label}_p95": pct(v, 95), f"{label}_n": sum(1 for x in v if x is not None)}
+
+    consumer_lag = []
+    for name, rows in sorted(by_consumer.items(), key=str):
+        ok = [c for c in rows if as_bool(c.get("success")) is not False]
+        graph = [_diff(c, "t_record_done", "t_ack") for c in ok if c.get("projection_phase") == "projected"]
+        feed = [_diff(c, "t_feed_published", "t_ack") for c in ok]
+        entry = {"consumer": name, "n": len(rows),
+                 **_row("governed_lag_ms", [num(c.get("governed_lag_ms")) for c in ok]),
+                 **_row("graph_projection_lag_ms", graph), **_row("feed_projection_lag_ms", feed),
+                 **_row("stream_delay_ms", _col(ok, lambda c: _diff(c, "t_batch_start", "t_ack"))),
+                 **_row("queue_ms", _col(ok, lambda c: _diff(c, "t_record_start", "t_batch_start"))),
+                 **_row("store_ms", [num(c.get("store_ms")) for c in ok]),
+                 **_row("mark_ms", [num(c.get("mark_ms")) for c in ok]),
+                 **_row("publish_ms", [num(c.get("publish_ms")) for c in ok]),
+                 "marker_only_skipped_n": sum(1 for c in rows if as_bool(c.get("marker_only_skipped")) is True),
+                 "cold_n": sum(1 for c in rows if as_bool(c.get("cold_start")) is True)}
+        consumer_lag.append(entry)
+
     # --- per-session cold fraction distribution
     sess = defaultdict(lambda: [0, 0])
     for w in writes:
@@ -326,7 +359,7 @@ def compute(lines, reports, window_start, window_end, grace_min=15, dlq_depth=0)
             "counts": {"write_lines": len(writes), "consumer_lines": len(consumers), "report_init_rows": len(init_by_req),
                        "report_joined": joined, "malformed_lines": malformed},
             "latency_by_tool_surface": latency, "latency_by_tool": latency_by_tool, "stage_table": stage_table,
-            "governed_lag": governed_lag, "cold_fraction": cold_fraction, "counter_metrics": cm}
+            "governed_lag": governed_lag, "consumer_lag": consumer_lag, "cold_fraction": cold_fraction, "counter_metrics": cm}
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -352,6 +385,14 @@ def render_markdown(res, title):
                    f"| {r['cold_n']} | {f(r['cold_share'], 3)} | {f(r['client_p50'])} | {f(r['client_p95'])} |")
     out += ["", "## Governed lag (ms)", "", "| tool | n | p50 | p95 |", "|---|---|---|---|"]
     out += [f"| {r['tool']} | {r['n']} | {f(r['p50'])} | {f(r['p95'])} |" for r in res["governed_lag"]]
+    out += ["", "## Consumer projection lag (ms, p50/p95; governed_lag_ms = compatibility alias)", "",
+            "| consumer | n | graph_projection_lag_ms | feed_projection_lag_ms | governed_lag_ms | stream_delay_ms | queue_ms | store_ms | publish_ms |",
+            "|---|---|---|---|---|---|---|---|---|"]
+    for r in res.get("consumer_lag", []):
+        cells = [f"{f(r[k + '_p50'])}/{f(r[k + '_p95'])}" if r[k + "_n"] else "-" for k in (
+            "graph_projection_lag_ms", "feed_projection_lag_ms", "governed_lag_ms", "stream_delay_ms", "queue_ms",
+            "store_ms", "publish_ms")]
+        out.append(f"| {r['consumer']} | {r['n']} | " + " | ".join(cells) + " |")
     c = res["cold_fraction"]
     out += ["", "## Per-session cold fraction", "",
             f"sessions {c['sessions']}, mean {f(c['mean'], 3)}, p50 {f(c['p50'], 3)}, p90 {f(c['p90'], 3)}, max {f(c['max'], 3)}  ",
