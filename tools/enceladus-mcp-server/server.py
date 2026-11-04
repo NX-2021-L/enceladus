@@ -3590,8 +3590,10 @@ def _code_mode_tool_catalog() -> list[Tool]:
             name="execute",
             description=(
                 "Governed workflow runner for ordered mutation or lifecycle steps. "
-                "Each step resolves through existing MCP/HTTP handlers, supports dry_run, "
-                "and returns per-step status with resolved underlying calls. Failures also carry "
+                "Each step resolves through existing MCP/HTTP handlers and returns per-step status "
+                "with resolved underlying calls. Top-level dry_run short-circuits every step; "
+                "step-level dry_run (or arguments.dry_run) short-circuits that step only. A dry step "
+                "never invokes the underlying tool and returns a ResolvedCall. Failures carry "
                 "RFC 9457 problem details (errors[].pointer)."
             ),
             inputSchema={
