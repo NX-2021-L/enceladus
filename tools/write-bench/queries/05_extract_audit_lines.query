@@ -1,0 +1,4 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| sort @timestamp asc
+| limit 10000

@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import client_timing as elr_timing
 from . import config as elr_config
 from . import tls as elr_tls
 
@@ -129,6 +130,7 @@ class InternalClient:
         *,
         payload: Optional[Dict[str, Any]] = None,
         query: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None,
     ) -> Tuple[int, Any]:
         """Issue one governed-API call.
 
@@ -143,6 +145,7 @@ class InternalClient:
         server-side); retrying blind could double-apply it. Ambiguous
         write failures are surfaced as-is for the caller to investigate.
         """
+        timing = elr_timing.begin_call("internal", correlation_id)
         base = self.config.base_url(api)
         key = self.config.key_for(api)
         url = _join_url(base, path)
@@ -158,13 +161,16 @@ class InternalClient:
         body: Optional[bytes] = None
         if payload is not None:
             headers["Content-Type"] = "application/json"
-            body = json.dumps(payload).encode("utf-8")
+            body = elr_timing.serialize_body(timing, payload)
         if key:
             headers[elr_config.INTERNAL_AUTH_HEADER] = key
+        headers.update(elr_timing.headers_for(timing))
 
         method_upper = method.upper()
         allow_retry = method_upper == "GET"
-        return self._do(method_upper, url, headers, body, allow_retry)
+        status, parsed = self._do(method_upper, url, headers, body, allow_retry, timing)
+        elr_timing.finish_call(timing, method=method_upper, url=url, status=status)
+        return status, parsed
 
     def _do(
         self,
@@ -173,6 +179,7 @@ class InternalClient:
         headers: Dict[str, str],
         body: Optional[bytes],
         allow_retry: bool,
+        timing: Optional["elr_timing.CallTiming"] = None,
     ) -> Tuple[int, Any]:
         # AC-2 (ENC-TSK-P76): fail fast, BEFORE urlopen ever runs, when the
         # CA bundle resolution chain came up empty -- never let urllib
@@ -188,11 +195,17 @@ class InternalClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
                     status = resp.getcode()
-                    text = resp.read().decode("utf-8")
+                    raw_bytes = resp.read()
+                    if timing is not None:
+                        timing.response_bytes = len(raw_bytes)
+                    text = raw_bytes.decode("utf-8")
                     parsed = json.loads(text) if text else {}
                     return status, parsed
             except urllib.error.HTTPError as exc:
-                raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+                raw_bytes = exc.read() if hasattr(exc, "read") else b""
+                if timing is not None:
+                    timing.response_bytes = len(raw_bytes)
+                raw = raw_bytes.decode("utf-8")
                 try:
                     parsed = json.loads(raw) if raw else {}
                 except json.JSONDecodeError:
@@ -327,7 +340,37 @@ class McpHttpClient:
             fields["remediation"] = elr_tls.REMEDIATION_MESSAGE
         return fields
 
-    def _post(self, method_name: str, params: Optional[Dict[str, Any]] = None, *, is_notification: bool = False) -> McpResponse:
+    def _post(
+        self,
+        method_name: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        is_notification: bool = False,
+        correlation_id: Optional[str] = None,
+    ) -> McpResponse:
+        handshake = method_name in ("initialize", "notifications/initialized")
+        timing = elr_timing.begin_call("mcp", correlation_id, handshake=handshake)
+        resp = self._post_timed(method_name, params, is_notification, timing)
+        row = elr_timing.finish_call(
+            timing,
+            method="POST",
+            url=self.config.gateway_url,
+            status=resp.status,
+            verb=method_name,
+        )
+        if handshake:
+            # Time spent in initialize + notifications/initialized is
+            # reported as client_session_init_ms on the next tools/call.
+            elr_timing.add_session_init_ms(row["client_total_ms"])
+        return resp
+
+    def _post_timed(
+        self,
+        method_name: str,
+        params: Optional[Dict[str, Any]],
+        is_notification: bool,
+        timing: "elr_timing.CallTiming",
+    ) -> McpResponse:
         # AC-2 (ENC-TSK-P76): same fail-fast contract as InternalClient._do
         # -- never attempt the handshake when the CA bundle is unresolved.
         if self._ca_bundle.unresolved:
@@ -344,7 +387,7 @@ class McpHttpClient:
             self._next_id += 1
             payload["id"] = req_id
 
-        body = json.dumps(payload).encode("utf-8")
+        body = elr_timing.serialize_body(timing, payload)
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -354,6 +397,7 @@ class McpHttpClient:
             headers["Authorization"] = f"Bearer {self.config.bearer_token()}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
+        headers.update(elr_timing.headers_for(timing))
 
         req = urllib.request.Request(url=self.config.gateway_url, method="POST", headers=headers, data=body)
         try:
@@ -365,10 +409,13 @@ class McpHttpClient:
             status = exc.code
             resp_headers = dict(exc.headers.items()) if getattr(exc, "headers", None) else {}
             raw = exc.read() if hasattr(exc, "read") else b""
+            timing.response_bytes = len(raw)
         except urllib.error.URLError as exc:
             return McpResponse(status=0, envelope={"error": f"unreachable: {exc}"}, session_id=self.session_id)
         except TimeoutError as exc:
             return McpResponse(status=0, envelope={"error": f"timeout: {exc}"}, session_id=self.session_id)
+
+        timing.response_bytes = len(raw)
 
         # Tolerate an EMPTY (or entirely absent) mcp-session-id header --
         # the gateway is not required to mint one, and a blank value must
@@ -405,8 +452,10 @@ class McpHttpClient:
     def notify_initialized(self) -> McpResponse:
         return self._post("notifications/initialized", {}, is_notification=True)
 
-    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> ToolCallResult:
-        resp = self._post("tools/call", {"name": name, "arguments": arguments or {}})
+    def call_tool(
+        self, name: str, arguments: Optional[Dict[str, Any]] = None, *, correlation_id: Optional[str] = None
+    ) -> ToolCallResult:
+        resp = self._post("tools/call", {"name": name, "arguments": arguments or {}}, correlation_id=correlation_id)
         result = unwrap_tool_result(resp.envelope)
 
         is_error = False
