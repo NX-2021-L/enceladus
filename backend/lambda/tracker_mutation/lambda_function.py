@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import time
+import uuid
 
 _WA_T0 = time.perf_counter()  # ENC-TSK-S26-0A: init_ms origin
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -1200,6 +1201,21 @@ def _wa_begin(event: Dict, context: Any, surface: str) -> None:
                 _WA["correlation_id"] = _WA["correlation_id"] or cid
                 event["body"], event["isBase64Encoded"] = json.dumps(b), False
             _WA["idempotency_key"] = _WA["idempotency_key"] or str(b.get("idempotency_key") or "")
+
+
+def _wa_ensure_correlation_id() -> str:
+    """ENC-ISS-895: guarantee a correlation_id on a write whose caller sent none (non-MCP callers).
+
+    Only inside a request wrapped by lambda_handler (_WA seeded); a generated id is prefixed `srv-` so it is
+    distinguishable from a caller-supplied one. The same value lands on the record, the audit item and the
+    [WRITE-AUDIT] line, which is what lets the write-path query pack join them.
+    """
+    if not _WA:
+        return ""
+    if not _WA.get("correlation_id"):
+        _WA["correlation_id"] = "srv-" + uuid.uuid4().hex
+        _WA["extra"]["correlation_id_generated"] = True
+    return str(_WA["correlation_id"])
 
 
 def _wa_timed(key: str):
@@ -7770,7 +7786,13 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
     if evidence_acceptance and not evidence_text:
         return _error(400, "Cannot set evidence_acceptance=true without providing evidence text.")
 
-    ddb = _get_ddb()
+    # ENC-ISS-895 / ENC-TSK-S28-0D: a live idempotency marker returns the stored receipt byte-identical.
+    _s28_key_val = _s28_idem_key(body)
+    if _s28_key_val:
+        _s28_stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, _s28_key_val)
+        if _s28_stored is not None:
+            return _s28_replay_response(_s28_stored)
+
     key = _build_key(project_id, record_type, record_id)
 
     # Fetch the record
@@ -7833,25 +7855,9 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
         "description": _ser_s(note_text),
     }}
 
-    try:
-        ddb.update_item(
-            TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                f"SET acceptance_criteria[{criterion_index}] = :ac_item, "
-                "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
-            ExpressionAttributeValues={
-                ":ac_item": ac_updated, ":now": _ser_s(now),
-                ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
-        )
-    except Exception as exc:
-        logger.error("update_item (evidence) failed: %s", exc)
-        return _error(500, "Database write failed.")
+    # ENC-ISS-895: correlation_id must exist before the stamps below so record, audit item and the
+    # [WRITE-AUDIT] line all carry the same value (server-generated when the caller sent none).
+    _wa_ensure_correlation_id()
 
     # Build criteria summary
     criteria_summary = []
@@ -7872,13 +7878,64 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
 
     all_accepted = all(c["evidence_acceptance"] for c in criteria_summary)
 
-    return _response(200, {
+    update_expr = (
+        f"SET acceptance_criteria[{criterion_index}] = :ac_item, "
+        "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    # Same stamps as tracker.set: version_seq / feed_scope, correlation_id, write_tool, t_ack, projection_status.
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
+    attr_values = {
+        ":ac_item": ac_updated, ":now": _ser_s(now),
+        ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+    }
+    attr_values.update(vseq_vals)
+
+    # ENC-ISS-895 / ENC-TSK-S28-0D: the receipt is fixed BEFORE the write so the audit item and the
+    # idempotency marker (same transaction) carry its hash / exact body.
+    result: Dict[str, Any] = {
         "success": True, "record_id": record_id,
         "criterion_index": criterion_index,
         "evidence_acceptance": evidence_acceptance,
         "updated_at": now, "criteria_summary": criteria_summary,
         "all_criteria_accepted": all_accepted, "completion_eligible": all_accepted,
-    })
+    }
+    _s28_receipt = json.dumps(result, default=str)
+    _s28_rhash = _s28_receipt_hash(_s28_receipt)
+    _s28_ops: List[Dict] = [{"Update": {
+        "TableName": DYNAMODB_TABLE, "Key": key,
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeValues": attr_values,
+    }}]
+    _s28_ops.append(_s28_audit_put(
+        DYNAMODB_TABLE, "update", project_id, record_id, 200, _s28_rhash,
+        str(_normalize_write_source(body).get("provider") or ""),
+    ))
+    if _s28_key_val:
+        _s28_ops.append(_s28_marker_put(
+            DYNAMODB_TABLE, project_id, _s28_key_val, record_id, "update", 200, _s28_receipt, _s28_rhash))
+
+    try:
+        _wf_before_commit()
+        _s28_commit(DYNAMODB_TABLE, _s28_ops)
+    except ClientError as exc:
+        _codes = _s28_txn_codes(exc)
+        _failed = {i for i, c in enumerate(_codes or []) if c == "ConditionalCheckFailed"}
+        if _s28_key_val and (len(_s28_ops) - 1) in _failed:  # marker lost a race: same key already committed
+            _stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, _s28_key_val)
+            if _stored is not None:
+                return _s28_replay_response(_stored)
+        logger.error("atomic update commit (evidence) failed: %s", exc)
+        return _error(500, "Database write failed.")
+    except Exception as exc:
+        logger.error("atomic update commit (evidence) failed: %s", exc)
+        return _error(500, "Database write failed.")
+
+    return _response(200, result)
 
 
 # ---------------------------------------------------------------------------
