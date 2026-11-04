@@ -106,6 +106,7 @@ def _wa_iso_ms(value: Any) -> Optional[int]:
 def _wa_consumer_emit(
     consumer: str, raw_record: Dict[str, Any], stream_record: Optional[Dict[str, Any]],
     t_received_ms: int, t_done_ms: int, outcome: str = "success", phase: str = "projected",
+    stage: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Never raises; silent for non-governed records (no correlation_id / version_seq on the image)."""
     try:
@@ -117,7 +118,7 @@ def _wa_consumer_emit(
         if t_ack is None:
             t_ack, basis = _wa_iso_ms(_wa_val(image, "updated_at")), "updated_at"
         t_ack = int(t_ack) if t_ack is not None else None
-        lag = max(0, t_done_ms - t_ack) if t_ack is not None else None
+        lag = max(0, t_done_ms - t_ack) if t_ack is not None and phase == "projected" else None
         tool = str(_wa_val(image, "write_tool") or "unknown")
         rid = _wa_val(image, "item_id") or _wa_val(image, "document_id") or str(_wa_val(image, "record_id") or "").split("#")[-1]
         attempt = int(((raw_record or {}).get("attributes") or {}).get("ApproximateReceiveCount") or 1)
@@ -129,6 +130,10 @@ def _wa_consumer_emit(
             "t_projection_done": t_done_ms, "t_ack": t_ack, "lag_basis": basis if t_ack is not None else None,
             "governed_lag_ms": lag,
         }
+        if stage is not None:  # ENC-TSK-S46-0A: BRD 7.1 per-record stage fields (derived lags live in the query pack)
+            line.update(stage)
+            line["t_record_done"] = t_done_ms
+            line["stream_approx_creation_ms"] = _wa_stream_creation_ms(stream_record)
         print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
         if lag is not None and outcome == "success" and phase == "projected":
             print(json.dumps({
@@ -143,6 +148,95 @@ def _wa_consumer_emit(
 
 def _wa_now_ms() -> int:
     return int(_wa_time.time() * 1000)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-S46-0A (BRD DOC-735D82EA6E0E 7.1): per-record stage timing on the consumer audit line.
+# Stamps only (perf_counter + one dict per record); derived lags (stream_delay_ms, queue_ms,
+# graph_projection_lag_ms) are computed by the query pack, never here.
+# ---------------------------------------------------------------------------
+_WA_COLD = True  # flips False after the first handler invocation in this container
+_WA_T0 = _wa_time.perf_counter()  # module import time; init_ms = import -> first invocation (same contract as the MCP server line)
+_WA_EDGE_MERGE_RE = re.compile(r"MERGE\s*\([^)]*\)\s*(?:<-|-)\s*\[")
+_WA_REC: Dict[str, Any] = {}
+
+
+def _wa_reset_record_stats() -> None:
+    _WA_REC.update({"store_ms": 0.0, "store_calls": 0, "store_statements": 0, "edges_written": 0, "mark_ms": 0.0})
+
+
+_wa_reset_record_stats()
+
+
+def _wa_stream_creation_ms(stream_record: Optional[Dict[str, Any]]) -> Optional[int]:
+    try:
+        v = ((stream_record or {}).get("dynamodb") or {}).get("ApproximateCreationDateTime")
+        return int(float(v) * 1000) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _wa_shard_id(raw_record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """DynamoDB Streams events do not carry the shard id; the stream label from eventSourceARN is the closest stable key."""
+    arn = str((raw_record or {}).get("eventSourceARN") or "")
+    return arn.split("/stream/", 1)[1] if "/stream/" in arn else (arn or None)
+
+
+class _WaTimedTx:
+    """Counts graph statements (and edge MERGEs) for this record; forwards everything else."""
+
+    def __init__(self, tx: Any) -> None:
+        self._tx = tx
+
+    def run(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        _WA_REC["store_statements"] += 1
+        if isinstance(query, str) and _WA_EDGE_MERGE_RE.search(query):
+            _WA_REC["edges_written"] += 1
+        return self._tx.run(query, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tx, name)
+
+
+class _WaTimedSession:
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+        self._s: Any = None
+
+    def __enter__(self) -> "_WaTimedSession":
+        self._s = self._ctx.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._ctx.__exit__(*exc)
+
+    def _timed(self, method: str, fn: Any, args: Any, kwargs: Any) -> Any:
+        t0 = _wa_time.perf_counter()
+        try:
+            return getattr(self._s, method)(lambda tx, *a, **k: fn(_WaTimedTx(tx), *a, **k), *args, **kwargs)
+        finally:
+            _WA_REC["store_calls"] += 1
+            _WA_REC["store_ms"] += (_wa_time.perf_counter() - t0) * 1000.0
+
+    def execute_write(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._timed("execute_write", fn, args, kwargs)
+
+    def execute_read(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._timed("execute_read", fn, args, kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._s, name)
+
+
+class _WaTimedDriver:
+    def __init__(self, driver: Any) -> None:
+        self._driver = driver
+
+    def session(self, *args: Any, **kwargs: Any) -> _WaTimedSession:
+        return _WaTimedSession(self._driver.session(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._driver, name)
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): projection_status + loop guard +
@@ -2197,7 +2291,11 @@ def _process_record(driver, stream_record: Dict) -> None:
             _project_mutated_edge(session, record)
 
         if incoming_vseq is not None:  # ENC-TSK-S28-0E: projected marker on the source item
-            _mark_source_projected(new_image, incoming_vseq)
+            _wa_m0 = _wa_time.perf_counter()
+            try:
+                _mark_source_projected(new_image, incoming_vseq)
+            finally:
+                _WA_REC["mark_ms"] += (_wa_time.perf_counter() - _wa_m0) * 1000.0
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",
             record_type, record_id, event_name, record.get("project_id", ""),
@@ -2261,11 +2359,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     GraphSyncSqsTrigger / GraphSyncTrackerStreamTrigger /
     GraphSyncDocumentsStreamTrigger) for batchItemFailures to actually take
     effect."""
+    global _WA_COLD
+    _wa_t_batch = _wa_now_ms()  # ENC-TSK-S46-0A
+    _wa_cold, _WA_COLD = _WA_COLD, False
     records = event.get("Records", [])
     if not records:
         return {"statusCode": 200, "body": "no records"}
 
+    _wa_init_ms = round((_wa_time.perf_counter() - _WA_T0) * 1000.0, 3) if _wa_cold else 0.0
     driver = _get_neo4j_driver()
+    _wa_mem = getattr(context, "memory_limit_in_mb", None)
+    try:
+        _wa_mem = int(_wa_mem) if _wa_mem is not None else None
+    except (TypeError, ValueError):
+        _wa_mem = None
+    if driver is not None:
+        driver = _WaTimedDriver(driver)
     if driver is None:
         logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
         # Report every record as failed so the source retries the whole batch
@@ -2283,9 +2392,21 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     errors = 0
     failed_identifiers: List[str] = []
 
-    for raw_record in records:
+    def _wa_stage(position: int, raw: Dict[str, Any], t_rec_start: int, marker_only: bool = False) -> Dict[str, Any]:
+        return {
+            "t_batch_start": _wa_t_batch, "batch_size": len(records), "batch_position": position,
+            "t_record_start": t_rec_start, "cold_start": _wa_cold, "init_ms": _wa_init_ms,
+            "store_ms": round(_WA_REC["store_ms"], 3), "store_calls": _WA_REC["store_calls"],
+            "store_statements": _WA_REC["store_statements"], "edges_written": _WA_REC["edges_written"],
+            "edges_skipped_missing_target": 0,  # W6a.4 fills this
+            "mark_ms": round(_WA_REC["mark_ms"], 3), "marker_only_skipped": marker_only,
+            "shard_id": _wa_shard_id(raw), "memory_mb": _wa_mem,
+        }
+
+    for _wa_pos, raw_record in enumerate(records):
         source, identifier = _record_source_and_identifier(raw_record)
         _wa_t_recv = _wa_now_ms()  # ENC-TSK-S26-0A
+        _wa_reset_record_stats()
         stream_record = None
         try:
             if source == "sqs":
@@ -2302,14 +2423,18 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 (stream_record.get("dynamodb") or {}).get("OldImage"),
                 (stream_record.get("dynamodb") or {}).get("NewImage"),
             ):
+                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(),
+                                  phase="marker_skipped", stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv, True))
                 continue  # ENC-TSK-S28-0E loop guard: consumer-originated projection marker write
             if stream_record and "dynamodb" in stream_record:
                 _process_record(driver, stream_record)
                 processed += 1
-                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms())
+                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(),
+                                  stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv))
         except Exception:
             errors += 1
-            _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(), outcome="error")
+            _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(), outcome="error",
+                              stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv))
             logger.exception("[ERROR] Failed to process %s record identifier=%s", source, identifier)
             if identifier:
                 failed_identifiers.append(identifier)
