@@ -134,7 +134,7 @@ IDEMPOTENT_VALUE = "write-bench idempotent description (no semantic content)"
 
 
 def _body(nbytes: int, tag: str) -> str:
-    head = f"# [BENCH] {tag}\n\n"
+    head = f"# [BENCH] write-bench payload\n\n# {tag}\n\n"
     line = "write-bench filler line. lorem ipsum dolor sit amet, consectetur adipiscing elit.\n"
     out = head
     while len(out.encode("utf-8")) < nbytes:

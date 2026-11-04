@@ -30,7 +30,10 @@ import wire  # noqa: E402
 
 ARMS = ["elr_per_process", "long_lived_session", "in_region_lambda_client"]
 GAMMA_LAMBDA = "devops-write-bench-client-gamma"
-DEFAULT_COLD_FUNCTIONS = ("enceladus-mcp-code-gamma", "devops-tracker-mutation-api-gamma", "devops-document-api-gamma")
+# Verified gamma write-path functions (log groups exist): the streaming gateway fronting mcp-gamma.jreese.net
+# (enceladus-mcp-code-gamma has no log group and does not serve it), tracker mutation and document API.
+# Re-resolve with: aws lambda list-functions --query "Functions[?contains(FunctionName,'mcp')].FunctionName" --output text
+DEFAULT_COLD_FUNCTIONS = ("enceladus-mcp-streaming-gateway-gamma", "devops-tracker-mutation-api-gamma", "devops-document-api-gamma")
 DEFAULT_URL = f"https://{wire.ALLOWED_HOST}{wire.DEFAULT_PATH}"
 
 

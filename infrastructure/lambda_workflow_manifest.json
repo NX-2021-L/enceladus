@@ -364,6 +364,13 @@
       "lambda_dir": "backend/lambda/escalation_decision_authorizer",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
+    },
+    {
+      "function_name": "devops-write-bench-client",
+      "lambda_dir": "backend/lambda/write_bench_client",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/write_bench_client/deploy.sh",
+      "_note": "ENC-TSK-S26-0C: gamma-only write-bench in-region client (Condition IsGamma in 02-compute.yaml); no v3-prod twin."
     }
   ],
   "architecture_exceptions": {

@@ -72,8 +72,8 @@ value); chained executes all hit `pool[0]` with values derived from the previous
 
 Cold samples are preceded by `aws lambda update-function-configuration` setting
 `BENCH_COLD_NONCE=<uuid>` (existing env variables are preserved) on the gamma write-path functions
-(`--cold-functions`, default `enceladus-mcp-code-gamma`, `devops-tracker-mutation-api-gamma`,
-`devops-document-api-gamma`), then polling until `LastUpdateStatus` is `Successful`. This needs
+(`--cold-functions`, default `enceladus-mcp-streaming-gateway-gamma` (the function behind
+`mcp-gamma.jreese.net`), `devops-tracker-mutation-api-gamma`, `devops-document-api-gamma`), then polling until `LastUpdateStatus` is `Successful`. This needs
 Lambda configuration write access, so **cold runs need the `product-lead` profile**:
 `--aws-profile product-lead`. Agent profiles (`enceladus-agent`) cannot do it. The bump mutates gamma
 function configuration (not CFN-declared); expect drift on those env maps until the next compute deploy.
@@ -92,7 +92,10 @@ python3 tools/write-bench/compare.py --pre pre1.json [pre2.json pre3.json] \
 Delta (post - pre) per cell with a bootstrap CI (cells paired by key, samples not paired); an
 improvement requires the CI to exclude zero. Up to three runs per side are pooled within a cell after a
 between-run check: a run is `divergent` if its p50 lies outside the p50 CI of every other run in that
-cell. Investigate divergent cells before trusting the pooled number.
+cell. This is the implemented reading of BRD 7.5(5) ("if one run's p50 differs from the other two by more
+than its own interval, investigate before pooling"): the "outside every other run" form isolates a single
+outlier instead of also flagging the runs that agree with each other. Investigate divergent cells before
+trusting the pooled number.
 
 ## Tests
 
