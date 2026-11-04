@@ -9,12 +9,19 @@ McpHttpClient   -- JSON-RPC 2.0 client for the streaming MCP-over-HTTP
                    tools/call), including the SSE double-parse contract
                    that gateway's tool results require.
 
+Long-lived mode (ENC-TSK-S28-0B, default on; ``ELR_LONG_LIVED=0`` restores
+one urllib connection per call): both clients keep an http.client connection
+alive per host for the life of the process (elr_lib.keepalive), and
+McpHttpClient runs initialize + notifications/initialized once per process
+and reuses the Mcp-Session-Id for every later tools/call.
+
 Nothing here imports server.py -- ELR must run standalone on any
 workstation with only the Python 3.11 standard library.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import ssl
@@ -26,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import client_timing as elr_timing
 from . import config as elr_config
+from . import keepalive as elr_keepalive
 from . import tls as elr_tls
 
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -107,6 +115,24 @@ def classify_mcp_posture(*, bearer_sent: bool, tool_status_code: int, is_error: 
     return "unknown", anomalies
 
 
+
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+MAX_REDIRECTS = 3
+
+
+def _tls_header_callback(timing: Optional["elr_timing.CallTiming"], headers: Dict[str, str]):
+    """Return an on_connection hook that keeps client_tls_new (ledger row and
+    X-Enc-Client-Tls-New header) truthful for each send attempt, including a
+    replay after a dropped connection."""
+
+    def _hook(opened_new: bool) -> None:
+        if timing is not None:
+            timing.tls_new = bool(opened_new)
+        headers[elr_timing.H_TLS_NEW] = "1" if opened_new else "0"
+
+    return _hook
+
+
 # ---------------------------------------------------------------------------
 # InternalClient
 # ---------------------------------------------------------------------------
@@ -121,6 +147,19 @@ class InternalClient:
         self._ca_bundle = elr_tls.resolve_ca_bundle()
         self.ca_bundle = self._ca_bundle.as_digest_field()
         self._ssl_ctx = elr_tls.build_ssl_context(self._ca_bundle)
+        self._pool: Optional[elr_keepalive.KeepAlivePool] = None
+
+    def _get_pool(self) -> Optional[elr_keepalive.KeepAlivePool]:
+        """The keep-alive pool, or None when ELR_LONG_LIVED=0 (per-call urllib)."""
+        if not elr_keepalive.long_lived_enabled():
+            return None
+        if self._pool is None:
+            self._pool = elr_keepalive.KeepAlivePool(self._ssl_ctx)
+        return self._pool
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
 
     def request(
         self,
@@ -189,6 +228,10 @@ class InternalClient:
         if self._ca_bundle.unresolved:
             return elr_tls.TLS_UNRESOLVED_STATUS, {"error": elr_tls.REMEDIATION_MESSAGE}
 
+        pool = self._get_pool()
+        if pool is not None:
+            return self._do_pooled(pool, method, url, headers, body, allow_retry, timing)
+
         attempted_retry = False
         while True:
             req = urllib.request.Request(url=url, method=method, headers=headers, data=body)
@@ -220,6 +263,61 @@ class InternalClient:
                 return 0, {"error": f"timeout: {exc}"}
             except Exception as exc:  # noqa: BLE001 -- surface, never swallow
                 return 0, {"error": f"request_failed: {exc}"}
+
+    def _do_pooled(
+        self,
+        pool: "elr_keepalive.KeepAlivePool",
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        body: Optional[bytes],
+        allow_retry: bool,
+        timing: Optional["elr_timing.CallTiming"],
+    ) -> Tuple[int, Any]:
+        """Same status/body contract as the urllib path, over a kept-alive
+        connection. 4xx/5xx come back as (code, parsed) exactly as the
+        HTTPError branch does; a single GET-only retry on 5xx is preserved."""
+        attempted_retry = False
+        redirects = 0
+        hook = _tls_header_callback(timing, headers)
+        while True:
+            try:
+                resp = pool.request(
+                    method, url, headers, body, timeout=self.timeout, idempotent=allow_retry, on_connection=hook
+                )
+            except TimeoutError as exc:
+                return 0, {"error": f"timeout: {exc}"}
+            except (OSError, http.client.HTTPException) as exc:
+                return 0, {"error": f"unreachable: {exc}"}
+            except Exception as exc:  # noqa: BLE001 -- surface, never swallow
+                return 0, {"error": f"request_failed: {exc}"}
+
+            if timing is not None:
+                timing.response_bytes = len(resp.body)
+            if resp.status in REDIRECT_STATUSES and allow_retry and redirects < MAX_REDIRECTS:
+                location = _get_header(resp.headers, "location")
+                if location:
+                    redirects += 1
+                    url = urllib.parse.urljoin(url, location)
+                    continue
+            try:
+                text = resp.body.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                return 0, {"error": f"request_failed: {exc}"}
+            if resp.status >= 400:
+                try:
+                    parsed = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    parsed = {"error": text or f"HTTP Error {resp.status}"}
+                if resp.status >= 500 and allow_retry and not attempted_retry:
+                    attempted_retry = True
+                    continue
+                return resp.status, parsed
+            try:
+                parsed = json.loads(text) if text else {}
+            except json.JSONDecodeError as exc:
+                return 0, {"error": f"request_failed: {exc}"}
+            return resp.status, parsed
 
     def health(self) -> Tuple[int, Any]:
         """Cheap governed READ: GET the same health endpoint the MCP
@@ -268,6 +366,10 @@ def parse_mcp_http_response(headers: Dict[str, str], body_bytes: bytes) -> Dict[
     if not text.strip():
         return {}
     return json.loads(text)
+
+
+def handshake_method(method_name: str) -> bool:
+    return method_name in ("initialize", "notifications/initialized")
 
 
 def unwrap_tool_result(envelope: Dict[str, Any]) -> Any:
@@ -322,6 +424,13 @@ class McpHttpClient:
     """JSON-RPC 2.0 client for the streaming MCP-over-HTTP gateway.
 
     Lifecycle: initialize() -> notify_initialized() -> call_tool(...).
+
+    Long-lived mode (default; ELR_LONG_LIVED=0 disables): call_tool() runs
+    the handshake lazily, ONCE per client, then reuses the Mcp-Session-Id and
+    a kept-alive connection for every later call. The server rebuilds its
+    ASGI state per Lambda invocation, so the session id is not durable
+    server-side across invocations; reuse here saves the per-process
+    handshake round trips and the TLS setup, not server state.
     """
 
     def __init__(self, config: "elr_config.McpHttpProfileConfig", timeout: int = DEFAULT_TIMEOUT_SECONDS):
@@ -332,6 +441,33 @@ class McpHttpClient:
         self.ca_bundle = self._ca_bundle.as_digest_field()
         self._ssl_ctx = elr_tls.build_ssl_context(self._ca_bundle)
         self._next_id = 1
+        self._pool: Optional[elr_keepalive.KeepAlivePool] = None
+        self._session_ready = False
+        self.handshakes_run = 0
+
+    def _get_pool(self) -> Optional[elr_keepalive.KeepAlivePool]:
+        if not elr_keepalive.long_lived_enabled():
+            return None
+        if self._pool is None:
+            self._pool = elr_keepalive.KeepAlivePool(self._ssl_ctx)
+        return self._pool
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
+
+    def ensure_session(self) -> bool:
+        """Run initialize + notifications/initialized once per client.
+        Returns True when the session is ready (idempotent afterwards)."""
+        if self._session_ready:
+            return True
+        init = self.initialize()
+        if not (200 <= init.status < 300):
+            return False
+        self.notify_initialized()
+        self._session_ready = True
+        self.handshakes_run += 1
+        return True
 
     def ca_bundle_digest_fields(self) -> Dict[str, Any]:
         """See InternalClient.ca_bundle_digest_fields (ENC-TSK-P76 AC-1)."""
@@ -347,10 +483,11 @@ class McpHttpClient:
         *,
         is_notification: bool = False,
         correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> McpResponse:
         handshake = method_name in ("initialize", "notifications/initialized")
         timing = elr_timing.begin_call("mcp", correlation_id, handshake=handshake)
-        resp = self._post_timed(method_name, params, is_notification, timing)
+        resp = self._post_timed(method_name, params, is_notification, timing, idempotency_key)
         row = elr_timing.finish_call(
             timing,
             method="POST",
@@ -370,6 +507,7 @@ class McpHttpClient:
         params: Optional[Dict[str, Any]],
         is_notification: bool,
         timing: "elr_timing.CallTiming",
+        idempotency_key: Optional[str] = None,
     ) -> McpResponse:
         # AC-2 (ENC-TSK-P76): same fail-fast contract as InternalClient._do
         # -- never attempt the handshake when the CA bundle is unresolved.
@@ -397,23 +535,46 @@ class McpHttpClient:
             headers["Authorization"] = f"Bearer {self.config.bearer_token()}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         headers.update(elr_timing.headers_for(timing))
 
-        req = urllib.request.Request(url=self.config.gateway_url, method="POST", headers=headers, data=body)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
-                status = resp.getcode()
-                resp_headers = dict(resp.headers.items())
-                raw = resp.read()
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            resp_headers = dict(exc.headers.items()) if getattr(exc, "headers", None) else {}
-            raw = exc.read() if hasattr(exc, "read") else b""
-            timing.response_bytes = len(raw)
-        except urllib.error.URLError as exc:
-            return McpResponse(status=0, envelope={"error": f"unreachable: {exc}"}, session_id=self.session_id)
-        except TimeoutError as exc:
-            return McpResponse(status=0, envelope={"error": f"timeout: {exc}"}, session_id=self.session_id)
+        pool = self._get_pool()
+        if pool is not None:
+            # Handshake messages are safe to replay; a tools/call is replayed
+            # only when the caller supplied an Idempotency-Key.
+            idempotent = handshake_method(method_name) or bool(idempotency_key)
+            try:
+                presp = pool.request(
+                    "POST",
+                    self.config.gateway_url,
+                    headers,
+                    body,
+                    timeout=self.timeout,
+                    idempotent=idempotent,
+                    on_connection=_tls_header_callback(timing, headers),
+                )
+            except TimeoutError as exc:
+                return McpResponse(status=0, envelope={"error": f"timeout: {exc}"}, session_id=self.session_id)
+            except (OSError, http.client.HTTPException) as exc:
+                return McpResponse(status=0, envelope={"error": f"unreachable: {exc}"}, session_id=self.session_id)
+            status, resp_headers, raw = presp.status, presp.headers, presp.body
+        else:
+            req = urllib.request.Request(url=self.config.gateway_url, method="POST", headers=headers, data=body)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
+                    status = resp.getcode()
+                    resp_headers = dict(resp.headers.items())
+                    raw = resp.read()
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                resp_headers = dict(exc.headers.items()) if getattr(exc, "headers", None) else {}
+                raw = exc.read() if hasattr(exc, "read") else b""
+                timing.response_bytes = len(raw)
+            except urllib.error.URLError as exc:
+                return McpResponse(status=0, envelope={"error": f"unreachable: {exc}"}, session_id=self.session_id)
+            except TimeoutError as exc:
+                return McpResponse(status=0, envelope={"error": f"timeout: {exc}"}, session_id=self.session_id)
 
         timing.response_bytes = len(raw)
 
@@ -450,12 +611,41 @@ class McpHttpClient:
         )
 
     def notify_initialized(self) -> McpResponse:
-        return self._post("notifications/initialized", {}, is_notification=True)
+        resp = self._post("notifications/initialized", {}, is_notification=True)
+        if 200 <= resp.status < 300:
+            # A caller driving the handshake by hand must not trigger a second
+            # one from call_tool().
+            self._session_ready = True
+        return resp
 
     def call_tool(
-        self, name: str, arguments: Optional[Dict[str, Any]] = None, *, correlation_id: Optional[str] = None
+        self,
+        name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> ToolCallResult:
-        resp = self._post("tools/call", {"name": name, "arguments": arguments or {}}, correlation_id=correlation_id)
+        if elr_keepalive.long_lived_enabled():
+            self.ensure_session()
+        resp = self._post(
+            "tools/call",
+            {"name": name, "arguments": arguments or {}},
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
+        )
+        if resp.status == 404 and idempotency_key and self._session_ready and self.session_id:
+            # Unknown/expired session (MCP spec: 404). Re-handshake once and
+            # replay -- only safe because the call is idempotent.
+            self._session_ready = False
+            self.session_id = ""
+            if elr_keepalive.long_lived_enabled() and self.ensure_session():
+                resp = self._post(
+                    "tools/call",
+                    {"name": name, "arguments": arguments or {}},
+                    correlation_id=correlation_id,
+                    idempotency_key=idempotency_key,
+                )
         result = unwrap_tool_result(resp.envelope)
 
         is_error = False

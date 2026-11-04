@@ -20,8 +20,15 @@ Ledger: ``~/.enceladus/elr/ledger/client_timing.jsonl`` (override with
 timings and routing facts only -- never a header value, so neither the
 Authorization bearer nor the internal key can reach disk through here.
 
-Stdlib only. Nothing here changes transport behaviour (still one fresh
-urllib connection per call; connection reuse is W2.2).
+Long-lived mode (ENC-TSK-S28-0B): the transport keeps connections alive and
+runs the MCP handshake once per process, so ``client_session_reused`` is true
+on every MCP call after the first, ``client_tls_new`` is true only when the
+call actually opened a connection (the pool reports it per send attempt), and
+``client_session_init_ms`` is the one-time initialize + initialized cost.
+With ELR_LONG_LIVED=0 the legacy per-call urllib behaviour (tls_new always
+true) is unchanged.
+
+Stdlib only.
 """
 
 from __future__ import annotations
@@ -148,9 +155,8 @@ class CallTiming:
     serialize_ms: int = 0
     session_reused: bool = False
     session_init_ms: int = 0
-    # W2.2 changes this: with urllib every call opens a NEW connection (and
-    # TLS handshake), so this is True on every call until connection reuse
-    # lands. Do not "fix" it here -- it must keep reporting what happens.
+    # Default True (legacy urllib path opens a NEW connection per call). The
+    # keep-alive pool overwrites it per send attempt with what truly happened.
     tls_new: bool = True
     response_bytes: int = 0
 

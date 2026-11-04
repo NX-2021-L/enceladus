@@ -12165,6 +12165,94 @@ async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
     return await _handle_mcp_request(event)
 
 
+# ENC-TSK-S28-0B (BRD DOC-E32D0ED08473 W1.2): tools/list is a pure function of
+# the code in the container (server version, interface mode, flag-resolved
+# action registry). The serialized JSON-RPC result is therefore memoized per
+# warm container, byte-exact from the SDK's own first response, so every later
+# tools/list is a memory read. Invalidated only by process restart (a new
+# deploy is a new container) or a registry-key change.
+_TOOLS_LIST_CACHE: Dict[str, Any] = {"key": None, "result_json": None, "hits": 0, "stores": 0}
+
+
+def _tools_list_registry_key() -> str:
+    names = "|".join(
+        ",".join(sorted(registry)) for registry in (_SEARCH_ACTIONS, _COORDINATION_ACTIONS, _EXECUTE_ACTIONS)
+    )
+    material = f"{SERVER_VERSION}\n{INTERFACE_MODE}\n{int(bool(DYNAMIC_TOOLSETS_ENABLED))}\n{names}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _tools_list_request_id(body_bytes: bytes) -> Tuple[bool, Any]:
+    """(True, id) iff the body is exactly one JSON-RPC tools/list request with
+    no pagination cursor; anything else takes the normal SDK path."""
+    if b"tools/list" not in body_bytes:
+        return False, None
+    try:
+        msg = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        return False, None
+    if not isinstance(msg, dict) or msg.get("method") != "tools/list" or "id" not in msg:
+        return False, None
+    params = msg.get("params")
+    if isinstance(params, dict) and params.get("cursor"):
+        return False, None
+    return True, msg["id"]
+
+
+def _tools_list_headers_cacheable(headers: Dict[str, Any]) -> bool:
+    lowered = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    accept = lowered.get("accept", "")
+    if accept and "application/json" not in accept and "*/*" not in accept:
+        return False  # the SDK answers 406 -- keep that behaviour
+    version = lowered.get("mcp-protocol-version")
+    if version:
+        try:
+            from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        except Exception:  # noqa: BLE001
+            return False
+        if version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return False
+    return True
+
+
+def _tools_list_filter_active() -> bool:
+    return bool(DYNAMIC_TOOLSETS_ENABLED and any(
+        isinstance(ctx, dict) and ctx.get("tool_filter_active") for ctx in _SESSION_TOOLSET_CONTEXTS.values()
+    ))
+
+
+def _tools_list_cached_response(body_bytes: bytes, headers: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Lambda response for a tools/list request straight from the cache, or None."""
+    ok, req_id = _tools_list_request_id(body_bytes)
+    if not ok or not _tools_list_headers_cacheable(headers) or _tools_list_filter_active():
+        return None
+    if _TOOLS_LIST_CACHE["key"] != _tools_list_registry_key() or _TOOLS_LIST_CACHE["result_json"] is None:
+        return None
+    _TOOLS_LIST_CACHE["hits"] += 1
+    body = '{"jsonrpc":"2.0","id":' + json.dumps(req_id) + ',"result":' + _TOOLS_LIST_CACHE["result_json"] + "}"
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "content-length": str(len(body.encode("utf-8")))},
+        "body": body,
+        "isBase64Encoded": False,
+    }
+
+
+def _tools_list_cache_store(body_bytes: bytes, headers: Dict[str, Any], status: int, resp_body: str) -> None:
+    """Remember the SDK's own serialized tools/list result (byte-exact)."""
+    ok, req_id = _tools_list_request_id(body_bytes)
+    if not ok or status != 200 or not _tools_list_headers_cacheable(headers) or _tools_list_filter_active():
+        return
+    prefix = '{"jsonrpc":"2.0","id":' + json.dumps(req_id) + ',"result":'
+    if not (resp_body.startswith(prefix) and resp_body.endswith("}")):
+        return
+    result_json = resp_body[len(prefix):-1]
+    if not result_json.startswith('{"tools":['):
+        return
+    _TOOLS_LIST_CACHE.update(key=_tools_list_registry_key(), result_json=result_json)
+    _TOOLS_LIST_CACHE["stores"] += 1
+
+
 async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
     """The post-auth MCP path: the bearer gate (legacy or kit edge) has already run."""
     import base64
@@ -12179,6 +12267,10 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
     # 3. Build ASGI scope from Lambda Function URL event
     headers_raw = event.get("headers", {}) or {}
     _absorb_request_headers(headers_raw)  # ENC-TSK-S26-0A: correlation_id + client passthrough
+    # ENC-TSK-S28-0B: tools/list from the per-container cache (memory read).
+    cached_tools_list = _tools_list_cached_response(body_bytes, headers_raw)
+    if cached_tools_list is not None:
+        return cached_tools_list
     asgi_headers = [(k.encode(), v.encode()) for k, v in headers_raw.items()]
     req_ctx = (event.get("requestContext") or {}).get("http", {})
     path = req_ctx.get("path", "/mcp")
@@ -12227,10 +12319,12 @@ async def _handle_mcp_request(event: Dict[str, Any]) -> Dict[str, Any]:
         await manager.handle_request(scope, receive, send)
         tg.cancel_scope.cancel()
 
+    resp_text = resp_body.decode("utf-8", errors="replace")
+    _tools_list_cache_store(body_bytes, headers_raw, resp_status, resp_text)
     return {
         "statusCode": resp_status,
         "headers": resp_headers,
-        "body": resp_body.decode("utf-8", errors="replace"),
+        "body": resp_text,
         "isBase64Encoded": False,
     }
 
