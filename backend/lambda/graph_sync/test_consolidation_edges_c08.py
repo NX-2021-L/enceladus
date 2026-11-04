@@ -66,9 +66,14 @@ class TestCandidateEdgeProjectionC08(unittest.TestCase):
             "project_id": "enceladus",
             "document_subtype": "doc",
         }
-        calls = self._reconcile(record)
-        self.assertFalse(any("CONSOLIDATED_FROM" in c for c in calls))
-        self.assertFalse(any("PROPOSED_BY" in c for c in calls))
+        import lambda_function as lf
+        tx = MagicMock()
+        lf._reconcile_edges(tx, record)
+        # ENC-TSK-S33: the owner-scoped delete passes edge type names as a parameter, so
+        # inspect the Cypher text only (what is MERGEd), not the call parameters.
+        cypher = [c.args[0] for c in tx.run.call_args_list]
+        self.assertFalse(any("CONSOLIDATED_FROM" in c for c in cypher))
+        self.assertFalse(any("PROPOSED_BY" in c for c in cypher))
 
 
 if __name__ == "__main__":

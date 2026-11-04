@@ -993,22 +993,33 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     if not label or not record_id:
         return
 
-    # Remove all outgoing relationships so we can re-create from current state.
-    # ENC-TSK-I07 (Dedup P3): preserve the SUPERSEDED_BY tombstone so a superseded
-    # node is never transiently orphaned from its canonical between reconciles.
-    # The tombstone is removed only when its `superseded-by` rel-record is archived
-    # (un-supersession) via _delete_relationship_edge.
+    # ENC-TSK-S33 / ENC-ISS-890: owner-scoped reconcile (spec DOC-CC14B0A7C4BC section 2).
+    # A record reconcile deletes only the edges it OWNS, then re-creates them from its
+    # current fields:
+    #   * start-owned outgoing edges (EDGE_OWNERSHIP["start"]) of this node, and
+    #   * for Plan/Document, the inverse edges this record emits INTO itself
+    #     (EDGE_OWNERSHIP["end"][label]).
+    # Both deletes skip relationship-record edges (r.source_id IS NOT NULL), which only
+    # _delete_relationship_edge may remove. The blanket outgoing delete and the incoming
+    # RELATED_TO delete that this replaces erased edges other records own (ENC-ISS-890).
+    # ENC-TSK-I07 (Dedup P3): the SUPERSEDED_BY tombstone is never deleted here; the
+    # explicit exclusion stays as defense in depth (it is not start-owned either).
     tx.run(
-        f"MATCH (n:{label}) WHERE n.record_id = $rid "
-        "OPTIONAL MATCH (n)-[r]->() WHERE type(r) <> 'SUPERSEDED_BY' DELETE r",
+        f"MATCH (n:{label} {{record_id: $rid}})-[r]->() "
+        "WHERE type(r) IN $start_owned AND type(r) <> 'SUPERSEDED_BY' "
+        "AND r.source_id IS NULL DELETE r",
         rid=record_id,
+        start_owned=sorted(EDGE_OWNERSHIP["start"]),
     )
-    # Also remove incoming RELATED_TO since we'll re-create from current state
-    tx.run(
-        f"MATCH (n:{label}) WHERE n.record_id = $rid "
-        "OPTIONAL MATCH ()-[r:RELATED_TO]->(n) DELETE r",
-        rid=record_id,
-    )
+    end_owned = EDGE_OWNERSHIP["end"].get(label)
+    if end_owned:
+        tx.run(
+            f"MATCH ()-[r]->(n:{label} {{record_id: $rid}}) "
+            "WHERE type(r) IN $end_owned AND type(r) <> 'SUPERSEDED_BY' "
+            "AND r.source_id IS NULL DELETE r",
+            rid=record_id,
+            end_owned=sorted(end_owned),
+        )
 
     project_id = record.get("project_id", "")
 
@@ -1017,7 +1028,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             f"MATCH (n:{label}), (p:Project) "
             "WHERE n.record_id = $rid AND p.project_id = $pid "
-            "MERGE (n)-[:BELONGS_TO]->(p)",
+            "MERGE (n)-[:BELONGS_TO {source: 'field'}]->(p)",
             rid=record_id, pid=project_id,
         )
 
@@ -1036,7 +1047,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             "MATCH (child:Task), (parent:Task) "
             "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
-            "MERGE (child)-[:CHILD_OF]->(parent)",
+            "MERGE (child)-[:CHILD_OF {source: 'field'}]->(parent)",
             child_id=record_id, parent_id=parent,
         )
 
@@ -1055,7 +1066,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             "MATCH (b:Task) WHERE b.record_id = $bid "
             "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
             "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
-            "MERGE (a)-[:RELATED_TO]->(tgt)",
+            "MERGE (a)-[:RELATED_TO {source: 'field'}]->(tgt)",
             aid=record_id, bid=related_id,
         )
 
@@ -1070,7 +1081,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             "MATCH (b:Issue) WHERE b.record_id = $bid "
             "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
             "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
-            "MERGE (a)-[:RELATED_TO]->(tgt)",
+            "MERGE (a)-[:RELATED_TO {source: 'field'}]->(tgt)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
@@ -1079,7 +1090,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 "MATCH (i:Issue) WHERE i.record_id = $iid "
                 "OPTIONAL MATCH (i)-[:SUPERSEDED_BY]->(canon) "
                 "WITH t, coalesce(canon, i) AS tgt WHERE tgt.record_id <> t.record_id "
-                "MERGE (t)-[:ADDRESSES]->(tgt)",
+                "MERGE (t)-[:ADDRESSES {source: 'field'}]->(tgt)",
                 tid=record_id, iid=related_id,
             )
 
@@ -1092,14 +1103,14 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             f"MATCH (a:{label}), (b:Feature) "
             "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b)",
+            "MERGE (a)-[:RELATED_TO {source: 'field'}]->(b)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
             tx.run(
                 "MATCH (t:Task), (f:Feature) "
                 "WHERE t.record_id = $tid AND f.record_id = $fid "
-                "MERGE (t)-[:IMPLEMENTS]->(f)",
+                "MERGE (t)-[:IMPLEMENTS {source: 'field'}]->(f)",
                 tid=record_id, fid=related_id,
             )
 
@@ -1142,7 +1153,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     f"MATCH (p:Plan), (t:{target_label}) "
                     "WHERE p.record_id = $pid AND t.record_id = $tid "
-                    "MERGE (p)-[:PLAN_CONTAINS]->(t)",
+                    "MERGE (p)-[:PLAN_CONTAINS {source: 'field'}]->(t)",
                     pid=record_id, tid=obj_id,
                 )
             else:
@@ -1157,7 +1168,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     "MATCH (p:Plan), (t {record_id: $tid}) "
                     "WHERE p.record_id = $pid "
-                    "MERGE (p)-[:PLAN_CONTAINS]->(t)",
+                    "MERGE (p)-[:PLAN_CONTAINS {source: 'field'}]->(t)",
                     pid=record_id, tid=obj_id,
                 )
 
@@ -1176,14 +1187,14 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             tx.run(
                 "MATCH (p:Plan), (d:Document) "
                 "WHERE p.record_id = $pid AND d.record_id = $did "
-                "MERGE (p)-[:PLAN_ATTACHED_DOC]->(d)",
+                "MERGE (p)-[:PLAN_ATTACHED_DOC {source: 'field'}]->(d)",
                 pid=record_id, did=doc_id,
             )
             # ENC-PLN-014 / ENC-FTR-065: inverse DOC_ATTACHED_TO_PLAN
             tx.run(
                 "MATCH (p:Plan), (d:Document) "
                 "WHERE p.record_id = $pid AND d.record_id = $did "
-                "MERGE (d)-[:DOC_ATTACHED_TO_PLAN]->(p)",
+                "MERGE (d)-[:DOC_ATTACHED_TO_PLAN {source: 'field'}]->(p)",
                 pid=record_id, did=doc_id,
             )
 
@@ -1201,7 +1212,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             tx.run(
                 "MATCH (p:Plan), (f:Feature) "
                 "WHERE p.record_id = $pid AND f.record_id = $fid "
-                "MERGE (p)-[:PLAN_IMPLEMENTS]->(f)",
+                "MERGE (p)-[:PLAN_IMPLEMENTS {source: 'field'}]->(f)",
                 pid=record_id, fid=feat_id,
             )
 
@@ -1268,7 +1279,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     f"MATCH (l:Lesson), (t:{target_label}) "
                     "WHERE l.record_id = $lid AND t.record_id = $tid "
-                    "MERGE (l)-[:LEARNED_FROM]->(t)",
+                    "MERGE (l)-[:LEARNED_FROM {source: 'field'}]->(t)",
                     lid=record_id, tid=ev_id,
                 )
             else:
@@ -1285,7 +1296,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     "MATCH (l:Lesson), (t {record_id: $tid}) "
                     "WHERE l.record_id = $lid "
-                    "MERGE (l)-[:LEARNED_FROM]->(t)",
+                    "MERGE (l)-[:LEARNED_FROM {source: 'field'}]->(t)",
                     lid=record_id, tid=ev_id,
                 )
 
@@ -1318,7 +1329,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     f"MATCH (d:Document), (t:{target_label}) "
                     "WHERE d.record_id = $did AND t.record_id = $tid "
-                    "MERGE (d)-[:RELATED_TO]->(t)",
+                    "MERGE (d)-[:RELATED_TO {source: 'field'}]->(t)",
                     did=doc_id, tid=related_id,
                 )
             else:
@@ -1330,7 +1341,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     "MATCH (d:Document), (t {record_id: $tid}) "
                     "WHERE d.record_id = $did "
-                    "MERGE (d)-[:RELATED_TO]->(t)",
+                    "MERGE (d)-[:RELATED_TO {source: 'field'}]->(t)",
                     did=doc_id, tid=related_id,
                 )
 
@@ -1350,8 +1361,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             tx.run(
                 "MATCH (d:Document), (s:Document) "
                 "WHERE d.record_id = $did AND s.record_id = $sid "
-                "MERGE (d)-[:INFORMED_BY]->(s) "
-                "MERGE (s)-[:INFORMS]->(d)",
+                "MERGE (d)-[:INFORMED_BY {source: 'field'}]->(s) "
+                "MERGE (s)-[:INFORMS {source: 'field'}]->(d)",
                 did=doc_id, sid=informed_id,
             )
 
@@ -1373,8 +1384,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                     tx.run(
                         f"MATCH (d:Document), (t:{target_label}) "
                         "WHERE d.record_id = $did AND t.record_id = $target_id "
-                        "MERGE (d)-[:INVESTIGATES]->(t) "
-                        "MERGE (t)-[:INVESTIGATED_BY]->(d)",
+                        "MERGE (d)-[:INVESTIGATES {source: 'field'}]->(t) "
+                        "MERGE (t)-[:INVESTIGATED_BY {source: 'field'}]->(d)",
                         did=doc_id, target_id=source_incident_id,
                     )
                 else:
@@ -1397,8 +1408,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     "MATCH (d:Document), (p:Plan) "
                     "WHERE d.record_id = $did AND p.record_id = $plan_id "
-                    "MERGE (d)-[:TRACKS_WAVE_OF]->(p) "
-                    "MERGE (p)-[:HAS_WAVE_DOC]->(d)",
+                    "MERGE (d)-[:TRACKS_WAVE_OF {source: 'field'}]->(p) "
+                    "MERGE (p)-[:HAS_WAVE_DOC {source: 'field'}]->(d)",
                     did=doc_id, plan_id=plan_anchor_id,
                 )
 
@@ -1417,8 +1428,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                     tx.run(
                         f"MATCH (d:Document), (t:{target_label}) "
                         "WHERE d.record_id = $did AND t.record_id = $source_rec_id "
-                        "MERGE (d)-[:HANDS_OFF]->(t) "
-                        "MERGE (t)-[:HANDED_OFF_BY]->(d)",
+                        "MERGE (d)-[:HANDS_OFF {source: 'field'}]->(t) "
+                        "MERGE (t)-[:HANDED_OFF_BY {source: 'field'}]->(d)",
                         did=doc_id, source_rec_id=source_record_id,
                     )
                 else:
@@ -1444,8 +1455,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             tx.run(
                 "MATCH (d:Document), (s:Document) "
                 "WHERE d.record_id = $did AND s.record_id = $sid "
-                "MERGE (d)-[:CONSOLIDATED_FROM]->(s) "
-                "MERGE (s)-[:CONSOLIDATES]->(d)",
+                "MERGE (d)-[:CONSOLIDATED_FROM {source: 'field'}]->(s) "
+                "MERGE (s)-[:CONSOLIDATES {source: 'field'}]->(d)",
                 did=doc_id, sid=source_id,
             )
 
@@ -1462,8 +1473,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tx.run(
                     f"MATCH (d:Document), (t:{target_label}) "
                     "WHERE d.record_id = $did AND t.record_id = $pid "
-                    "MERGE (d)-[:PROPOSED_BY]->(t) "
-                    "MERGE (t)-[:PROPOSES]->(d)",
+                    "MERGE (d)-[:PROPOSED_BY {source: 'field'}]->(t) "
+                    "MERGE (t)-[:PROPOSES {source: 'field'}]->(d)",
                     did=doc_id, pid=proposed_by,
                 )
             else:
@@ -1496,7 +1507,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             tx.run(
                 "MATCH (g:Generation), (p:Generation) "
                 "WHERE g.record_id = $gid AND p.record_id = $pid "
-                "MERGE (g)-[:SUCCEEDS]->(p)",
+                "MERGE (g)-[:SUCCEEDS {source: 'field'}]->(p)",
                 gid=gen_id, pid=parent_gen,
             )
 
@@ -1505,17 +1516,12 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         target_gen = record.get("target_generation", "")
         if target_gen:
             target_gen = _bare_id(target_gen)
-            edge_type = {
-                "task": "TARGETS_GENERATION",
-                "feature": "BELONGS_TO_GENERATION",
-                "plan": "EXECUTES_WITHIN",
-                "lesson": "TARGETS_GENERATION",
-            }.get(record_type, "TARGETS_GENERATION")
+            edge_type = TARGET_GENERATION_EDGE_BY_RECORD_TYPE.get(record_type, "TARGETS_GENERATION")
             label = RECORD_TYPE_TO_LABEL.get(record_type, "Task")
             tx.run(
                 f"MATCH (n:{label}), (g:Generation) "
                 "WHERE n.record_id = $nid AND g.record_id = $gid "
-                f"MERGE (n)-[:{edge_type}]->(g)",
+                f"MERGE (n)-[:{edge_type} {{source: 'field'}}]->(g)",
                 nid=record_id, gid=target_gen,
             )
 
@@ -1689,6 +1695,55 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
 }
 
 
+# GMF: record_type -> edge label for target_generation projection.
+TARGET_GENERATION_EDGE_BY_RECORD_TYPE = {
+    "task": "TARGETS_GENERATION",
+    "feature": "BELONGS_TO_GENERATION",
+    "plan": "EXECUTES_WITHIN",
+    "lesson": "TARGETS_GENERATION",
+}
+
+# ENC-TSK-S33 / ENC-ISS-890 (spec DOC-CC14B0A7C4BC section 2.1): which side owns each edge
+# graph_sync creates. _reconcile_edges deletes only start-owned outgoing edges of the
+# reconciling node and the end-owned inverse edges that point INTO it, and only edges
+# without a relationship-record marker (r.source_id IS NULL).
+#   start    : emitted while the START node's own record reconciles (field projection;
+#              MENTIONS carries source 'auto_mention').
+#   end      : inverse edges emitted while the END node's record reconciles, keyed by label.
+#   external : never touched by _reconcile_edges (agent, MUTATED, recipe families; the
+#              recipe projectors do their own owner-scoped deletes).
+#   Relationship-record edges (_upsert_relationship_edge) carry {source_id, target_id} and
+#   are removed only by _delete_relationship_edge. Field-projection MERGEs carry
+#   {source: 'field'} so they never collapse onto a relationship-record edge.
+# test_edge_ownership_s33.py scans every MERGE in this module against this table.
+EDGE_OWNERSHIP = {
+    "start": frozenset({
+        "BELONGS_TO", "CHILD_OF", "RELATED_TO", "ADDRESSES", "IMPLEMENTS",
+        "PLAN_CONTAINS", "PLAN_ATTACHED_DOC", "PLAN_IMPLEMENTS",
+        "LEARNED_FROM",
+        "INFORMED_BY", "INVESTIGATES", "TRACKS_WAVE_OF", "HANDS_OFF",
+        "CONSOLIDATED_FROM", "PROPOSED_BY",
+        "SUCCEEDS", "TARGETS_GENERATION", "BELONGS_TO_GENERATION", "EXECUTES_WITHIN",
+        "MENTIONS",
+    }),
+    "end": {
+        "Plan": frozenset({"DOC_ATTACHED_TO_PLAN"}),
+        "Document": frozenset({
+            "INFORMS", "INVESTIGATED_BY", "HAS_WAVE_DOC", "HANDED_OFF_BY",
+            "CONSOLIDATES", "PROPOSES",
+        }),
+    },
+    "external": frozenset({
+        "AUTHENTICATED_AS", "TRIGGERED_BY", "OWNED_BY", "DERIVED_FROM", "MUTATED",
+        "RECIPE_SERVES_PROJECT", "PROJECT_SERVED_BY_RECIPE",
+        "RECIPE_IMPLEMENTS_FEATURE", "IMPLEMENTED_BY_RECIPE",
+        "RECIPE_USES_TOOL", "TOOL_USED_BY_RECIPE",
+        "RUN_INSTANCE_OF_RECIPE", "RECIPE_HAS_RUN",
+        "RUN_OPENED_ESCALATION", "ESCALATION_OPENED_BY_RUN",
+    }),
+}
+
+
 def _upsert_relationship_edge(tx, record: Dict[str, Any]) -> None:
     """MERGE a typed relationship edge with properties from a DynamoDB relationship record."""
     rel_type = record.get("relationship_type", "")
@@ -1741,7 +1796,11 @@ def _delete_relationship_edge(tx, record_id_sk: str) -> None:
         return
 
     cypher = (
-        f"MATCH (s {{record_id: $source_id}})-[r:{edge_label}]->(t {{record_id: $target_id}}) "
+        # ENC-TSK-S33 (spec 2.4): match only the edge this relationship record owns, so the
+        # field-projection edge of the same type between the same nodes survives.
+        f"MATCH (s {{record_id: $source_id}})-[r:{edge_label} "
+        "{source_id: $source_id, target_id: $target_id}]->"
+        "(t {record_id: $target_id}) "
         "DELETE r"
     )
     tx.run(cypher, source_id=source_id, target_id=target_id)
