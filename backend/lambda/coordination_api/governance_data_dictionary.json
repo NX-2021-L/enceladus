@@ -11310,6 +11310,11 @@
       "summary": "ENC-TSK-S28-0A: write-path functions at 1024 MB with init-time clients; no schema change."
     },
     {
+      "version": "2026-11-04.6",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0B: MCP tools/list response cached per warm container; ELR long-lived session mode (BRD DOC-E32D0ED08473 W1.2). enceladus-mcp-code memoizes the serialized tools/list JSON-RPC result per warm container keyed by server version, interface mode and the flag-resolved action registry; invalidated only by process restart. Behavior-only; no new/renamed/removed fields. ELR (client) keeps one http.client connection per host alive and runs the MCP initialize handshake once per process (ELR_LONG_LIVED=0 restores per-call behavior)."
+    },
+    {
       "version": "2026-11-04.7",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S28-0D (BRD DOC-E32D0ED08473 B3/W2.2): atomic governed commit. tracker_mutation create/update and document_api put/patch commit the record, an audit item, the ID counter (tracker create only) and, when an Idempotency-Key is present, an idempotency marker in ONE TransactWriteItems (extra WCUs only; no new tables). New entities tracker.audit_item and tracker.idempotency_marker; a replayed key returns the stored receipt byte-identical (HTTP 200, response header idempotent_replay: true). WRITE_FAULT_INJECT env (before_commit|cancel_commit) is a default-off fault hook for AC-7; the [WRITE-AUDIT] line gains atomic_commit, txn_items, ddb_txn_ops, t_commit_ms and fault_inject. Additive; no existing field changes."
