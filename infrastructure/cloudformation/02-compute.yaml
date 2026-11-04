@@ -694,7 +694,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       # DVP-TSK-B36: a recipe-run segment (runner session register + claim + several governed MCP writes) runs
       # inside one API request; 10s killed DVP-RUN-002 mid-segment. 29s stays under the HTTP API's 30s cap.
       Timeout: 29
@@ -797,7 +797,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64
@@ -936,7 +936,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64
@@ -8745,7 +8745,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: server.lambda_handler
-      MemorySize: 512
+      MemorySize: 1024  # ENC-TSK-S28-0A: 512 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64
