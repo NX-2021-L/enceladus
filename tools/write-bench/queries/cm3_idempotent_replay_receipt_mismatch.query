@@ -1,0 +1,8 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"idempotency_key": ?"(?<idempotency_key>[^"]+)"/
+| parse @message /"receipt_hash": ?"(?<receipt_hash>[^"]+)"/
+| filter ispresent(idempotency_key) and ispresent(receipt_hash)
+| stats count_distinct(receipt_hash) as distinct_receipts by idempotency_key
+| filter distinct_receipts > 1
+| stats count(*) as violations
