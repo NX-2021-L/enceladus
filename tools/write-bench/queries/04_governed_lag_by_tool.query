@@ -1,0 +1,8 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"tool": ?"(?<tool>[^"]*)"/
+| parse @message /"consumer": ?"(?<consumer>[^"]*)"/
+| parse @message /"governed_lag_ms": ?(?<governed_lag_ms>[0-9.]+)/
+| filter ispresent(governed_lag_ms) and ispresent(consumer)
+| stats count(*) as n, pct(governed_lag_ms, 50) as governed_lag_p50_ms, pct(governed_lag_ms, 95) as governed_lag_p95_ms, max(governed_lag_ms) as governed_lag_max_ms by tool, consumer
+| sort n desc

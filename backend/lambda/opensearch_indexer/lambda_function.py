@@ -71,6 +71,28 @@ def _extract_stream_record(sqs_body: Dict[str, Any]) -> Optional[Dict[str, Any]]
     return sqs_body
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: audit / idempotency-marker rows are write-path bookkeeping, not records.
+# Their key (project_id on the tracker table, document_id on the documents table) begins
+# `audit#` or `idem#`; every stream consumer drops them before any work. A skipped record is
+# consumed (never reported in batchItemFailures).
+# ---------------------------------------------------------------------------
+_S28_META_PREFIXES = ("audit#", "idem#")
+
+
+def _is_s28_meta_row(stream_record: Any) -> bool:
+    try:
+        ddb = stream_record.get("dynamodb") if isinstance(stream_record.get("dynamodb"), dict) else stream_record
+        for image in (ddb.get("Keys"), ddb.get("NewImage"), ddb.get("OldImage")):
+            for attr in ("project_id", "document_id"):
+                value = ((image or {}).get(attr) or {}).get("S")
+                if isinstance(value, str) and value.startswith(_S28_META_PREFIXES):
+                    return True
+    except AttributeError:
+        return False
+    return False
+
+
 def _record_source_and_identifier(raw_record: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Classify a Records[] entry as 'sqs' or 'ddb_stream' and return its
     ReportBatchItemFailures identifier (messageId for SQS, SequenceNumber for
@@ -129,6 +151,26 @@ def _batch_failure_response(identifiers: List[str]) -> Dict[str, Any]:
     return {"batchItemFailures": failures}
 
 
+# ENC-TSK-S28-0E loop guard: records whose only OldImage/NewImage diff is a consumer-owned
+# projection attribute (written by graph_sync / feed_publisher) are dropped. FilterCriteria
+# cannot compare images, so the guard is in code (duplicated per Lambda).
+PROJECTION_ONLY_ATTRS = frozenset({
+    "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+})
+
+
+def _projection_only_diff(old_image: Any, new_image: Any) -> bool:
+    if not old_image or not new_image:
+        return False
+    diff = {k for k in set(old_image) | set(new_image) if old_image.get(k) != new_image.get(k)}
+    return bool(diff) and diff <= PROJECTION_ONLY_ATTRS
+
+
+def _record_is_projection_marker(record: Any) -> bool:
+    d = (record or {}).get("dynamodb") or {}
+    return _projection_only_diff(d.get("OldImage"), d.get("NewImage"))
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     records = event.get("Records") or []
     if not records:
@@ -150,6 +192,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             else:
                 stream_record = raw_record
             if not stream_record or "dynamodb" not in stream_record:
+                continue
+            if _is_s28_meta_row(stream_record):
+                continue  # ENC-TSK-S28-0D: audit/marker row, never indexed
+            if _record_is_projection_marker(stream_record):  # ENC-TSK-S28-0E loop guard
                 continue
             action = _stream_record_to_action(stream_record)
             if action is not None:

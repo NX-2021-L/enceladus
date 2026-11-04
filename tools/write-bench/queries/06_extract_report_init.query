@@ -1,0 +1,6 @@
+fields @timestamp, @requestId as request_id, @message
+| filter @message like /^REPORT RequestId/ and @message like /Init Duration/
+| parse @message /Duration: (?<duration_ms>[0-9.]+) ms/
+| parse @message /Init Duration: (?<init_duration_ms>[0-9.]+) ms/
+| sort @timestamp asc
+| limit 10000

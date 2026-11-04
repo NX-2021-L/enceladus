@@ -19,7 +19,7 @@
     "handler": "server.lambda_handler",
     "last_modified": "",
     "layers": [],
-    "memory_size": 512,
+    "memory_size": 1024,
     "role": "",
     "runtime": "python3.12",
     "timeout": 30,
