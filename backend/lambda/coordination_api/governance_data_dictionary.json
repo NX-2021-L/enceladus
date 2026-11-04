@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.10",
-  "updated_at": "2026-11-04T18:00:00Z",
-  "last_change_summary": "ENC-TSK-S29-0A (BRD DOC-E32D0ED08473 B4/W3.3, ruling D4): execute validates every step before the first write (422 with per-step pointers, nothing written), accepts optional step id and depends_on (step ids or zero-based indexes; unknown ids and cycles are 422), runs a declared graph on a pool of eight (steps without any declared graph stay strictly serial), stamps every step result with started_ms/duration_ms/status/error and the response with execute_total_ms, critical_path_ms and committed_prefix, and re-reads the governance hash immediately before each step commits: on rotation that step and every not-yet-started step abort with governance_hash_stale (409), committed steps stand. New entity mcp_server.execute_dag; additive, no existing field changes.",
+  "version": "2026-11-04.11",
+  "updated_at": "2026-11-04T09:00:00Z",
+  "last_change_summary": "ENC-TSK-S26-0A (BRD DOC-E32D0ED08473 s7.2): enceladus-mcp-code emits one [WRITE-AUDIT] JSON line per write tool call (tracker_create/set, documents_put/patch, checkout.*) and per execute step, plus two EMF metrics in namespace Enceladus/WritePath (dimension tool: server_total_ms, cold_start). X-Correlation-Id is accepted or minted at the MCP edge and propagated to tracker/document/checkout Lambdas as a header and as a correlation_id body field on POST/PUT/PATCH. New entity mcp_server.write_audit_line; new item attribute write_tool (stamped beside correlation_id on tracker and document items, source of the governed_lag_ms tool dimension); additive, no existing field changes. PREVIOUS: ENC-TSK-S25 (ENC-FTR-152): first ENC-FTR-078 AC-18 graduation -- 'brd' joins the document_subtype enum with a new document.brd entity (no new required fields; title hygiene applies; subtypepattern rejected). document.doc gains graduated_subtypepattern_values {brd: brd}; doc+subtypepattern=brd writes are rejected with code subtypepattern_graduated; documents.search(subtypepattern=brd) becomes a deprecated alias carrying a deprecation object. graduation_pathway (d) pins the criteria (>=10 instances, >=3 projects, >=60 days). observed_emergent_subtypepattern_values is now [research]. PREVIOUS: ENC-TSK-S22: graph_query_api GraphSearch EMF now emits dimension set [SearchType, Environment] (Environment=prod|gamma); GRAPHSEARCH_EMF_ENABLED env override kept, code default true on prod and false on gamma; 05-monitoring GraphSearch alarms are prod-only with Environment=prod. Behavior-only; no new/renamed/removed fields. PREVIOUS: ENC-TSK-S20 (ENC-PLN-103 N16 / P103-R17): graph_query_api hybrid vector signal now runs the per-label HNSW index queries concurrently (bounded pool of 6, one session per label, same k, merge order/dedup unchanged; a failing label degrades only that label). New additive `graphsearch_query` audit fields: `keyword_fulltext_ms` (int ms in the Neo4j fulltext index attempts), `keyword_fallback_ms` (int ms in the per-token CONTAINS fallback) and `keyword_rows` (int rows returned by the Neo4j keyword arm); all 0 when the OpenSearch primary keyword arm served the call. Response body unchanged. PREVIOUS: ENC-TSK-S19 (ENC-PLN-103 N15): graph_query_api hybrid non-signal overhead. New additive `graphsearch_query` audit fields `preflight_ms` (load_lambda_weights + load_alpha + _ensure_live_driver), `node_fetch_ms` (_fetch_nodes_by_record_ids), `rank_cpu_ms` (facets + energy + corroboration + T3 filter) and `emit_ms` (enqueue time of pathway telemetry + stigmergic trace) on search_type=hybrid. Pathway telemetry S3 put and stigmergic trace now run on a module-level single-worker daemon background queue (bounded 64, drop-on-full, exceptions swallowed; best-effort, flushed at next hybrid invocation). New env var DRIVER_LIVENESS_TTL_S (default 60; 0 disables) skips the Bolt verify_connectivity round-trip when the driver was verified within the TTL; failures still rebuild. Response body unchanged. PREVIOUS: ENC-TSK-S13 (ENC-PLN-103 N12/N3): graph_query_api graph signal gains in-process Personalized PageRank (inproc_ppr.py: Andersen-Chung-Lang push, alpha 0.15, epsilon 1e-4, edge weight GRAPH_EDGE_WEIGHTS[type]*coalesce(flow_weight,1.0), undirected) over a per-project cached edge-list projection (env PPR_CACHE_TTL_S, default 600s, lazy refresh; the graphsearch health action warms it). Env flag GRAPH_SIGNAL_MODE ('inproc_ppr' | 'cypher_fallback'); code default keyed on environment: gamma (Lambda name ends '-gamma') -> inproc_ppr, prod -> cypher_fallback. New internal/agent-only per-request param `graph_signal_mode` on search_type=hybrid (same gate as `vector_source`; stripped for other callers). `graph_algorithm` (response, `graphsearch_query` audit line, health graph_mode.mode) gains the value 'inproc_ppr'; the health graph_mode block adds reason 'projection_cache' and a `cache` stats object (nodes, edges, approx_bytes, loaded_at) when active. N3: the Cypher fallback prechecks the anchor degree with one count query; above env HUB_DEGREE_THRESHOLD (default 150) it walks *1..2 instead of *1..3; new additive `graphsearch_query` audit field `hop_bound` (2 | 3; null when the Cypher walk did not run). Cypher fallback remains when the cache is empty/unloadable, the anchor is absent from it, or the mode is off. PREVIOUS: ENC-TSK-S14 (ENC-PLN-103 N4): graph_query_api action=refresh_flow_weight is gated by FLOW_WEIGHT_REFRESH_ENABLED (env override; code default gamma true, prod false); when disabled returns {status: noop, reason: FLOW_WEIGHT_REFRESH_ENABLED=false}. Daily EventBridge rule enceladus-graph-flow-weight-refresh added in 05-monitoring.yaml. behavior-only; no new/renamed/removed fields. PREVIOUS: ENC-TSK-S12: keyword signal boosts over text index (env KEYWORD_FULLTEXT_INDEX). PREVIOUS: ENC-TSK-S10 (ENC-PLN-103 N14): graph_query_api hybrid vector signal reuses the anchor node's stored 256-d `embedding` (one Cypher read) instead of a Titan call when anchor_record_id is set and the query text equals the record-derived query (normalized \"<title> <intent>\"[:300]); Titan fallback when the node has no embedding. New internal/agent-only per-request param `vector_source` on search_type=hybrid ('auto' default | 'anchor' | 'titan'; stripped for user/cookie/anonymous callers). New additive `graphsearch_query` audit field `vector_source` ('anchor' | 'titan' | 'titan_fallback'; null/absent when no query text). Response body unchanged. PREVIOUS: ENC-TSK-S09 (ENC-PLN-103 N13): graph_query_api _query_hybrid runs the vector, graph and keyword signals concurrently in one 3-worker executor and fuses once all return or the graph deadline lapses; behavior-only; no new/renamed/removed fields (vector_ms/graph_ms/keyword_ms are now measured per signal inside each task, duration_ms still covers the whole call). PREVIOUS: ENC-TSK-S11 (ENC-PLN-103 N11): graph_query_api now prints a CloudWatch EMF object per graphsearch_query audit record (namespace Enceladus/GraphSearch, dimension SearchType): SearchDurationMs (Milliseconds) for hybrid and neighbors, and HybridPathwayFailed (Count, 1 when pathway_status=='failed' else 0) for hybrid. Env GRAPHSEARCH_EMF_ENABLED (default 'true'; false/0/no/off disables). Audit line itself is unchanged; no new/renamed/removed audit or response fields. 05-monitoring.yaml adds alarms HybridP95Over4s and PathwayFailureRate. PREVIOUS: ENC-TSK-S08 (ENC-PLN-103 N1): graph_query_api _reconstruct_pathway_edges now excludes the anchor record from the shortestPath target set (record-mode anchor is a member of its own result set, which made shortestPath error and pathway_status=failed); behavior-only; no new/renamed/removed fields. PREVIOUS: ENC-TSK-S05 (ENC-PLN-103 N5a): graph_sync now projects two additional string properties onto governed Neo4j nodes (Task/Issue/Feature/Plan/Lesson/Document): `intent` (capped at 1,000 chars) and `description` (capped at 2,000 chars), omitted when empty or non-string. Projection contract: node props only; build_embedding_text / embedding_text_hash are unchanged (no re-embedding). Existing nodes are filled by the one-time backfill (ENC-TSK-S12); migration 003 adds fulltext index governed_record_text_ft over title/intent/description (ENC-TSK-S06). No DynamoDB schema change. PREVIOUS: ENC-TSK-S02 (ENC-PLN-103 N2): graph_query_api hybrid `graphsearch_query` audit line (ENC-TSK-R81-0F AC-3) gains ten fields: vector_ms, graph_ms, keyword_ms, facets_ms, pathway_ms (int ms via time.perf_counter), graph_candidates, keyword_candidates (int), graph_algorithm (gds_pagerank|cypher_fallback|timeout|unavailable), pathway_status (ok|timeout|failed|skipped) and query_hash (sha256 hex of query text + anchor_record_id + record_type, the FTR-082 intent-signature derivation without the 'sha256:' prefix). Audit-log only; the graphsearch response body is unchanged. PREVIOUS: ENC-TSK-R95 (ENC-ISS-887): tracker_mutation plan status=complete gate (ENC-ISS-155) now reads each objective from its owning project via _resolve_project_for_record_id (new helper _plan_objective_status), falling back to the plan's project only for an unknown prefix; cross-project objectives such as DVP-TSK-* under an ENC plan were reported NOT_FOUND. No schema change. PREVIOUS: ENC-TSK-R91 follow-up (gamma re-run on PR #1720): sns_anomaly_responder create path records total_impact_usd on the first evidence entry and sets pushed=true on it only after the create push returns 2xx (fail-open follow-up write), so an identical replay after a 2xx create push compares against the create impact instead of None and does not push again. Enrichment (enrichment.dispatch_async) now dispatches ONLY after a create, never on replay or anomaly-closed signals, so advisory fields are written once per issue. Cost class C0. PREVIOUS: ENC-TSK-R91 (ENC-FTR-150 gamma E2E fixes): (1) 03-api.yaml gains RouteNotificationsAnomaly, POST /api/v1/coordination/notifications/anomaly on the coordination integration (the R82-0A handler existed but API Gateway returned 404, so every create/update push failed on gamma); no authorizer, internal-key/managed-token checked in coordination_api like the other notifications routes. (2) sns_anomaly_responder replay bookkeeping: the tracker list view is a compact projection WITHOUT evidence, so the push baseline was always empty and each replay overwrote the evidence list with one entry; replays now read the full record (get_issue), append one evidence entry per replay carrying total_impact_usd and pushed, set pushed=true ONLY after a 2xx update push (a failed push never moves the baseline), and skip the evidence write and push entirely when prior evidence cannot be read. (3) lambda_handler passes the Lambda context into _run(event, client, context=None) so enrichment.dispatch_async fires after a create (regression from the PR #1713 merge). Cost class C0, no new resources. PREVIOUS: ENC-TSK-R82-0A re-entry (ENC-FTR-150 W2.1): sns_anomaly_responder resolves its agent_type_id per environment instead of hard-coding prod's ENC-AGT-00R (absent on gamma, where the W1.1 gate failed every invocation closed): env ANOMALY_AGENT_TYPE_ID wins, else idempotent agent.type.register {surface sns-anomaly-responder, model deterministic-no-llm, cost_tier low} at cold start, cached per container; failure aborts before any mutation. agent_id_alloc _SURFACE_CANONICAL gains sns_anomaly_responder -> sns-anomaly-responder (additive, matches the live prod row). Cost class C0. PREVIOUS: ENC-TSK-R83-0C (ENC-FTR-150 W3.3): sns_anomaly_responder second source adapter cost-floor (cost_floor_digest.py), weekly fixed-floor magnitude digest. Scheduled event {\"digest_source\":\"cost-floor\"} (gamma EventBridge cron(30 14 ? * MON *)) runs read-only describe/list inventory (NAT gateways, EIPs, interface VPC endpoints, EC2, OpenSearch, RDS, Lightsail), prices it from a versioned static us-west-2 on-demand table (never Cost Explorer, DOC-323ED181F51D rule 7), ranks the top N (FLOOR_DIGEST_TOP_N=10, FLOOR_DIGEST_MIN_MONTHLY_USD=3) and files one devops issue per resource through the existing idempotent process_anomaly path; anomaly_id = {kind}-{resource id} so a persisting resource refreshes one issue. lambda_handler/_run gain a digest_source dispatch (identity acquired as for SNS). Responder role gains read-only ec2/es/rds/lightsail describe permissions. Cost class C1. PREVIOUS: ENC-TSK-R82-0F (DOC-52FE56D6F529 U8 step 3): jreese.net /api/v1 ingress retired (Cloudflare WAF block live); CORS_ORIGIN defaults across API Lambdas, shared http_utils and CFN retargeted to the PWA origin https://enceladus.jreese.net (gamma https://enceladus-gamma.jreese.net via EnvironmentSuffix). No schema or enum change. PREVIOUS: ENC-TSK-R83-0B (ENC-FTR-150 AC-9): MENTIONS drift audit migrated onto the anomaly primitive as the second source adapter. New sns_anomaly_responder/mentions_drift_adapter.py (SOURCE mentions-drift, stable anomaly_id = md-sha256(direction signature missing|extra|missing+extra)[:12], never counts/time/record ids); registered in build_default_registry; lambda_function._select_adapter now honors SNS MessageAttributes.anomaly_source over the ANOMALY_SOURCE env default and _impact_line renders non-CAD impact generically. deploy_parity_validator._run_mentions_drift_audit hands a breach to _emit_drift_via_responder (lambda invoke of ANOMALY_RESPONDER_FUNCTION, gamma-only env + IAM in 02-compute.yaml) instead of _emit_drift_iss; legacy POST path retained only when the env var is unset (prod). No ENC-FTR-115 P2/P4/P5 scope. PREVIOUS: ENC-TSK-R83-0A (ENC-FTR-150 AC-6): sns_anomaly_responder async fail-open Bedrock enrichment. New module enrichment.py; single call site after create/replay (async self-invoke Event, no new resource). Gated by ANOMALY_ENRICHMENT_ENABLED (code default off; CFN sets true on gamma only). Writes ONLY advisory issue fields hypothesis, technical_notes, location_hint stamped with model id + timestamp; priority/project re-route are proposed as text in technical_notes, never applied (ruling D-7). Context includes truthful cost digest settled/settled_day/settled_day_spend read from s3 governance/cost-digest/latest.json plus open issue titles. Idempotent per {key, impact} marker; any error logs to the issue worklog and is swallowed. CFN 02-compute.yaml adds least-privilege lambda:InvokeFunction (self), bedrock:InvokeModel (haiku-4-5 profile) and s3:GetObject (digest object) to the gamma-only responder role. Cost class C0. PREVIOUS: ENC-TSK-R82-0C (ENC-FTR-150 AC-5 / ENC-FTR-100 AC-4): sns_anomaly_responder update-push thresholds. A re-delivery pushes (same coordination notify anomaly route, update=true) only when total impact is >= ANOMALY_UPDATE_PUSH_RATIO x (default 2) the last-PUSHED impact OR grew by >= ANOMALY_UPDATE_PUSH_ABS_USD (default 5) since it; evidence entries that pushed carry pushed=true as the baseline; below-threshold re-sends only refresh evidence and append a worklog. A source anomaly-closed signal (aws_cad_adapter.is_closed_signal -> NormalizedAnomaly.lifecycle=closed, exempt from the significance gate) appends a worklog entry and never changes issue status or creates. Both thresholds are Lambda env vars read at call time (no code change to retune). Cost class C0, no new resources. PREVIOUS: ENC-TSK-R82-0A (ENC-FTR-150 AC-2/AC-4, ENC-PLN-102 W2.1): sns_anomaly_responder now establishes its identity per invocation through the W1.1 fail-closed path: GET /governance/hash, agent.register (agent_type_id ENC-AGT-00R, runtime aws_lambda; usage_count +1 via W1.8) and agent.claim (expected_agent_type_id ENC-AGT-00R) BEFORE any tracker mutation; a 422/400/transport failure aborts the invocation (SNS retry) with zero mutations. Every create/evidence/worklog write carries write_source.provider=<ENC-SES>, sci and that invocation's governance_hash; the session is retired best-effort at the end. agent_id_alloc ALLOWED_RUNTIMES gains aws_lambda (additive). On the FIRST create only (never a replay) the responder POSTs the new service-credential route /api/v1/coordination/notifications/anomaly (internal-key or managed-token auth; Cognito callers get 403); notify_v2.handle_anomaly_push fans a notify v2 type `anomaly` push per approver device under the same per-device prefs gate as escalations (prefs.types.anomaly.enabled and severity >= min_risk; detailed body = issue id, service, total impact; generic body = issue id only; navigate = PWA /{project}/issue/{id} deep link). The push is independent of enrichment and a push failure never fails intake. No CFN/IAM change (cost class C0). PREVIOUS: ENC-TSK-R82-0D (ENC-FTR-150 AC-8): sns_anomaly_responder source-adapter boundary. New modules source_adapters.py (SourceAdapter protocol {SOURCE, parse(message)->NormalizedAnomaly[]}, AdapterRegistry keyed by source, validate_normalized contract check enforcing stable anomaly_id/source/project/title/evidence, project_id routing alias) and stub_adapter.py (unregistered reference adapter for the later MENTIONS-drift adapter). lambda_function.ADAPTERS is now the registry and the handler parses via source_adapters.parse_message; aws-cad behaviour, dedupe key, create/replay path unchanged. No new env vars, IAM or infrastructure (cost class C0). PREVIOUS: ENC-TSK-R81-0D (U3): graph_query_api module-load init of Secrets Manager, Neo4j driver and Bedrock runtime clients (guarded; lazy fallback) plus MemorySize 256 -> 1024 MB. PREVIOUS: ENC-TSK-R81-0E (DOC-52FE56D6F529 U2): graph_query_api _hybrid_keyword_ranks queries the TITLE-ONLY multi-label fulltext index governed_record_title_ft (tools/neo4j-migrations/002-fulltext-governed-records.cypher; labels Task, Issue, Feature, Plan, Lesson, Document, Recipe, RecipeRun) via db.index.fulltext.queryNodes with the project and record-type filters applied after the index hit; title-only CONTAINS is the fallback when the index or procedure is unavailable. intent and description are no longer queried (not projected on prod nodes). Env KEYWORD_FULLTEXT_INDEX overrides the index name. Response shape unchanged. Index created on gamma and prod Aura before deploy (additive). PREVIOUS: ENC-TSK-R81-0B (ENC-FTR-150 AC-1/AC-3, ENC-PLN-102 W1.2): new Lambda backend/lambda/sns_anomaly_responder (enceladus-sns-anomaly-responder, gamma-only CFN in 02-compute.yaml, cost class C0 pay-per-use). Subscribed to the new SNS topic enceladus-cost-anomaly-events{suffix}; an aws-cad source adapter deterministically normalizes a Cost Anomaly Detection payload to {source, anomaly_id, project=devops, title, evidence[]} (no LLM; FTR-100 AC-2 configurable CAD_MIN_IMPACT_USD/CAD_MIN_IMPACT_PCT floor, AC-3 per-service/per-usage-type breakdown in evidence) and the source-agnostic primitive creates one governed issue per stable key {source}:{anomaly_id}; replays refresh evidence and append a worklog, never create. Agent type ENC-AGT-00R (surface sns-anomaly-responder) registered via agent.type.register; per-invocation register/claim SCI is W2.1 (ENC-TSK-R82-0A). PREVIOUS: ENC-TSK-R81-0H (ENC-FTR-146 AC-6, W1.8): agent.register now increments usage_count on the resolved ACTIVE agent-types row atomically: mint_session_id(increment_usage=True) issues one TransactWriteItems (session Put + Update ADD usage_count 1, conditional on the row existing and status=active; status aliased via ExpressionAttributeNames per ENC-TSK-P89). A rejected/inactive register or session-id collision never increments; dry_run does not mint. tools/backfill_agent_type_usage_count.py is the one-shot historical backfill: dry-run by default (per-type session counts), --apply requires --approved-by and a privileged terminal; apply uses ADD delta so it is idempotent and race-safe against concurrent registers; non-canonical session agent_type_id values are reported as orphans (rewritten by W2.2/AC-7). No response-shape change. PREVIOUS: ENC-TSK-R81-0F (ENC-PLN-102 W1.6 U5, ENC-ISS-541, ENC-FTR-089): graph_query_api /health signals.graph now reports the graph signal OPERATING MODE as a string using hybrid's graph_algorithm vocabulary ('gds_pagerank' | 'cypher_fallback'), not GDS plugin presence (GDS_HARD_DISABLED forces cypher_fallback by policy); the response gains an additive graph_mode object {mode, reason, gds_plugin_present}. Node serialisation strips the raw `embedding` vector server-side everywhere except the internal hybrid bulk fetch and search_type=embeddings_for (the FTR-089 research-only egress contract); neighbors nodes are additionally bounded to 1000 bytes of JSON per node (long string properties truncated with an ellipsis). The graphsearch_query audit line gains record_id, caller, caller_type (internal|user|agent|cookie|unknown), surface, session_id and, for neighbors, empty_neighbors so the empty-neighbors rate is attributable by caller. No route, parameter or IAM change. PREVIOUS: ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): graph_query_api _query_hybrid computes facets in-process over the fused candidate set and always reports facets_source=fused_candidates; the prod-to-gamma feed/corpus facet HTTP fallback and the FEED_API_BASE env var are deleted, OpenSearch facet aggregations are no longer requested. PREVIOUS: ENC-TSK-R81-0A (ENC-FTR-146 AC-4/5, W1.1): coordination_api agent.register and agent.claim are FAIL-CLOSED on agent_type_id: only an ACTIVE agent-types row (ENC-AGT-* pattern, consistent read) is accepted; free text is rejected, never mapped. Rejection is an RFC 9457 problem (422, Content-Type application/problem+json, type .../agent-type-not-active, fields agent_type_id, detail, see.action=agent.type.list) and keeps the legacy success/error/error_envelope (code AGENT_TYPE_NOT_ACTIVE). agent.register accepts dry_run (forwarded by the MCP server): same gate, 200 {dry_run, would_register}, no mint. runtime (register) and surface (agent.type.register) are closed enums over coordination.agent_type_normal_form (400 INVALID_ENUM with allowed[]); register persists the canonical runtime. agent.claim only FK-gates a caller-supplied expected_agent_type_id; sessions minted before the gate still claim. PREVIOUS: ENC-TSK-R80-0D (ENC-PLN-102 W0.1): cost_digest producer (backend/lambda/cost_digest) compares a SETTLED day (T-2, Cost Explorer T-1 is unsettled and read 0.0 for provisioned C3 usage) against the median of the 7 days before it, and adds additive top-level fields settled (bool), settled_day and settled_day_spend; regression is null (never false) when the settled day has no positive spend, and top_deltas rows (key prior_day kept) use the settled day. connection_health cost_digest passes settled/settled_day through and no longer coerces a null regression to false. No new Cost Explorer calls (same window query, one day wider). PREVIOUS: ENC-TSK-R80-0F (ENC-FTR-146 AC-1/2/3): coordination_api canonicalizes agent.type.register surface/model(/runtime) via agent_id_alloc.canonicalize_agent_type_fields (single importable function; normal form documented in new entity coordination.agent_type_normal_form) and find_agent_type now scans ALL pages and matches on the canonical (surface, model) pair, so a spelling variant (e.g. 'Claude Code CLI' == ENC-AGT-002) resolves to the existing type instead of minting a duplicate. Register is NOT fail-closed (ENC-FTR-146 W1.1). agent.type.register responses gain an additive normal_form object. Variant-to-canonical ENC-AGT mapping published as DOC-82CF8C268DA5. No session history or stored row is rewritten. PREVIOUS: ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes). PREVIOUS: ENC-TSK-R79 (ENC-ISS-876): devops-appsync-feed-publisher skips ID-allocator counter rows (record_type 'counter', recordId COUNTER-<TYPE>) in build_event_payload, beside the existing recipe-name and sentinel-project filters. Every tracker create bumps its type's counter row; publishing it sent a titleless, statusless v2 appsync_feed.event that the client defensive applier healed around once per create. No payload contract change for real records.",
   "owners": [
     "enceladus-platform"
   ],
@@ -513,6 +513,30 @@
           "type": "string",
           "definition": "Governed write tool that last wrote the item (tracker.create | tracker.set | tracker.log | checkout.task | checkout.release | tracker.set_acceptance_evidence | ...), stamped by tracker_mutation beside correlation_id (ENC-TSK-S26-0A).",
           "usage_guidance": "Server-stamped. graph_sync and feed_publisher read it from the stream image as the `tool` dimension of the governed_lag_ms EMF metric (fallback 'unknown')."
+        },
+        "t_ack": {
+          "type": "number",
+          "definition": "Epoch milliseconds at which the governed write was acknowledged, stamped on the item and echoed in the write response (ENC-TSK-S28-0E). Consumers compute governed_lag_ms against it.",
+          "usage_guidance": "Server-stamped; falls back to updated_at on legacy items."
+        },
+        "projection_status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "projected"
+          ],
+          "definition": "pending on every governed write; graph_sync flips it to projected after a successful projection (ENC-TSK-S28-0E).",
+          "usage_guidance": "Server-stamped. Compare projected_version_seq to version_seq to know whether projections have caught up. Never poll projections for correctness."
+        },
+        "projected_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq graph_sync has projected, set by a conditional update (only if lower) with t_projected (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "feed_published_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
         }
       }
     },
@@ -5858,6 +5882,30 @@
           "type": "string",
           "definition": "Governed write tool that last wrote the document (documents.put | documents.patch | documents.patch_section), stamped by document_api beside correlation_id (ENC-TSK-S26-0A).",
           "usage_guidance": "Server-stamped. graph_sync and feed_publisher read it from the stream image as the `tool` dimension of the governed_lag_ms EMF metric (fallback 'unknown')."
+        },
+        "t_ack": {
+          "type": "number",
+          "definition": "Epoch milliseconds at which the governed write was acknowledged, stamped on the item and echoed in the write response (ENC-TSK-S28-0E). Consumers compute governed_lag_ms against it.",
+          "usage_guidance": "Server-stamped; falls back to updated_at on legacy items."
+        },
+        "projection_status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "projected"
+          ],
+          "definition": "pending on every governed write; graph_sync flips it to projected after a successful projection (ENC-TSK-S28-0E).",
+          "usage_guidance": "Server-stamped. Compare projected_version_seq to version_seq to know whether projections have caught up. Never poll projections for correctness."
+        },
+        "projected_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq graph_sync has projected, set by a conditional update (only if lower) with t_projected (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "feed_published_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
         }
       }
     },
@@ -9926,6 +9974,15 @@
         "projection_phase": {
           "type": "string",
           "definition": "Consumer lines: 'projected', or 'marked' for feed_publisher in coalesced mode (publish happens later at the sweep)."
+        },
+        "invoke_mode": {
+          "type": "string",
+          "definition": "ENC-TSK-S28-0F: how the call reached the write tool Lambda: direct (qualified `<fn>:live` Lambda invoke; includes a tool FunctionError, because the function ran), http (CloudFront+API Gateway), direct_fallback (the invoke never reached the function -- ResourceNotFound, AccessDenied, throttling, EC2Throttled, ServiceException, connection errors -- and the call was retried once over HTTP), none (no write-tool request). Reads always use http and do not set it. Every fallback also emits a separate note line with audit_kind invoke_fallback.",
+          "usage_guidance": "Alarm on direct_fallback. Join latency by invoke_mode to compare the direct path against the API Gateway path."
+        },
+        "audit_kind": {
+          "type": "string|null",
+          "definition": "Present only on non-attempt note lines. invoke_fallback marks the line emitted when a direct invoke failed to reach the function and the call fell back to HTTP; it carries attempt_outcome error, success false, tool_function, fallback_reason and the correlation_id. The S26-0D counters exclude lines with an audit_kind (the real attempt is counted on its own line)."
         }
       },
       "governing_records": [
@@ -9982,6 +10039,129 @@
         "ENC-TSK-S29-0A",
         "DOC-E32D0ED08473"
       ]
+    },
+    "mcp_server.write_tool_invoke": {
+      "description": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): direct qualified invoke of the write tool Lambdas from the MCP server (tools/enceladus-mcp-server/server.py _invoke_tool_lambda). A mutating call (POST/PUT/PATCH/DELETE) through _tracker_api_request, _document_api_request or _checkout_api_request is turned into an API Gateway v2 (payload 2.0) event -- requestContext.http.method/path, rawPath, rawQueryString, headers (lower-cased: x-coordination-internal-key, x-correlation-id, X-Enc-* passthrough), queryStringParameters, body as a JSON string, isBase64Encoded false, routeKey $default -- and invoked synchronously (RequestResponse) on `<function>:live`; the {statusCode, headers, body} reply is translated to exactly what the HTTP helper returns. Never $LATEST and never an unqualified ARN; IAM grants lambda:InvokeFunction on the three `:live` ARNs only (02-compute.yaml CoordinationApiRole InvokeWriteToolLambdasLive).",
+      "fields": {
+        "WRITE_TOOL_INVOKE_MODE": {
+          "type": "string",
+          "definition": "direct | http. Default derived from the environment: gamma (ENVIRONMENT_SUFFIX/ENV_SUFFIX -gamma or function name ending -gamma) -> direct, prod and local stdio -> http (P103-R5 pattern). Reads (GET) always use http."
+        },
+        "TRACKER_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Tracker write Lambda name; default devops-tracker-mutation-api (-gamma on gamma)."
+        },
+        "DOCUMENT_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Document write Lambda name; default devops-document-api (-gamma on gamma)."
+        },
+        "CHECKOUT_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Checkout write Lambda name; default enceladus-checkout-service (-gamma on gamma)."
+        },
+        "fallback": {
+          "type": "string",
+          "definition": "The call is retried ONCE over the HTTP path only when the invoke did not reach the function (ResourceNotFound, AccessDenied, TooManyRequests/Throttling, EC2Throttled, ServiceException, endpoint/connection errors before a response); the audit line then says invoke_mode direct_fallback. A FunctionError (the function ran) is NEVER retried: the tool's error envelope is returned as-is (retryable only if the tool says so) with invoke_mode direct and attempt_outcome error. A read timeout is not retried either (ambiguous outcome) and returns UPSTREAM_ERROR retryable."
+        },
+        "governance_hash": {
+          "type": "string",
+          "definition": "A direct invoke is never pre-validated: tracker_mutation and document_api re-verify a body governance_hash against the governance API /hash (module-level 60 s TTL cache, one forced refresh on mismatch) and return 409 GOVERNANCE_STALE with provided/current in the envelope details; requests without a hash keep their prior behaviour (governance_hash_verified false); an unreachable governance API fails open with governance_hash_check unavailable."
+        }
+      }
+    },
+    "tracker.audit_item": {
+      "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error). Stream consumers (graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry) drop any record whose key begins `audit#` or `idem#` before doing any work; skipped records are consumed, never reported in batchItemFailures.",
+      "fields": {
+        "audit_type": {
+          "type": "string",
+          "definition": "'create' or 'update'."
+        },
+        "target_project_id": {
+          "type": "string",
+          "definition": "project_id of the audited record."
+        },
+        "target_record_id": {
+          "type": "string",
+          "definition": "Bare id of the audited record (ENC-* or DOC-*)."
+        },
+        "correlation_id": {
+          "type": "string",
+          "definition": "X-Correlation-Id / body correlation_id of the request (omitted when absent)."
+        },
+        "write_tool": {
+          "type": "string",
+          "definition": "Governed write tool, e.g. tracker.create, tracker.set, documents.put."
+        },
+        "provider": {
+          "type": "string",
+          "definition": "write_source.provider (tracker) or caller email/sub (documents)."
+        },
+        "version_seq": {
+          "type": "number",
+          "definition": "Feed version_seq allocated for the write, when the write path allocates one."
+        },
+        "request_id": {
+          "type": "string",
+          "definition": "Lambda aws_request_id of the tool Lambda invocation."
+        },
+        "attempt_outcome": {
+          "type": "string",
+          "definition": "Always 'success' (rows exist only for committed writes)."
+        },
+        "http_status": {
+          "type": "number",
+          "definition": "Status of the original response (201 create, 200 update)."
+        },
+        "receipt_hash": {
+          "type": "string",
+          "definition": "sha256 hex of the exact response body (the receipt) the caller was handed."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "definition": "Idempotency-Key of the request, when sent."
+        },
+        "audited_at": {
+          "type": "string",
+          "definition": "UTC ISO timestamp with microseconds; also the sort-key prefix."
+        }
+      }
+    },
+    "tracker.idempotency_marker": {
+      "description": "ENC-TSK-S28-0D: durable idempotency marker committed in the same TransactWriteItems as the write it protects, written only when the request carries an Idempotency-Key header or body idempotency_key. Keys on the tracker table: project_id = `idem#<project_id>#<key>`, record_id = `marker` (documents table, hash-only: document_id = `idem#<project_id>#<key>#marker`). Before writing, create/update/put/patch read the marker (consistent); a live marker returns the stored receipt byte-identical with HTTP 200 and response header `idempotent_replay: true`, with no second transaction. The marker Put is conditioned on attribute_not_exists OR ttl < now, so a concurrent twin loses inside the transaction, rolls back, and replays. TTL: `ttl` (epoch seconds, now + 24 h) is the DynamoDB TimeToLiveSpecification attribute on both devops-project-tracker and documents (infrastructure/cloudformation/01-data.yaml, ENC-TSK-S28-0D), so expired markers are deleted by DynamoDB (deletion may lag by up to ~48 h); the read path also ignores a marker whose ttl has passed, and a new marker Put overwrites an expired one. Same key reused for a different write tool replays the first receipt (keys are caller-unique by contract).",
+      "fields": {
+        "receipt": {
+          "type": "string",
+          "definition": "The exact response body returned for the first successful commit."
+        },
+        "receipt_hash": {
+          "type": "string",
+          "definition": "sha256 hex of receipt."
+        },
+        "http_status": {
+          "type": "number",
+          "definition": "Original status (201 create, 200 update); replays always answer 200."
+        },
+        "marker_type": {
+          "type": "string",
+          "definition": "'create' or 'update'."
+        },
+        "target_record_id": {
+          "type": "string",
+          "definition": "Bare id of the record the marker protects."
+        },
+        "ttl": {
+          "type": "number",
+          "definition": "Epoch seconds, creation + 24 h; DynamoDB TTL attribute on the tracker and documents tables, also enforced on read."
+        },
+        "expires_at": {
+          "type": "string",
+          "definition": "UTC ISO form of ttl."
+        },
+        "created_epoch": {
+          "type": "number",
+          "definition": "Epoch seconds at commit."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
@@ -10162,6 +10342,36 @@
       "summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed."
     },
     {
+      "version": "2026-07-05.3",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional relation enforcement -- tracker_mutation PATCH now atomically mirrors newly-added related_task_ids/related_issue_ids/related_feature_ids onto each target's reverse field; document_api PUT/PATCH mirrors related_items onto each named tracker record's new related_document_ids field; new tracker.relate(source_id, target_id) MCP convenience action performs the append under one governance hash check. inverse_of declared across tracker.task/issue/feature/lesson and docstore.document."
+    },
+    {
+      "version": "2026-07-05.4",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L23 (FTR-127 AC-1..4/13): GET /api/v1/feed/corpus — cursor-paginated multi-project corpus spanning tracker + documents tables with filter/sort pushdown, source-tagged composite cursors, facet counts, and compact attrs projection."
+    },
+    {
+      "version": "2026-07-05.5",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L25 (B67 Search2.0 WaveB / FTR-127 AC-10/16/17): new user_preferences_api Lambda + user-preferences DynamoDB table (PK=sub) + GET/PUT /api/v1/user/preferences routes, gamma-only. New entity user_preferences_api.lambda."
+    },
+    {
+      "version": "2026-07-05.6",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L47 (B67 backend / FTR-127 AC-19, K25 AC-3): If-Match / HTTP 409 per-record revision-conflict contract added to tracker_mutation's generic field-update path (sync_version) and document_api's PATCH path (version). Absent header preserves prior unconditional-write behavior. New entity api.if_match_revision_contract; new error_envelope.code value REVISION_CONFLICT."
+    },
+    {
+      "version": "2026-07-05.8",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29."
+    },
+    {
+      "version": "2026-07-05.9",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L10 (B64 Ph3): new mcp_streaming_gateway Lambda (Lambda Web Adapter + Starlette/uvicorn, reusing server.py's MCP tool surface) + dedicated REST API Gateway v1 (McpStreamingRestApi) with responseTransferMode=STREAM, gamma-only. New entity mcp_streaming_gateway.lambda."
+    },
+    {
       "version": "2026-07-05.12",
       "date": "2026-07-05",
       "summary": "ENC-TSK-L58 (L10 follow-up): added backend/lambda/mcp_streaming_gateway/lambda_function.py as a build-discovery marker (Gen2 requires this exact filename to package a Lambda dir; the real entry point remains asgi_app.py via the AWS Lambda Web Adapter). No new schema/behavior -- the handler only exists to be discovered and raises if ever actually invoked directly."
@@ -10212,59 +10422,9 @@
       "summary": "ENC-TSK-L42 (B67 Search2.0): new opensearch_backfill.lambda entity for devops-opensearch-backfill scan+bulk job (records_write / records_v{n} target, shared search_index_core with L41 indexer; L44 scoped indexer credentials)."
     },
     {
-      "version": "2026-07-05.3",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional relation enforcement -- tracker_mutation PATCH now atomically mirrors newly-added related_task_ids/related_issue_ids/related_feature_ids onto each target's reverse field; document_api PUT/PATCH mirrors related_items onto each named tracker record's new related_document_ids field; new tracker.relate(source_id, target_id) MCP convenience action performs the append under one governance hash check. inverse_of declared across tracker.task/issue/feature/lesson and docstore.document."
-    },
-    {
-      "version": "2026-07-05.4",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L23 (FTR-127 AC-1..4/13): GET /api/v1/feed/corpus — cursor-paginated multi-project corpus spanning tracker + documents tables with filter/sort pushdown, source-tagged composite cursors, facet counts, and compact attrs projection."
-    },
-    {
-      "version": "2026-07-05.5",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L25 (B67 Search2.0 WaveB / FTR-127 AC-10/16/17): new user_preferences_api Lambda + user-preferences DynamoDB table (PK=sub) + GET/PUT /api/v1/user/preferences routes, gamma-only. New entity user_preferences_api.lambda."
-    },
-    {
-      "version": "2026-07-05.6",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L47 (B67 backend / FTR-127 AC-19, K25 AC-3): If-Match / HTTP 409 per-record revision-conflict contract added to tracker_mutation's generic field-update path (sync_version) and document_api's PATCH path (version). Absent header preserves prior unconditional-write behavior. New entity api.if_match_revision_contract; new error_envelope.code value REVISION_CONFLICT."
-    },
-    {
-      "version": "2026-07-05.8",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29."
-    },
-    {
-      "version": "2026-07-05.9",
-      "date": "2026-07-05",
-      "summary": "ENC-TSK-L10 (B64 Ph3): new mcp_streaming_gateway Lambda (Lambda Web Adapter + Starlette/uvicorn, reusing server.py's MCP tool surface) + dedicated REST API Gateway v1 (McpStreamingRestApi) with responseTransferMode=STREAM, gamma-only. New entity mcp_streaming_gateway.lambda."
-    },
-    {
       "version": "2026-07-07.1",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L80: graph_query_api._query_adjacency's node_count/edge_count session.run() calls now bind project_id=project_id (previously referenced $project_id in Cypher text only, causing Neo.ClientError.Statement.ParameterMissing on every offset=0 adjacency call — the exact call shape ENC-TSK-K41's CEE Lambda makes nightly). No entity/field/schema change; version bump only to satisfy the Governance Dictionary Guard's file-touched heuristic."
-    },
-    {
-      "version": "2026-07-07.11",
-      "date": "2026-07-07",
-      "summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- two independent root causes fixed for the escalating MENTIONS drift ratio (43/96 -> 59/96). (1) DeployParityValidatorFunction's TRACKER_API_URL/graphsearch fallback was hardcoded to the prod API Gateway on both prod and gamma; the gamma validator was comparing gamma DynamoDB content against PROD's Neo4j graph. Fixed via a gamma-scoped GRAPHSEARCH_URL CFN env var (Fn::If on IsGamma; the code already supported this override, it was never wired up). (2) _run_mentions_drift_audit's sample spans every project in the shared tracker table (type-updated-index has no project_id key), but _current_mentions_for was called with no project_id, always defaulting to 'enceladus'; any non-enceladus-project sample read back as a false-positive full mismatch. Fixed by threading record.get('project_id') through. No new fields/entities; behavioral bugfixes only."
-    },
-    {
-      "version": "2026-07-07.12",
-      "date": "2026-07-07",
-      "summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors dropped the `neighbor.project_id = $project_id` Cypher filter (only the START node stays project-scoped). MENTIONS edges are legitimately cross-project -- graph_sync's write path MERGEs by record_id only -- so this read-side filter silently hid every correctly-written cross-project edge from every 'neighbors' consumer, not just mentions_drift_audit. Previously zero test coverage for this function; added dedicated tests including a Cypher-text regression test."
-    },
-    {
-      "version": "2026-07-07.13",
-      "date": "2026-07-07",
-      "summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6): v3 component-registry instance backfill in tools/seed-component-registry.py -- four v3 identity fields + v3 required_transition_type on all active enceladus components; PWA decomposition (frontend/cdn/api-gateway) superseding comp-enceladus-pwa; comp-enceladus-neo4j external dep + infrastructure/external/neo4j-auradb.yaml; nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (MECE, I2-I5); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt); comp-umbrella-governance-documentation meta umbrella. Extended verify_component_hardening_fields.py + tests (v3 identity/MECE audit); verify_component_required_transition_type.py guard enum -> v3. Schema already v3 (ENC-TSK-L77). AC-5 + live legacy-row rename/deprecation are io-Cognito follow-ups."
-    },
-    {
-      "version": "2026-07-07.14",
-      "date": "2026-07-07",
-      "summary": "ENC-TSK-L93: document_api GET ?project= list now honors include_content=false (and content=false alias) for body-excluded metadata projection. Skill rows return document_id, title, description, version (from agentskills_manifest.version), updated_at, runtime_hint (runtime_variants keys or 'claude,agentskills' default). Non-skill rows omit full_description/claude_description/content/agentskills fields. Default include_content=true unchanged. MCP documents.list forwards include_content. New docstore.document.list_include_content + list_runtime_hint dictionary fields."
     },
     {
       "version": "2026-07-07.2",
@@ -10295,6 +10455,26 @@
       "version": "2026-07-07.9",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH."
+    },
+    {
+      "version": "2026-07-07.11",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- two independent root causes fixed for the escalating MENTIONS drift ratio (43/96 -> 59/96). (1) DeployParityValidatorFunction's TRACKER_API_URL/graphsearch fallback was hardcoded to the prod API Gateway on both prod and gamma; the gamma validator was comparing gamma DynamoDB content against PROD's Neo4j graph. Fixed via a gamma-scoped GRAPHSEARCH_URL CFN env var (Fn::If on IsGamma; the code already supported this override, it was never wired up). (2) _run_mentions_drift_audit's sample spans every project in the shared tracker table (type-updated-index has no project_id key), but _current_mentions_for was called with no project_id, always defaulting to 'enceladus'; any non-enceladus-project sample read back as a false-positive full mismatch. Fixed by threading record.get('project_id') through. No new fields/entities; behavioral bugfixes only."
+    },
+    {
+      "version": "2026-07-07.12",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors dropped the `neighbor.project_id = $project_id` Cypher filter (only the START node stays project-scoped). MENTIONS edges are legitimately cross-project -- graph_sync's write path MERGEs by record_id only -- so this read-side filter silently hid every correctly-written cross-project edge from every 'neighbors' consumer, not just mentions_drift_audit. Previously zero test coverage for this function; added dedicated tests including a Cypher-text regression test."
+    },
+    {
+      "version": "2026-07-07.13",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6): v3 component-registry instance backfill in tools/seed-component-registry.py -- four v3 identity fields + v3 required_transition_type on all active enceladus components; PWA decomposition (frontend/cdn/api-gateway) superseding comp-enceladus-pwa; comp-enceladus-neo4j external dep + infrastructure/external/neo4j-auradb.yaml; nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (MECE, I2-I5); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt); comp-umbrella-governance-documentation meta umbrella. Extended verify_component_hardening_fields.py + tests (v3 identity/MECE audit); verify_component_required_transition_type.py guard enum -> v3. Schema already v3 (ENC-TSK-L77). AC-5 + live legacy-row rename/deprecation are io-Cognito follow-ups."
+    },
+    {
+      "version": "2026-07-07.14",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L93: document_api GET ?project= list now honors include_content=false (and content=false alias) for body-excluded metadata projection. Skill rows return document_id, title, description, version (from agentskills_manifest.version), updated_at, runtime_hint (runtime_variants keys or 'claude,agentskills' default). Non-skill rows omit full_description/claude_description/content/agentskills fields. Default include_content=true unchanged. MCP documents.list forwards include_content. New docstore.document.list_include_content + list_runtime_hint dictionary fields."
     },
     {
       "version": "2026-07-08.01",
@@ -10538,18 +10718,6 @@
       "task_id": "ENC-TSK-P69"
     },
     {
-      "version": "2026-09-16.10",
-      "date": "2026-09-17",
-      "summary": "MCP documents.patch_section forwards governance_hash to document_api (denylist fix); provider/sci stripped from the forwarded body",
-      "task_id": "ENC-TSK-Q01"
-    },
-    {
-      "version": "2026-09-16.11",
-      "date": "2026-09-17",
-      "summary": "ENC-TSK-Q02 (ENC-ISS-777): checkout_service's code_only closed gate accepts the documented code_on_main_evidence shapes -- an object {commit_sha}, a bare 40-hex commit sha string, or a note string alongside a top-level transition_evidence.commit_sha -- via a new _normalize_code_on_main_evidence() helper, instead of rejecting anything that was not already a non-empty dict. The rejection envelope for malformed input, _CODE_ON_MAIN_EVIDENCE_SCHEMA's required_fields key, and _example_advance_fix now all agree on the nested path transition_evidence.code_on_main_evidence.commit_sha (previously the envelope named the flat label while the schema and example named only commit_sha). The no_code closed gate's schema was aligned the same way (transition_evidence.no_code_evidence) with no change to its accepted input. transition_type_matrix.py CLOSED_EVIDENCE is unchanged (comment only); MATRIX_VERSION not bumped. mcp_server.escalation_actions.escalation.request's arg-shape contract is documented below: target_record_id (not record_id), target_record_type, project_id, mutation_type in [deploy_arc_change, direct_state_override], payload as a non-empty object (payload.target_status required for direct_state_override), justification, requested_by.session_id, governance_hash.",
-      "task_id": "ENC-TSK-Q02"
-    },
-    {
       "version": "2026-09-16.2",
       "date": "2026-09-16",
       "task_id": "ENC-TSK-P70",
@@ -10596,6 +10764,18 @@
       "date": "2026-09-16",
       "summary": "ENC-TSK-P89 (ENC-ISS-759, ENC-ISS-699): _apply_direct_state_override in backend/lambda/tracker_mutation/lambda_function.py now builds the direct_state_override UpdateExpression from a single ordered map of top-level attribute paths via a new _render_update_expression helper -- a field_values entry that restates a reserved bookkeeping path (most importantly \"status\", the exact stored shape of ENC-ESC-105/106) is dropped rather than rendered as a second SET clause on the same path, which previously made #st and a #fv{i} alias both resolve to `status` and DynamoDB rejected the whole UpdateItem with \"Two document paths overlap\" (no partial write; the approval stayed durable and is safely re-driven once fixed). Dropped keys are recorded in the returned after[\"dropped_field_values\"] and the provenance note. tools/enceladus-mcp-server/server.py _ID_SEGMENT_TO_TYPE adds \"ESC\":\"escalation\" and \"GEN\":\"generation\" (mirroring the tracker_mutation module) so tracker.get / get_compact_context(mode=\"record\") resolve an ENC-ESC-NNN or ENC-GEN-NNN id instead of raising Unknown type segment. REVIEW FOLLOW-UP (same task): _handle_escalation_list's cursor is now a value-based (created_at, item_id) sort boundary rather than a raw DynamoDB LastEvaluatedKey -- the prior version silently dropped items whenever a single query() response held more than page_size matches and was also DynamoDB's last page (no LastEvaluatedKey), and separately could skip items across a cursor boundary because results are re-sorted by created_at after the raw scan. tools/enceladus-mcp-server/server.py _tracker_get, _get_issue_context, _tracker_validation_rules and _tracker_relate now route escalation reads through a new _unwrap_tracker_envelope(resp, record_type) helper that reads resp[\"escalation\"] for record_type==\"escalation\" instead of falling through resp.get(\"record\", resp) to the whole {\"success\":...,\"escalation\":{...}} wrapper -- previously every field (status, title, priority, category, intent) came back empty for a real escalation read. ENC-TSK-P89 retry addendum: the escalation FSM now allows one additional edge, failed->applying, so an escalation parked at status=failed with applied_at unset (the ENC-ESC-105 prod symptom -- the applier's target UpdateItem raised a DynamoDB ValidationException and the applier recorded the failure with no partial write) can be re-driven through the same idempotent POST /{project}/escalation/{id}/apply endpoint instead of requiring a brand-new escalation; _handle_escalation_apply now accepts status in {approved, failed} (still gated by applied_at being unset), the failed->applying transition remains a single conditional write on the current status value so racing re-drives stay exactly-once, and a retry_count attribute plus a 'retry' history event are appended (the prior failure's event and result are never overwritten or erased).",
       "task_id": "ENC-TSK-P89"
+    },
+    {
+      "version": "2026-09-16.10",
+      "date": "2026-09-17",
+      "summary": "MCP documents.patch_section forwards governance_hash to document_api (denylist fix); provider/sci stripped from the forwarded body",
+      "task_id": "ENC-TSK-Q01"
+    },
+    {
+      "version": "2026-09-16.11",
+      "date": "2026-09-17",
+      "summary": "ENC-TSK-Q02 (ENC-ISS-777): checkout_service's code_only closed gate accepts the documented code_on_main_evidence shapes -- an object {commit_sha}, a bare 40-hex commit sha string, or a note string alongside a top-level transition_evidence.commit_sha -- via a new _normalize_code_on_main_evidence() helper, instead of rejecting anything that was not already a non-empty dict. The rejection envelope for malformed input, _CODE_ON_MAIN_EVIDENCE_SCHEMA's required_fields key, and _example_advance_fix now all agree on the nested path transition_evidence.code_on_main_evidence.commit_sha (previously the envelope named the flat label while the schema and example named only commit_sha). The no_code closed gate's schema was aligned the same way (transition_evidence.no_code_evidence) with no change to its accepted input. transition_type_matrix.py CLOSED_EVIDENCE is unchanged (comment only); MATRIX_VERSION not bumped. mcp_server.escalation_actions.escalation.request's arg-shape contract is documented below: target_record_id (not record_id), target_record_type, project_id, mutation_type in [deploy_arc_change, direct_state_override], payload as a non-empty object (payload.target_status required for direct_state_override), justification, requested_by.session_id, governance_hash.",
+      "task_id": "ENC-TSK-Q02"
     },
     {
       "version": "2026-09-23.1",
@@ -10950,6 +11130,46 @@
       "summary": "ENC-TSK-R80-0J (U4): graph_query_api graph_laplacian default vertex selection now samples the project's giant component (BFS from the highest-degree vertex, first `limit` vertices in BFS order) instead of the alphabetically-first record_ids, so a zero-degree stub can no longer force lambda2 to 0; the laplacian block and the GraphHealth lambda2 result gain component_size, component_coverage and sampling fields (additive). The GraphHealth publish schedule (05-monitoring GraphHealthScheduleRule) now targets enceladus-graph-health-metrics hourly (was devops-graph-query-api every 15 minutes)."
     },
     {
+      "version": "2026-11-02.2",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R80-0F (ENC-FTR-146 AC-1/2/3): coordination_api canonicalizes agent.type.register surface/model(/runtime) via agent_id_alloc.canonicalize_agent_type_fields (single importable function; normal form documented in new entity coordination.agent_type_normal_form) and find_agent_type now scans ALL pages and matches on the canonical (surface, model) pair, so a spelling variant (e.g. 'Claude Code CLI' == ENC-AGT-002) resolves to the existing type instead of minting a duplicate. Register is NOT fail-closed (ENC-FTR-146 W1.1). agent.type.register responses gain an additive normal_form object. Variant-to-canonical ENC-AGT mapping published as DOC-82CF8C268DA5. No session history or stored row is rewritten."
+    },
+    {
+      "version": "2026-11-02.3",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R80-0D (ENC-PLN-102 W0.1): cost_digest producer (backend/lambda/cost_digest) compares a SETTLED day (T-2, Cost Explorer T-1 is unsettled and read 0.0 for provisioned C3 usage) against the median of the 7 days before it, and adds additive top-level fields settled (bool), settled_day and settled_day_spend; regression is null (never false) when the settled day has no positive spend, and top_deltas rows (key prior_day kept) use the settled day. connection_health cost_digest passes settled/settled_day through and no longer coerces a null regression to false. No new Cost Explorer calls (same window query, one day wider)."
+    },
+    {
+      "version": "2026-11-02.4",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R81-0A (ENC-FTR-146 AC-4/5, W1.1): coordination_api agent.register and agent.claim are FAIL-CLOSED on agent_type_id: only an ACTIVE agent-types row (ENC-AGT-* pattern, consistent read) is accepted; free text is rejected, never mapped. Rejection is an RFC 9457 problem (422, Content-Type application/problem+json, type .../agent-type-not-active, fields agent_type_id, detail, see.action=agent.type.list) and keeps the legacy success/error/error_envelope (code AGENT_TYPE_NOT_ACTIVE). agent.register accepts dry_run (forwarded by the MCP server): same gate, 200 {dry_run, would_register}, no mint. runtime (register) and surface (agent.type.register) are closed enums over coordination.agent_type_normal_form (400 INVALID_ENUM with allowed[]); register persists the canonical runtime. agent.claim only FK-gates a caller-supplied expected_agent_type_id; sessions minted before the gate still claim."
+    },
+    {
+      "version": "2026-11-02.5",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): graph_query_api _query_hybrid computes facets in-process over the fused candidate set and always reports facets_source=fused_candidates; the prod-to-gamma feed/corpus facet HTTP fallback and the FEED_API_BASE env var are deleted, OpenSearch facet aggregations are no longer requested."
+    },
+    {
+      "version": "2026-11-02.6",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R81-0F (ENC-PLN-102 W1.6 U5, ENC-ISS-541, ENC-FTR-089): graph_query_api /health signals.graph now reports the graph signal OPERATING MODE as a string using hybrid's graph_algorithm vocabulary ('gds_pagerank' | 'cypher_fallback'), not GDS plugin presence (GDS_HARD_DISABLED forces cypher_fallback by policy); the response gains an additive graph_mode object {mode, reason, gds_plugin_present}. Node serialisation strips the raw `embedding` vector server-side everywhere except the internal hybrid bulk fetch and search_type=embeddings_for (the FTR-089 research-only egress contract); neighbors nodes are additionally bounded to 1000 bytes of JSON per node (long string properties truncated with an ellipsis). The graphsearch_query audit line gains record_id, caller, caller_type (internal|user|agent|cookie|unknown), surface, session_id and, for neighbors, empty_neighbors so the empty-neighbors rate is attributable by caller. No route, parameter or IAM change."
+    },
+    {
+      "version": "2026-11-02.7",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R81-0H (ENC-FTR-146 AC-6, W1.8): agent.register now increments usage_count on the resolved ACTIVE agent-types row atomically: mint_session_id(increment_usage=True) issues one TransactWriteItems (session Put + Update ADD usage_count 1, conditional on the row existing and status=active; status aliased via ExpressionAttributeNames per ENC-TSK-P89). A rejected/inactive register or session-id collision never increments; dry_run does not mint. tools/backfill_agent_type_usage_count.py is the one-shot historical backfill: dry-run by default (per-type session counts), --apply requires --approved-by and a privileged terminal; apply uses ADD delta so it is idempotent and race-safe against concurrent registers; non-canonical session agent_type_id values are reported as orphans (rewritten by W2.2/AC-7). No response-shape change."
+    },
+    {
+      "version": "2026-11-02.8",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R81-0B (ENC-FTR-150 AC-1/AC-3, ENC-PLN-102 W1.2): new Lambda backend/lambda/sns_anomaly_responder (enceladus-sns-anomaly-responder, gamma-only CFN in 02-compute.yaml, cost class C0 pay-per-use). Subscribed to the new SNS topic enceladus-cost-anomaly-events{suffix}; an aws-cad source adapter deterministically normalizes a Cost Anomaly Detection payload to {source, anomaly_id, project=devops, title, evidence[]} (no LLM; FTR-100 AC-2 configurable CAD_MIN_IMPACT_USD/CAD_MIN_IMPACT_PCT floor, AC-3 per-service/per-usage-type breakdown in evidence) and the source-agnostic primitive creates one governed issue per stable key {source}:{anomaly_id}; replays refresh evidence and append a worklog, never create. Agent type ENC-AGT-00R (surface sns-anomaly-responder) registered via agent.type.register; per-invocation register/claim SCI is W2.1 (ENC-TSK-R82-0A)."
+    },
+    {
+      "version": "2026-11-02.9",
+      "date": "2026-11-02",
+      "summary": "ENC-TSK-R81-0E (DOC-52FE56D6F529 U2): graph_query_api _hybrid_keyword_ranks queries the TITLE-ONLY multi-label fulltext index governed_record_title_ft (tools/neo4j-migrations/002-fulltext-governed-records.cypher; labels Task, Issue, Feature, Plan, Lesson, Document, Recipe, RecipeRun) via db.index.fulltext.queryNodes with the project and record-type filters applied after the index hit; title-only CONTAINS is the fallback when the index or procedure is unavailable. intent and description are no longer queried (not projected on prod nodes). Env KEYWORD_FULLTEXT_INDEX overrides the index name. Response shape unchanged. Index created on gamma and prod Aura before deploy (additive)."
+    },
+    {
       "version": "2026-11-02.10",
       "date": "2026-11-02",
       "summary": "ENC-TSK-R81-0D (U3): graph_query_api module-load init of Secrets Manager, Neo4j driver and Bedrock runtime clients (guarded; lazy fallback) plus MemorySize 256 -> 1024 MB."
@@ -10998,11 +11218,6 @@
       "version": "2026-11-02.19",
       "date": "2026-11-02",
       "summary": "ENC-TSK-R91 (ENC-FTR-150 gamma E2E fixes): (1) 03-api.yaml gains RouteNotificationsAnomaly, POST /api/v1/coordination/notifications/anomaly on the coordination integration (the R82-0A handler existed but API Gateway returned 404, so every create/update push failed on gamma); no authorizer, internal-key/managed-token checked in coordination_api like the other notifications routes. (2) sns_anomaly_responder replay bookkeeping: the tracker list view is a compact projection WITHOUT evidence, so the push baseline was always empty and each replay overwrote the evidence list with one entry; replays now read the full record (get_issue), append one evidence entry per replay carrying total_impact_usd and pushed, set pushed=true ONLY after a 2xx update push (a failed push never moves the baseline), and skip the evidence write and push entirely when prior evidence cannot be read. (3) lambda_handler passes the Lambda context into _run(event, client, context=None) so enrichment.dispatch_async fires after a create (regression from the PR #1713 merge). Cost class C0, no new resources."
-    },
-    {
-      "version": "2026-11-02.2",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R80-0F (ENC-FTR-146 AC-1/2/3): coordination_api canonicalizes agent.type.register surface/model(/runtime) via agent_id_alloc.canonicalize_agent_type_fields (single importable function; normal form documented in new entity coordination.agent_type_normal_form) and find_agent_type now scans ALL pages and matches on the canonical (surface, model) pair, so a spelling variant (e.g. 'Claude Code CLI' == ENC-AGT-002) resolves to the existing type instead of minting a duplicate. Register is NOT fail-closed (ENC-FTR-146 W1.1). agent.type.register responses gain an additive normal_form object. Variant-to-canonical ENC-AGT mapping published as DOC-82CF8C268DA5. No session history or stored row is rewritten."
     },
     {
       "version": "2026-11-02.20",
@@ -11055,11 +11270,6 @@
       "summary": "ENC-TSK-S14 (ENC-PLN-103 N4): graph_query_api action=refresh_flow_weight is gated by FLOW_WEIGHT_REFRESH_ENABLED (env override; code default gamma true, prod false); when disabled returns {status: noop, reason: FLOW_WEIGHT_REFRESH_ENABLED=false}. Daily EventBridge rule enceladus-graph-flow-weight-refresh added in 05-monitoring.yaml. behavior-only; no new/renamed/removed fields."
     },
     {
-      "version": "2026-11-02.3",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R80-0D (ENC-PLN-102 W0.1): cost_digest producer (backend/lambda/cost_digest) compares a SETTLED day (T-2, Cost Explorer T-1 is unsettled and read 0.0 for provisioned C3 usage) against the median of the 7 days before it, and adds additive top-level fields settled (bool), settled_day and settled_day_spend; regression is null (never false) when the settled day has no positive spend, and top_deltas rows (key prior_day kept) use the settled day. connection_health cost_digest passes settled/settled_day through and no longer coerces a null regression to false. No new Cost Explorer calls (same window query, one day wider)."
-    },
-    {
       "version": "2026-11-02.30",
       "date": "2026-11-02",
       "summary": "ENC-TSK-S13 (ENC-PLN-103 N12/N3): graph_query_api graph signal gains in-process Personalized PageRank (inproc_ppr.py: Andersen-Chung-Lang push, alpha 0.15, epsilon 1e-4, edge weight GRAPH_EDGE_WEIGHTS[type]*coalesce(flow_weight,1.0), undirected) over a per-project cached edge-list projection (env PPR_CACHE_TTL_S, default 600s, lazy refresh; the graphsearch health action warms it). Env flag GRAPH_SIGNAL_MODE ('inproc_ppr' | 'cypher_fallback'); code default keyed on environment: gamma (Lambda name ends '-gamma') -> inproc_ppr, prod -> cypher_fallback. New internal/agent-only per-request param `graph_signal_mode` on search_type=hybrid (same gate as `vector_source`; stripped for other callers). `graph_algorithm` (response, `graphsearch_query` audit line, health graph_mode.mode) gains the value 'inproc_ppr'; the health graph_mode block adds reason 'projection_cache' and a `cache` stats object (nodes, edges, approx_bytes, loaded_at) when active. N3: the Cypher fallback prechecks the anchor degree with one count query; above env HUB_DEGREE_THRESHOLD (default 150) it walks *1..2 instead of *1..3; new additive `graphsearch_query` audit field `hop_bound` (2 | 3; null when the Cypher walk did not run). Cypher fallback remains when the cache is empty/unloadable, the anchor is absent from it, or the mode is off."
@@ -11080,36 +11290,6 @@
       "summary": "ENC-TSK-S22 (ENC-PLN-103 F6 / P103-R21): graph_query_api GraphSearch EMF now emits dimension set [SearchType, Environment] (Environment=prod|gamma); GRAPHSEARCH_EMF_ENABLED env override kept, code default true on prod and false on gamma; 05-monitoring GraphSearch alarms are prod-only with Environment=prod. Behavior-only; no new/renamed/removed fields."
     },
     {
-      "version": "2026-11-02.4",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R81-0A (ENC-FTR-146 AC-4/5, W1.1): coordination_api agent.register and agent.claim are FAIL-CLOSED on agent_type_id: only an ACTIVE agent-types row (ENC-AGT-* pattern, consistent read) is accepted; free text is rejected, never mapped. Rejection is an RFC 9457 problem (422, Content-Type application/problem+json, type .../agent-type-not-active, fields agent_type_id, detail, see.action=agent.type.list) and keeps the legacy success/error/error_envelope (code AGENT_TYPE_NOT_ACTIVE). agent.register accepts dry_run (forwarded by the MCP server): same gate, 200 {dry_run, would_register}, no mint. runtime (register) and surface (agent.type.register) are closed enums over coordination.agent_type_normal_form (400 INVALID_ENUM with allowed[]); register persists the canonical runtime. agent.claim only FK-gates a caller-supplied expected_agent_type_id; sessions minted before the gate still claim."
-    },
-    {
-      "version": "2026-11-02.5",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R80-0I (DOC-52FE56D6F529 U1): graph_query_api _query_hybrid computes facets in-process over the fused candidate set and always reports facets_source=fused_candidates; the prod-to-gamma feed/corpus facet HTTP fallback and the FEED_API_BASE env var are deleted, OpenSearch facet aggregations are no longer requested."
-    },
-    {
-      "version": "2026-11-02.6",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R81-0F (ENC-PLN-102 W1.6 U5, ENC-ISS-541, ENC-FTR-089): graph_query_api /health signals.graph now reports the graph signal OPERATING MODE as a string using hybrid's graph_algorithm vocabulary ('gds_pagerank' | 'cypher_fallback'), not GDS plugin presence (GDS_HARD_DISABLED forces cypher_fallback by policy); the response gains an additive graph_mode object {mode, reason, gds_plugin_present}. Node serialisation strips the raw `embedding` vector server-side everywhere except the internal hybrid bulk fetch and search_type=embeddings_for (the FTR-089 research-only egress contract); neighbors nodes are additionally bounded to 1000 bytes of JSON per node (long string properties truncated with an ellipsis). The graphsearch_query audit line gains record_id, caller, caller_type (internal|user|agent|cookie|unknown), surface, session_id and, for neighbors, empty_neighbors so the empty-neighbors rate is attributable by caller. No route, parameter or IAM change."
-    },
-    {
-      "version": "2026-11-02.7",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R81-0H (ENC-FTR-146 AC-6, W1.8): agent.register now increments usage_count on the resolved ACTIVE agent-types row atomically: mint_session_id(increment_usage=True) issues one TransactWriteItems (session Put + Update ADD usage_count 1, conditional on the row existing and status=active; status aliased via ExpressionAttributeNames per ENC-TSK-P89). A rejected/inactive register or session-id collision never increments; dry_run does not mint. tools/backfill_agent_type_usage_count.py is the one-shot historical backfill: dry-run by default (per-type session counts), --apply requires --approved-by and a privileged terminal; apply uses ADD delta so it is idempotent and race-safe against concurrent registers; non-canonical session agent_type_id values are reported as orphans (rewritten by W2.2/AC-7). No response-shape change."
-    },
-    {
-      "version": "2026-11-02.8",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R81-0B (ENC-FTR-150 AC-1/AC-3, ENC-PLN-102 W1.2): new Lambda backend/lambda/sns_anomaly_responder (enceladus-sns-anomaly-responder, gamma-only CFN in 02-compute.yaml, cost class C0 pay-per-use). Subscribed to the new SNS topic enceladus-cost-anomaly-events{suffix}; an aws-cad source adapter deterministically normalizes a Cost Anomaly Detection payload to {source, anomaly_id, project=devops, title, evidence[]} (no LLM; FTR-100 AC-2 configurable CAD_MIN_IMPACT_USD/CAD_MIN_IMPACT_PCT floor, AC-3 per-service/per-usage-type breakdown in evidence) and the source-agnostic primitive creates one governed issue per stable key {source}:{anomaly_id}; replays refresh evidence and append a worklog, never create. Agent type ENC-AGT-00R (surface sns-anomaly-responder) registered via agent.type.register; per-invocation register/claim SCI is W2.1 (ENC-TSK-R82-0A)."
-    },
-    {
-      "version": "2026-11-02.9",
-      "date": "2026-11-02",
-      "summary": "ENC-TSK-R81-0E (DOC-52FE56D6F529 U2): graph_query_api _hybrid_keyword_ranks queries the TITLE-ONLY multi-label fulltext index governed_record_title_ft (tools/neo4j-migrations/002-fulltext-governed-records.cypher; labels Task, Issue, Feature, Plan, Lesson, Document, Recipe, RecipeRun) via db.index.fulltext.queryNodes with the project and record-type filters applied after the index hit; title-only CONTAINS is the fallback when the index or procedure is unavailable. intent and description are no longer queried (not projected on prod nodes). Env KEYWORD_FULLTEXT_INDEX overrides the index name. Response shape unchanged. Index created on gamma and prod Aura before deploy (additive)."
-    },
-    {
       "version": "2026-11-04.1",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S25 (ENC-FTR-152): first ENC-FTR-078 AC-18 graduation -- 'brd' joins the document_subtype enum with a new document.brd entity (no new required fields; title hygiene applies; subtypepattern rejected). document.doc gains graduated_subtypepattern_values {brd: brd}; doc+subtypepattern=brd writes are rejected with code subtypepattern_graduated; documents.search(subtypepattern=brd) becomes a deprecated alias carrying a deprecation object. graduation_pathway (d) pins the criteria (>=10 instances, >=3 projects, >=60 days). observed_emergent_subtypepattern_values is now [research]."
@@ -11125,9 +11305,34 @@
       "summary": "ENC-TSK-S26-0A (BRD DOC-E32D0ED08473 s7.2): enceladus-mcp-code emits one [WRITE-AUDIT] JSON line per write tool call (tracker_create/set, documents_put/patch, checkout.*) and per execute step, plus two EMF metrics in namespace Enceladus/WritePath (dimension tool: server_total_ms, cold_start). X-Correlation-Id is accepted or minted at the MCP edge and propagated to tracker/document/checkout Lambdas as a header and as a correlation_id body field on POST/PUT/PATCH. New entity mcp_server.write_audit_line; new item attribute write_tool (stamped beside correlation_id on tracker and document items, source of the governed_lag_ms tool dimension); additive, no existing field changes."
     },
     {
+      "version": "2026-11-04.5",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0A: write-path functions at 1024 MB with init-time clients; no schema change."
+    },
+    {
+      "version": "2026-11-04.7",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0D (BRD DOC-E32D0ED08473 B3/W2.2): atomic governed commit. tracker_mutation create/update and document_api put/patch commit the record, an audit item, the ID counter (tracker create only) and, when an Idempotency-Key is present, an idempotency marker in ONE TransactWriteItems (extra WCUs only; no new tables). New entities tracker.audit_item and tracker.idempotency_marker; a replayed key returns the stored receipt byte-identical (HTTP 200, response header idempotent_replay: true). WRITE_FAULT_INJECT env (before_commit|cancel_commit) is a default-off fault hook for AC-7; the [WRITE-AUDIT] line gains atomic_commit, txn_items, ddb_txn_ops, t_commit_ms and fault_inject. Additive; no existing field changes."
+    },
+    {
+      "version": "2026-11-04.8",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. Write responses carry t_ack, version_seq, server_total_ms. New item attributes t_ack, projection_status, projected_version_seq (plus t_projected), feed_published_version_seq on tracker and document items; consumer-originated updates to the projection attributes are skipped by every stream consumer (loop guard). Additive."
+    },
+    {
+      "version": "2026-11-04.9",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3, ENC-ISS-654/ENC-ISS-681 write-path tranche): the MCP server can invoke the write tool Lambdas (devops-tracker-mutation-api, devops-document-api, enceladus-checkout-service and their -gamma twins) directly via the QUALIFIED `live` alias (Lambda Invoke RequestResponse with a synthesized API Gateway v2 event) instead of CloudFront+API Gateway; env WRITE_TOOL_INVOKE_MODE direct|http (default gamma direct, prod http) with a single HTTP fallback logged as invoke_mode direct_fallback. New entity mcp_server.write_tool_invoke; mcp_server.write_audit_line gains invoke_mode and a direct-aware hops. tracker_mutation and document_api now verify a supplied governance_hash against the governance API /hash (60 s module cache): mismatch -> HTTP 409 GOVERNANCE_STALE, and their [WRITE-AUDIT] lines carry governance_hash_verified. The Gen2 deploy waits for State==Active and LastUpdateStatus==Successful before moving the `live` alias."
+    },
+    {
       "version": "2026-11-04.10",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S29-0A (BRD DOC-E32D0ED08473 B4/W3.3, ruling D4): execute validates every step before the first write (422 with per-step pointers, nothing written), accepts optional step id and depends_on (step ids or zero-based indexes; unknown ids and cycles are 422), runs a declared graph on a pool of eight (steps without any declared graph stay strictly serial), stamps every step result with started_ms/duration_ms/status/error and the response with execute_total_ms, critical_path_ms and committed_prefix, and re-reads the governance hash immediately before each step commits: on rotation that step and every not-yet-started step abort with governance_hash_stale (409), committed steps stand. New entity mcp_server.execute_dag; additive, no existing field changes."
+    },
+    {
+      "version": "2026-11-04.11",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0C in-process governance cache keyed by hash, verified refetch, TTL probe; fields governance_cache_hit/t_governance_ms semantics (governance_cache_hit is true only when the request hash equals the cached verified hash and the entry is younger than GOVERNANCE_PROBE_TTL_S, default 300 s; t_governance_ms is ~0 on a hit and covers one canonical-record re-read otherwise); additive, no field changes."
     }
   ]
 }
