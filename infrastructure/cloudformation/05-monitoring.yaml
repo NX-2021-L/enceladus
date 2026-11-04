@@ -403,6 +403,159 @@ Resources:
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
 
+  # ENC-TSK-S28-0E: stream-consumer IteratorAge + on-failure queue alarms.
+  AppSyncFeedPublisherIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-devops-appsync-feed-publisher-iteratorage${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: devops-appsync-feed-publisher IteratorAge p95 > 60s over 5 min"
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  GraphSyncIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-graph-sync-iteratorage${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: devops-graph-sync IteratorAge p95 > 60s over 5 min"
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-graph-sync${EnvironmentSuffix}"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  OpenSearchIndexerIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-opensearch-indexer-iteratorage${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: devops-opensearch-indexer IteratorAge p95 > 60s over 5 min"
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  AppSyncFeedPublisherDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-devops-appsync-feed-publisher-dlq-approximatenumberofmessagesvisible${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: queue devops-appsync-feed-publisher-dlq has visible messages"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  GraphSyncTrackerOnFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-graph-sync-tracker-onfailure-approximatenumberofmessagesvisible${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: queue devops-graph-sync-tracker-onfailure has visible messages"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-graph-sync-tracker-onfailure${EnvironmentSuffix}"
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  GraphSyncDocumentsOnFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-graph-sync-documents-onfailure-approximatenumberofmessagesvisible${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: queue devops-graph-sync-documents-onfailure has visible messages"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-graph-sync-documents-onfailure${EnvironmentSuffix}"
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  SearchIndexCdcDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-search-index-cdc-dlq-approximatenumberofmessagesvisible${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: queue devops-search-index-cdc-dlq has visible messages"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-search-index-cdc-dlq${EnvironmentSuffix}"
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
   # Lambda error rate alarm — Errors > 5 in 5 minutes across all functions
   LambdaErrorRateAlarm:
     Type: AWS::CloudWatch::Alarm

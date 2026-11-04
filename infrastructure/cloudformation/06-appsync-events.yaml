@@ -414,7 +414,7 @@ Resources:
       FunctionName: !Ref AppSyncFeedPublisherFunction
       BatchSize: 1
       MaximumBatchingWindowInSeconds: 0
-      MaximumRetryAttempts: 5
+      MaximumRetryAttempts: 3
       BisectBatchOnFunctionError: true
       DestinationConfig:
         OnFailure:
@@ -438,7 +438,7 @@ Resources:
       FunctionName: !Ref AppSyncFeedPublisherFunction
       BatchSize: 1
       MaximumBatchingWindowInSeconds: 0
-      MaximumRetryAttempts: 5
+      MaximumRetryAttempts: 3
       BisectBatchOnFunctionError: true
       DestinationConfig:
         OnFailure:

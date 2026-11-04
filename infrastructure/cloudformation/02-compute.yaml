@@ -2319,6 +2319,8 @@ Resources:
           # secret so graph_sync can recompute + verify item_id_provenance before MERGE
           # (warning-only on mismatch/absence — never blocks the sync pipeline).
           ID_SERVICE_HMAC_SECRET_ARN: !Ref IdServiceHmacSecret
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"  # ENC-TSK-S28-0E
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"  # ENC-TSK-S28-0E
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "300"  # ENC-TSK-R36 (ruling A5): was 45
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -4168,6 +4170,19 @@ Resources:
   # account-wide outage).
   # ---------------------------------------------------------------------------
 
+  # ENC-TSK-S28-0E: on-failure destination for GraphSyncTrackerStreamTrigger (14-day retention).
+  GraphSyncTrackerOnFailureQueue:
+    Type: AWS::SQS::Queue
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-graph-sync-tracker-onfailure${EnvironmentSuffix}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+
   GraphSyncTrackerStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
     Condition: IsGamma
@@ -4181,11 +4196,30 @@ Resources:
       StartingPosition: LATEST
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      # ENC-TSK-S28-0E: bounded retries + bisect + on-failure destination.
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 3
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt GraphSyncTrackerOnFailureQueue.Arn
       FilterCriteria:
         Filters:
           - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
           - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
       Enabled: true
+
+  # ENC-TSK-S28-0E: on-failure destination for GraphSyncDocumentsStreamTrigger (14-day retention).
+  GraphSyncDocumentsOnFailureQueue:
+    Type: AWS::SQS::Queue
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-graph-sync-documents-onfailure${EnvironmentSuffix}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
 
   GraphSyncDocumentsStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
@@ -4200,6 +4234,12 @@ Resources:
       StartingPosition: LATEST
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      # ENC-TSK-S28-0E: bounded retries + bisect + on-failure destination.
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 3
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt GraphSyncDocumentsOnFailureQueue.Arn
       FilterCriteria:
         Filters:
           - Pattern: '{"eventName":["INSERT","MODIFY"]}'
@@ -6706,6 +6746,13 @@ Resources:
                   # pipeline never completed a publish.
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+              - Sid: MarkFeedPublishedVersion  # ENC-TSK-S28-0E: feed_published_version_seq conditional marker
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
               - Sid: S3MobileFeedsWrite
                 Effect: Allow
                 Action:
@@ -7386,6 +7433,23 @@ Resources:
         # ESM configured against it in prod under this template -- SqsEventSource
         # above is retained (not removed) since GraphSyncSqsTrigger stays
         # defined, just disabled on gamma, for rollback.
+        # ENC-TSK-S28-0E: on-failure destinations + minimal projection_status source-item update.
+        - PolicyName: GraphSyncOnFailureAndProjectionMarker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SendOnFailureQueues
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:devops-graph-sync-*-onfailure${EnvironmentSuffix}"
+              - Sid: MarkSourceProjected
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
         - PolicyName: DynamoDbStreamEventSource
           PolicyDocument:
             Version: '2012-10-17'
