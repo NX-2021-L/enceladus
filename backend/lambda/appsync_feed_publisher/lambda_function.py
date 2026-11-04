@@ -891,6 +891,26 @@ def _batch_failure_response(sequence_numbers: List[str]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# ENC-TSK-S28-0E loop guard: records whose only OldImage/NewImage diff is a consumer-owned
+# projection attribute (written by graph_sync / feed_publisher) are dropped. FilterCriteria
+# cannot compare images, so the guard is in code (duplicated per Lambda).
+PROJECTION_ONLY_ATTRS = frozenset({
+    "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+})
+
+
+def _projection_only_diff(old_image: Any, new_image: Any) -> bool:
+    if not old_image or not new_image:
+        return False
+    diff = {k for k in set(old_image) | set(new_image) if old_image.get(k) != new_image.get(k)}
+    return bool(diff) and diff <= PROJECTION_ONLY_ATTRS
+
+
+def _record_is_projection_marker(record: Any) -> bool:
+    d = (record or {}).get("dynamodb") or {}
+    return _projection_only_diff(d.get("OldImage"), d.get("NewImage"))
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """DynamoDB Streams entry point.
 
@@ -913,6 +933,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     for batch_counter, record in enumerate(records):
         seq = (record.get("dynamodb", {}) or {}).get("SequenceNumber") or record.get("eventID")
+        if _record_is_projection_marker(record):  # ENC-TSK-S28-0E loop guard
+            skipped += 1
+            continue
         try:
             payload = build_event_payload(record, batch_counter)
             if payload is None:
