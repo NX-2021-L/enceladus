@@ -760,6 +760,7 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
                 "sync_version": {"N": "1"},
                 "created_at": {"S": now},
                 "updated_at": {"S": now},
+                "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
             },
             ConditionExpression="attribute_not_exists(project_id)",
         )

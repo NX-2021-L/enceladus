@@ -168,9 +168,10 @@ def _archive_reference_record(record_id: str) -> bool:
     _get_ddb().update_item(
         TableName=TRACKER_TABLE,
         Key={"record_id": {"S": record_id}},
-        UpdateExpression="SET #st = :archived, unlearning_archived_at = :ts",
+        UpdateExpression="SET write_kind = :wk, #st = :archived, unlearning_archived_at = :ts",
         ExpressionAttributeNames={"#st": "status"},
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":archived": {"S": "archived"},
             ":ts": {"S": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
         },
@@ -211,6 +212,7 @@ def _put_candidate_report(
             "status": {"S": "draft"},
             "created_at": {"S": now},
             "updated_at": {"S": now},
+            "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
             "full_description": {"S": body},
         },
     )

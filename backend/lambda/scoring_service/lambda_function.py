@@ -268,13 +268,14 @@ def _apply_scores(project_id: str, record_id: str, pillar_composite: float, reso
             TableName=DYNAMODB_TABLE,
             Key={"project_id": {"S": project_id}, "record_id": {"S": record_id}},
             UpdateExpression=(
-                "SET pillar_composite = :pc, resonance_score = :rs, "
+                "SET write_kind = :wk, pillar_composite = :pc, resonance_score = :rs, "
                 "scoring_status = :scored, scoring_completed_at = :now"
             ),
             ConditionExpression=(
                 "attribute_exists(record_id) AND scoring_status = :pending"
             ),
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":pc": {"N": str(pillar_composite)},
                 ":rs": {"N": str(resonance_score)},
                 ":scored": {"S": "scored"},

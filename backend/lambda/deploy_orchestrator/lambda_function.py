@@ -662,12 +662,13 @@ def _finalize_record_only(
                         "record_id": {"S": f"{rec_type}#{record_id}"},
                     },
                     UpdateExpression=(
-                        "SET updated_at = :ts, last_update_note = :note, "
+                        "SET write_kind = :wk, updated_at = :ts, last_update_note = :note, "
                         "sync_version = sync_version + :one, "
                         "#history = list_append(if_not_exists(#history, :empty_list), :entry)"
                     ),
                     ExpressionAttributeNames={"#history": "history"},
                     ExpressionAttributeValues={
+                        ":wk": {"S": "governed"},
                         ":ts": {"S": now},
                         ":note": {"S": description[:200]},
                         ":one": {"N": "1"},
