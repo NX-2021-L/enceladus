@@ -204,6 +204,19 @@ def _get_lambda_client():
     return _lambda_client
 
 
+def _nested_target(fn: str) -> str:
+    """ENC-TSK-S39-0C: qualify nested service invokes with the `live` alias (ENC-ISS-654).
+    NESTED_INVOKE_QUALIFIER (default 'live'); empty string => unqualified (rollback switch)."""
+    q = os.environ.get("NESTED_INVOKE_QUALIFIER", "live").strip()
+    return f"{fn}:{q}" if q and fn else fn
+
+
+def _wa_add_ms(key: str, t0: float) -> None:
+    """Accumulate nested-invoke wall time into the [WRITE-AUDIT] timing map (no-op outside a write)."""
+    if _WA:
+        _WA["t"][key] = _WA["t"].get(key, 0.0) + (time.perf_counter() - t0) * 1000
+
+
 def _lifecycle_service_enabled() -> bool:
     """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-H46 AC #3)."""
     return _appconfig_flag("enable_lifecycle_service_extraction", env_fallback="ENABLE_LIFECYCLE_SERVICE")
@@ -227,11 +240,15 @@ def _invoke_lifecycle_action(payload: dict):
         logger.error("[H85] LIFECYCLE_SERVICE_FUNCTION not configured; arc-walk skipped")
         return None
     try:
-        resp = _get_lambda_client().invoke(
-            FunctionName=fn,
-            InvocationType="RequestResponse",
-            Payload=json.dumps(payload).encode("utf-8"),
-        )
+        _t0 = time.perf_counter()
+        try:
+            resp = _get_lambda_client().invoke(
+                FunctionName=_nested_target(fn),
+                InvocationType="RequestResponse",
+                Payload=json.dumps(payload).encode("utf-8"),
+            )
+        finally:
+            _wa_add_ms("t_lifecycle_ms", _t0)
         if resp.get("FunctionError"):
             logger.error("[H85] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
             return None
@@ -257,11 +274,15 @@ def _invoke_lifecycle_service(payload: dict):
         logger.error("[H46] LIFECYCLE_SERVICE_FUNCTION not configured; failing closed")
         return None
     try:
-        resp = _get_lambda_client().invoke(
-            FunctionName=fn,
-            InvocationType="RequestResponse",
-            Payload=json.dumps(payload).encode("utf-8"),
-        )
+        _t0 = time.perf_counter()
+        try:
+            resp = _get_lambda_client().invoke(
+                FunctionName=_nested_target(fn),
+                InvocationType="RequestResponse",
+                Payload=json.dumps(payload).encode("utf-8"),
+            )
+        finally:
+            _wa_add_ms("t_lifecycle_ms", _t0)
         if resp.get("FunctionError"):
             logger.error("[H46] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
             return None
@@ -307,11 +328,15 @@ def _invoke_id_service(payload: dict):
         logger.error("[L06] ID_SERVICE_FUNCTION not configured; failing closed")
         return None
     try:
-        resp = _get_lambda_client().invoke(
-            FunctionName=fn,
-            InvocationType="RequestResponse",
-            Payload=json.dumps(payload).encode("utf-8"),
-        )
+        _t0 = time.perf_counter()
+        try:
+            resp = _get_lambda_client().invoke(
+                FunctionName=_nested_target(fn),
+                InvocationType="RequestResponse",
+                Payload=json.dumps(payload).encode("utf-8"),
+            )
+        finally:
+            _wa_add_ms("t_id_service_ms", _t0)
         if resp.get("FunctionError"):
             logger.error("[L06] ID Service FunctionError=%s", resp.get("FunctionError"))
             return None
@@ -339,7 +364,7 @@ def _record_id_boundary_violation(body: dict, record_type: str, field: str) -> N
         ws = _normalize_write_source(body)
         caller_identity = ws.get("provider") or "unknown"
         _get_lambda_client().invoke(
-            FunctionName=ID_SERVICE_FUNCTION,
+            FunctionName=_nested_target(ID_SERVICE_FUNCTION),
             InvocationType="Event",  # fire-and-forget; never blocks the 400 response
             Payload=json.dumps({
                 "action": "record_violation",
@@ -1274,7 +1299,9 @@ def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Opt
             "server_total_ms": int(total), "cold_start": st["cold_start"],
             "init_ms": _WA_INIT_MS if st["cold_start"] else 0,
             "t_auth_ms": int(t.get("t_auth_ms", 0)), "t_validate_ms": int(t.get("t_validate_ms", 0)),
-            "t_counter_ms": int(t.get("t_counter_ms", 0)), "t_ddb_ms": int(st["ddb_ms"]),
+            "t_counter_ms": int(t.get("t_counter_ms", 0)),
+            "t_lifecycle_ms": int(t.get("t_lifecycle_ms", 0)), "t_id_service_ms": int(t.get("t_id_service_ms", 0)),
+            "t_ddb_ms": int(st["ddb_ms"]),
             "ddb_ops": st["ddb_ops"], "ddb_retries": st["ddb_retries"],
             "memory_mb": st["memory_mb"], "runtime": sys.version.split()[0], "arch": platform.machine(),
             "function_version": st["function_version"], "hops": 1, "version_seq": st["version_seq"],

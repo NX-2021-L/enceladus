@@ -1065,6 +1065,15 @@ Resources:
             # require Query/Scan, so no index ARN is included. Do not broaden without confirming
             # the role actually needs index access.
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+          # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
+          # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
+          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          - Sid: InvokeTrackerMutationLive
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
@@ -5072,11 +5081,6 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: InvokeBedrockAgentAlias
-                Effect: Allow
-                Action:
-                  - bedrock:InvokeAgent
-                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -5100,21 +5104,6 @@ Resources:
                   - xray:PutTraceSegments
                   - xray:PutTelemetryRecords
                 Resource: "*"
-              # ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): the MCP server invokes the write
-              # tool Lambdas directly via their QUALIFIED `live` alias (no CloudFront/APIGW hop).
-              # Qualified ARNs ONLY -- nothing on $LATEST or the unqualified function ARN. This role
-              # is devops-coordination-api-lambda-role${EnvironmentSuffix}: the prod stack grants the
-              # prod tool aliases to the prod mcp-code role, the gamma stack grants the -gamma tool
-              # aliases to the gamma mcp-code role (enceladus-mcp-code-gamma, role-gamma).
-              # Prod stays on WRITE_TOOL_INVOKE_MODE=http until the mode default is flipped.
-              - Sid: InvokeWriteToolLambdasLive
-                Effect: Allow
-                Action:
-                  - lambda:InvokeFunction
-                Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}:live"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}:live"
               - Sid: PushSubscriptionsTableAccess
                 Effect: Allow
                 Action:
@@ -5300,25 +5289,15 @@ Resources:
               # planes (io, DOC-EF4BC758CCC9, 2026-10-13). The ${EnvironmentSuffix} grants above resolve to the gamma content
               # bucket on gamma, which is the wrong bucket for governance/, so name the prod bucket explicitly (no suffix).
               # On prod this repeats the grants above, which is harmless.
-              - Sid: GovernanceSharedProdContentList
+              - Sid: GovernanceSharedProdContent
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource:
-                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
-              - Sid: GovernanceSharedProdContentGet
-                Effect: Allow
-                Action:
                   - s3:GetObject
-                Resource:
-                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/*"
-              - Sid: GovernanceSharedProdContentWrite
-                Effect: Allow
-                Action:
                   - s3:PutObject
                 Resource:
+                  - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}"
                   - !Sub "arn:aws:s3:::enceladus-content-${AWS::AccountId}-${AWS::Region}/governance/*"
-              # ENC-TSK-K02 / FTR-084 Ph2: versioned intent-training weight snapshots + labels.
               - Sid: IntentTrainingS3ReadWrite
                 Effect: Allow
                 Action:
@@ -5362,35 +5341,23 @@ Resources:
                   - ec2:TerminateInstances
                   - ec2:CreateTags
                 Resource: "*"
-              - Sid: ProviderSecretsRead
+              - Sid: SecretsRead
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DescribeSecret
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/coordination/*"
-              # ENC-TSK-M27 (ENC-FTR-130): io-queue paused-approvals read reuses the
-              # existing ENC-FTR-021 GitHub App installation-token path (same secret
-              # already read by DeployDecideRole below) -- least-privilege GET-only
-              # scope, no new secret minted, no write-capable GitHub call added.
-              - Sid: GitHubAppSecretRead
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:DescribeSecret
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/coordination/*"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
               - Sid: ComponentEventsTopicPublish
                 Effect: Allow
                 Action:
                   - sns:Publish
                 Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-component-registry-events${EnvironmentSuffix}"
-              - Sid: CognitoTerminalAuth
+              - Sid: CognitoUserPoolAccess
                 Effect: Allow
                 Action:
                   - cognito-idp:InitiateAuth
-                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
-              - Sid: CognitoOAuthClientManagement
-                Effect: Allow
-                Action:
                   - cognito-idp:CreateUserPoolClient
                   - cognito-idp:DeleteUserPoolClient
                   - cognito-idp:DescribeUserPoolClient
@@ -5417,16 +5384,24 @@ Resources:
                 Action:
                   - bedrock:InvokeAgent
                 Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
-              - Sid: BedrockPassAgentRole
-                Effect: Allow
-                Action:
-                  - iam:PassRole
-                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-bedrock-agent-execution-role${EnvironmentSuffix}"
               - Sid: FleetHostPassRole
                 Effect: Allow
                 Action:
                   - iam:PassRole
                 Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+              # ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): the MCP server invokes the write tool
+              # Lambdas directly via their QUALIFIED `live` alias (no CloudFront/APIGW hop). Qualified ARNs
+              # ONLY -- nothing on $LATEST or the unqualified function ARN. devops-tracker-mutation-api:live is
+              # already covered by InvokeTrackerMutationEscalationApply (function:*). This role sits at IAM's
+              # 10240-byte aggregate inline-policy cap (ENC-ISS-891), hence the consolidated statements above.
+              # Prod stays on WRITE_TOOL_INVOKE_MODE=http until the mode default is flipped.
+              - Sid: InvokeWriteToolLambdasLive
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}:live"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}:live"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
