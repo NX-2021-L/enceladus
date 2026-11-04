@@ -91,9 +91,11 @@ def make(seed=26):
         # ---- planted violations / decoys keyed by write index ----
         if i == 20:   # CM1 planted: stale hash accepted (success true)
             line["governance_hash_verified"] = False
+            line["surface"] = "mcp_server"
         if i == 21:   # CM1 decoy: stale hash but rejected
             line["governance_hash_verified"] = False
             line["success"] = False
+            line["surface"] = "mcp_server"
             has_consumer = False
         if i == 30:   # CM2 planted: write that never reaches a stream consumer
             has_consumer = False
@@ -138,6 +140,17 @@ def make(seed=26):
                       "tool": "tracker.set", "surface": "mcp", "server_total_ms": 150.0, "cold_start": False,
                       "t_ddb_ms": 40.0, "ddb_ops": 3, "governance_hash_verified": True, "success": True,
                       "idempotency_hit": False}))
+    # ENC-ISS-896: tool-Lambda pass-through. The tracker_mutation line never sees the governance hash
+    # (null, verified false) while its mcp_server twin validated it. Must NOT count as CM1.
+    pt_ts = last + timedelta(seconds=30)
+    common = {"session_id": sessions[0], "tool": "tracker.set", "server_total_ms": 120.0, "cold_start": False,
+              "t_ddb_ms": 0.0, "ddb_ops": 0, "idempotency_hit": False, "success": True}  # ddb_ops 0: not a CM2 orphan
+    rows.append((pt_ts, "/aws/lambda/enceladus-mcp-code",
+                 dict(common, correlation_id="cor-pt-0", request_id="req-pt-0a", surface="mcp_server",
+                      governance_hash_verified=True, governance_hash_in=GOV_HASH)))
+    rows.append((pt_ts + timedelta(milliseconds=40), "/aws/lambda/devops-tracker-mutation-api",
+                 dict(common, correlation_id="cor-pt-0", request_id="req-pt-0b", surface="tracker_mutation",
+                      governance_hash=None, governance_hash_verified=False)))
     # one sentinel consumer line at the very end so window_end is well past the late writes
     rows.sort(key=lambda r: r[0])
     return rows
