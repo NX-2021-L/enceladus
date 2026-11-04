@@ -1,0 +1,9 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"session_id": ?"(?<session_id>[^"]*)"/
+| parse @message /"cold_start": ?(?<cold_start>true|false)/
+| filter ispresent(session_id) and ispresent(cold_start)
+| fields if(cold_start = "true", 1, 0) as cold_i
+| stats count(*) as n, sum(cold_i) as cold_n, sum(cold_i) / count(*) as cold_fraction by session_id
+| sort n desc
+| limit 10000

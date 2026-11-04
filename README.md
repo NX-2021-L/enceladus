@@ -40,6 +40,40 @@ The [documentation landing page](docs/README.md) lists everything, grouped by ki
 - `infrastructure/` — CloudFormation templates, IAM policies, and deployment metadata.
 - `docs/` — all human-facing documentation (see above).
 
+## Atomic governed commit and write fault injection
+
+Governed writes in `tracker_mutation` (create, update) and `document_api` (put, patch) commit in ONE
+`TransactWriteItems` (ENC-TSK-S28-0D): the record, an audit item (`audit#<record_id>` / `<iso_ts>#<correlation_id>`),
+the ID counter (tracker create only) and, when the request carries an `Idempotency-Key` header or body
+`idempotency_key`, a 24 h marker (`idem#<project_id>#<key>`) holding the exact response body. A replay of the
+same key returns that body byte-identical (HTTP 200, response header `idempotent_replay: true`) with no second
+transaction. Document put writes the S3 body first and deletes it again if the transaction fails. See the
+dictionary entities `tracker.audit_item` and `tracker.idempotency_marker`.
+
+`WRITE_FAULT_INJECT` (Lambda environment variable, **unset by default**) lets tests prove atomicity:
+
+| Value | Effect |
+| --- | --- |
+| `before_commit` | Raise after prechecks (and after the S3 body write), before the transaction. Nothing is written. |
+| `cancel_commit` | Append an always-false `ConditionCheck` so DynamoDB cancels the whole transaction. Nothing is written. |
+
+With either value the request returns HTTP 500 and the `[WRITE-AUDIT]` line carries `attempt_outcome=error` and
+`fault_inject=<value>`. Successful atomic commits add `atomic_commit`, `txn_items`, `ddb_txn_ops` (the transaction
+counts as one DynamoDB op) and `t_commit_ms` to the line. Never set the variable on production functions outside a
+planned fault drill.
+
+Table-level DynamoDB TTL on attribute `ttl` is enabled for the tracker and documents tables
+(`infrastructure/cloudformation/01-data.yaml`); the read path still ignores an expired marker. Stream consumers
+(graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry)
+skip any record whose key begins `audit#` or `idem#`.
+
+**PR notes (ENC-TSK-S28-0D):**
+- A replay of an idempotent write returns HTTP 200 with the stored receipt byte-identical (the first response was 201 for
+  creates) and the response header `idempotent_replay: true`.
+- Pre-S28 tests assert on `put_item` / `update_item` kwargs. The `conftest.py` shim in `backend/lambda/tracker_mutation`
+  and `backend/lambda/document_api` fans each transaction out to those calls for legacy tests only (skipping counter, audit
+  and marker rows). Test modules named `*s28*` bypass the shim and exercise the real `transact_write_items` on moto.
+
 ## License
 
 Enceladus is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE).

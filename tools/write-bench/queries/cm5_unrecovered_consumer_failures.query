@@ -1,0 +1,7 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"consumer": ?"(?<consumer>[^"]*)"/
+| parse @message /"attempt": ?(?<attempt>[0-9]+)/
+| parse @message /"t_projection_done": ?(?<t_projection_done>[0-9.]+)/
+| filter ispresent(consumer) and attempt >= 3 and isblank(t_projection_done)
+| stats count(*) as violations

@@ -1,0 +1,10 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"tool": ?"(?<tool>[^"]*)"/
+| parse @message /"surface": ?"(?<surface>[^"]*)"/
+| parse @message /"cold_start": ?(?<cold_start>true|false)/
+| parse @message /"client_total_ms": ?(?<client_total_ms>[0-9.]+)/
+| filter ispresent(client_total_ms) and ispresent(tool)
+| fields if(cold_start = "true", 1, 0) as cold_i
+| stats count(*) as n, pct(client_total_ms, 50) as p50_ms, pct(client_total_ms, 90) as p90_ms, pct(client_total_ms, 95) as p95_ms, max(client_total_ms) as max_ms, sum(cold_i) as cold_n, sum(cold_i) / count(*) as cold_share by tool, surface
+| sort n desc

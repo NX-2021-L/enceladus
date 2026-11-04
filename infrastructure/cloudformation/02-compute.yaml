@@ -694,7 +694,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       # DVP-TSK-B36: a recipe-run segment (runner session register + claim + several governed MCP writes) runs
       # inside one API request; 10s killed DVP-RUN-002 mid-segment. 29s stays under the HTTP API's 30s cap.
       Timeout: 29
@@ -797,7 +797,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64
@@ -936,7 +936,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
-      MemorySize: 256
+      MemorySize: 1024  # ENC-TSK-S28-0A: 256 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64
@@ -5083,10 +5083,16 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
+                # ENC-ISS-891 / ENC-TSK-S26-0H: the role's five inline policies sit at IAM's
+                # 10240-byte aggregate cap, so the resources are expressed as three prefixes:
+                # the coordination API group, every /enceladus/* group (mcp/server, worker-runtime)
+                # and every /aws/lambda/enceladus-mcp-* group (mcp-code, mcp-streamable, the
+                # streaming gateway). Without the last one the prod MCP Lambdas never created a
+                # log stream and the ENC-PLN-104 W0 write-audit lines were lost.
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-*"
               # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
               - Sid: XRayTracing
                 Effect: Allow
@@ -8809,7 +8815,7 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: server.lambda_handler
-      MemorySize: 512
+      MemorySize: 1024  # ENC-TSK-S28-0A: 512 -> 1024 MB
       Timeout: 30
       Architectures:
         - arm64

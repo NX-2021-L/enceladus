@@ -1,0 +1,6 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"governance_hash_verified": ?(?<verified>true|false)/
+| parse @message /"success": ?(?<success>true|false)/
+| filter verified = "false" and (isblank(success) or success = "true")
+| stats count(*) as violations
