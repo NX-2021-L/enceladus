@@ -11625,6 +11625,133 @@ def _wa_tool_for(method: str, path: str) -> Tuple[str, str, str]:
     return f"tracker.{method.lower()}", "", ""
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): tool-side governance_hash verification.
+# The MCP server may invoke this Lambda directly (qualified `live` alias); a direct invoke is NEVER treated as
+# pre-validated. When a request body carries governance_hash it is compared with the current hash from the same
+# governance source the MCP server uses (governance API GET /hash), cached at module level for 60 s. A mismatch
+# is a 409 GOVERNANCE_STALE envelope. A request that never sent a hash keeps today's behaviour (no check) and is
+# logged `governance_hash_verified: false`. Duplicated per Lambda (stdlib only, no shared layer change).
+# ---------------------------------------------------------------------------
+_GOV_HASH_TTL_SECONDS = 60.0
+_GOV_HASH_FORCE_MIN_AGE_SECONDS = 5.0  # a mismatch re-fetches once, but not more often than this
+_GOV_HASH_FAIL_BACKOFF_SECONDS = 30.0  # after an unreachable governance API, do not stall every write on a 5 s timeout
+_GOV_HASH_CACHE: Dict[str, Any] = {"value": "", "at": 0.0, "fail_at": 0.0}
+
+
+def _gov_hash_is_gamma() -> bool:
+    suffix = (os.environ.get("ENVIRONMENT_SUFFIX") or os.environ.get("ENV_SUFFIX") or "").strip().lower()
+    if suffix:
+        return suffix.lstrip("-") == "gamma"
+    return os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip().lower().endswith("-gamma")
+
+
+def _governance_hash_url() -> str:
+    base = (
+        os.environ.get("ENCELADUS_GOVERNANCE_API_BASE")
+        or os.environ.get("GOVERNANCE_API_BASE")
+        or (
+            "https://enceladus-gamma.jreese.net/api/v1/governance"
+            if _gov_hash_is_gamma()
+            else "https://enceladus.jreese.net/api/v1/governance"
+        )
+    )
+    return base.rstrip("/") + "/hash"
+
+
+def _gov_hash_keys() -> List[str]:
+    keys: List[str] = []
+    for raw in (
+        os.environ.get("ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY", ""),
+        os.environ.get("COORDINATION_INTERNAL_API_KEY", ""),
+        os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", ""),
+        os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+        os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""),
+        os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    ):
+        for part in str(raw or "").split(","):
+            part = part.strip()
+            if part and part not in keys:
+                keys.append(part)
+    return keys
+
+
+def _current_governance_hash(force: bool = False) -> str:
+    """Current governance hash (module-level 60 s TTL cache); '' when the governance API is unreachable."""
+    now = time.time()
+    cached = _GOV_HASH_CACHE.get("value") or ""
+    age = now - float(_GOV_HASH_CACHE.get("at") or 0.0)
+    if cached and age < _GOV_HASH_TTL_SECONDS and not (force and age >= _GOV_HASH_FORCE_MIN_AGE_SECONDS):
+        return cached
+    if now - float(_GOV_HASH_CACHE.get("fail_at") or 0.0) < _GOV_HASH_FAIL_BACKOFF_SECONDS:
+        return cached if (cached and age < 2 * _GOV_HASH_TTL_SECONDS) else ""
+    url = _governance_hash_url()
+    for key in _gov_hash_keys() or [""]:
+        headers = {"Accept": "application/json", "User-Agent": "enceladus-tool-lambda/governance-hash"}
+        if key:
+            headers["X-Coordination-Internal-Key"] = key
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8") or "{}")
+        except Exception:  # noqa: BLE001 - try the next key; unreachable -> '' (caller fails open, flagged)
+            continue
+        value = str((data or {}).get("governance_hash") or "").strip() if isinstance(data, dict) else ""
+        if value:
+            _GOV_HASH_CACHE["value"], _GOV_HASH_CACHE["at"], _GOV_HASH_CACHE["fail_at"] = value, now, 0.0
+            return value
+    _GOV_HASH_CACHE["fail_at"] = now
+    return cached if (cached and age < 2 * _GOV_HASH_TTL_SECONDS) else ""
+
+
+def _wa_set_governance_verified(verified: bool, **extra: Any) -> None:
+    if _WA:
+        _WA.setdefault("extra", {})["governance_hash_verified"] = bool(verified)
+        _WA["extra"].update(extra)
+
+
+def _verify_governance_hash(body_hash: Any) -> Optional[Dict]:
+    """None when the request may proceed, else the 409 GOVERNANCE_STALE response. Sets the audit-line flag."""
+    provided = str(body_hash or "").strip()
+    if not provided:
+        _wa_set_governance_verified(False)  # caller never sent one: today's behaviour
+        return None
+    current = _current_governance_hash()
+    if current and provided != current:
+        current = _current_governance_hash(force=True) or current  # self-heal a stale cache once
+    if not current:
+        _wa_set_governance_verified(False, governance_hash_check="unavailable")  # fail open, but flagged
+        return None
+    if provided == current:
+        _wa_set_governance_verified(True)
+        return None
+    _wa_set_governance_verified(False, governance_hash_check="mismatch")
+    return _error(
+        409,
+        "GOVERNANCE_STALE: provided governance_hash does not match the current governance bundle",
+        code="GOVERNANCE_STALE",
+        retryable=True,
+        provided=provided,
+        current=current,
+        self_correct="Re-read the current hash (connection_health / governance_hash) and resubmit with it.",
+    )
+
+
+def _body_governance_hash(event: Dict) -> str:
+    raw = event.get("body")
+    if isinstance(raw, str) and event.get("isBase64Encoded"):
+        try:
+            raw = base64.b64decode(raw).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return ""
+    if not isinstance(raw, str) or "governance_hash" not in raw:
+        return ""
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return ""
+    return str(body.get("governance_hash") or "") if isinstance(body, dict) else ""
+
+
 def lambda_handler(event: Dict, context: Any) -> Dict:
     """ENC-TSK-S26-0A wrapper: one [WRITE-AUDIT] line per mutating request, correlation_id accepted."""
     method = ""
@@ -11641,7 +11768,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     status = 500
     resp: Any = None
     try:
-        resp = _lambda_handler_inner(event, context)
+        # ENC-TSK-S28-0F: never treat a direct invoke as pre-validated.
+        resp = _verify_governance_hash(_body_governance_hash(event)) or _lambda_handler_inner(event, context)
         status = int((resp or {}).get("statusCode", 200))
         return _wa_inject_ack(resp)
     finally:

@@ -5100,6 +5100,21 @@ Resources:
                   - xray:PutTraceSegments
                   - xray:PutTelemetryRecords
                 Resource: "*"
+              # ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): the MCP server invokes the write
+              # tool Lambdas directly via their QUALIFIED `live` alias (no CloudFront/APIGW hop).
+              # Qualified ARNs ONLY -- nothing on $LATEST or the unqualified function ARN. This role
+              # is devops-coordination-api-lambda-role${EnvironmentSuffix}: the prod stack grants the
+              # prod tool aliases to the prod mcp-code role, the gamma stack grants the -gamma tool
+              # aliases to the gamma mcp-code role (enceladus-mcp-code-gamma, role-gamma).
+              # Prod stays on WRITE_TOOL_INVOKE_MODE=http until the mode default is flipped.
+              - Sid: InvokeWriteToolLambdasLive
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}:live"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}:live"
               - Sid: PushSubscriptionsTableAccess
                 Effect: Allow
                 Action:

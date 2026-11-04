@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.8",
-  "updated_at": "2026-11-04T12:00:00Z",
-  "last_change_summary": "ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. Write responses carry t_ack, version_seq, server_total_ms. New item attributes t_ack, projection_status, projected_version_seq (plus t_projected), feed_published_version_seq on tracker and document items; consumer-originated updates to the projection attributes are skipped by every stream consumer (loop guard). Additive.",
+  "version": "2026-11-04.9",
+  "updated_at": "2026-11-04T14:00:00Z",
+  "last_change_summary": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3, ENC-ISS-654/ENC-ISS-681 write-path tranche): the MCP server can invoke the write tool Lambdas (devops-tracker-mutation-api, devops-document-api, enceladus-checkout-service and their -gamma twins) directly via the QUALIFIED `live` alias (Lambda Invoke RequestResponse with a synthesized API Gateway v2 event) instead of CloudFront+API Gateway; env WRITE_TOOL_INVOKE_MODE direct|http (default gamma direct, prod http) with a single HTTP fallback logged as invoke_mode direct_fallback. New entity mcp_server.write_tool_invoke; mcp_server.write_audit_line gains invoke_mode and a direct-aware hops. tracker_mutation and document_api now verify a supplied governance_hash against the governance API /hash (60 s module cache): mismatch -> HTTP 409 GOVERNANCE_STALE, and their [WRITE-AUDIT] lines carry governance_hash_verified. The Gen2 deploy waits for State==Active and LastUpdateStatus==Successful before moving the `live` alias.",
   "owners": [
     "enceladus-platform"
   ],
@@ -9837,7 +9837,16 @@
         },
         "hops": {
           "type": "integer",
-          "definition": "Hops counted by this surface; 1 (the MCP hop)."
+          "definition": "Hops from the MCP server to the write tool Lambda for this call: 1 when invoke_mode is direct (or none); 2 for http / direct_fallback (CloudFront + API Gateway in front of the Lambda). Tool Lambdas report 1."
+        },
+        "invoke_mode": {
+          "type": "string",
+          "definition": "ENC-TSK-S28-0F: how the call reached the write tool Lambda: direct (qualified `<fn>:live` Lambda invoke; includes a tool FunctionError, because the function ran), http (CloudFront+API Gateway), direct_fallback (the invoke never reached the function -- ResourceNotFound, AccessDenied, throttling, EC2Throttled, ServiceException, connection errors -- and the call was retried once over HTTP), none (no write-tool request). Reads always use http and do not set it. Every fallback also emits a separate note line with audit_kind invoke_fallback.",
+          "usage_guidance": "Alarm on direct_fallback. Join latency by invoke_mode to compare the direct path against the API Gateway path."
+        },
+        "audit_kind": {
+          "type": "string|null",
+          "definition": "Present only on non-attempt note lines. invoke_fallback marks the line emitted when a direct invoke failed to reach the function and the call fell back to HTTP; it carries attempt_outcome error, success false, tool_function, fallback_reason and the correlation_id. The S26-0D counters exclude lines with an audit_kind (the real attempt is counted on its own line)."
         },
         "t_route_ms": {
           "type": "integer",
@@ -9857,11 +9866,11 @@
         },
         "governance_hash_verified": {
           "type": "boolean",
-          "definition": "True when the supplied hash matched the current bundle."
+          "definition": "True when the supplied hash matched the current bundle. On the tool Lambda lines (tracker_mutation, document_api) it is the tool-side check against the governance API /hash (also set false with governance_hash_check mismatch|unavailable)."
         },
         "t_invoke_ms": {
           "type": "integer",
-          "definition": "Summed urlopen round trips to tool Lambdas (tracker/document/checkout), ms."
+          "definition": "Summed round trips to tool Lambdas (tracker/document/checkout) -- urlopen over HTTP or Lambda Invoke when invoke_mode is direct -- ms."
         },
         "memory_mb": {
           "type": "string|null",
@@ -9993,6 +10002,35 @@
         }
       },
       "usage_guidance": "Invoked only by tools/write-bench/bench.py with the product-lead or an inspect profile; payloads carry X-Correlation-Id and the X-Enc-* client headers so audit lines join to bench samples. Not part of any governed write path."
+    },
+    "mcp_server.write_tool_invoke": {
+      "description": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): direct qualified invoke of the write tool Lambdas from the MCP server (tools/enceladus-mcp-server/server.py _invoke_tool_lambda). A mutating call (POST/PUT/PATCH/DELETE) through _tracker_api_request, _document_api_request or _checkout_api_request is turned into an API Gateway v2 (payload 2.0) event -- requestContext.http.method/path, rawPath, rawQueryString, headers (lower-cased: x-coordination-internal-key, x-correlation-id, X-Enc-* passthrough), queryStringParameters, body as a JSON string, isBase64Encoded false, routeKey $default -- and invoked synchronously (RequestResponse) on `<function>:live`; the {statusCode, headers, body} reply is translated to exactly what the HTTP helper returns. Never $LATEST and never an unqualified ARN; IAM grants lambda:InvokeFunction on the three `:live` ARNs only (02-compute.yaml CoordinationApiRole InvokeWriteToolLambdasLive).",
+      "fields": {
+        "WRITE_TOOL_INVOKE_MODE": {
+          "type": "string",
+          "definition": "direct | http. Default derived from the environment: gamma (ENVIRONMENT_SUFFIX/ENV_SUFFIX -gamma or function name ending -gamma) -> direct, prod and local stdio -> http (P103-R5 pattern). Reads (GET) always use http."
+        },
+        "TRACKER_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Tracker write Lambda name; default devops-tracker-mutation-api (-gamma on gamma)."
+        },
+        "DOCUMENT_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Document write Lambda name; default devops-document-api (-gamma on gamma)."
+        },
+        "CHECKOUT_TOOL_FUNCTION": {
+          "type": "string",
+          "definition": "Checkout write Lambda name; default enceladus-checkout-service (-gamma on gamma)."
+        },
+        "fallback": {
+          "type": "string",
+          "definition": "The call is retried ONCE over the HTTP path only when the invoke did not reach the function (ResourceNotFound, AccessDenied, TooManyRequests/Throttling, EC2Throttled, ServiceException, endpoint/connection errors before a response); the audit line then says invoke_mode direct_fallback. A FunctionError (the function ran) is NEVER retried: the tool's error envelope is returned as-is (retryable only if the tool says so) with invoke_mode direct and attempt_outcome error. A read timeout is not retried either (ambiguous outcome) and returns UPSTREAM_ERROR retryable."
+        },
+        "governance_hash": {
+          "type": "string",
+          "definition": "A direct invoke is never pre-validated: tracker_mutation and document_api re-verify a body governance_hash against the governance API /hash (module-level 60 s TTL cache, one forced refresh on mismatch) and return 409 GOVERNANCE_STALE with provided/current in the envelope details; requests without a hash keep their prior behaviour (governance_hash_verified false); an unreachable governance API fails open with governance_hash_check unavailable."
+        }
+      }
     },
     "tracker.audit_item": {
       "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error). Stream consumers (graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry) drop any record whose key begins `audit#` or `idem#` before doing any work; skipped records are consumed, never reported in batchItemFailures.",
@@ -11243,6 +11281,11 @@
       "version": "2026-11-04.8",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. Write responses carry t_ack, version_seq, server_total_ms. New item attributes t_ack, projection_status, projected_version_seq (plus t_projected), feed_published_version_seq on tracker and document items; consumer-originated updates to the projection attributes are skipped by every stream consumer (loop guard). Additive."
+    },
+    {
+      "version": "2026-11-04.9",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3, ENC-ISS-654/ENC-ISS-681 write-path tranche): the MCP server can invoke the write tool Lambdas (devops-tracker-mutation-api, devops-document-api, enceladus-checkout-service and their -gamma twins) directly via the QUALIFIED `live` alias (Lambda Invoke RequestResponse with a synthesized API Gateway v2 event) instead of CloudFront+API Gateway; env WRITE_TOOL_INVOKE_MODE direct|http (default gamma direct, prod http) with a single HTTP fallback logged as invoke_mode direct_fallback. New entity mcp_server.write_tool_invoke; mcp_server.write_audit_line gains invoke_mode and a direct-aware hops. tracker_mutation and document_api now verify a supplied governance_hash against the governance API /hash (60 s module cache): mismatch -> HTTP 409 GOVERNANCE_STALE, and their [WRITE-AUDIT] lines carry governance_hash_verified. The Gen2 deploy waits for State==Active and LastUpdateStatus==Successful before moving the `live` alias."
     }
   ]
 }
