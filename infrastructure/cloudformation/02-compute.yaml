@@ -983,6 +983,11 @@ Resources:
           # ENC-TSK-O43 AC-5: multi-key accept-list, live-only on gamma and byte-equal to the
           # singular key above. Codified from the SAME parameter -- no new secret.
           COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
+          # ENC-TSK-S50 (ENC-PLN-104 W3b.4): canonical for both planes. Direct qualified invoke of the
+          # tracker mutation `live` alias (ENC-TSK-S39-0A). Needs lambda:InvokeFunction on the :live ARN
+          # (gamma: CheckoutServiceRoleAgentSessionsGammaAccess; prod: CheckoutServiceRoleInvokeTrackerLive).
+          # Rollback: set to `http`. The code default in checkout_service stays as the fallback.
+          CHECKOUT_TRACKER_INVOKE_MODE: direct
       Tags:
         - Key: Project
           Value: enceladus
@@ -1067,8 +1072,29 @@ Resources:
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
           # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
           # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
-          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
-          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod has the same
+          # statement in CheckoutServiceRoleInvokeTrackerLive (ENC-TSK-S50).
+          - Sid: InvokeTrackerMutationLive
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
+
+  # ENC-TSK-S50 (ENC-PLN-104 W3b.4): production counterpart of the gamma-only InvokeTrackerMutationLive
+  # statement above, so checkout_service can direct-invoke tracker_mutation (CHECKOUT_TRACKER_INVOKE_MODE=direct)
+  # on prod. Same attach-by-name precedent: the role is not CFN-managed. QUALIFIED `:live` ARN ONLY --
+  # no `:*`, nothing on $LATEST, nothing on the unqualified function ARN. Gamma keeps its statement in
+  # the gamma-only policy; this one is IsProduction so the two never overlap.
+  CheckoutServiceRoleInvokeTrackerLive:
+    Type: AWS::IAM::Policy
+    Condition: IsProduction
+    Properties:
+      PolicyName: InvokeTrackerMutationLiveCfn
+      Roles:
+        - !Sub "enceladus-checkout-service-role${EnvironmentSuffix}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
           - Sid: InvokeTrackerMutationLive
             Effect: Allow
             Action:
