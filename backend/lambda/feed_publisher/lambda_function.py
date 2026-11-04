@@ -138,6 +138,114 @@ def _wa_consumer_emit(
 def _wa_now_ms() -> int:
     return int(_wa_time.time() * 1000)
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): loop guard + version_seq idempotence.
+#  * LOOP GUARD: a record whose OldImage/NewImage differ only in consumer-owned projection
+#    attributes (including this consumer's own feed_published_version_seq marker) is consumed
+#    without work; a Pipe/ESM FilterCriteria cannot compare images, so the guard is in code.
+#  * IDEMPOTENCE (per_batch mode): before publishing, each governed record claims
+#    feed_published_version_seq on its source item with a conditional UpdateItem
+#    (absent or < version_seq). A failed condition = duplicate / out-of-order delivery -> the
+#    record is dropped. If the publish then fails the claims are released so the SQS retry
+#    is not wrongly skipped. Coalesced mode only applies the loop guard (a dirty mark is idempotent).
+# ---------------------------------------------------------------------------
+PROJECTION_ONLY_ATTRS = frozenset({
+    "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+})
+
+
+def _projection_only_diff(old_image: Optional[Dict[str, Any]], new_image: Optional[Dict[str, Any]]) -> bool:
+    if not old_image or not new_image:
+        return False
+    diff = {k for k in set(old_image) | set(new_image) if old_image.get(k) != new_image.get(k)}
+    return bool(diff) and diff <= PROJECTION_ONLY_ATTRS
+
+
+def _s28_record_parts(record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]]:
+    """(OldImage, NewImage, version_seq) of one SQS record; (None, None, None) when unparseable."""
+    try:
+        body = json.loads(record.get("body", "{}"))
+        ddb_record = body.get("dynamodb", body)
+        new = ddb_record.get("NewImage") or None
+        raw = (new or {}).get("version_seq")
+        vseq = int(raw["N"]) if isinstance(raw, dict) and "N" in raw else None
+        return ddb_record.get("OldImage") or None, new, vseq
+    except (AttributeError, TypeError, ValueError):
+        return None, None, None
+
+
+def _s28_source_key(new: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any], str]]:
+    if "document_id" in new and "record_id" not in new:
+        return os.environ.get("DOCUMENTS_TABLE", DEFAULT_DOCUMENTS_TABLE), {"document_id": new["document_id"]}, "document_id"
+    if "project_id" in new and "record_id" in new:
+        return TRACKER_TABLE, {"project_id": new["project_id"], "record_id": new["record_id"]}, "record_id"
+    return None
+
+
+def _s28_claim_version(new: Dict[str, Any], vseq: int, ddb: Any) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """(claimed, previous marker). claimed=False means a higher/equal version was already published."""
+    target = _s28_source_key(new)
+    if target is None:
+        return True, None
+    table, key, pk = target
+    try:
+        resp = ddb.update_item(
+            TableName=table, Key=key, UpdateExpression="SET feed_published_version_seq = :v",
+            ConditionExpression=f"attribute_exists({pk}) AND (attribute_not_exists(feed_published_version_seq) OR feed_published_version_seq < :v)",
+            ExpressionAttributeValues={":v": {"N": str(vseq)}}, ReturnValues="UPDATED_OLD",
+        )
+        return True, (resp.get("Attributes") or {}).get("feed_published_version_seq")
+    except ClientError as exc:
+        if _is_condition_failure(exc):
+            return False, None
+        logger.warning("feed_publisher: version claim failed open (non-fatal): %s", exc)
+        return True, None
+
+
+def _s28_release_claim(claim: Tuple[str, Dict[str, Any], int, Optional[Dict[str, Any]]], ddb: Any) -> None:
+    table, key, vseq, prev = claim
+    try:
+        vals: Dict[str, Any] = {":v": {"N": str(vseq)}}
+        if prev:
+            vals[":prev"] = prev
+        ddb.update_item(
+            TableName=table, Key=key,
+            UpdateExpression="SET feed_published_version_seq = :prev" if prev else "REMOVE feed_published_version_seq",
+            ConditionExpression="feed_published_version_seq = :v", ExpressionAttributeValues=vals,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_publisher: claim release skipped: %s", exc)
+
+
+def _s28_filter_event(event: Dict[str, Any], claim_versions: bool, ddb: Any = None) -> Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any], int, Optional[Dict[str, Any]]]], int]:
+    """Drop projection-only records (loop guard) and stale/duplicate versions (idempotence).
+    Returns (filtered event, claims taken, dropped count). Never drops an unparseable record."""
+    kept: List[Dict[str, Any]] = []
+    claims: List[Tuple[str, Dict[str, Any], int, Optional[Dict[str, Any]]]] = []
+    seen: Dict[str, int] = {}
+    dropped = 0
+    for record in event.get("Records", []):
+        old, new, vseq = _s28_record_parts(record)
+        if _projection_only_diff(old, new):
+            dropped += 1
+            continue
+        if claim_versions and new is not None and vseq is not None:
+            target = _s28_source_key(new)
+            ident = json.dumps(target[1], sort_keys=True) if target else ""
+            if ident and seen.get(ident, -1) >= vseq:
+                dropped += 1  # duplicate / older image inside the same batch
+                continue
+            ok, prev = _s28_claim_version(new, vseq, ddb or _ddb_client())
+            if not ok:
+                dropped += 1
+                continue
+            if target:
+                seen[ident] = vseq
+                claims.append((target[0], target[1], vseq, prev))
+        kept.append(record)
+    return {**event, "Records": kept}, claims, dropped
+
+
 # Feed utils is bundled alongside this Lambda (same zip package)
 # Import all generation / publication utilities from the shared module.
 try:
@@ -1856,11 +1964,19 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if _is_sweep_event(event):
         return _handle_sweep(context)
     t_recv = _wa_now_ms()  # ENC-TSK-S26-0A
+    original_count = len(event.get("Records", []))  # ENC-TSK-S28-0E
+    event, claims, dropped = _s28_filter_event(event, claim_versions=FEED_PUBLISH_MODE != FEED_PUBLISH_MODE_COALESCED)
+    if original_count and not event.get("Records"):
+        logger.info("feed_publisher: %d record(s) consumed by loop guard / version_seq idempotence", dropped)
+        return {"batchItemFailures": []}
     if FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED:
         resp = _handle_mark(event)
         _wa_emit_feed_records(event, resp, t_recv, phase="marked")  # projection happens later, at the sweep
         return resp
     resp = _handle_per_batch(event)
+    if (resp or {}).get("batchItemFailures"):  # ENC-TSK-S28-0E: failed publish must stay retryable
+        for claim in claims:
+            _s28_release_claim(claim, _ddb_client())
     _wa_emit_feed_records(event, resp, t_recv, phase="projected")
     return resp
 

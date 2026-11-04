@@ -27,6 +27,19 @@ sys.path.insert(0, os.path.dirname(__file__))
 import lambda_function as da  # noqa: E402
 
 
+# ENC-TSK-S28-0E x S28-0D composition: the committed receipt (audit hash, idempotency marker) is the
+# domain body fixed BEFORE the write; the per-attempt ack envelope (t_ack / version_seq /
+# server_total_ms) is added to every response afterwards, so compare receipts with it stripped.
+_ACK_KEYS = ("t_ack", "version_seq", "server_total_ms")
+
+
+def _receipt(resp):
+    body = json.loads(resp["body"])
+    for k in _ACK_KEYS:
+        body.pop(k, None)
+    return json.dumps(body)
+
+
 class _Ctx:
     aws_request_id = "req-d-s28"
     memory_limit_in_mb = 256
@@ -124,7 +137,7 @@ class DocumentAtomicCommitTests(unittest.TestCase):
         self.assertTrue(audit["document_id"]["S"].startswith(f"audit#{doc_id}#"))
         self.assertTrue(audit["document_id"]["S"].endswith("#corr-d"))
         self.assertEqual(audit["target_record_id"]["S"], doc_id)
-        self.assertEqual(audit["receipt_hash"]["S"], da._s28_receipt_hash(resp["body"]))
+        self.assertEqual(audit["receipt_hash"]["S"], da._s28_receipt_hash(_receipt(resp)))
         self.assertEqual(audit["write_tool"]["S"], "documents.put")
         self.assertEqual(audit["correlation_id"]["S"], "corr-d")
         self.assertEqual(audit["attempt_outcome"]["S"], "success")
@@ -135,12 +148,12 @@ class DocumentAtomicCommitTests(unittest.TestCase):
         self.assertEqual(self.kinds(self.spy.txns[0]), ["Put:DOC", "Put:audit", "Put:idem"])
         (marker,) = self.scan("idem#")
         self.assertEqual(marker["document_id"]["S"], "idem#devops#dk-1#marker")
-        self.assertEqual(marker["receipt"]["S"], first["body"])
+        self.assertEqual(marker["receipt"]["S"], _receipt(first))
         self.assertTrue(t0 + 86400 <= int(marker["ttl"]["N"]) <= int(time.time()) + 86400)
         again, _ = self.put(key="dk-1")
         self.assertEqual(again["statusCode"], 200)
         self.assertEqual(again["headers"].get("idempotent_replay"), "true")
-        self.assertEqual(again["body"], first["body"])
+        self.assertEqual(_receipt(again), _receipt(first))
         self.assertEqual(len(self.spy.txns), 1)
         self.assertEqual(len(self.docs()), 1)
         self.assertEqual(len(self.scan("audit#")), 1)
@@ -186,9 +199,9 @@ class DocumentAtomicCommitTests(unittest.TestCase):
         item = self.real.get_item(TableName=da.DOCUMENTS_TABLE, Key={"document_id": {"S": "DOC-AAAA11112222"}})["Item"]
         self.assertEqual((item["title"]["S"], item["version"]["N"]), ("new", "2"))
         (audit,) = self.scan("audit#")
-        self.assertEqual(audit["receipt_hash"]["S"], da._s28_receipt_hash(resp["body"]))
+        self.assertEqual(audit["receipt_hash"]["S"], da._s28_receipt_hash(_receipt(resp)))
         again = self.patch(key="pk-1")
-        self.assertEqual(again["body"], resp["body"])
+        self.assertEqual(_receipt(again), _receipt(resp))
         self.assertEqual(len(self.spy.txns), 1)
 
     def test_patch_cancel_commit_leaves_document_and_audit_untouched(self):

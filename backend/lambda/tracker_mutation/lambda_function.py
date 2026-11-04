@@ -1226,6 +1226,38 @@ def _wa_find_id(resp: Any) -> str:
     return ""
 
 
+# ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. t_ack is the epoch-ms
+# the write was acknowledged; it is stamped on the item (consumers compute governed_lag_ms
+# against it) and echoed with version_seq + server_total_ms in every successful write response.
+# projection_status starts "pending" on every write; graph_sync flips it to "projected".
+def _wa_ack_now() -> int:
+    ms = int(time.time() * 1000)
+    if _WA:  # only inside a write request (never create state outside one)
+        _WA["t_ack"] = ms
+    return ms
+
+
+def _wa_inject_ack(resp: Any) -> Any:
+    """Add t_ack / version_seq / server_total_ms to a successful JSON-object response body."""
+    try:
+        if not _WA or not isinstance(resp, dict) or int(resp.get("statusCode", 200)) >= 400:
+            return resp
+        raw = resp.get("body")
+        if not isinstance(raw, str) or resp.get("isBase64Encoded"):
+            return resp
+        body = json.loads(raw) if raw else {}
+        if not isinstance(body, dict):
+            return resp
+        body["t_ack"] = _WA.get("t_ack") or int(time.time() * 1000)
+        if _WA.get("version_seq") is not None:
+            body["version_seq"] = _WA["version_seq"]
+        body["server_total_ms"] = int((time.perf_counter() - _WA["t0"]) * 1000)
+        resp["body"] = json.dumps(body, default=str)
+    except Exception:  # noqa: BLE001 - ack fields must never break a committed write
+        pass
+    return resp
+
+
 def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Optional[Dict] = None) -> None:
     try:
         if not _WA:
@@ -1246,7 +1278,7 @@ def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Opt
             "ddb_ops": st["ddb_ops"], "ddb_retries": st["ddb_retries"],
             "memory_mb": st["memory_mb"], "runtime": sys.version.split()[0], "arch": platform.machine(),
             "function_version": st["function_version"], "hops": 1, "version_seq": st["version_seq"],
-            "t_ack": int(time.time() * 1000),
+            "t_ack": st.get("t_ack") or int(time.time() * 1000),
         }
         line.update({k: (int(v) if k.startswith("t_") and k.endswith("_ms") else v) for k, v in t.items()
                      if k not in line})
@@ -1283,6 +1315,9 @@ def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
         item["correlation_id"] = {"S": _WA["correlation_id"]}
     if _WA.get("write_tool"):  # ENC-TSK-S26-0A: governed_lag_ms `tool` dimension source
         item["write_tool"] = {"S": _WA["write_tool"]}
+    # ENC-TSK-S28-0E: ack basis + projection marker (graph_sync flips it to "projected")
+    item["t_ack"] = {"N": str(_wa_ack_now())}
+    item["projection_status"] = {"S": "pending"}
     if not _VERSION_SEQ_AVAILABLE:
         return
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
@@ -1307,6 +1342,11 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
         if wtool:
             expr += ", write_tool = :wa_tool"
             vals[":wa_tool"] = {"S": wtool}
+    if expr:  # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
+        vals = dict(vals)
+        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat"
+        vals[":wa_tack"] = {"N": str(_wa_ack_now())}
+        vals[":wa_pstat"] = {"S": "pending"}
     return expr, vals
 
 
@@ -11603,7 +11643,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     try:
         resp = _lambda_handler_inner(event, context)
         status = int((resp or {}).get("statusCode", 200))
-        return resp
+        return _wa_inject_ack(resp)
     finally:
         _wa_emit(tool, project_id, record_id or (_wa_find_id(resp) if resp else ""), status)
 

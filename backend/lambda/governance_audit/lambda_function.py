@@ -225,6 +225,26 @@ def _collect_stream_records(event: Any) -> List[Dict[str, Any]]:
     return []
 
 
+# ENC-TSK-S28-0E loop guard: records whose only OldImage/NewImage diff is a consumer-owned
+# projection attribute (written by graph_sync / feed_publisher) are dropped. FilterCriteria
+# cannot compare images, so the guard is in code (duplicated per Lambda).
+PROJECTION_ONLY_ATTRS = frozenset({
+    "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+})
+
+
+def _projection_only_diff(old_image: Any, new_image: Any) -> bool:
+    if not old_image or not new_image:
+        return False
+    diff = {k for k in set(old_image) | set(new_image) if old_image.get(k) != new_image.get(k)}
+    return bool(diff) and diff <= PROJECTION_ONLY_ATTRS
+
+
+def _record_is_projection_marker(record: Any) -> bool:
+    d = (record or {}).get("dynamodb") or {}
+    return _projection_only_diff(d.get("OldImage"), d.get("NewImage"))
+
+
 # ---------------------------------------------------------------------------
 # ENC-TSK-S28-0D: audit / idempotency-marker rows are write-path bookkeeping, not records.
 # Their key (project_id on the tracker table, document_id on the documents table) begins
@@ -262,6 +282,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     for record in records:
         if _is_s28_meta_row(record):
             continue  # ENC-TSK-S28-0D: audit/marker row has no write_source by design
+        if _record_is_projection_marker(record):  # ENC-TSK-S28-0E loop guard
+            continue
         event_name = record.get("eventName", "")
         # Only inspect INSERT and MODIFY events (not REMOVE)
         if event_name not in ("INSERT", "MODIFY"):

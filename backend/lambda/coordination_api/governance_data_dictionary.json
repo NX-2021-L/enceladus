@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.7",
+  "version": "2026-11-04.8",
   "updated_at": "2026-11-04T12:00:00Z",
-  "last_change_summary": "ENC-TSK-S28-0D (BRD DOC-E32D0ED08473 B3/W2.2): atomic governed commit. tracker_mutation create/update and document_api put/patch commit the record, an audit item, the ID counter (tracker create only) and, when an Idempotency-Key is present, an idempotency marker in ONE TransactWriteItems (extra WCUs only; no new tables). New entities tracker.audit_item and tracker.idempotency_marker; a replayed key returns the stored receipt byte-identical (HTTP 200, response header idempotent_replay: true). WRITE_FAULT_INJECT env (before_commit|cancel_commit) is a default-off fault hook for AC-7; the [WRITE-AUDIT] line gains atomic_commit, txn_items, ddb_txn_ops, t_commit_ms and fault_inject. Additive; no existing field changes.",
+  "last_change_summary": "ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. Write responses carry t_ack, version_seq, server_total_ms. New item attributes t_ack, projection_status, projected_version_seq (plus t_projected), feed_published_version_seq on tracker and document items; consumer-originated updates to the projection attributes are skipped by every stream consumer (loop guard). Additive.",
   "owners": [
     "enceladus-platform"
   ],
@@ -513,6 +513,30 @@
           "type": "string",
           "definition": "Governed write tool that last wrote the item (tracker.create | tracker.set | tracker.log | checkout.task | checkout.release | tracker.set_acceptance_evidence | ...), stamped by tracker_mutation beside correlation_id (ENC-TSK-S26-0A).",
           "usage_guidance": "Server-stamped. graph_sync and feed_publisher read it from the stream image as the `tool` dimension of the governed_lag_ms EMF metric (fallback 'unknown')."
+        },
+        "t_ack": {
+          "type": "number",
+          "definition": "Epoch milliseconds at which the governed write was acknowledged, stamped on the item and echoed in the write response (ENC-TSK-S28-0E). Consumers compute governed_lag_ms against it.",
+          "usage_guidance": "Server-stamped; falls back to updated_at on legacy items."
+        },
+        "projection_status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "projected"
+          ],
+          "definition": "pending on every governed write; graph_sync flips it to projected after a successful projection (ENC-TSK-S28-0E).",
+          "usage_guidance": "Server-stamped. Compare projected_version_seq to version_seq to know whether projections have caught up. Never poll projections for correctness."
+        },
+        "projected_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq graph_sync has projected, set by a conditional update (only if lower) with t_projected (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "feed_published_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
         }
       }
     },
@@ -5858,6 +5882,30 @@
           "type": "string",
           "definition": "Governed write tool that last wrote the document (documents.put | documents.patch | documents.patch_section), stamped by document_api beside correlation_id (ENC-TSK-S26-0A).",
           "usage_guidance": "Server-stamped. graph_sync and feed_publisher read it from the stream image as the `tool` dimension of the governed_lag_ms EMF metric (fallback 'unknown')."
+        },
+        "t_ack": {
+          "type": "number",
+          "definition": "Epoch milliseconds at which the governed write was acknowledged, stamped on the item and echoed in the write response (ENC-TSK-S28-0E). Consumers compute governed_lag_ms against it.",
+          "usage_guidance": "Server-stamped; falls back to updated_at on legacy items."
+        },
+        "projection_status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "projected"
+          ],
+          "definition": "pending on every governed write; graph_sync flips it to projected after a successful projection (ENC-TSK-S28-0E).",
+          "usage_guidance": "Server-stamped. Compare projected_version_seq to version_seq to know whether projections have caught up. Never poll projections for correctness."
+        },
+        "projected_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq graph_sync has projected, set by a conditional update (only if lower) with t_projected (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "feed_published_version_seq": {
+          "type": "number",
+          "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
+          "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
         }
       }
     },
@@ -11190,6 +11238,11 @@
       "version": "2026-11-04.7",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S28-0D (BRD DOC-E32D0ED08473 B3/W2.2): atomic governed commit. tracker_mutation create/update and document_api put/patch commit the record, an audit item, the ID counter (tracker create only) and, when an Idempotency-Key is present, an idempotency marker in ONE TransactWriteItems (extra WCUs only; no new tables). New entities tracker.audit_item and tracker.idempotency_marker; a replayed key returns the stored receipt byte-identical (HTTP 200, response header idempotent_replay: true). WRITE_FAULT_INJECT env (before_commit|cancel_commit) is a default-off fault hook for AC-7; the [WRITE-AUDIT] line gains atomic_commit, txn_items, ddb_txn_ops, t_commit_ms and fault_inject. Additive; no existing field changes."
+    },
+    {
+      "version": "2026-11-04.8",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): ack/governed split. Write responses carry t_ack, version_seq, server_total_ms. New item attributes t_ack, projection_status, projected_version_seq (plus t_projected), feed_published_version_seq on tracker and document items; consumer-originated updates to the projection attributes are skipped by every stream consumer (loop guard). Additive."
     }
   ]
 }

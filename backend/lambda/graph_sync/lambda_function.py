@@ -145,6 +145,88 @@ def _wa_now_ms() -> int:
     return int(_wa_time.time() * 1000)
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): projection_status + loop guard +
+# version_seq idempotence.
+#  * LOOP GUARD: a consumer-originated update (projection_status / projected_version_seq /
+#    t_projected / feed_published_version_seq only) must never re-trigger a consumer. An
+#    EventBridge Pipe / ESM FilterCriteria cannot compare OldImage to NewImage, so the guard
+#    is in code in every stream consumer (this function is duplicated per Lambda).
+#  * IDEMPOTENCE: the node stores version_seq; an image whose version_seq <= stored is skipped,
+#    so duplicate / out-of-order deliveries yield ONE projection at the highest version_seq.
+#  * After a successful projection the SOURCE item is flipped to projection_status="projected"
+#    with a minimal conditional UpdateItem (only if projected_version_seq < this version_seq).
+# ---------------------------------------------------------------------------
+PROJECTION_ONLY_ATTRS = frozenset({
+    "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+})
+TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
+DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
+_s28_ddb = None
+
+
+def _projection_only_diff(old_image: Optional[Dict[str, Any]], new_image: Optional[Dict[str, Any]]) -> bool:
+    """True when OldImage and NewImage differ ONLY in consumer-owned projection attributes."""
+    if not old_image or not new_image:
+        return False
+    diff = {k for k in set(old_image) | set(new_image) if old_image.get(k) != new_image.get(k)}
+    return bool(diff) and diff <= PROJECTION_ONLY_ATTRS
+
+
+def _image_version_seq(image: Optional[Dict[str, Any]]) -> Optional[int]:
+    try:
+        raw = (image or {}).get("version_seq")
+        return int(raw["N"]) if isinstance(raw, dict) and "N" in raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_s28_ddb():
+    global _s28_ddb
+    if _s28_ddb is None:
+        import boto3
+        from botocore.config import Config
+        _s28_ddb = boto3.client(
+            "dynamodb", region_name=os.environ.get("AWS_REGION", "us-west-2"),
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _s28_ddb
+
+
+def _mark_source_projected(new_image: Dict[str, Any], vseq: int, ddb: Any = None) -> bool:
+    """Conditionally flip the source item to projected. Never raises; returns True when written."""
+    try:
+        if "document_id" in new_image and "record_id" not in new_image:
+            table, key, pk = DOCUMENTS_TABLE, {"document_id": new_image["document_id"]}, "document_id"
+        elif "project_id" in new_image and "record_id" in new_image:
+            table, key, pk = TRACKER_TABLE, {"project_id": new_image["project_id"], "record_id": new_image["record_id"]}, "record_id"
+        else:
+            return False
+        (ddb or _get_s28_ddb()).update_item(
+            TableName=table, Key=key,
+            UpdateExpression="SET projection_status = :p, projected_version_seq = :v, t_projected = :t",
+            ConditionExpression=(
+                f"attribute_exists({pk}) AND version_seq = :v AND "
+                "(attribute_not_exists(projected_version_seq) OR projected_version_seq < :v)"
+            ),
+            ExpressionAttributeValues={
+                ":p": {"S": "projected"}, ":v": {"N": str(int(vseq))}, ":t": {"N": str(_wa_now_ms())},
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - ConditionalCheckFailed = stale/duplicate; others are non-fatal
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if code != "ConditionalCheckFailedException":
+            logger.warning("[WARN] projection_status update failed (non-fatal): %s", exc)
+        return False
+
+
+def _read_node_version_seq(tx, label: str, record_id: str) -> Optional[int]:
+    rec = tx.run(f"MATCH (n:{label} {{record_id: $record_id}}) RETURN n.version_seq AS v", record_id=record_id).single()
+    v = rec["v"] if rec else None
+    return int(v) if v is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -684,6 +766,8 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
 
     props = {k: record.get(k) for k in NODE_PROPERTIES if record.get(k) is not None}
     props["record_id"] = record_id
+    if record.get("version_seq") is not None:  # ENC-TSK-S28-0E: idempotence basis
+        props["version_seq"] = int(record["version_seq"])
     props.update(_text_projection_props(record))
 
     # ENC-ISS-543: ``SET n += $props`` alone leaves stale ``status`` when a later
@@ -1989,7 +2073,16 @@ def _process_record(driver, stream_record: Dict) -> None:
         if record_id and record_id.startswith("COUNTER-"):
             return
 
+        incoming_vseq = _image_version_seq(new_image)
         with driver.session() as session:
+            if incoming_vseq is not None:  # ENC-TSK-S28-0E: duplicate / out-of-order delivery -> skip
+                stored_vseq = session.execute_read(
+                    lambda tx: _read_node_version_seq(tx, RECORD_TYPE_TO_LABEL[record_type], _bare_id(record_id))
+                )
+                if stored_vseq is not None and incoming_vseq <= stored_vseq:
+                    logger.info("[INFO] Skipped stale %s %s (version_seq %s <= stored %s)",
+                                record_type, record_id, incoming_vseq, stored_vseq)
+                    return
             # Ensure project node exists
             project_id = record.get("project_id", "")
             if project_id:
@@ -2044,6 +2137,8 @@ def _process_record(driver, stream_record: Dict) -> None:
             # target node already exists.
             _project_mutated_edge(session, record)
 
+        if incoming_vseq is not None:  # ENC-TSK-S28-0E: projected marker on the source item
+            _mark_source_projected(new_image, incoming_vseq)
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",
             record_type, record_id, event_name, record.get("project_id", ""),
@@ -2144,6 +2239,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
             if stream_record and _is_s28_meta_row(stream_record):
                 continue  # ENC-TSK-S28-0D: audit/marker row, nothing to project
+            if stream_record and _projection_only_diff(
+                (stream_record.get("dynamodb") or {}).get("OldImage"),
+                (stream_record.get("dynamodb") or {}).get("NewImage"),
+            ):
+                continue  # ENC-TSK-S28-0E loop guard: consumer-originated projection marker write
             if stream_record and "dynamodb" in stream_record:
                 _process_record(driver, stream_record)
                 processed += 1

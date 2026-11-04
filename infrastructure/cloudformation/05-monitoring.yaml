@@ -403,6 +403,108 @@ Resources:
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
 
+  # ENC-TSK-S28-0E: stream-consumer IteratorAge + on-failure queue alarms.
+  AppSyncFeedPublisherIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-devops-appsync-feed-publisher-iteratorage${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: devops-appsync-feed-publisher IteratorAge p95 > 60s over 5 min"
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  GraphSyncIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-devops-graph-sync-iteratorage${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: devops-graph-sync IteratorAge p95 > 60s over 5 min"
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-graph-sync${EnvironmentSuffix}"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ENC-TSK-S28-0E: ONE metric-math alarm over the two tested on-failure destinations (O7 alarm envelope).
+  WritePathOnFailureDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-write-path-onfailure-depth${EnvironmentSuffix}"
+      AlarmDescription: "ENC-TSK-S28-0E: the AppSync feed publisher DLQ or (gamma) the graph-sync tracker on-failure queue has visible messages."
+      Metrics: !If
+        - IsGamma
+        -
+            - Id: m1
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: m2
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-graph-sync-tracker-onfailure${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: e1
+              ReturnData: true
+              Expression: "MAX([m1,m2])"
+        -
+            - Id: m1
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions:
+                    - Name: QueueName
+                      Value: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+                Period: 300
+                Stat: Maximum
+            - Id: e1
+              ReturnData: true
+              Expression: "MAX([m1])"
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
   # Lambda error rate alarm — Errors > 5 in 5 minutes across all functions
   LambdaErrorRateAlarm:
     Type: AWS::CloudWatch::Alarm

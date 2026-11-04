@@ -674,6 +674,25 @@ Resources:
       MessageRetentionPeriod: 86400
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true
+      # ENC-TSK-S28-0E: poison messages move to FeedPublishDLQ after 3 receives.
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FeedPublishDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+  # ENC-TSK-S28-0E: DLQ for FeedPublishQueue (FIFO source requires a FIFO DLQ), 14-day retention.
+  FeedPublishDLQ:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-feed-publish-dlq${EnvironmentSuffix}.fifo"
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
       Tags:
         - Key: Project
           Value: enceladus
