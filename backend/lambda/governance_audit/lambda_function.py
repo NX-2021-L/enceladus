@@ -230,6 +230,7 @@ def _collect_stream_records(event: Any) -> List[Dict[str, Any]]:
 # cannot compare images, so the guard is in code (duplicated per Lambda).
 PROJECTION_ONLY_ATTRS = frozenset({
     "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+    "write_kind",  # ENC-TSK-S47-0B: marker writers flip it to "marker"; governed writes set "governed"
 })
 
 

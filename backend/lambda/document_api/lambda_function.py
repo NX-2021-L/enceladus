@@ -2928,6 +2928,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     # ENC-TSK-S28-0E: ack basis + projection marker (graph_sync flips it to "projected")
     item["t_ack"] = {"N": str(_wa_ack_now())}
     item["projection_status"] = {"S": "pending"}
+    item["write_kind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     # ENC-TSK-S28-0D: documents item + audit item (+ idempotency marker) in ONE TransactWriteItems.
     # The S3 body is already written (unchanged order); any failure here deletes it as before.
     _s28_receipt_dict: Dict[str, Any] = {
@@ -4460,9 +4461,10 @@ def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
             clauses.append("write_tool = :wa_tool")
             vals[":wa_tool"] = {"S": _WA["write_tool"]}
     # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
-    clauses.extend(["t_ack = :wa_tack", "projection_status = :wa_pstat"])
+    clauses.extend(["t_ack = :wa_tack", "projection_status = :wa_pstat", "write_kind = :wa_wkind"])
     vals[":wa_tack"] = {"N": str(_wa_ack_now())}
     vals[":wa_pstat"] = {"S": "pending"}
+    vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return clauses, vals
 
 

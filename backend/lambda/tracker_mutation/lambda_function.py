@@ -1361,6 +1361,7 @@ def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
     # ENC-TSK-S28-0E: ack basis + projection marker (graph_sync flips it to "projected")
     item["t_ack"] = {"N": str(_wa_ack_now())}
     item["projection_status"] = {"S": "pending"}
+    item["write_kind"] = {"S": "governed"}  # ENC-TSK-S47-0B: stream filter key (markers write "marker")
     if not _VERSION_SEQ_AVAILABLE:
         return
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
@@ -1387,9 +1388,10 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
             vals[":wa_tool"] = {"S": wtool}
     if expr:  # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
         vals = dict(vals)
-        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat"
+        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat, write_kind = :wa_wkind"
         vals[":wa_tack"] = {"N": str(_wa_ack_now())}
         vals[":wa_pstat"] = {"S": "pending"}
+        vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return expr, vals
 
 

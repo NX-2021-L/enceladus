@@ -104,6 +104,20 @@ class WriteAuditTests(unittest.TestCase):
             self.assertNotIn("correlation_id", expr2)
             self.assertNotIn("write_tool", expr2)
 
+    def test_governed_writes_stamp_write_kind(self):
+        """ENC-TSK-S47-0B: every governed item write carries write_kind=governed (stream filter key)."""
+        with mock.patch.object(tm, "_VERSION_SEQ_AVAILABLE", True), \
+                mock.patch.object(tm, "allocate_version_seq", return_value=7), \
+                mock.patch.object(tm, "_get_ddb", return_value=object()):
+            tm._WA.clear()
+            item = {}
+            tm._stamp_version_seq_on_create_item(item)
+            self.assertEqual(item["write_kind"], {"S": "governed"})
+            expr, vals = tm._version_seq_update_parts()
+            self.assertIn("write_kind = :wa_wkind", expr)
+            self.assertEqual(vals[":wa_wkind"], {"S": "governed"})
+            tm._WA.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -246,6 +246,7 @@ class _WaTimedSession:
 # ---------------------------------------------------------------------------
 PROJECTION_ONLY_ATTRS = frozenset({
     "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+    "write_kind",  # ENC-TSK-S47-0B: marker writers flip it to "marker"; governed writes set "governed"
 })
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
@@ -291,13 +292,14 @@ def _mark_source_projected(new_image: Dict[str, Any], vseq: int, ddb: Any = None
             return False
         (ddb or _get_s28_ddb()).update_item(
             TableName=table, Key=key,
-            UpdateExpression="SET projection_status = :p, projected_version_seq = :v, t_projected = :t",
+            UpdateExpression="SET projection_status = :p, projected_version_seq = :v, t_projected = :t, write_kind = :wk",
             ConditionExpression=(
                 f"attribute_exists({pk}) AND version_seq = :v AND "
                 "(attribute_not_exists(projected_version_seq) OR projected_version_seq < :v)"
             ),
             ExpressionAttributeValues={
                 ":p": {"S": "projected"}, ":v": {"N": str(int(vseq))}, ":t": {"N": str(_wa_now_ms())},
+                ":wk": {"S": "marker"},  # ENC-TSK-S47-0B: stream filter drops marker-only MODIFYs
             },
         )
         return True
