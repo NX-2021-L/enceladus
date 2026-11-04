@@ -1,0 +1,6 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"dry_run": ?(?<dry_run>true|false)/
+| parse @message /"ddb_ops": ?(?<ddb_ops>[0-9]+)/
+| filter dry_run = "true" and ddb_ops > 0
+| stats count(*) as violations
