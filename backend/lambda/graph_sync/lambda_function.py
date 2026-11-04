@@ -106,6 +106,7 @@ def _wa_iso_ms(value: Any) -> Optional[int]:
 def _wa_consumer_emit(
     consumer: str, raw_record: Dict[str, Any], stream_record: Optional[Dict[str, Any]],
     t_received_ms: int, t_done_ms: int, outcome: str = "success", phase: str = "projected",
+    stage: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Never raises; silent for non-governed records (no correlation_id / version_seq on the image)."""
     try:
@@ -117,7 +118,7 @@ def _wa_consumer_emit(
         if t_ack is None:
             t_ack, basis = _wa_iso_ms(_wa_val(image, "updated_at")), "updated_at"
         t_ack = int(t_ack) if t_ack is not None else None
-        lag = max(0, t_done_ms - t_ack) if t_ack is not None else None
+        lag = max(0, t_done_ms - t_ack) if t_ack is not None and phase == "projected" else None
         tool = str(_wa_val(image, "write_tool") or "unknown")
         rid = _wa_val(image, "item_id") or _wa_val(image, "document_id") or str(_wa_val(image, "record_id") or "").split("#")[-1]
         attempt = int(((raw_record or {}).get("attributes") or {}).get("ApproximateReceiveCount") or 1)
@@ -127,8 +128,13 @@ def _wa_consumer_emit(
             "event_name": (stream_record or {}).get("eventName"), "attempt_outcome": outcome,
             "success": outcome == "success", "projection_phase": phase, "t_stream_received": t_received_ms,
             "t_projection_done": t_done_ms, "t_ack": t_ack, "lag_basis": basis if t_ack is not None else None,
+            **_edge_guard_audit_fields(),  # ENC-TSK-S46-0D: edges_skipped_missing_target, edges_placeholder_targets
             "governed_lag_ms": lag,
         }
+        if stage is not None:  # ENC-TSK-S46-0A: BRD 7.1 per-record stage fields (derived lags live in the query pack)
+            line.update(stage)
+            line["t_record_done"] = t_done_ms
+            line["stream_approx_creation_ms"] = _wa_stream_creation_ms(stream_record)
         print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
         if lag is not None and outcome == "success" and phase == "projected":
             print(json.dumps({
@@ -143,6 +149,95 @@ def _wa_consumer_emit(
 
 def _wa_now_ms() -> int:
     return int(_wa_time.time() * 1000)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-S46-0A (BRD DOC-735D82EA6E0E 7.1): per-record stage timing on the consumer audit line.
+# Stamps only (perf_counter + one dict per record); derived lags (stream_delay_ms, queue_ms,
+# graph_projection_lag_ms) are computed by the query pack, never here.
+# ---------------------------------------------------------------------------
+_WA_COLD = True  # flips False after the first handler invocation in this container
+_WA_T0 = _wa_time.perf_counter()  # module import time; init_ms = import -> first invocation (same contract as the MCP server line)
+_WA_EDGE_MERGE_RE = re.compile(r"MERGE\s*\([^)]*\)\s*(?:<-|-)\s*\[")
+_WA_REC: Dict[str, Any] = {}
+
+
+def _wa_reset_record_stats() -> None:
+    _WA_REC.update({"store_ms": 0.0, "store_calls": 0, "store_statements": 0, "edges_written": 0, "mark_ms": 0.0})
+
+
+_wa_reset_record_stats()
+
+
+def _wa_stream_creation_ms(stream_record: Optional[Dict[str, Any]]) -> Optional[int]:
+    try:
+        v = ((stream_record or {}).get("dynamodb") or {}).get("ApproximateCreationDateTime")
+        return int(float(v) * 1000) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _wa_shard_id(raw_record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """DynamoDB Streams events do not carry the shard id; the stream label from eventSourceARN is the closest stable key."""
+    arn = str((raw_record or {}).get("eventSourceARN") or "")
+    return arn.split("/stream/", 1)[1] if "/stream/" in arn else (arn or None)
+
+
+class _WaTimedTx:
+    """Counts graph statements (and edge MERGEs) for this record; forwards everything else."""
+
+    def __init__(self, tx: Any) -> None:
+        self._tx = tx
+
+    def run(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        _WA_REC["store_statements"] += 1
+        if isinstance(query, str) and _WA_EDGE_MERGE_RE.search(query):
+            _WA_REC["edges_written"] += 1
+        return self._tx.run(query, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tx, name)
+
+
+class _WaTimedSession:
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+        self._s: Any = None
+
+    def __enter__(self) -> "_WaTimedSession":
+        self._s = self._ctx.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._ctx.__exit__(*exc)
+
+    def _timed(self, method: str, fn: Any, args: Any, kwargs: Any) -> Any:
+        t0 = _wa_time.perf_counter()
+        try:
+            return getattr(self._s, method)(lambda tx, *a, **k: fn(_WaTimedTx(tx), *a, **k), *args, **kwargs)
+        finally:
+            _WA_REC["store_calls"] += 1
+            _WA_REC["store_ms"] += (_wa_time.perf_counter() - t0) * 1000.0
+
+    def execute_write(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._timed("execute_write", fn, args, kwargs)
+
+    def execute_read(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._timed("execute_read", fn, args, kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._s, name)
+
+
+class _WaTimedDriver:
+    def __init__(self, driver: Any) -> None:
+        self._driver = driver
+
+    def session(self, *args: Any, **kwargs: Any) -> _WaTimedSession:
+        return _WaTimedSession(self._driver.session(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._driver, name)
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): projection_status + loop guard +
@@ -670,6 +765,20 @@ def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderR
     refs: Set[PlaceholderRef] = set()
     record_type = str(record.get("record_type") or "").strip()
 
+    # ENC-TSK-S46-0D: field-projection targets guarded by _merge_placeholder.
+    if record_type == "task":
+        _add_placeholder_ref(refs, "Task", record.get("parent", ""))
+    for rid in record.get("related_task_ids", []) or []:
+        _add_placeholder_ref(refs, "Task", rid)
+    for rid in record.get("related_issue_ids", []) or []:
+        _add_placeholder_ref(refs, "Issue", rid)
+    for rid in record.get("related_feature_ids", []) or []:
+        _add_placeholder_ref(refs, "Feature", rid)
+    if record_type == "generation":
+        _add_placeholder_ref(refs, "Generation", record.get("parent_generation_id", ""))
+    if record_type in TARGET_GENERATION_EDGE_BY_RECORD_TYPE:
+        _add_placeholder_ref(refs, "Generation", record.get("target_generation", ""))
+
     if record_type == "plan":
         for objective_id in record.get("objectives_set", []) or []:
             obj_id = _bare_id(str(objective_id).strip()) if objective_id else ""
@@ -798,15 +907,81 @@ def _upsert_project_node(tx, project_id: str) -> None:
 # Agent-identity node + edge projection (ENC-TSK-J04 / ENC-FTR-074 Ph3)
 # ---------------------------------------------------------------------------
 
-def _merge_placeholder(tx, label: str, record_id: str) -> None:
-    """MERGE a labeled placeholder node (ENC-TSK-E01 pattern) so an edge lands even when
-    the target's own stream event has not yet projected it."""
+# ENC-TSK-S46-0D / ENC-ISS-180 defect A (io decision E2): per-record edge order-guard
+# counters, reset by lambda_handler before each record and read by _wa_consumer_emit.
+#   edges_placeholder_targets    : placeholder target nodes the guard materialized
+#                                  (target not yet projected; edge still landed).
+#   edges_skipped_missing_target : edges NOT created because the target could not be
+#                                  placed (unrecognised id prefix and no such node).
+# A transient-retry of execute_write may count twice; the counters are a diagnostic.
+_EDGE_GUARD_STATS: Dict[str, int] = {"edges_skipped_missing_target": 0, "edges_placeholder_targets": 0}
+
+
+def _edge_guard_reset() -> None:
+    for key in _EDGE_GUARD_STATS:
+        _EDGE_GUARD_STATS[key] = 0
+
+
+def _edge_guard_audit_fields() -> Dict[str, int]:
+    return dict(_EDGE_GUARD_STATS)
+
+
+def _result_value(result: Any, key: str) -> Any:
+    """Read one column of a single-row result; None for anything not a real row."""
+    try:
+        row = result.single() if result is not None else None
+        return row[key] if row is not None else None
+    except Exception:  # noqa: BLE001 - diagnostics must never break projection
+        return None
+
+
+def _count_edge_rows(result: Any) -> None:
+    """Count a skipped edge when an unlabelled-endpoint MERGE reports zero rows."""
+    n = _result_value(result, "n")
+    if isinstance(n, int) and not isinstance(n, bool) and n == 0:
+        _EDGE_GUARD_STATS["edges_skipped_missing_target"] += 1
+
+
+def _merge_placeholder(tx, label: str, record_id: str, project_id: Optional[str] = None) -> None:
+    """The ONE placeholder convention (ENC-TSK-E01/E06, extended by ENC-TSK-S46-0D).
+
+    MERGE a node keyed by (label, record_id) so an edge lands even when the target's own
+    stream event has not projected it yet. On create it is tagged is_placeholder = true
+    (plus project_id and placeholder_created_at). The target's later real projection
+    (_upsert_node / _upsert_agent_node) MERGEs the same (label, record_id) key, sets its
+    properties and is_placeholder = false: the placeholder is completed in place, never
+    duplicated. An existing node (real or placeholder) is left untouched.
+    """
     if not label or not record_id:
         return
-    tx.run(
-        f"MERGE (n:{label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true",
-        rid=record_id,
+    result = tx.run(
+        f"OPTIONAL MATCH (x:{label} {{record_id: $rid}}) "
+        "WITH count(x) AS existed "
+        f"MERGE (n:{label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true, "
+        "n.project_id = $project_id, n.placeholder_created_at = $now "
+        "RETURN existed = 0 AS created",
+        rid=record_id, project_id=(project_id or None),
+        now=_wa_dt.datetime.now(_wa_dt.timezone.utc).isoformat(),
     )
+    if _result_value(result, "created") is True:
+        _EDGE_GUARD_STATS["edges_placeholder_targets"] += 1
+
+
+def _guard_field_target(tx, expected_label: str, target_id: str, project_id: Optional[str]) -> None:
+    """ENC-TSK-S46-0D order guard for a field-projection edge whose field declares the
+    target label (related_task_ids -> Task, parent -> Task, target_generation -> Generation...).
+
+    Materializes the target as a placeholder via _merge_placeholder so the following
+    MATCH-based edge MERGE lands even when the target is not yet projected. When the id
+    prefix names a DIFFERENT label (e.g. an issue id stored in related_task_ids) no
+    wrong-label placeholder is created (it would never be completed); the typed MATCH
+    then finds nothing and the edge is counted as edges_skipped_missing_target.
+    """
+    inferred = _infer_label_from_id(target_id)
+    if inferred and inferred != expected_label:
+        _EDGE_GUARD_STATS["edges_skipped_missing_target"] += 1
+        return
+    _merge_placeholder(tx, expected_label, target_id, project_id)
 
 
 def _upsert_agent_node(tx, record: Dict[str, Any]) -> None:
@@ -1044,6 +1219,8 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     # CHILD_OF -> parent Task
     parent = _bare_id(record.get("parent", ""))
     if parent and record_type == "task":
+        # ENC-TSK-S46-0D / ENC-ISS-180 A: order guard, the parent may not be projected yet.
+        _guard_field_target(tx, "Task", parent, project_id)
         tx.run(
             "MATCH (child:Task), (parent:Task) "
             "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
@@ -1061,6 +1238,9 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
+        # ENC-TSK-S46-0D / ENC-ISS-180 A: order guard. A placeholder carries no
+        # SUPERSEDED_BY edge unless one was projected onto it, so the redirect still holds.
+        _guard_field_target(tx, "Task", related_id, project_id)
         tx.run(
             f"MATCH (a:{label}) WHERE a.record_id = $aid "
             "MATCH (b:Task) WHERE b.record_id = $bid "
@@ -1076,6 +1256,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
+        _guard_field_target(tx, "Issue", related_id, project_id)  # ENC-TSK-S46-0D order guard
         tx.run(
             f"MATCH (a:{label}) WHERE a.record_id = $aid "
             "MATCH (b:Issue) WHERE b.record_id = $bid "
@@ -1100,6 +1281,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
+        _guard_field_target(tx, "Feature", related_id, project_id)  # ENC-TSK-S46-0D order guard
         tx.run(
             f"MATCH (a:{label}), (b:Feature) "
             "WHERE a.record_id = $aid AND b.record_id = $bid "
@@ -1145,11 +1327,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 # ENC-TSK-E06: tag new placeholders so downstream embedding +
                 # coverage pipelines can filter them out; _upsert_node clears
                 # the flag to false when the real record materializes.
-                tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
-                    "ON CREATE SET t.is_placeholder = true",
-                    tid=obj_id,
-                )
+                _merge_placeholder(tx, target_label, obj_id, project_id)
                 tx.run(
                     f"MATCH (p:Plan), (t:{target_label}) "
                     "WHERE p.record_id = $pid AND t.record_id = $tid "
@@ -1165,12 +1343,13 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                     "falling back to unlabelled MATCH (edge may not land if target absent)",
                     record_id, obj_id,
                 )
-                tx.run(
+                _count_edge_rows(tx.run(
                     "MATCH (p:Plan), (t {record_id: $tid}) "
                     "WHERE p.record_id = $pid "
-                    "MERGE (p)-[:PLAN_CONTAINS {source: 'field'}]->(t)",
+                    "MERGE (p)-[:PLAN_CONTAINS {source: 'field'}]->(t) "
+                    "RETURN count(*) AS n",
                     pid=record_id, tid=obj_id,
-                )
+                ))
 
         # PLAN_ATTACHED_DOC -> each document
         for doc_id in attached_documents:
@@ -1179,11 +1358,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 continue
             # Documents always project to the :Document label.
             # ENC-TSK-E06: tag placeholder on create.
-            tx.run(
-                "MERGE (d:Document {record_id: $did}) "
-                "ON CREATE SET d.is_placeholder = true",
-                did=doc_id,
-            )
+            _merge_placeholder(tx, "Document", doc_id, project_id)
             tx.run(
                 "MATCH (p:Plan), (d:Document) "
                 "WHERE p.record_id = $pid AND d.record_id = $did "
@@ -1204,11 +1379,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             # Placeholder MERGE so the edge lands even if the Feature node
             # has not been projected yet (ENC-TSK-E01).
             # ENC-TSK-E06: tag placeholder on create.
-            tx.run(
-                "MERGE (f:Feature {record_id: $fid}) "
-                "ON CREATE SET f.is_placeholder = true",
-                fid=feat_id,
-            )
+            _merge_placeholder(tx, "Feature", feat_id, project_id)
             tx.run(
                 "MATCH (p:Plan), (f:Feature) "
                 "WHERE p.record_id = $pid AND f.record_id = $fid "
@@ -1271,11 +1442,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 # when the target node has not been projected yet
                 # (ENC-TSK-E01 pattern).
                 # ENC-TSK-E06: tag placeholder on create.
-                tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
-                    "ON CREATE SET t.is_placeholder = true",
-                    tid=ev_id,
-                )
+                _merge_placeholder(tx, target_label, ev_id, project_id)
                 tx.run(
                     f"MATCH (l:Lesson), (t:{target_label}) "
                     "WHERE l.record_id = $lid AND t.record_id = $tid "
@@ -1293,12 +1460,13 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                     "falling back to unlabelled MATCH (edge may not land if target absent)",
                     record_id, ev_id,
                 )
-                tx.run(
+                _count_edge_rows(tx.run(
                     "MATCH (l:Lesson), (t {record_id: $tid}) "
                     "WHERE l.record_id = $lid "
-                    "MERGE (l)-[:LEARNED_FROM {source: 'field'}]->(t)",
+                    "MERGE (l)-[:LEARNED_FROM {source: 'field'}]->(t) "
+                    "RETURN count(*) AS n",
                     lid=record_id, tid=ev_id,
-                )
+                ))
 
     # ENC-FTR-065 / ENC-PLN-014: Document edge projections
     if record_type == "document":
@@ -1321,11 +1489,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             target_label = _infer_label_from_id(related_id)
             if target_label:
                 # ENC-TSK-E06: tag placeholder on create.
-                tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
-                    "ON CREATE SET t.is_placeholder = true",
-                    tid=related_id,
-                )
+                _merge_placeholder(tx, target_label, related_id, project_id)
                 tx.run(
                     f"MATCH (d:Document), (t:{target_label}) "
                     "WHERE d.record_id = $did AND t.record_id = $tid "
@@ -1338,12 +1502,13 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                     "falling back to unlabelled MATCH",
                     doc_id, related_id,
                 )
-                tx.run(
+                _count_edge_rows(tx.run(
                     "MATCH (d:Document), (t {record_id: $tid}) "
                     "WHERE d.record_id = $did "
-                    "MERGE (d)-[:RELATED_TO {source: 'field'}]->(t)",
+                    "MERGE (d)-[:RELATED_TO {source: 'field'}]->(t) "
+                    "RETURN count(*) AS n",
                     did=doc_id, tid=related_id,
-                )
+                ))
 
         # INFORMED_BY -> source document; INFORMS inverse from source -> this doc
         # ENC-TSK-E01: placeholder MERGE so edges land even if the source
@@ -1353,11 +1518,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             if not informed_id:
                 continue
             # ENC-TSK-E06: tag placeholder on create.
-            tx.run(
-                "MERGE (s:Document {record_id: $sid}) "
-                "ON CREATE SET s.is_placeholder = true",
-                sid=informed_id,
-            )
+            _merge_placeholder(tx, "Document", informed_id, project_id)
             tx.run(
                 "MATCH (d:Document), (s:Document) "
                 "WHERE d.record_id = $did AND s.record_id = $sid "
@@ -1376,11 +1537,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 source_incident_id = _bare_id(source_incident_id)
                 target_label = _infer_label_from_id(source_incident_id)
                 if target_label:
-                    tx.run(
-                        f"MERGE (t:{target_label} {{record_id: $target_id}}) "
-                        "ON CREATE SET t.is_placeholder = true",
-                        target_id=source_incident_id,
-                    )
+                    _merge_placeholder(tx, target_label, source_incident_id, project_id)
                     tx.run(
                         f"MATCH (d:Document), (t:{target_label}) "
                         "WHERE d.record_id = $did AND t.record_id = $target_id "
@@ -1400,11 +1557,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             plan_anchor_id = record.get("plan_anchor_id", "")
             if plan_anchor_id:
                 plan_anchor_id = _bare_id(plan_anchor_id)
-                tx.run(
-                    "MERGE (p:Plan {record_id: $plan_id}) "
-                    "ON CREATE SET p.is_placeholder = true",
-                    plan_id=plan_anchor_id,
-                )
+                _merge_placeholder(tx, "Plan", plan_anchor_id, project_id)
                 tx.run(
                     "MATCH (d:Document), (p:Plan) "
                     "WHERE d.record_id = $did AND p.record_id = $plan_id "
@@ -1420,11 +1573,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 source_record_id = _bare_id(source_record_id)
                 target_label = _infer_label_from_id(source_record_id)
                 if target_label:
-                    tx.run(
-                        f"MERGE (t:{target_label} {{record_id: $source_rec_id}}) "
-                        "ON CREATE SET t.is_placeholder = true",
-                        source_rec_id=source_record_id,
-                    )
+                    _merge_placeholder(tx, target_label, source_record_id, project_id)
                     tx.run(
                         f"MATCH (d:Document), (t:{target_label}) "
                         "WHERE d.record_id = $did AND t.record_id = $source_rec_id "
@@ -1447,11 +1596,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             source_id = _bare_id(source_id) if source_id else ""
             if not source_id:
                 continue
-            tx.run(
-                "MERGE (s:Document {record_id: $sid}) "
-                "ON CREATE SET s.is_placeholder = true",
-                sid=source_id,
-            )
+            _merge_placeholder(tx, "Document", source_id, project_id)
             tx.run(
                 "MATCH (d:Document), (s:Document) "
                 "WHERE d.record_id = $did AND s.record_id = $sid "
@@ -1465,11 +1610,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         if proposed_by:
             target_label = _infer_label_from_id(proposed_by)
             if target_label:
-                tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $pid}}) "
-                    "ON CREATE SET t.is_placeholder = true",
-                    pid=proposed_by,
-                )
+                _merge_placeholder(tx, target_label, proposed_by, project_id)
                 tx.run(
                     f"MATCH (d:Document), (t:{target_label}) "
                     "WHERE d.record_id = $did AND t.record_id = $pid "
@@ -1504,6 +1645,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         parent_gen = record.get("parent_generation_id", "")
         if parent_gen:
             parent_gen = _bare_id(parent_gen)
+            _guard_field_target(tx, "Generation", parent_gen, project_id)  # ENC-TSK-S46-0D order guard
             tx.run(
                 "MATCH (g:Generation), (p:Generation) "
                 "WHERE g.record_id = $gid AND p.record_id = $pid "
@@ -1518,6 +1660,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             target_gen = _bare_id(target_gen)
             edge_type = TARGET_GENERATION_EDGE_BY_RECORD_TYPE.get(record_type, "TARGETS_GENERATION")
             label = RECORD_TYPE_TO_LABEL.get(record_type, "Task")
+            _guard_field_target(tx, "Generation", target_gen, project_id)  # ENC-TSK-S46-0D order guard
             tx.run(
                 f"MATCH (n:{label}), (g:Generation) "
                 "WHERE n.record_id = $nid AND g.record_id = $gid "
@@ -1546,6 +1689,7 @@ def _reconcile_mentions_edges(
     fields = _MENTIONS_PROSE_FIELDS.get(record_type)
     if not fields or not label or not record_id:
         return
+    project_id = record.get("project_id")
 
     extracted: Dict[str, Set[str]] = {}
     for field_name in fields:
@@ -1584,11 +1728,7 @@ def _reconcile_mentions_edges(
             # Placeholder MERGE on inferred label (ENC-TSK-E01 + E06 pattern)
             # so the edge lands even when the target node has not yet been
             # projected.
-            tx.run(
-                f"MERGE (t:{target_label} {{record_id: $tid}}) "
-                "ON CREATE SET t.is_placeholder = true",
-                tid=target_id,
-            )
+            _merge_placeholder(tx, target_label, target_id, project_id)
             edge_props = stamp_provenance({}, field_name)
             tx.run(
                 f"MATCH (s:{label}), (t:{target_label}) "
@@ -1769,17 +1909,15 @@ def _upsert_relationship_edge(tx, record: Dict[str, Any]) -> None:
     for nid in (source_id, target_id):
         n_label = _infer_label_from_id(nid)
         if n_label:
-            tx.run(
-                f"MERGE (n:{n_label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true",
-                rid=nid,
-            )
+            _merge_placeholder(tx, n_label, nid, record.get("project_id"))
 
     cypher = (
         f"MATCH (s {{record_id: $source_id}}), (t {{record_id: $target_id}}) "
         f"MERGE (s)-[r:{edge_label} {{source_id: $source_id, target_id: $target_id}}]->(t) "
-        "SET r += $props"
+        "SET r += $props "
+        "RETURN count(*) AS n"
     )
-    tx.run(cypher, source_id=source_id, target_id=target_id, props=props)
+    _count_edge_rows(tx.run(cypher, source_id=source_id, target_id=target_id, props=props))
 
 
 def _delete_relationship_edge(tx, record_id_sk: str) -> None:
@@ -2197,7 +2335,11 @@ def _process_record(driver, stream_record: Dict) -> None:
             _project_mutated_edge(session, record)
 
         if incoming_vseq is not None:  # ENC-TSK-S28-0E: projected marker on the source item
-            _mark_source_projected(new_image, incoming_vseq)
+            _wa_m0 = _wa_time.perf_counter()
+            try:
+                _mark_source_projected(new_image, incoming_vseq)
+            finally:
+                _WA_REC["mark_ms"] += (_wa_time.perf_counter() - _wa_m0) * 1000.0
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",
             record_type, record_id, event_name, record.get("project_id", ""),
@@ -2261,11 +2403,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     GraphSyncSqsTrigger / GraphSyncTrackerStreamTrigger /
     GraphSyncDocumentsStreamTrigger) for batchItemFailures to actually take
     effect."""
+    global _WA_COLD
+    _wa_t_batch = _wa_now_ms()  # ENC-TSK-S46-0A
+    _wa_cold, _WA_COLD = _WA_COLD, False
     records = event.get("Records", [])
     if not records:
         return {"statusCode": 200, "body": "no records"}
 
+    _wa_init_ms = round((_wa_time.perf_counter() - _WA_T0) * 1000.0, 3) if _wa_cold else 0.0
     driver = _get_neo4j_driver()
+    _wa_mem = getattr(context, "memory_limit_in_mb", None)
+    try:
+        _wa_mem = int(_wa_mem) if _wa_mem is not None else None
+    except (TypeError, ValueError):
+        _wa_mem = None
+    if driver is not None:
+        driver = _WaTimedDriver(driver)
     if driver is None:
         logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
         # Report every record as failed so the source retries the whole batch
@@ -2283,9 +2436,21 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     errors = 0
     failed_identifiers: List[str] = []
 
-    for raw_record in records:
+    def _wa_stage(position: int, raw: Dict[str, Any], t_rec_start: int, marker_only: bool = False) -> Dict[str, Any]:
+        return {
+            "t_batch_start": _wa_t_batch, "batch_size": len(records), "batch_position": position,
+            "t_record_start": t_rec_start, "cold_start": _wa_cold, "init_ms": _wa_init_ms,
+            "store_ms": round(_WA_REC["store_ms"], 3), "store_calls": _WA_REC["store_calls"],
+            "store_statements": _WA_REC["store_statements"], "edges_written": _WA_REC["edges_written"],
+            "mark_ms": round(_WA_REC["mark_ms"], 3), "marker_only_skipped": marker_only,
+            "shard_id": _wa_shard_id(raw), "memory_mb": _wa_mem,
+        }
+
+    for _wa_pos, raw_record in enumerate(records):
         source, identifier = _record_source_and_identifier(raw_record)
         _wa_t_recv = _wa_now_ms()  # ENC-TSK-S26-0A
+        _wa_reset_record_stats()  # ENC-TSK-S46-0A: per-record stage timing counters
+        _edge_guard_reset()  # ENC-TSK-S46-0D: per-record edge order-guard counters
         stream_record = None
         try:
             if source == "sqs":
@@ -2302,14 +2467,18 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 (stream_record.get("dynamodb") or {}).get("OldImage"),
                 (stream_record.get("dynamodb") or {}).get("NewImage"),
             ):
+                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(),
+                                  phase="marker_skipped", stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv, True))
                 continue  # ENC-TSK-S28-0E loop guard: consumer-originated projection marker write
             if stream_record and "dynamodb" in stream_record:
                 _process_record(driver, stream_record)
                 processed += 1
-                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms())
+                _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(),
+                                  stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv))
         except Exception:
             errors += 1
-            _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(), outcome="error")
+            _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(), outcome="error",
+                              stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv))
             logger.exception("[ERROR] Failed to process %s record identifier=%s", source, identifier)
             if identifier:
                 failed_identifiers.append(identifier)
