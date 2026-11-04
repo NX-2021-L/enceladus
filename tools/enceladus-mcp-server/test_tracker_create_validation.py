@@ -6,6 +6,8 @@ import json
 import pathlib
 import sys
 import threading
+import urllib.error
+import urllib.parse
 from unittest.mock import patch
 
 from pydantic import AnyUrl, TypeAdapter
@@ -375,122 +377,183 @@ def test_document_policy_allows_docstore_basename_file():
     assert fake_ddb.put_calls
 
 
-class _GovernanceArchiveFailS3:
-    def __init__(self):
-        self.put_keys = []
-
-    def get_object(self, **_kwargs):
-        return {"Body": io.BytesIO(b"previous content")}
-
-    def put_object(self, **kwargs):
-        key = kwargs["Key"]
-        self.put_keys.append(key)
-        if key.startswith("governance/history/"):
-            raise RuntimeError("archive write failed")
-        return {}
+# ENC-TSK-S44 / ENC-ISS-894: governance_update is an HTTP PUT to the governance API (archival and the S3 write happen
+# server-side in the coordination Lambda). These tests exercise it ONLY through a recording fake of the urlopen
+# transport, so no request can reach a host: the old versions sent "# content" through the live transport and rotated
+# the production governance bundle on every run.
+GOVERNANCE_BASE_FOR_SHAPE = "https://enceladus.jreese.net/api/v1/governance"
 
 
-class _GovernanceNoExistingObjectS3:
-    def __init__(self):
-        self.put_keys = []
+class _FakeGovernanceTransport:
+    """Recording stand-in for urllib.request.urlopen: returns a queued JSON body or raises a queued HTTPError."""
 
-    def get_object(self, **_kwargs):
-        raise server.ClientError(
-            {
-                "Error": {"Code": "NoSuchKey", "Message": "missing"},
-                "ResponseMetadata": {"HTTPStatusCode": 404},
-            },
-            "GetObject",
-        )
+    def __init__(self, response=None, http_error=None):
+        self.requests = []
+        self.response = response if response is not None else {"success": True}
+        self.http_error = http_error
 
-    def put_object(self, **kwargs):
-        self.put_keys.append(kwargs["Key"])
-        return {}
+    def __call__(self, req, *args, **kwargs):
+        self.requests.append(req)
+        if self.http_error is not None:
+            code, body = self.http_error
+            raise urllib.error.HTTPError(req.full_url, code, "error", {}, io.BytesIO(json.dumps(body).encode("utf-8")))
+        return _FakeHttpResponse(json.dumps(self.response).encode("utf-8"))
 
 
-class _GovernanceReadFailureS3:
-    def __init__(self):
-        self.put_keys = []
+class _FakeHttpResponse:
+    def __init__(self, body: bytes):
+        self._body = body
 
-    def get_object(self, **_kwargs):
-        raise RuntimeError("s3 read failed")
+    def read(self):
+        return self._body
 
-    def put_object(self, **kwargs):
-        self.put_keys.append(kwargs["Key"])
-        return {}
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
 
 
-def _call_governance_update(args: dict) -> dict:
-    content = _run(server._governance_update(args))
+def _call_governance_update(args: dict, transport: _FakeGovernanceTransport) -> dict:
+    # The conftest guard points GOVERNANCE_API_BASE at an inert host; pin the production route shape purely as a string
+    # to assert on, while the transport stays the recording fake.
+    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
+        server, "_enforce_document_storage_policy", return_value=None
+    ), patch.object(server, "GOVERNANCE_API_BASE", GOVERNANCE_BASE_FOR_SHAPE), patch.object(
+        server, "GOVERNANCE_API_INTERNAL_API_KEY", "test-internal-key"
+    ), patch.object(server, "_cache_governance_hash"), patch.object(
+        server.urllib.request, "urlopen", transport
+    ):
+        content = _run(server._governance_update(args))
     assert content, "governance_update returned empty content"
     return json.loads(content[0].text)
 
 
+def _assert_put_shape(req, *, file_name: str, content: str, change_summary: str, governance_hash: str):
+    assert req.get_method() == "PUT"
+    assert req.full_url == f"{GOVERNANCE_BASE_FOR_SHAPE}/{file_name}"
+    assert urllib.parse.urlparse(req.full_url).path == f"/api/v1/governance/{file_name}"
+    assert req.get_header("Content-type") == "application/json"
+    assert req.get_header("X-coordination-internal-key") == "test-internal-key"
+    assert json.loads(req.data.decode("utf-8")) == {
+        "file_name": file_name,
+        "content": content,
+        "change_summary": change_summary,
+        "governance_hash": governance_hash,
+    }
+
+
 def test_governance_update_aborts_when_archive_write_fails():
-    fake_s3 = _GovernanceArchiveFailS3()
-    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
-        server, "_enforce_document_storage_policy", return_value=None
-    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
-        server, "_compute_governance_hash", return_value="a" * 64
-    ):
-        result = _call_governance_update(
+    transport = _FakeGovernanceTransport(
+        http_error=(
+            502,
             {
-                "governance_hash": "a" * 64,
-                "file_name": "agents.md",
-                "content": "# new",
-                "change_summary": "test update",
-            }
+                "success": False,
+                "error": {
+                    "code": "UPSTREAM_ERROR",
+                    "message": "governance archive write failed; live object not modified",
+                    "retryable": True,
+                    "details": {},
+                },
+            },
         )
+    )
+    result = _call_governance_update(
+        {
+            "governance_hash": "a" * 64,
+            "file_name": "agents.md",
+            "content": "# new",
+            "change_summary": "test update",
+        },
+        transport,
+    )
 
     assert result.get("success") is False
     assert result["error"]["code"] == "UPSTREAM_ERROR"
     assert "archive" in result["error"]["message"].lower()
-    assert len(fake_s3.put_keys) == 1
-    assert fake_s3.put_keys[0].startswith("governance/history/agents.md/")
+    assert len(transport.requests) == 1
+    _assert_put_shape(
+        transport.requests[0], file_name="agents.md", content="# new", change_summary="test update", governance_hash="a" * 64
+    )
 
 
 def test_governance_update_allows_first_write_without_existing_object():
-    fake_s3 = _GovernanceNoExistingObjectS3()
-    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
-        server, "_enforce_document_storage_policy", return_value=None
-    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
-        server, "_compute_governance_hash", return_value="b" * 64
-    ):
-        result = _call_governance_update(
-            {
-                "governance_hash": "b" * 64,
-                "file_name": "agents.md",
-                "content": "# first",
-                "change_summary": "first publish",
-            }
-        )
+    transport = _FakeGovernanceTransport(
+        response={
+            "success": True,
+            "status": "updated",
+            "s3_key": "governance/live/agents.md",
+            "governance_hash": "b" * 64,
+        }
+    )
+    result = _call_governance_update(
+        {
+            "governance_hash": "b" * 64,
+            "file_name": "agents.md",
+            "content": "# first",
+            "change_summary": "first publish",
+        },
+        transport,
+    )
 
     assert result["status"] == "updated"
     assert result["s3_key"] == "governance/live/agents.md"
     assert "archived_to" not in result
-    assert fake_s3.put_keys == ["governance/live/agents.md"]
+    assert len(transport.requests) == 1
+    _assert_put_shape(
+        transport.requests[0], file_name="agents.md", content="# first", change_summary="first publish", governance_hash="b" * 64
+    )
 
 
 def test_governance_update_blocks_on_existing_read_failure():
-    fake_s3 = _GovernanceReadFailureS3()
-    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
-        server, "_enforce_document_storage_policy", return_value=None
-    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
-        server, "_compute_governance_hash", return_value="c" * 64
-    ):
-        result = _call_governance_update(
+    transport = _FakeGovernanceTransport(
+        http_error=(
+            502,
             {
-                "governance_hash": "c" * 64,
-                "file_name": "agents.md",
-                "content": "# content",
-                "change_summary": "update",
-            }
+                "success": False,
+                "error": {
+                    "code": "UPSTREAM_ERROR",
+                    "message": "could not read existing object; write blocked for archival safety",
+                    "retryable": True,
+                    "details": {},
+                },
+            },
         )
+    )
+    result = _call_governance_update(
+        {
+            "governance_hash": "c" * 64,
+            "file_name": "agents.md",
+            "content": "# content",
+            "change_summary": "update",
+        },
+        transport,
+    )
 
     assert result.get("success") is False
     assert result["error"]["code"] == "UPSTREAM_ERROR"
     assert "archival safety" in result["error"]["message"]
-    assert fake_s3.put_keys == []
+    assert len(transport.requests) == 1  # no retry / second write after the upstream refusal
+    _assert_put_shape(
+        transport.requests[0], file_name="agents.md", content="# content", change_summary="update", governance_hash="c" * 64
+    )
+
+
+def test_governance_update_never_reaches_a_host_without_a_test_transport():
+    """Guard regression (ENC-ISS-894): with no test transport installed the hermetic conftest blocks the call."""
+    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
+        server, "_enforce_document_storage_policy", return_value=None
+    ):
+        content = _run(
+            server._governance_update(
+                {"governance_hash": "d" * 64, "file_name": "agents.md", "content": "# content", "change_summary": "x"}
+            )
+        )
+    result = json.loads(content[0].text)
+    assert result.get("success") is False
+    assert "hermetic test: network call blocked" in result["error"]["message"]
+    assert server.GOVERNANCE_API_BASE == "http://127.0.0.1:9"
+    assert not server.GOVERNANCE_API_INTERNAL_API_KEY
 
 
 # ---------------------------------------------------------------------------
