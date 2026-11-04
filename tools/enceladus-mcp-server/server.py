@@ -1929,6 +1929,23 @@ def _current_governance_hash_for_validation(provided: str) -> str:
     return current
 
 
+def _execute_governance_probe(max_age_s: float) -> str:
+    """ENC-TSK-S29-0A (ruling D4): current governance hash for the per-step execute re-check.
+
+    Reuses the 60 s TTL cache: a cached value fetched at or after the batch start (age <= max_age_s)
+    is served with zero network hops; an older one is dropped and refreshed once through the normal
+    resolution chain, after which the rest of the batch reads the cache. Disabled (returns "") by
+    ENCELADUS_EXECUTE_GOVERNANCE_PROBE=off, which execute treats as "no probe".
+    """
+    global _governance_hash_api_cache, _governance_hash_api_cache_at
+    if os.environ.get("ENCELADUS_EXECUTE_GOVERNANCE_PROBE", "on").strip().lower() in ("off", "0", "false", "no"):
+        return ""
+    age = time.time() - _governance_hash_api_cache_at
+    if not (_governance_hash_api_cache and age <= min(max(max_age_s, 0.0), _GOVERNANCE_HASH_API_TTL)):
+        _governance_hash_api_cache = None
+    return _get_governance_hash_via_api()
+
+
 def _timed_governance_validation(provided: str) -> str:
     """_current_governance_hash_for_validation + write-audit timing (t_governance_ms, cache hit)."""
     state = _CALL_STATE.get()
@@ -3840,7 +3857,9 @@ def _code_mode_tool_catalog() -> list[Tool]:
                 "with resolved underlying calls. Top-level dry_run short-circuits every step; "
                 "step-level dry_run (or arguments.dry_run) short-circuits that step only. A dry step "
                 "never invokes the underlying tool and returns a ResolvedCall. Failures carry "
-                "RFC 9457 problem details (errors[].pointer)."
+                "RFC 9457 problem details (errors[].pointer). All steps are validated before the first "
+                "write. Steps may carry id and depends_on: a declared graph runs on a pool of eight "
+                "with per-step timings, and fails closed (governance_hash_stale) if governance rotates mid-batch."
             ),
             inputSchema={
                 "type": "object",
@@ -3891,6 +3910,12 @@ def _code_mode_tool_catalog() -> list[Tool]:
                                 "dry_run": {
                                     "type": "boolean",
                                     "description": "Optional step-level dry-run override.",
+                                },
+                                "id": {"type": "string", "description": "Optional step id for depends_on."},
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": {"type": ["string", "integer"]},
+                                    "description": "Optional step ids or zero-based indexes that must finish first.",
                                 },
                             },
                             "required": ["action"],
@@ -11120,6 +11145,7 @@ bind_runtime(
     error_payload=_error_payload,
     enable_context_nodes=ENABLE_CONTEXT_NODES,
     action_catalog=_action_catalog,
+    current_governance_hash=_execute_governance_probe,
 )
 
 
