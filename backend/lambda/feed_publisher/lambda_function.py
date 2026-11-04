@@ -100,6 +100,7 @@ def _wa_iso_ms(value: Any) -> Optional[int]:
 def _wa_consumer_emit(
     consumer: str, raw_record: Dict[str, Any], stream_record: Optional[Dict[str, Any]],
     t_received_ms: int, t_done_ms: int, outcome: str = "success", phase: str = "projected",
+    stage: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Never raises; silent for non-governed records (no correlation_id / version_seq on the image)."""
     try:
@@ -123,6 +124,8 @@ def _wa_consumer_emit(
             "t_projection_done": t_done_ms, "t_ack": t_ack, "lag_basis": basis if t_ack is not None else None,
             "governed_lag_ms": lag,
         }
+        if stage is not None:  # ENC-TSK-S46-0A: BRD 7.1 feed lag clock (audit line only; never written to the item)
+            line.update(stage)
         print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
         if lag is not None and outcome == "success" and phase == "projected":
             print(json.dumps({
@@ -137,6 +140,10 @@ def _wa_consumer_emit(
 
 def _wa_now_ms() -> int:
     return int(_wa_time.time() * 1000)
+
+
+# ENC-TSK-S46-0A: container cold-start flag (True only for the first handler invocation).
+_WA_COLD = True
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): loop guard + version_seq idempotence.
@@ -1963,7 +1970,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     if _is_sweep_event(event):
         return _handle_sweep(context)
+    global _WA_COLD
     t_recv = _wa_now_ms()  # ENC-TSK-S26-0A
+    wa_cold, _WA_COLD = _WA_COLD, False  # ENC-TSK-S46-0A
+    wa_positions = {r.get("messageId"): i for i, r in enumerate(event.get("Records", []))}
     original_count = len(event.get("Records", []))  # ENC-TSK-S28-0E
     event, claims, dropped = _s28_filter_event(event, claim_versions=FEED_PUBLISH_MODE != FEED_PUBLISH_MODE_COALESCED)
     if original_count and not event.get("Records"):
@@ -1971,30 +1981,46 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {"batchItemFailures": []}
     if FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED:
         resp = _handle_mark(event)
-        _wa_emit_feed_records(event, resp, t_recv, phase="marked")  # projection happens later, at the sweep
+        # projection happens later, at the sweep: no per-record feed clock in coalesced mode
+        _wa_emit_feed_records(event, resp, t_recv, phase="marked", cold=wa_cold, positions=wa_positions,
+                              batch_size=original_count)
         return resp
+    wa_p0 = _wa_time.perf_counter()
     resp = _handle_per_batch(event)
+    wa_publish_ms = round((_wa_time.perf_counter() - wa_p0) * 1000.0, 3)
     if (resp or {}).get("batchItemFailures"):  # ENC-TSK-S28-0E: failed publish must stay retryable
         for claim in claims:
             _s28_release_claim(claim, _ddb_client())
-    _wa_emit_feed_records(event, resp, t_recv, phase="projected")
+    _wa_emit_feed_records(event, resp, t_recv, phase="projected", cold=wa_cold, positions=wa_positions,
+                          batch_size=original_count, publish_ms=wa_publish_ms)
     return resp
 
 
-def _wa_emit_feed_records(event: Dict[str, Any], resp: Any, t_recv: int, phase: str) -> None:
+def _wa_emit_feed_records(
+    event: Dict[str, Any], resp: Any, t_recv: int, phase: str, cold: bool = False,
+    positions: Optional[Dict[Any, int]] = None, batch_size: Optional[int] = None, publish_ms: Optional[float] = None,
+) -> None:
     """ENC-TSK-S26-0A: one [WRITE-AUDIT] line per governed record in the SQS batch (never raises)."""
     try:
         failed = {f.get("itemIdentifier") for f in (resp or {}).get("batchItemFailures", [])}
         t_done = _wa_now_ms()
-        for record in event.get("Records", []):
+        for idx, record in enumerate(event.get("Records", [])):
             try:
                 body = json.loads(record.get("body", "{}"))
                 ddb_record = body.get("dynamodb", body)
             except (AttributeError, TypeError, ValueError):
                 continue
+            ok = record.get("messageId") not in failed
+            mid = record.get("messageId")
+            stage = {  # ENC-TSK-S46-0A (BRD 7.1): per-record feed lag clock
+                "t_batch_start": t_recv, "batch_size": batch_size,
+                "batch_position": (positions or {}).get(mid, idx), "cold_start": cold,
+                "publish_ms": publish_ms if phase == "projected" else None,
+                "t_feed_published": t_done if (ok and phase == "projected") else None,
+            }
             _wa_consumer_emit(
                 "feed_publisher", record, {"dynamodb": ddb_record, "eventName": body.get("eventName")},
-                t_recv, t_done, outcome="error" if record.get("messageId") in failed else "success", phase=phase,
+                t_recv, t_done, outcome="success" if ok else "error", phase=phase, stage=stage,
             )
     except Exception:  # noqa: BLE001
         pass

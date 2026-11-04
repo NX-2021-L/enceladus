@@ -1,0 +1,16 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"consumer": ?"(?<consumer>[^"]*)"/
+| parse @message /"t_ack": ?(?<t_ack>[0-9]+)/
+| parse @message /"t_batch_start": ?(?<t_batch_start>[0-9]+)/
+| parse @message /"t_record_start": ?(?<t_record_start>[0-9]+)/
+| parse @message /"t_record_done": ?(?<t_record_done>[0-9]+)/
+| parse @message /"t_feed_published": ?(?<t_feed_published>[0-9]+)/
+| parse @message /"governed_lag_ms": ?(?<governed_lag_ms>[0-9.]+)/
+| parse @message /"store_ms": ?(?<store_ms>[0-9.]+)/
+| parse @message /"mark_ms": ?(?<mark_ms>[0-9.]+)/
+| parse @message /"publish_ms": ?(?<publish_ms>[0-9.]+)/
+| filter ispresent(consumer) and ispresent(t_ack)
+| fields t_batch_start - t_ack as stream_delay_ms, t_record_start - t_batch_start as queue_ms, t_record_done - t_ack as graph_projection_lag_ms, t_feed_published - t_ack as feed_projection_lag_ms
+| stats count(*) as n, pct(stream_delay_ms, 50) as stream_delay_p50_ms, pct(stream_delay_ms, 95) as stream_delay_p95_ms, pct(queue_ms, 50) as queue_p50_ms, pct(queue_ms, 95) as queue_p95_ms, pct(graph_projection_lag_ms, 50) as graph_projection_lag_p50_ms, pct(graph_projection_lag_ms, 95) as graph_projection_lag_p95_ms, pct(feed_projection_lag_ms, 50) as feed_projection_lag_p50_ms, pct(feed_projection_lag_ms, 95) as feed_projection_lag_p95_ms, pct(governed_lag_ms, 50) as governed_lag_p50_ms, pct(governed_lag_ms, 95) as governed_lag_p95_ms, pct(store_ms, 95) as store_p95_ms, pct(mark_ms, 95) as mark_p95_ms, pct(publish_ms, 95) as publish_p95_ms by consumer
+| sort n desc

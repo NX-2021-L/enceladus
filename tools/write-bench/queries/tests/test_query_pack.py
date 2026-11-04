@@ -97,6 +97,34 @@ class QueryPackTests(unittest.TestCase):
         for r in res["governed_lag"]:
             self.assertLessEqual(r["p50"], r["p95"])
 
+    def test_consumer_lag_derived_per_consumer(self):
+        def line(consumer, **kw):
+            base = {"consumer": consumer, "correlation_id": "c", "success": True, "projection_phase": "projected", "t_ack": 1000}
+            base.update(kw)
+            return {"ts": "2026-11-04T10:00:00Z", "message": "[WRITE-AUDIT] " + json.dumps(base)}
+        lines = [
+            line("graph_sync", t_batch_start=1200, t_record_start=1250, t_record_done=1900, t_projection_done=1900,
+                 governed_lag_ms=900, store_ms=400.5, mark_ms=20.0, marker_only_skipped=False, cold_start=True),
+            line("graph_sync", t_batch_start=1300, t_record_start=1300, t_record_done=2100, t_projection_done=2100,
+                 governed_lag_ms=1100, store_ms=500.0, mark_ms=30.0),
+            line("graph_sync", projection_phase="marker_skipped", t_record_done=1500, marker_only_skipped=True, governed_lag_ms=None),
+            line("feed_publisher", t_batch_start=1100, t_feed_published=3000, publish_ms=1800.0, governed_lag_ms=2000),
+            line("feed_publisher", t_batch_start=1100, t_feed_published=None, success=False),
+        ]
+        ws = we = rq.parse_ts("2026-11-04T10:00:00Z")
+        res = rq.compute(lines, [], ws, we, 15, 0)
+        by = {r["consumer"]: r for r in res["consumer_lag"]}
+        g, fd = by["graph_sync"], by["feed_publisher"]
+        self.assertEqual((g["graph_projection_lag_ms_n"], g["graph_projection_lag_ms_p50"]), (2, 1000.0))
+        self.assertEqual(g["stream_delay_ms_p50"], 250.0)    # t_batch_start - t_ack: 200 and 300
+        self.assertEqual(g["queue_ms_p50"], 25.0)            # 50 and 0
+        self.assertEqual((g["governed_lag_ms_p50"], g["marker_only_skipped_n"], g["cold_n"]), (1000.0, 1, 1))
+        self.assertEqual((fd["feed_projection_lag_ms_n"], fd["feed_projection_lag_ms_p95"]), (1, 2000.0))
+        self.assertEqual(fd["graph_projection_lag_ms_n"], 0)  # feed lines carry no t_record_done
+        md = rq.render_markdown({**res, "scanned_bytes": 0}, "t")
+        self.assertIn("graph_projection_lag_ms", md)
+        self.assertIn("feed_projection_lag_ms", md)
+
     def test_cli_fixture_path_writes_json_and_markdown(self):
         with tempfile.TemporaryDirectory() as d:
             res = rq.main(["--fixture", str(FIXTURE), "--out-dir", d])
@@ -111,7 +139,7 @@ class QueryPackTests(unittest.TestCase):
     def test_query_files_present(self):
         names = {p.name for p in QDIR.glob("*.query")}
         for n in ("01_server_latency_by_tool_surface.query", "03_stage_p50_p95_by_tool_surface.query",
-                  "04_governed_lag_by_tool.query", "06_extract_report_init.query", "cm1_stale_hash_acceptances.query",
+                  "04_governed_lag_by_tool.query", "08_consumer_stage_lag.query", "06_extract_report_init.query", "cm1_stale_hash_acceptances.query",
                   "cm3_idempotent_replay_receipt_mismatch.query", "cm4_dry_run_writes.query",
                   "cm5_unrecovered_consumer_failures.query", "cm6_edges_skipped_missing_target.query"):
             self.assertIn(n, names)

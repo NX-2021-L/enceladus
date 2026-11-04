@@ -1,6 +1,6 @@
 {
-  "version": "2026-11-04.16",
-  "updated_at": "2026-11-04T16:00:00Z",
+  "version": "2026-11-04.17",
+  "updated_at": "2026-11-04T18:00:00Z",
   "last_change_summary": "ENC-TSK-S46-0D (ENC-ISS-180 defect A, ENC-PLN-104 W6a.4, io decision E2): graph_sync edge order guard. When an edge's target node is not yet projected (out-of-order stream delivery, parallel shards, burst execute), graph_sync MERGEs a placeholder for the target through the single placeholder convention _merge_placeholder (key (label, record_id); ON CREATE is_placeholder=true, project_id, placeholder_created_at) and then creates the edge; this now also covers the field-projection edges that previously used MATCH-only targets (CHILD_OF, RELATED_TO/ADDRESSES/IMPLEMENTS from related_task_ids/related_issue_ids/related_feature_ids, SUCCEEDS, TARGETS_GENERATION/BELONGS_TO_GENERATION/EXECUTES_WITHIN), and every existing E01 placeholder site (plan/lesson/document/MENTIONS/relationship-record) routes through the same helper. The target's later real projection completes the placeholder in place (same node, is_placeholder=false, no duplicate). S33 owner-scoped reconcile and the SUPERSEDED_BY canonical redirect are unchanged. graph_sync [WRITE-AUDIT] consumer line gains edges_skipped_missing_target (int: edges not created because the target was absent and could not be placed, i.e. an unrecognised id prefix on an unlabelled-MATCH fallback or relationship-record endpoint, or an id whose prefix names a different label than the field declares, for which no wrong-label placeholder is created; steady state 0) and edges_placeholder_targets (int: placeholder target nodes the guard materialized for this record). Write-bench counter-metric 6 (cm6_edges_skipped_missing_target.query) sums edges_skipped_missing_target over the window. Additive, no schema changes.",
   "owners": [
     "enceladus-platform"
@@ -9829,11 +9829,11 @@
         },
         "cold_start": {
           "type": "boolean",
-          "definition": "True for every line in the first invocation of a container (EMF metric cold_start, Count)."
+          "definition": "True for every line in the first invocation of a container (EMF metric cold_start, Count). ENC-TSK-S46-0A: also on every consumer line (graph_sync, feed_publisher, appsync_feed_publisher), true only for the first handler invocation in the container."
         },
         "init_ms": {
           "type": "integer",
-          "definition": "Module import to first invocation, ms; 0 when warm."
+          "definition": "Module import to first invocation, ms; 0 when warm. ENC-TSK-S46-0A: graph_sync consumer lines use the same definition (module import to first invocation, 0.0 warm)."
         },
         "hops": {
           "type": "integer",
@@ -9865,7 +9865,7 @@
         },
         "memory_mb": {
           "type": "string|null",
-          "definition": "AWS_LAMBDA_FUNCTION_MEMORY_SIZE."
+          "definition": "AWS_LAMBDA_FUNCTION_MEMORY_SIZE. ENC-TSK-S46-0A: graph_sync consumer lines emit an integer from the Lambda context memory_limit_in_mb (null without a context)."
         },
         "runtime": {
           "type": "string",
@@ -9949,7 +9949,7 @@
         },
         "consumer": {
           "type": "string",
-          "definition": "Consumer lines: graph_sync | feed_publisher."
+          "definition": "Consumer lines: graph_sync | feed_publisher | appsync_feed_publisher (ENC-TSK-S46-0A added appsync_feed_publisher, one line per governed record published)."
         },
         "attempt": {
           "type": "integer",
@@ -9965,7 +9965,7 @@
         },
         "governed_lag_ms": {
           "type": "integer|null",
-          "definition": "Consumer lines: t_projection_done - t_ack (EMF metric, Milliseconds, dimension tool; not emitted for projection_phase 'marked' or on error)."
+          "definition": "Consumer lines: t_projection_done - t_ack (EMF metric, Milliseconds, dimension tool; not emitted for projection_phase 'marked' or 'marker_skipped', or on error). Compatibility alias: the query pack reports graph_projection_lag_ms and feed_projection_lag_ms (derived, never emitted by the Lambdas)."
         },
         "lag_basis": {
           "type": "string|null",
@@ -9973,7 +9973,7 @@
         },
         "projection_phase": {
           "type": "string",
-          "definition": "Consumer lines: 'projected', or 'marked' for feed_publisher in coalesced mode (publish happens later at the sweep)."
+          "definition": "Consumer lines: 'projected'; 'marked' for feed_publisher in coalesced mode (publish happens later at the sweep); 'marker_skipped' for a graph_sync record skipped by the S28-0E loop guard (consumer-originated marker write; governed_lag_ms null, no EMF); 'published' / 'failed' on appsync_feed_publisher lines."
         },
         "invoke_mode": {
           "type": "string",
@@ -9983,11 +9983,85 @@
         "audit_kind": {
           "type": "string|null",
           "definition": "Present only on non-attempt note lines. invoke_fallback marks the line emitted when a direct invoke failed to reach the function and the call fell back to HTTP; it carries attempt_outcome error, success false, tool_function, fallback_reason and the correlation_id. The S26-0D counters exclude lines with an audit_kind (the real attempt is counted on its own line)."
+        },
+        "event_name": {
+          "type": "string|null",
+          "definition": "Consumer lines: DynamoDB stream eventName (INSERT | MODIFY | REMOVE)."
+        },
+        "stream_approx_creation_ms": {
+          "type": "integer|null",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: stream record dynamodb.ApproximateCreationDateTime in epoch ms (null when absent). stream_delay_ms is derived in the query pack as t_batch_start - t_ack."
+        },
+        "t_batch_start": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, consumer lines: epoch ms when the handler invocation started (shared by every record of the batch). queue_ms is derived as t_record_start - t_batch_start."
+        },
+        "batch_size": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, consumer lines: number of records in the invocation batch (feed_publisher: before the loop-guard / version_seq filter; absent on appsync_feed_publisher lines)."
+        },
+        "batch_position": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, consumer lines: 0-based index of the record in the invocation batch."
+        },
+        "t_record_start": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: epoch ms when this record's processing began (equals t_stream_received)."
+        },
+        "t_record_done": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: epoch ms when this record's processing finished (equals t_projection_done). graph_projection_lag_ms is derived in the query pack as t_record_done - t_ack."
+        },
+        "store_ms": {
+          "type": "number",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: total milliseconds inside graph-store transactions (execute_read/execute_write) for this record."
+        },
+        "store_calls": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: graph transactions (execute_read/execute_write round trips) for this record; store_statements counts the tx.run statements inside them."
+        },
+        "store_statements": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: Cypher statements run for this record."
+        },
+        "edges_written": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: edge MERGE statements executed for this record (statements, not distinct edges)."
+        },
+        "edges_skipped_missing_target": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0D, graph_sync lines: edges not created this record because the target could not be placed by the edge order guard (target id prefix names a different label than the field expects, or no such node). Per-record, reset by handler; emitted from _edge_guard_audit_fields() (supersedes the S46-0A placeholder that was always 0)."
+        },
+        "mark_ms": {
+          "type": "number",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: milliseconds spent writing the source-item projection marker (_mark_source_projected)."
+        },
+        "marker_only_skipped": {
+          "type": "boolean",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: true when the S28-0E loop guard skipped the record because OldImage and NewImage differ only in consumer-owned projection attributes."
+        },
+        "shard_id": {
+          "type": "string|null",
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: the stream label parsed from eventSourceARN (the Lambda event does not carry the shard id); null when absent."
+        },
+        "publish_ms": {
+          "type": "number|null",
+          "definition": "ENC-TSK-S46-0A, feed_publisher lines: milliseconds the batch publish took (per_batch mode; null for phase marked); appsync_feed_publisher lines: milliseconds the per-record publish took (null on failure)."
+        },
+        "t_feed_published": {
+          "type": "integer|null",
+          "definition": "ENC-TSK-S46-0A feed lag clock, audit line ONLY (never written to the DynamoDB item, io decision E3): epoch ms when the publish for this record completed; null on error or phase marked. feed_projection_lag_ms is derived in the query pack as t_feed_published - t_ack."
+        },
+        "edges_placeholder_targets": {
+          "type": "integer",
+          "definition": "ENC-TSK-S46-0D, graph_sync lines: placeholder target nodes the edge order guard materialized this record via _merge_placeholder (target not yet projected; the edge still landed). Per-record, reset by handler."
         }
       },
       "governing_records": [
         "ENC-TSK-S26-0A",
-        "DOC-E32D0ED08473"
+        "DOC-E32D0ED08473",
+        "ENC-TSK-S46-0A",
+        "ENC-TSK-S46-0D"
       ]
     },
     "write_bench_client": {
@@ -11361,6 +11435,11 @@
     },
     {
       "version": "2026-11-04.16",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S46-0A (ENC-PLN-104 W6a.1, BRD DOC-735D82EA6E0E s7.1/9.2): no schema change on items. The existing [WRITE-AUDIT] consumer lines gain per-record stage fields: graph_sync adds t_batch_start, batch_size, batch_position, t_record_start, t_record_done, stream_approx_creation_ms, cold_start, init_ms, store_ms, store_calls, store_statements, edges_written, edges_skipped_missing_target (0 until W6a.4), mark_ms, marker_only_skipped (a marker-only MODIFY now emits one line with projection_phase marker_skipped, governed_lag_ms null, no EMF), shard_id, memory_mb; feed_publisher adds t_batch_start, batch_size, batch_position, cold_start, publish_ms and the feed lag clock t_feed_published; appsync_feed_publisher now emits a per-record consumer line with the same feed clock. t_feed_published lives on the audit line only and is never written to the DynamoDB item (no extra stream event, io decision E3). Derived values (stream_delay_ms, queue_ms, graph_projection_lag_ms, feed_projection_lag_ms) are computed by tools/write-bench/queries (08_consumer_stage_lag.query, run_queries.py), not by the Lambdas; governed_lag_ms is kept as the compatibility alias."
+    },
+    {
+      "version": "2026-11-04.17",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S46-0D (ENC-ISS-180 defect A, ENC-PLN-104 W6a.4, io decision E2): graph_sync edge order guard. When an edge's target node is not yet projected (out-of-order stream delivery, parallel shards, burst execute), graph_sync MERGEs a placeholder for the target through the single placeholder convention _merge_placeholder (key (label, record_id); ON CREATE is_placeholder=true, project_id, placeholder_created_at) and then creates the edge; this now also covers the field-projection edges that previously used MATCH-only targets (CHILD_OF, RELATED_TO/ADDRESSES/IMPLEMENTS from related_task_ids/related_issue_ids/related_feature_ids, SUCCEEDS, TARGETS_GENERATION/BELONGS_TO_GENERATION/EXECUTES_WITHIN), and every existing E01 placeholder site (plan/lesson/document/MENTIONS/relationship-record) routes through the same helper. The target's later real projection completes the placeholder in place (same node, is_placeholder=false, no duplicate). S33 owner-scoped reconcile and the SUPERSEDED_BY canonical redirect are unchanged. graph_sync [WRITE-AUDIT] consumer line gains edges_skipped_missing_target (int: edges not created because the target was absent and could not be placed, i.e. an unrecognised id prefix on an unlabelled-MATCH fallback or relationship-record endpoint, or an id whose prefix names a different label than the field declares, for which no wrong-label placeholder is created; steady state 0) and edges_placeholder_targets (int: placeholder target nodes the guard materialized for this record). Write-bench counter-metric 6 (cm6_edges_skipped_missing_target.query) sums edges_skipped_missing_target over the window. Additive, no schema changes."
     }

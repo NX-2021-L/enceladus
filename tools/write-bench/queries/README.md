@@ -19,6 +19,7 @@ does not exist yet (the runner warns and skips missing groups; add one with `--l
 | `02_client_latency_by_tool_surface.query` | same over `client_total_ms` (owned clients only) |
 | `03_stage_p50_p95_by_tool_surface.query` | p50 and p95 of every `t_*_ms` stage plus `init_ms` |
 | `04_governed_lag_by_tool.query` | `governed_lag_ms` p50, p95, max per tool and consumer |
+| `08_consumer_stage_lag.query` | ENC-TSK-S46-0A: per consumer p50/p95 of `stream_delay_ms` (t_batch_start - t_ack), `queue_ms` (t_record_start - t_batch_start), `graph_projection_lag_ms` (t_record_done - t_ack), `feed_projection_lag_ms` (t_feed_published - t_ack), plus `governed_lag_ms` (compatibility alias) and store/mark/publish p95. Derived values live only here and in `run_queries.py`, never in the Lambdas |
 | `07_cold_by_session.query` | cold n and cold fraction per `session_id` (the runner builds the distribution) |
 | `05_extract_audit_lines.query`, `06_extract_report_init.query` | raw extracts feeding the Python merge |
 
