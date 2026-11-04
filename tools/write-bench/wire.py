@@ -163,7 +163,7 @@ def build_operation(op: str, project: str, pool: List[str], governance_hash: str
         s = step("documents.put", {
             "project_id": project, "title": f"[BENCH] write-bench doc {op} {nonce}",
             "content": _body(size, f"{op} {nonce}"), "description": "write-bench scratch document",
-            "file_name": f"bench-{op}-{nonce}.md",
+            "file_name": f"bench-{op}-{nonce}.md", "document_subtype": "doc",
         }, governance_hash)
         return "execute", execute_args([s])
     if op == "execute_10_independent":

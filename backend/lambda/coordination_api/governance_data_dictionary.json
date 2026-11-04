@@ -10003,6 +10003,43 @@
       },
       "usage_guidance": "Invoked only by tools/write-bench/bench.py with the product-lead or an inspect profile; payloads carry X-Correlation-Id and the X-Enc-* client headers so audit lines join to bench samples. Not part of any governed write path."
     },
+    "mcp_server.execute_dag": {
+      "description": "ENC-TSK-S29-0A: optional DAG scheduling, per-step timing and fail-closed governance rotation for the code-mode execute tool (tools/enceladus-mcp-server/mcp_server/tools/execute.py). A batch where no step declares depends_on runs strictly serial (legacy). When any step declares depends_on (an empty list counts), steps run on a pool of eight once their dependencies succeed; on_error=abort cancels unstarted steps, on_error=continue lets independent steps proceed and skips dependents. Ruling D4: the governance hash is re-read immediately before each step commits (60 s TTL cache; refreshed once when the cached value predates the batch); a mismatch aborts that step and every not-yet-started step with governance_hash_stale, committed steps stand, and resume is a new execute with the remaining steps and a new idempotency key. No registry action declares an inverse, so no compensation runs.",
+      "fields": {
+        "id": {
+          "type": "string",
+          "definition": "Optional step-level identifier (unique within the batch) that other steps can name in depends_on."
+        },
+        "depends_on": {
+          "type": "array<string|integer>",
+          "definition": "Optional step-level list of step ids or zero-based step indexes that must succeed first. Unknown ids, out-of-range indexes and cycles return a 422 problem before any write."
+        },
+        "started_ms": {
+          "type": "integer",
+          "definition": "Per step result: milliseconds from batch start to the moment the step began executing (after pool admission and the governance re-check start)."
+        },
+        "duration_ms": {
+          "type": "integer",
+          "definition": "Per step result: milliseconds the step spent in the governance re-check plus the underlying tool call (0 for dry_run, skipped and aborted steps)."
+        },
+        "critical_path_ms": {
+          "type": "integer",
+          "definition": "Response member: sum of duration_ms along the longest dependency chain (the sum of all durations for a serial batch)."
+        },
+        "execute_total_ms": {
+          "type": "integer",
+          "definition": "Response member: wall-clock milliseconds for the whole batch."
+        },
+        "committed_prefix": {
+          "type": "array<integer>",
+          "definition": "Response member: 1-based step numbers (the step field of step_results) whose commit succeeded, in commit order. After a governance_hash_stale abort this is the set of steps that stand."
+        }
+      },
+      "governing_records": [
+        "ENC-TSK-S29-0A",
+        "DOC-E32D0ED08473"
+      ]
+    },
     "mcp_server.write_tool_invoke": {
       "description": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3): direct qualified invoke of the write tool Lambdas from the MCP server (tools/enceladus-mcp-server/server.py _invoke_tool_lambda). A mutating call (POST/PUT/PATCH/DELETE) through _tracker_api_request, _document_api_request or _checkout_api_request is turned into an API Gateway v2 (payload 2.0) event -- requestContext.http.method/path, rawPath, rawQueryString, headers (lower-cased: x-coordination-internal-key, x-correlation-id, X-Enc-* passthrough), queryStringParameters, body as a JSON string, isBase64Encoded false, routeKey $default -- and invoked synchronously (RequestResponse) on `<function>:live`; the {statusCode, headers, body} reply is translated to exactly what the HTTP helper returns. Never $LATEST and never an unqualified ARN; IAM grants lambda:InvokeFunction on the three `:live` ARNs only (02-compute.yaml CoordinationApiRole InvokeWriteToolLambdasLive).",
       "fields": {
@@ -11286,6 +11323,11 @@
       "version": "2026-11-04.9",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S28-0F (BRD DOC-E32D0ED08473 ruling D3, ENC-ISS-654/ENC-ISS-681 write-path tranche): the MCP server can invoke the write tool Lambdas (devops-tracker-mutation-api, devops-document-api, enceladus-checkout-service and their -gamma twins) directly via the QUALIFIED `live` alias (Lambda Invoke RequestResponse with a synthesized API Gateway v2 event) instead of CloudFront+API Gateway; env WRITE_TOOL_INVOKE_MODE direct|http (default gamma direct, prod http) with a single HTTP fallback logged as invoke_mode direct_fallback. New entity mcp_server.write_tool_invoke; mcp_server.write_audit_line gains invoke_mode and a direct-aware hops. tracker_mutation and document_api now verify a supplied governance_hash against the governance API /hash (60 s module cache): mismatch -> HTTP 409 GOVERNANCE_STALE, and their [WRITE-AUDIT] lines carry governance_hash_verified. The Gen2 deploy waits for State==Active and LastUpdateStatus==Successful before moving the `live` alias."
+    },
+    {
+      "version": "2026-11-04.10",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S29-0A (BRD DOC-E32D0ED08473 B4/W3.3, ruling D4): execute validates every step before the first write (422 with per-step pointers, nothing written), accepts optional step id and depends_on (step ids or zero-based indexes; unknown ids and cycles are 422), runs a declared graph on a pool of eight (steps without any declared graph stay strictly serial), stamps every step result with started_ms/duration_ms/status/error and the response with execute_total_ms, critical_path_ms and committed_prefix, and re-reads the governance hash immediately before each step commits: on rotation that step and every not-yet-started step abort with governance_hash_stale (409), committed steps stand. New entity mcp_server.execute_dag; additive, no existing field changes."
     },
     {
       "version": "2026-11-04.11",
