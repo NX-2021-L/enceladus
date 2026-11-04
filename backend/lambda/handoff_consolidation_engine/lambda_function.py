@@ -778,7 +778,7 @@ def _run_cycle(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if GDMP_PROVENANCE_ENABLED:
             compliant = [
                 d for d in _scan_documents(
-                    ("doc", "handoff", "wave", "coe"),
+                    ("doc", "handoff", "wave", "coe", "brd"),
                     statuses=("active",),
                     cutoff_iso=cutoff_iso,
                 )

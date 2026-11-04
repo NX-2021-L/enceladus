@@ -196,7 +196,7 @@ FACT_RECORD_TRANSITION: List[ColumnSpec] = [
 DIM_DOCUMENT: List[ColumnSpec] = [
     ColumnSpec("document_id", "string", "Governed document identifier, e.g. DOC-3391173F2A5C."),
     ColumnSpec("project_id", "string", "Owning project."),
-    ColumnSpec("document_subtype", "string", "doc | handoff | coe | wave | idea | context-node | skill, or a legacy value."),
+    ColumnSpec("document_subtype", "string", "doc | handoff | coe | wave | idea | brd | context-node | skill, or a legacy value."),
     ColumnSpec("subtypepattern", "string", "Self-learning emergent subtype, valid only when document_subtype='doc'."),
     ColumnSpec("status", "string", "Document status, e.g. active."),
     ColumnSpec("document_maturity_state", "string", "raw | compliant | contextualized | mature (GDMP)."),

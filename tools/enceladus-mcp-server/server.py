@@ -4185,14 +4185,17 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "description": "Filter by document_subtype (e.g. 'idea', 'context-node', 'skill', 'doc', 'handoff', 'coe', 'wave'). Legacy values still searchable as they remain readable.",
+                        "description": "Filter by document_subtype (e.g. 'idea', 'brd', 'context-node', 'skill', 'doc', 'handoff', 'coe', 'wave'). Legacy values still searchable as they remain readable.",
                     },
                     "subtypepattern": {
                         "type": "string",
                         "description": (
                             "ENC-FTR-078 AC-17 self-learning filter. Matches document_subtype='doc' "
                             "records whose canonical subtypepattern (lowercase, alpha+dash) exactly "
-                            "equals the filter value. Combine with document_subtype='doc' for clarity."
+                            "equals the filter value. Combine with document_subtype='doc' for clarity. "
+                            "Graduated values (ENC-FTR-152: 'brd') are a deprecated alias for "
+                            "document_subtype='brd' and return a deprecation hint; search "
+                            "document_subtype='brd' instead."
                         ),
                     },
                 },
@@ -4237,7 +4240,7 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "description": "Filter by document_subtype (e.g. skill, handoff).",
+                        "description": "Filter by document_subtype (e.g. skill, handoff, brd).",
                     },
                     "include_content": {
                         "type": "boolean",
@@ -4292,16 +4295,17 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill", "brd"],
                         "description": (
-                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
-                            "Strict allow-list on writes. 'handoff' requires source_record_id; "
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078 and ENC-FTR-152). "
+                            "Strict allow-list on writes. 'brd' is a business requirements document (no extra required fields). 'handoff' requires source_record_id; "
                             "'coe' requires source_incident_id; 'wave' requires plan_anchor_id; "
                             "'context-node' requires body <=2048 chars and >=5 related_items; "
                             "'skill' requires full_description (<=4096), claude_description (<=1024), "
                             "agentskills_manifest + agentskills_spec_version, and >=2 related_items. "
                             "Legacy values {general, blueprint, narrative, session-log} are read-only; "
-                            "for emergent patterns use document_subtype='doc' with subtypepattern='<value>'."
+                            "for emergent patterns use document_subtype='doc' with subtypepattern='<value>'. "
+                            "A pattern that has graduated (brd) must be sent as document_subtype instead."
                         ),
                     },
                     "confirm_subtype": {
@@ -4313,7 +4317,9 @@ def _raw_tool_definitions() -> list[Tool]:
                         "description": (
                             "ENC-FTR-078 AC-16 self-learning field. Optional. Valid only when "
                             "document_subtype='doc'. Server canonicalizes (trim+lowercase) and validates "
-                            "^[a-z-]+$. Examples: 'blueprint', 'runbook', 'post-mortem'. (ref: document.doc)"
+                            "^[a-z-]+$. Examples: 'blueprint', 'runbook', 'post-mortem'. Graduated values "
+                            "('brd', ENC-FTR-152) are rejected with SUBTYPEPATTERN_GRADUATED; use "
+                            "document_subtype='brd'. (ref: document.doc)"
                         ),
                     },
                     "full_description": {
@@ -4466,9 +4472,9 @@ def _raw_tool_definitions() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill", "brd"],
                         "description": (
-                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078 and ENC-FTR-152). "
                             "Strict allow-list on patches. Agents may patch a legacy record "
                             "(general/blueprint/narrative/session-log) to any allow-list subtype "
                             "provided subtype-specific requirements are satisfied in the same PATCH."
@@ -4479,7 +4485,8 @@ def _raw_tool_definitions() -> list[Tool]:
                         "description": (
                             "ENC-FTR-078 AC-16. Valid only when the post-patch document_subtype='doc'. "
                             "Server canonicalizes (trim+lowercase) and validates ^[a-z-]+$. "
-                            "Empty string clears the field. (ref: document.doc)"
+                            "Empty string clears the field; moving a document off 'doc' clears it too. "
+                            "Graduated values ('brd') are rejected; set document_subtype='brd'. (ref: document.doc)"
                         ),
                     },
                     "full_description": {

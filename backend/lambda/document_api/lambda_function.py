@@ -156,7 +156,7 @@ ALLOWED_FILE_EXTENSIONS = {".md", ".markdown"}
 # Handoff document schema (ENC-FTR-061 / ENC-TSK-B52)
 # ---------------------------------------------------------------------------
 
-DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "idea", "context-node", "skill"}
+DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "idea", "context-node", "skill", "brd"}
 DOCUMENT_SUBTYPES_LEGACY_READ_ONLY = {"blueprint", "narrative", "session-log", "general"}
 HANDOFF_STATUSES = {"pending", "claimed", "completed", "stale"}
 HANDOFF_STATUS_TRANSITIONS = {
@@ -221,9 +221,16 @@ AGENTSKILLS_SPEC_VERSION_DEFAULT = "0.1.0"
 # Subtypepattern canonical format: lowercase alpha and dashes only.
 SUBTYPEPATTERN_REGEX = re.compile(r"^[a-z-]+$")
 
+# ENC-FTR-152: subtypepattern values that graduated into first-class document_subtype
+# values through the ENC-FTR-078 AC-18 pathway (pattern -> subtype). Writes that still
+# send a graduated pattern on a doc are rejected (subtypepattern_graduated) so there is
+# one write path; search keeps a deprecated read alias for one minor version (AC-7).
+GRADUATED_SUBTYPEPATTERNS = {"brd": "brd"}
+
 # Doc title colon-prefix rejection (AC-15). Case-insensitive leading alpha-or-dash
-# word of length 2-31 followed by a colon. Match enforced on subtype=doc only.
+# word of length 2-31 followed by a colon. Enforced on TITLE_COLON_PREFIX_SUBTYPES.
 DOC_TITLE_COLON_PREFIX_REGEX = re.compile(r"^[A-Za-z][A-Za-z-]{1,30}:")
+TITLE_COLON_PREFIX_SUBTYPES = {"doc", "brd"}  # brd: ENC-FTR-152 AC-3 title hygiene
 
 # Metadata block lines to strip from content when measuring context-node readable body.
 # Mirrors the convention in other governed docs and matches the canonicalization in
@@ -252,6 +259,63 @@ def _canonicalize_subtypepattern(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     return value.strip().lower()
+
+
+def _subtypepattern_graduated_error(canonical: str) -> Dict:
+    """ENC-FTR-152 AC-4: pedagogical 400 for a subtypepattern that is now a document_subtype."""
+    target = GRADUATED_SUBTYPEPATTERNS[canonical]
+    return _error(
+        400,
+        (
+            f"subtypepattern '{canonical}' has graduated to document_subtype='{target}' "
+            f"(ENC-FTR-152). Send document_subtype='{target}' and omit subtypepattern."
+        ),
+        code="subtypepattern_graduated",
+        invalid_value=canonical,
+        graduated_to=target,
+        dictionary_entity=f"document.{target}",
+        remediation=f"Set document_subtype='{target}' and remove subtypepattern from the request.",
+    )
+
+
+def _title_colon_prefix_error(title: str, document_subtype: str, *, in_patch: bool) -> Optional[Dict]:
+    """ENC-FTR-078 AC-15 title hygiene (doc and brd); None when the title passes.
+
+    A prefix naming a graduated pattern (e.g. 'BRD:') redirects to document_subtype
+    rather than to subtypepattern (ENC-FTR-152 AC-3).
+    """
+    if document_subtype not in TITLE_COLON_PREFIX_SUBTYPES:
+        return None
+    match = DOC_TITLE_COLON_PREFIX_REGEX.match(title)
+    if not match:
+        return None
+    prefix = match.group(0)[:-1].lower()
+    graduated_to = GRADUATED_SUBTYPEPATTERNS.get(prefix)
+    if graduated_to:
+        message = (
+            f"Title starts with a '{prefix}:' prefix. Titles should not encode subtype, and "
+            f"'{prefix}' is a document_subtype (ENC-FTR-152). Remove the prefix and set "
+            f"document_subtype='{graduated_to}'."
+        )
+        remediation = f"Remove the '{prefix}:' prefix from title and set document_subtype='{graduated_to}'."
+    elif document_subtype == "doc":
+        message = _DOC_TITLE_COLON_PREFIX_MSG
+        remediation = (
+            "Remove the prefix from title and populate subtypepattern with the lowercased prefix word"
+            + (" in the same PATCH." if in_patch else ".")
+        )
+    else:
+        message = "Title starts with a '<type>:' prefix. Titles should not encode subtype; remove the prefix."
+        remediation = "Remove the prefix from title."
+    return _error(
+        400,
+        message + f" Title received: {title!r}",
+        code="doc_title_colon_prefix_disallowed",
+        title=title,
+        rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
+        remediation=remediation,
+        dictionary_entity=f"document.{document_subtype}",
+    )
 
 
 def _measure_context_node_readable_body(content: str) -> int:
@@ -1977,7 +2041,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             400,
             "document_subtype is required. Use 'doc' for standard documents, "
             "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
-            "'wave' for coordination wave tracking.",
+            "'wave' for coordination wave tracking, 'brd' for business requirements documents.",
         )
     document_subtype = str(body.get("document_subtype", "")).strip().lower()
     if not document_subtype:
@@ -1986,8 +2050,8 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             "document_subtype is required. Use 'doc' for standard documents, "
             "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
             "'wave' for coordination wave tracking, 'idea' for architect-lifecycle "
-            "ideas, 'context-node' for compressed graph anchors, or 'skill' for "
-            "portable skills.",
+            "ideas, 'brd' for business requirements documents, 'context-node' for "
+            "compressed graph anchors, or 'skill' for portable skills.",
         )
     # ENC-FTR-078 AC-2: strict allow-list on writes. Legacy values remain readable
     # on GET but are rejected on PUT/PATCH. Pedagogical error redirects agents to
@@ -2072,19 +2136,15 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
                 canonical_attempt=canonical,
                 dictionary_entity="document.doc",
             )
+        # ENC-FTR-152 AC-4: a graduated pattern has exactly one write path.
+        if canonical in GRADUATED_SUBTYPEPATTERNS:
+            return _subtypepattern_graduated_error(canonical)
         subtypepattern_canonical = canonical
 
-    # --- ENC-FTR-078 AC-15: doc title colon-prefix rejection ---
-    if document_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
-        return _error(
-            400,
-            _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
-            code="doc_title_colon_prefix_disallowed",
-            title=title,
-            rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
-            remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word.",
-            dictionary_entity="document.doc",
-        )
+    # --- ENC-FTR-078 AC-15 / ENC-FTR-152 AC-3: title colon-prefix rejection (doc, brd) ---
+    title_prefix_error = _title_colon_prefix_error(title, document_subtype, in_patch=False)
+    if title_prefix_error:
+        return title_prefix_error
 
     # --- Semantic handoff-detection guard (ENC-FTR-077) ---
     # When subtype is 'doc', check for handoff-like patterns in title/content.
@@ -3063,17 +3123,10 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         title = str(body["title"]).strip()
         if not title or len(title) > MAX_TITLE_LENGTH:
             return _error(400, f"Title must be 1-{MAX_TITLE_LENGTH} characters.")
-        # ENC-FTR-078 AC-15: apply title colon-prefix rule when post-patch subtype is 'doc'.
-        if final_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
-            return _error(
-                400,
-                _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
-                code="doc_title_colon_prefix_disallowed",
-                title=title,
-                rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
-                remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word in the same PATCH.",
-                dictionary_entity="document.doc",
-            )
+        # ENC-FTR-078 AC-15 / ENC-FTR-152 AC-3: title colon-prefix rule on the post-patch subtype.
+        title_prefix_error = _title_colon_prefix_error(title, final_subtype, in_patch=True)
+        if title_prefix_error:
+            return title_prefix_error
         expr_parts.append("title = :title")
         attr_values[":title"] = {"S": title}
 
@@ -3174,8 +3227,20 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
                     canonical_attempt=sp_canonical,
                     dictionary_entity="document.doc",
                 )
+            # ENC-FTR-152 AC-4: a graduated pattern has exactly one write path.
+            if sp_canonical in GRADUATED_SUBTYPEPATTERNS:
+                return _subtypepattern_graduated_error(sp_canonical)
             expr_parts.append("subtypepattern = :sp")
             attr_values[":sp"] = {"S": sp_canonical}
+    elif (
+        _subtype_change_staged
+        and final_subtype != "doc"
+        and existing.get("subtypepattern", {}).get("S", "")
+    ):
+        # ENC-FTR-152: subtypepattern is doc-only, so a patch that moves a document off
+        # 'doc' clears the stale value rather than leaving it on the new subtype.
+        expr_parts.append("subtypepattern = :sp")
+        attr_values[":sp"] = {"S": ""}
 
     if "status" in body:
         status = str(body["status"]).strip().lower()
@@ -4867,12 +4932,36 @@ def _handle_search(qs: Dict) -> Dict:
     # ENC-FTR-078 AC-17: subtypepattern filter. Canonicalizes input (trim+lowercase).
     # Returns only document_subtype='doc' records with matching canonical subtypepattern.
     subtypepattern_filter = qs.get("subtypepattern", "").strip().lower()
-    if subtypepattern_filter:
-        docs = [
-            d for d in docs
-            if d.get("document_subtype", "general") == "doc"
+    deprecation: Optional[Dict[str, str]] = None
+
+    def _legacy_pattern_match(d: Dict[str, Any]) -> bool:
+        return (
+            d.get("document_subtype", "general") == "doc"
             and d.get("subtypepattern", "").strip().lower() == subtypepattern_filter
-        ]
+        )
+
+    if subtypepattern_filter in GRADUATED_SUBTYPEPATTERNS:
+        # ENC-FTR-152 AC-7: deprecated read alias for one minor version. With no subtype
+        # filter it returns the graduated subtype plus any not-yet-migrated legacy rows, so
+        # reads stay whole between deploy and backfill. document_subtype='doc' keeps the raw
+        # legacy probe that the census and backfill rely on.
+        graduated_to = GRADUATED_SUBTYPEPATTERNS[subtypepattern_filter]
+        deprecation = {
+            "field": "subtypepattern",
+            "value": subtypepattern_filter,
+            "replacement": f"document_subtype={graduated_to}",
+            "ref": "ENC-FTR-152",
+            "removal": "next minor version",
+        }
+        if subtype_filter == "doc":
+            docs = [d for d in docs if _legacy_pattern_match(d)]
+        else:
+            docs = [
+                d for d in docs
+                if d.get("document_subtype", "general") == graduated_to or _legacy_pattern_match(d)
+            ]
+    elif subtypepattern_filter:
+        docs = [d for d in docs if _legacy_pattern_match(d)]
 
     # Don't include content in search results
     for d in docs:
@@ -4882,12 +4971,15 @@ def _handle_search(qs: Dict) -> Dict:
     # default used by feed_query and the document candidate-list endpoint.
     docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
 
-    return _response(200, {
+    payload: Dict[str, Any] = {
         "success": True,
         "documents": docs[:PAGE_SIZE],
         "count": len(docs[:PAGE_SIZE]),
         "total_matches": len(docs),
-    })
+    }
+    if deprecation:
+        payload["deprecation"] = deprecation
+    return _response(200, payload)
 
 
 # ---------------------------------------------------------------------------
