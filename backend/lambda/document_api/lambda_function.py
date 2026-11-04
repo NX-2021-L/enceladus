@@ -40,6 +40,8 @@ import logging
 import os
 import re
 import time
+
+_WA_T0 = time.perf_counter()  # ENC-TSK-S26-0A: init_ms origin
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote
@@ -438,6 +440,140 @@ AGENT_LAYERS = {"supervisor", "coord-lead", "dispatched-agent", "product-lead-te
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+import base64
+import platform
+import sys
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-S26-0A: write-path audit line ([WRITE-AUDIT]) + correlation_id.
+# Duplicated per Lambda (stdlib only, no shared layer change). One JSON line per
+# mutating request; correlation_id arrives as header X-Correlation-Id or body
+# field correlation_id (the body field is stripped before routing).
+# ---------------------------------------------------------------------------
+_WA_COLD = True
+_WA: Dict[str, Any] = {}  # per-invocation state (Lambda runs one request at a time)
+
+
+def _wa_hdr(event: Dict, name: str) -> str:
+    for k, v in (event.get("headers") or {}).items():
+        if str(k).lower() == name:
+            return str(v or "").strip()
+    return ""
+
+
+def _wa_begin(event: Dict, context: Any, surface: str) -> None:
+    global _WA_COLD
+    cold, _WA_COLD = _WA_COLD, False
+    _WA.clear()
+    _WA.update({
+        "surface": surface, "t0": time.perf_counter(), "cold_start": cold, "ddb_ops": 0, "ddb_ms": 0.0,
+        "ddb_retries": 0, "t": {}, "version_seq": None, "extra": {},
+        "request_id": str(getattr(context, "aws_request_id", "") or ""),
+        "memory_mb": getattr(context, "memory_limit_in_mb", None),
+        "function_version": getattr(context, "function_version", None),
+        "correlation_id": _wa_hdr(event, "x-correlation-id"),
+        "idempotency_key": _wa_hdr(event, "idempotency-key"),
+    })
+    raw = event.get("body")
+    if isinstance(raw, str) and event.get("isBase64Encoded"):
+        try:
+            raw = base64.b64decode(raw).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return
+    if isinstance(raw, str) and ("correlation_id" in raw or "idempotency_key" in raw):
+        try:
+            b = json.loads(raw)
+        except ValueError:
+            return
+        if isinstance(b, dict):
+            if "correlation_id" in b:  # accepted, stripped from every field write
+                cid = str(b.pop("correlation_id") or "").strip()
+                _WA["correlation_id"] = _WA["correlation_id"] or cid
+                event["body"], event["isBase64Encoded"] = json.dumps(b), False
+            _WA["idempotency_key"] = _WA["idempotency_key"] or str(b.get("idempotency_key") or "")
+
+
+def _wa_timed(key: str):
+    def deco(fn):
+        def inner(*a, **k):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **k)
+            finally:
+                if _WA:
+                    _WA["t"][key] = _WA["t"].get(key, 0.0) + (time.perf_counter() - t) * 1000
+        inner.__name__, inner.__doc__ = fn.__name__, fn.__doc__
+        return inner
+    return deco
+
+
+def _wa_ddb_attach(client: Any) -> None:
+    try:
+        client.meta.events.register("before-call.dynamodb", _wa_ddb_before)
+        client.meta.events.register("after-call.dynamodb", _wa_ddb_after)
+    except Exception:  # noqa: BLE001 - audit must never break a write
+        pass
+
+
+def _wa_ddb_before(**_kw: Any) -> None:
+    if _WA:
+        _WA["_ts"] = time.perf_counter()
+
+
+def _wa_ddb_after(parsed: Any = None, **_kw: Any) -> None:
+    if _WA:
+        _WA["ddb_ops"] += 1
+        _WA["ddb_ms"] += (time.perf_counter() - _WA.pop("_ts", time.perf_counter())) * 1000
+        _WA["ddb_retries"] += int(((parsed or {}).get("ResponseMetadata") or {}).get("RetryAttempts") or 0)
+
+
+def _wa_find_id(resp: Any) -> str:
+    try:
+        d = json.loads(resp.get("body") or "{}")
+        for _ in range(2):
+            if not isinstance(d, dict):
+                break
+            for k in ("record_id", "item_id", "document_id", "id"):
+                if d.get(k):
+                    return str(d[k]).split("#")[-1]
+            d = next((v for v in d.values() if isinstance(v, dict)), None)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _wa_emit(tool: str, project_id: str, record_id: str, status: int, extra: Optional[Dict] = None) -> None:
+    try:
+        if not _WA:
+            return
+        st = _WA
+        total = (time.perf_counter() - st["t0"]) * 1000
+        outcome = "success" if status < 400 else ("rejected" if status < 500 else "error")
+        t = st["t"]
+        line = {
+            "correlation_id": st["correlation_id"] or None, "request_id": st["request_id"], "tool": tool,
+            "project_id": project_id or None, "record_id": record_id or None,
+            "idempotency_key": st["idempotency_key"] or None, "surface": st["surface"],
+            "attempt_outcome": outcome, "success": outcome == "success", "http_status": status,
+            "server_total_ms": int(total), "cold_start": st["cold_start"],
+            "init_ms": _WA_INIT_MS if st["cold_start"] else 0,
+            "t_auth_ms": int(t.get("t_auth_ms", 0)), "t_validate_ms": int(t.get("t_validate_ms", 0)),
+            "t_counter_ms": int(t.get("t_counter_ms", 0)), "t_ddb_ms": int(st["ddb_ms"]),
+            "ddb_ops": st["ddb_ops"], "ddb_retries": st["ddb_retries"],
+            "memory_mb": st["memory_mb"], "runtime": sys.version.split()[0], "arch": platform.machine(),
+            "function_version": st["function_version"], "hops": 1, "version_seq": st["version_seq"],
+            "t_ack": int(time.time() * 1000),
+        }
+        line.update({k: (int(v) if k.startswith("t_") and k.endswith("_ms") else v) for k, v in t.items()
+                     if k not in line})
+        line.update(st.get("extra") or {})
+        line.update(extra or {})
+        print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        _WA.clear()
+
 # ---------------------------------------------------------------------------
 # Module-level caches
 # ---------------------------------------------------------------------------
@@ -779,6 +915,7 @@ def _extract_token(event: Dict) -> Optional[str]:
     return None
 
 
+@_wa_timed("t_auth_ms")
 def _authenticate(event: Dict, required_scopes: Optional[List[str]] = None) -> Tuple[Optional[Dict], Optional[Dict]]:
     """Authenticate request. Returns (claims, None) or (None, error_response)."""
     headers = event.get("headers") or {}
@@ -869,6 +1006,7 @@ def _get_ddb():
             "dynamodb", region_name=DYNAMODB_REGION,
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
+        _wa_ddb_attach(_ddb)  # ENC-TSK-S26-0A
     return _ddb
 
 
@@ -992,6 +1130,7 @@ def _is_table_divider(line: str) -> bool:
     return bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line))
 
 
+@_wa_timed("t_compliance_ms")
 def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> Dict[str, Any]:
     warnings: List[str] = []
     lines = content.splitlines()
@@ -1281,6 +1420,7 @@ def _is_allowed_file_name(file_name: str) -> bool:
     return any(lower_name.endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS)
 
 
+@_wa_timed("t_s3_ms")
 def _upload_content(
     project_id: str, document_id: str, content: str, version: Optional[int] = None,
 ) -> Tuple[str, str, int]:
@@ -1382,6 +1522,7 @@ def _put_version_object_immutable(s3: Any, key: str, content_bytes: bytes) -> No
     )
 
 
+@_wa_timed("t_s3_ms")
 def _upload_content_staged(
     project_id: str, document_id: str, content: str, next_version: int,
 ) -> Tuple[str, str, int]:
@@ -1661,6 +1802,7 @@ def _stable_doc_id(seed: str) -> str:
     return f"DOC-{digest}"
 
 
+@_wa_timed("t_s3_ms")
 def _put_document_content_bytes(
     project_id: str,
     document_id: str,
@@ -2083,6 +2225,9 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
 
     # Compliance check (pass subtype for COE section warnings — ENC-FTR-077)
     compliance = _evaluate_markdown_compliance(content, document_subtype=document_subtype)
+    if _WA:  # ENC-TSK-S26-0A / ENC-TSK-E73
+        _WA["project_id"] = project_id
+        _WA["extra"]["document_subtype"] = document_subtype
     if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
         return _error(
             400,
@@ -2524,6 +2669,8 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     try:
         _p72_seq = _allocate_document_version_seq()
         item["version_seq"] = {"N": str(_p72_seq)}
+        if _WA:
+            _WA["version_seq"] = _p72_seq  # ENC-TSK-S26-0A
         item["feed_scope"] = {"S": FEED_SCOPE}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ENC-TSK-P72] version_seq allocation failed on create (non-fatal): %s", exc)
@@ -2580,6 +2727,10 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if document_subtype == "doc" and subtypepattern_canonical:
         item["subtypepattern"] = {"S": subtypepattern_canonical}
 
+    if _WA.get("correlation_id"):  # ENC-TSK-S26-0A
+        item["correlation_id"] = {"S": _WA["correlation_id"]}
+    if _WA.get("write_tool"):  # governed_lag_ms `tool` dimension source
+        item["write_tool"] = {"S": _WA["write_tool"]}
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
     except Exception as exc:
@@ -2960,6 +3111,8 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
 
     current_version = int(existing.get("version", {}).get("N", "0"))
     project_id = existing.get("project_id", {}).get("S", "")
+    if _WA:
+        _WA["project_id"] = project_id  # ENC-TSK-S26-0A
     now = _now_z()
 
     # ENC-TSK-L47 / ENC-TSK-P70: If-Match / HTTP 409|412 per-record precondition
@@ -3549,6 +3702,8 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             attr_values[":rbl"] = {"N": str(readable_body_length)}
         try:
             compliance = _evaluate_markdown_compliance(content, document_subtype=final_subtype)
+            if _WA:
+                _WA["extra"]["document_subtype"] = final_subtype
             if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
                 return _error(
                     400,
@@ -4038,10 +4193,17 @@ def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
     """AC-7: returns (extra_set_clauses, extra_attr_values) stamping
     version_seq + feed_scope in the SAME UpdateItem as the caller's write."""
     seq = _allocate_document_version_seq()
-    return (
-        ["version_seq = :p72_vseq", "feed_scope = :p72_fscope"],
-        {":p72_vseq": {"N": str(seq)}, ":p72_fscope": {"S": FEED_SCOPE}},
-    )
+    clauses = ["version_seq = :p72_vseq", "feed_scope = :p72_fscope"]
+    vals: Dict[str, Any] = {":p72_vseq": {"N": str(seq)}, ":p72_fscope": {"S": FEED_SCOPE}}
+    if _WA:  # ENC-TSK-S26-0A: correlation_id lands on the item in the same UpdateItem
+        _WA["version_seq"] = seq
+        if _WA.get("correlation_id"):
+            clauses.append("correlation_id = :wa_cid")
+            vals[":wa_cid"] = {"S": _WA["correlation_id"]}
+        if _WA.get("write_tool"):
+            clauses.append("write_tool = :wa_tool")
+            vals[":wa_tool"] = {"S": _WA["write_tool"]}
+    return clauses, vals
 
 
 def _append_history_sidecar(project_id: str, document_id: str, events: List[Dict[str, Any]]) -> None:
@@ -5122,7 +5284,7 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict, bool, bool, b
 # ---------------------------------------------------------------------------
 
 
-def lambda_handler(event: Dict, context: Any) -> Dict:
+def _lambda_handler_inner(event: Dict, context: Any) -> Dict:
     # ENC-TSK-729: internal push-on-write trigger from coordination_api (direct Lambda invocation,
     # no HTTP context). Must be checked before _parse_request which expects an HTTP event.
     if event.get("_governance_sync_push"):
@@ -5162,3 +5324,48 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return _handle_patch(event, claims, document_id)
     else:
         return _error(405, f"Method {method} not allowed.")
+
+
+def _wa_caller_environment() -> str:
+    env = os.environ.get("ENVIRONMENT_SUFFIX") or os.environ.get("ENV_SUFFIX") or os.environ.get("ENVIRONMENT") or ""
+    if env:
+        return env.strip().lstrip("-").lower()
+    return "gamma" if "gamma" in os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").lower() else "prod"
+
+
+def lambda_handler(event: Dict, context: Any) -> Dict:
+    """ENC-TSK-S26-0A wrapper: one [WRITE-AUDIT] line per mutating request, correlation_id accepted."""
+    method = ""
+    if isinstance(event, dict) and not event.get("_governance_sync_push"):
+        method = str(
+            (event.get("requestContext") or {}).get("http", {}).get("method") or event.get("httpMethod", "")
+        ).upper()
+    if method not in ("POST", "PUT", "PATCH"):
+        return _lambda_handler_inner(event, context)
+    _wa_begin(event, context, "document_api")
+    segs = (event.get("rawPath") or event.get("path", "")).rstrip("/").split("/")
+    doc_id = ""
+    if segs[-1] == "sections":
+        tool, doc_id = "documents.patch_section", (segs[-2] if len(segs) > 1 else "")
+    elif method == "PATCH":
+        tool, doc_id = "documents.patch", segs[-1]
+    else:
+        tool = "documents.put"
+    _WA["write_tool"] = tool  # stamped on the item beside correlation_id
+    status = 500
+    resp: Any = None
+    try:
+        resp = _lambda_handler_inner(event, context)
+        status = int((resp or {}).get("statusCode", 200))
+        return resp
+    finally:
+        if _WA and tool == "documents.put":  # ENC-TSK-E73 fields (attempt_outcome is on every line)
+            _WA["extra"]["caller_environment"] = _wa_caller_environment()
+            try:
+                _WA["extra"]["content_hash"] = json.loads((resp or {}).get("body") or "{}").get("content_hash")
+            except Exception:  # noqa: BLE001
+                _WA["extra"]["content_hash"] = None
+        _wa_emit(tool, _WA.get("project_id") or "", doc_id or (_wa_find_id(resp) if resp else ""), status)
+
+
+_WA_INIT_MS = int((time.perf_counter() - _WA_T0) * 1000)
