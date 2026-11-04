@@ -23,6 +23,7 @@ from typing import Dict, List
 import stats
 
 MAX_RUNS = 3
+LAG_METRIC = "projection_lag_ms"  # ENC-TSK-S46-0B: also compared when present in both sides
 
 
 def load_run(path: str) -> List[dict]:
@@ -64,7 +65,7 @@ def _cell_stats(samples: List[float], key: str, resamples: int) -> dict:
 
 
 def compare(pre_paths: List[str], post_paths: List[str], metric: str = "client_total_ms",
-            resamples: int = stats.RESAMPLES) -> dict:
+            resamples: int = stats.RESAMPLES, include_lag: bool = True) -> dict:
     if len(pre_paths) > MAX_RUNS or len(post_paths) > MAX_RUNS:
         raise ValueError(f"at most {MAX_RUNS} runs per side")
     pre, post = side_cells(pre_paths, metric), side_cells(post_paths, metric)
@@ -90,9 +91,14 @@ def compare(pre_paths: List[str], post_paths: List[str], metric: str = "client_t
                 "gating_ok": True if name == "p50" else bool(s_pre["p95_gating_ok"] and s_post["p95_gating_ok"]),
             }
         cells[key] = entry
-    return {"metric": metric, "resamples": resamples, "pre_runs": pre_paths, "post_runs": post_paths,
-            "cells_only_pre": sorted(set(pre) - set(post)), "cells_only_post": sorted(set(post) - set(pre)),
-            "cells": cells}
+    result = {"metric": metric, "resamples": resamples, "pre_runs": pre_paths, "post_runs": post_paths,
+              "cells_only_pre": sorted(set(pre) - set(post)), "cells_only_post": sorted(set(post) - set(pre)),
+              "cells": cells}
+    if include_lag and metric != LAG_METRIC:
+        lag = compare(pre_paths, post_paths, LAG_METRIC, resamples, include_lag=False)
+        if lag["cells"]:
+            result["projection_lag"] = lag
+    return result
 
 
 def to_markdown(result: dict) -> str:
@@ -116,7 +122,10 @@ def to_markdown(result: dict) -> str:
             f"| {c['pre']['p50']:.1f} | {c['post']['p50']:.1f} | {d50['value_ms']:+.1f} [{d50['ci95'][0]:+.1f}, {d50['ci95'][1]:+.1f}] "
             f"| {c['pre']['p95']:.1f} | {c['post']['p95']:.1f} | {d95['value_ms']:+.1f} [{d95['ci95'][0]:+.1f}, {d95['ci95'][1]:+.1f}] "
             f"| p50 {verdict(d50)}; p95 {verdict(d95)} | {'ok' if c['pool_consistent'] else 'DIVERGENT'} |")
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    if result.get("projection_lag"):
+        text += "\nProjection lag (`projection_lag_ms`, t_projected - t_ack):\n\n" + to_markdown(result["projection_lag"])
+    return text
 
 
 def main(argv=None) -> int:
