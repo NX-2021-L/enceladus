@@ -147,6 +147,7 @@ class PayloadTests(unittest.TestCase):
             st = a["steps"][0]
             self.assertEqual(st["action"], "documents.put")
             self.assertEqual(len(st["arguments"]["content"].encode()), size)
+            self.assertEqual(st["arguments"]["document_subtype"], "doc")
 
     def test_chained_vs_independent(self):
         _, ind = wire.build_operation("execute_10_independent", "P", self.POOL, "GH")
