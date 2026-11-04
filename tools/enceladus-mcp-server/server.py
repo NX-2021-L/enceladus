@@ -2440,12 +2440,11 @@ _TOOL_FUNCTION_DEFAULTS = {
     "document": ("DOCUMENT_TOOL_FUNCTION", "devops-document-api"),
     "checkout": ("CHECKOUT_TOOL_FUNCTION", "enceladus-checkout-service"),
 }
-# Invoke errors that mean "the request was NOT delivered": safe to retry once over HTTP.
+# Invoke errors that mean "the invoke never reached the function" (the write did not run): safe to retry once over
+# HTTP. FunctionError is NOT here: the function ran, so retrying could apply a write twice.
 _TOOL_INVOKE_FALLBACK_CODES = frozenset({
-    "TooManyRequestsException", "ThrottlingException", "ResourceNotFoundException", "ResourceConflictException",
-    "ServiceException", "EC2ThrottledException", "EC2UnexpectedException", "AccessDeniedException",
-    "InvalidRequestContentException", "RequestTooLargeException", "SnapStartNotReadyException",
-    "SnapStartTimeoutException", "SnapStartException",
+    "ResourceNotFoundException", "AccessDeniedException", "TooManyRequestsException", "ThrottlingException",
+    "EC2ThrottledException", "ServiceException",
 })
 _lambda_client = None
 
@@ -2560,10 +2559,23 @@ def _invoke_tool_lambda_raw(function_name: str, event: Dict[str, Any]) -> Tuple[
         if name in ("EndpointConnectionError", "ConnectTimeoutError", "NoCredentialsError", "RuntimeError"):
             raise _ToolInvokeUnavailable(name, str(exc)) from exc
         raise
-    if resp.get("FunctionError"):
-        raise _ToolInvokeUnavailable("FunctionError", str(resp.get("FunctionError")))
     payload_stream = resp.get("Payload")
     raw = payload_stream.read() if hasattr(payload_stream, "read") else (payload_stream or b"")
+    if resp.get("FunctionError"):
+        # The function RAN and failed: never fall back (a write could run twice). Surface the tool's own
+        # error envelope as-is when it produced one; otherwise wrap Lambda's {errorType, errorMessage}.
+        try:
+            err = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+        except (ValueError, UnicodeDecodeError):
+            err = {}
+        if isinstance(err, dict) and isinstance(err.get("error_envelope"), dict):
+            return 500, json.dumps(err)
+        message = f"{(err or {}).get('errorType', 'FunctionError')}: {(err or {}).get('errorMessage', 'tool Lambda failed')}"
+        return 500, json.dumps({
+            "success": False, "error": message,
+            "error_envelope": {"code": "INTERNAL_ERROR", "message": message, "retryable": False,
+                               "details": {"function_error": str(resp.get("FunctionError"))}},
+        })
     try:
         out = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -2641,6 +2653,8 @@ def _try_direct_tool_call(
         _write_audit_note({
             "audit_kind": "invoke_fallback",
             "invoke_mode": "direct_fallback",
+            "attempt_outcome": "error",  # S26-0D counters exclude audit_kind invoke_fallback lines
+            "success": False,
             "correlation_id": _current_correlation_id(),
             "tool_function": f"{function_name}:{WRITE_TOOL_INVOKE_QUALIFIER}",
             "method": method.upper(),

@@ -267,7 +267,8 @@ def test_reads_and_http_mode_stay_on_http(monkeypatch):
 @pytest.mark.parametrize("fake_factory,reason", [
     (lambda: FakeLambda(error=_client_error("ResourceNotFoundException")), "ResourceNotFoundException"),
     (lambda: FakeLambda(error=_client_error("TooManyRequestsException")), "TooManyRequestsException"),
-    (lambda: FakeLambda(function_error="Unhandled"), "FunctionError"),
+    (lambda: FakeLambda(error=_client_error("AccessDeniedException")), "AccessDeniedException"),
+    (lambda: FakeLambda(error=_client_error("EC2ThrottledException")), "EC2ThrottledException"),
 ])
 def test_invoke_error_falls_back_to_http_once_and_logs(monkeypatch, fake_factory, reason):
     s = _load_server()
@@ -284,7 +285,44 @@ def test_invoke_error_falls_back_to_http_once_and_logs(monkeypatch, fake_factory
     notes = [json.loads(l.split(" ", 1)[1]) for l in buf.getvalue().splitlines() if l.startswith("[WRITE-AUDIT] ")]
     assert len(notes) == 1
     assert notes[0]["invoke_mode"] == "direct_fallback" and notes[0]["fallback_reason"] == reason
+    assert notes[0]["attempt_outcome"] == "error" and notes[0]["success"] is False
+    assert notes[0]["audit_kind"] == "invoke_fallback"
     assert notes[0]["correlation_id"] == "corr-f" and notes[0]["tool_function"] == "devops-tracker-mutation-api:live"
+
+
+def test_function_error_never_falls_back_and_returns_tool_envelope(monkeypatch):
+    s = _load_server()
+    s._begin_request_context(None)
+    s._absorb_request_headers({})
+    monkeypatch.setenv("WRITE_TOOL_INVOKE_MODE", "direct")
+    tool_env = {"success": False, "error": "boom", "error_envelope": {
+        "code": "UPSTREAM_ERROR", "message": "boom", "retryable": True, "details": {}}}
+    for reply in (tool_env, {"errorType": "KeyError", "errorMessage": "'x'"}):
+        fake = FakeLambda([reply], function_error="Unhandled")
+        s._lambda_client = fake
+        buf = io.StringIO()
+
+        async def stub(args):
+            return s._result_text(s._tracker_api_request("POST", "/enceladus/task", payload={"t": 1}))
+
+        with patch.dict(s._TOOL_HANDLERS, {"tracker_create": stub}), \
+                patch.object(s, "_current_governance_hash_for_validation", return_value=GOV), \
+                patch.object(s.urllib.request, "urlopen", side_effect=AssertionError("a write must not run twice")), \
+                contextlib.redirect_stdout(buf):
+            _run(s.call_tool("tracker_create", {"project_id": "enceladus", "governance_hash": GOV}))
+        assert len(fake.calls) == 1
+        lines = [json.loads(l.split(" ", 1)[1]) for l in buf.getvalue().splitlines() if l.startswith("[WRITE-AUDIT] ")]
+        assert len(lines) == 1 and "audit_kind" not in lines[0]  # no fallback note
+        assert lines[0]["invoke_mode"] == "direct" and lines[0]["attempt_outcome"] == "error"
+        assert lines[0]["success"] is False
+    s._lambda_client = FakeLambda([tool_env], function_error="Unhandled")
+    with patch.object(s.urllib.request, "urlopen", side_effect=AssertionError("no HTTP")):
+        got = s._tracker_api_request("POST", "/enceladus/task", payload={})
+    assert got["error_envelope"]["code"] == "UPSTREAM_ERROR" and got["error_envelope"]["retryable"] is True
+    s._lambda_client = FakeLambda([{"errorType": "KeyError", "errorMessage": "'x'"}], function_error="Unhandled")
+    with patch.object(s.urllib.request, "urlopen", side_effect=AssertionError("no HTTP")):
+        got = s._tracker_api_request("POST", "/enceladus/task", payload={})
+    assert got["error_envelope"]["code"] == "INTERNAL_ERROR" and got["error_envelope"]["retryable"] is False
 
 
 def test_read_timeout_is_not_retried_over_http(monkeypatch):

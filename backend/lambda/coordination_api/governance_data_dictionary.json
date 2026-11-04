@@ -9793,8 +9793,12 @@
         },
         "invoke_mode": {
           "type": "string",
-          "definition": "ENC-TSK-S28-0F: how the call reached the write tool Lambda: direct (qualified `<fn>:live` Lambda invoke), http (CloudFront+API Gateway), direct_fallback (direct invoke failed -- FunctionError, throttle, ResourceNotFound, access denied -- and the call was retried once over HTTP), none (the call made no write-tool request). Reads always use http and do not set it. A dedicated `[WRITE-AUDIT]` note line with audit_kind invoke_fallback, tool_function, fallback_reason is also emitted on every fallback.",
+          "definition": "ENC-TSK-S28-0F: how the call reached the write tool Lambda: direct (qualified `<fn>:live` Lambda invoke; includes a tool FunctionError, because the function ran), http (CloudFront+API Gateway), direct_fallback (the invoke never reached the function -- ResourceNotFound, AccessDenied, throttling, EC2Throttled, ServiceException, connection errors -- and the call was retried once over HTTP), none (no write-tool request). Reads always use http and do not set it. Every fallback also emits a separate note line with audit_kind invoke_fallback.",
           "usage_guidance": "Alarm on direct_fallback. Join latency by invoke_mode to compare the direct path against the API Gateway path."
+        },
+        "audit_kind": {
+          "type": "string|null",
+          "definition": "Present only on non-attempt note lines. invoke_fallback marks the line emitted when a direct invoke failed to reach the function and the call fell back to HTTP; it carries attempt_outcome error, success false, tool_function, fallback_reason and the correlation_id. The S26-0D counters exclude lines with an audit_kind (the real attempt is counted on its own line)."
         },
         "t_route_ms": {
           "type": "integer",
@@ -9972,7 +9976,7 @@
         },
         "fallback": {
           "type": "string",
-          "definition": "On a delivery-class Invoke failure (FunctionError, TooManyRequests/Throttling, ResourceNotFound, AccessDenied, SnapStart*, connect errors) the call is retried ONCE over the HTTP path and the audit line says invoke_mode direct_fallback. A read timeout is NOT retried (ambiguous outcome); it returns UPSTREAM_ERROR retryable."
+          "definition": "The call is retried ONCE over the HTTP path only when the invoke did not reach the function (ResourceNotFound, AccessDenied, TooManyRequests/Throttling, EC2Throttled, ServiceException, endpoint/connection errors before a response); the audit line then says invoke_mode direct_fallback. A FunctionError (the function ran) is NEVER retried: the tool's error envelope is returned as-is (retryable only if the tool says so) with invoke_mode direct and attempt_outcome error. A read timeout is not retried either (ambiguous outcome) and returns UPSTREAM_ERROR retryable."
         },
         "governance_hash": {
           "type": "string",
