@@ -1,0 +1,8 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"correlation_id": ?"(?<correlation_id>[^"]*)"/
+| parse @message /"consumer": ?"(?<consumer>[^"]*)"/
+| parse @message /"t_projection_done": ?(?<t_projection_done>[0-9.]+)/
+| filter ispresent(correlation_id)
+| fields if(ispresent(consumer) and ispresent(t_projection_done), 1, 0) as consumed_i
+| stats sum(consumed_i) as consumed_lines, count_distinct(correlation_id) as distinct_correlation_ids

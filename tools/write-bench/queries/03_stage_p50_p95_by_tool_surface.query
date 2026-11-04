@@ -1,0 +1,19 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"tool": ?"(?<tool>[^"]*)"/
+| parse @message /"surface": ?"(?<surface>[^"]*)"/
+| parse @message /"t_edge_ms": ?(?<t_edge_ms>[0-9.]+)/
+| parse @message /"t_auth_ms": ?(?<t_auth_ms>[0-9.]+)/
+| parse @message /"t_route_ms": ?(?<t_route_ms>[0-9.]+)/
+| parse @message /"t_invoke_ms": ?(?<t_invoke_ms>[0-9.]+)/
+| parse @message /"t_governance_ms": ?(?<t_governance_ms>[0-9.]+)/
+| parse @message /"t_validate_ms": ?(?<t_validate_ms>[0-9.]+)/
+| parse @message /"t_idempotency_ms": ?(?<t_idempotency_ms>[0-9.]+)/
+| parse @message /"t_counter_ms": ?(?<t_counter_ms>[0-9.]+)/
+| parse @message /"t_ddb_ms": ?(?<t_ddb_ms>[0-9.]+)/
+| parse @message /"t_s3_ms": ?(?<t_s3_ms>[0-9.]+)/
+| parse @message /"t_compliance_ms": ?(?<t_compliance_ms>[0-9.]+)/
+| parse @message /"init_ms": ?(?<init_ms>[0-9.]+)/
+| filter ispresent(tool) and ispresent(t_ddb_ms)
+| stats count(*) as n, pct(t_edge_ms, 50) as t_edge_ms_p50, pct(t_edge_ms, 95) as t_edge_ms_p95, pct(t_auth_ms, 50) as t_auth_ms_p50, pct(t_auth_ms, 95) as t_auth_ms_p95, pct(t_route_ms, 50) as t_route_ms_p50, pct(t_route_ms, 95) as t_route_ms_p95, pct(t_invoke_ms, 50) as t_invoke_ms_p50, pct(t_invoke_ms, 95) as t_invoke_ms_p95, pct(t_governance_ms, 50) as t_governance_ms_p50, pct(t_governance_ms, 95) as t_governance_ms_p95, pct(t_validate_ms, 50) as t_validate_ms_p50, pct(t_validate_ms, 95) as t_validate_ms_p95, pct(t_idempotency_ms, 50) as t_idempotency_ms_p50, pct(t_idempotency_ms, 95) as t_idempotency_ms_p95, pct(t_counter_ms, 50) as t_counter_ms_p50, pct(t_counter_ms, 95) as t_counter_ms_p95, pct(t_ddb_ms, 50) as t_ddb_ms_p50, pct(t_ddb_ms, 95) as t_ddb_ms_p95, pct(t_s3_ms, 50) as t_s3_ms_p50, pct(t_s3_ms, 95) as t_s3_ms_p95, pct(t_compliance_ms, 50) as t_compliance_ms_p50, pct(t_compliance_ms, 95) as t_compliance_ms_p95, pct(init_ms, 50) as init_ms_p50, pct(init_ms, 95) as init_ms_p95 by tool, surface
+| sort n desc
