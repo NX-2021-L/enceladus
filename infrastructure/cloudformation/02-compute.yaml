@@ -4227,6 +4227,12 @@ Resources:
         Fn::Sub: ${DataStackName}-TrackerStreamArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): shard-parallel drain. A 20-step execute puts
+      # 20 records on one shard; with ParallelizationFactor 1 the mapping drains them
+      # serially (projection lag 10-16 s). Per-record order is preserved (Lambda keeps
+      # same-partition-key records on one concurrent batch); cross-record order is covered
+      # by the ENC-TSK-S46-0D placeholder guard. Raise only on evidence.
+      ParallelizationFactor: 4
       MaximumBatchingWindowInSeconds: 0
       StartingPosition: LATEST
       FunctionResponseTypes:
@@ -4265,6 +4271,12 @@ Resources:
         Fn::Sub: ${DataStackName}-DocumentsStreamArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): shard-parallel drain. A 20-step execute puts
+      # 20 records on one shard; with ParallelizationFactor 1 the mapping drains them
+      # serially (projection lag 10-16 s). Per-record order is preserved (Lambda keeps
+      # same-partition-key records on one concurrent batch); cross-record order is covered
+      # by the ENC-TSK-S46-0D placeholder guard. Raise only on evidence.
+      ParallelizationFactor: 4
       MaximumBatchingWindowInSeconds: 0
       StartingPosition: LATEST
       FunctionResponseTypes:
@@ -4907,7 +4919,11 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: $.dynamodb.Keys.project_id.S
+          # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): group per tracker record_id so the FIFO drains records
+          # in parallel while each record stays strictly ordered. Was $.dynamodb.Keys.project_id.S (whole project/
+          # corpus drained serially). Cross-record order: ENC-TSK-S46-0D placeholder guard.
+          # MessageDeduplicationId stays $.eventID (ENC-TSK-Q57). Keys is present on REMOVE.
+          MessageGroupId: $.dynamodb.Keys.record_id.S
           MessageDeduplicationId: $.eventID
 
   # ENC-PLN-014 / ENC-FTR-065: Document node graph projection.
@@ -4936,7 +4952,11 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: document
+          # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): group per document_id so the FIFO drains records
+          # in parallel while each record stays strictly ordered. Was document (whole project/
+          # corpus drained serially). Cross-record order: ENC-TSK-S46-0D placeholder guard.
+          # MessageDeduplicationId stays $.eventID (ENC-TSK-Q57). Keys is present on REMOVE.
+          MessageGroupId: $.dynamodb.Keys.document_id.S
           MessageDeduplicationId: $.eventID
 
   # ENC-TSK-L41 / B67 Search2.0: dedicated search-index FIFO (NOT GraphSyncQueue).
