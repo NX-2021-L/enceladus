@@ -18,8 +18,8 @@
   "dependencies": {
     "@cloudscape-design/components": "3.0.1396",
     "@io-kit/auth": "2.4.1",
-    "@io-kit/content": "0.3.2",
-    "@io-kit/feed": "1.2.0",
+    "@io-kit/content": "0.4.0",
+    "@io-kit/feed": "1.3.0",
     "@io-kit/gates": "1.1.0",
     "@io-kit/md": "1.2.0",
     "@io-kit/notify": "0.10.0",
