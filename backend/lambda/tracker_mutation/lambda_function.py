@@ -1592,7 +1592,7 @@ def _s28_marker_put(table: str, project_id: str, key: str, target_id: str, kind:
     item.update({
         "marker_type": {"S": kind}, "target_record_id": {"S": target_id},
         "http_status": {"N": str(int(status))}, "receipt": {"S": receipt}, "receipt_hash": {"S": receipt_hash},
-        "ttl": {"N": str(exp)},  # TTL attribute (table-level TTL not enabled on this table: expiry enforced on read)
+        "ttl": {"N": str(exp)},  # DynamoDB TTL attribute (01-data.yaml); expiry is also enforced on read
         "expires_at": {"S": dt.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%dT%H:%M:%SZ")},
         "created_epoch": {"N": str(int(time.time()))},
     })

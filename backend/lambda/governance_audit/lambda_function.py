@@ -225,6 +225,28 @@ def _collect_stream_records(event: Any) -> List[Dict[str, Any]]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: audit / idempotency-marker rows are write-path bookkeeping, not records.
+# Their key (project_id on the tracker table, document_id on the documents table) begins
+# `audit#` or `idem#`; every stream consumer drops them before any work. A skipped record is
+# consumed (never reported in batchItemFailures).
+# ---------------------------------------------------------------------------
+_S28_META_PREFIXES = ("audit#", "idem#")
+
+
+def _is_s28_meta_row(stream_record: Any) -> bool:
+    try:
+        ddb = stream_record.get("dynamodb") if isinstance(stream_record.get("dynamodb"), dict) else stream_record
+        for image in (ddb.get("Keys"), ddb.get("NewImage"), ddb.get("OldImage")):
+            for attr in ("project_id", "document_id"):
+                value = ((image or {}).get(attr) or {}).get("S")
+                if isinstance(value, str) and value.startswith(_S28_META_PREFIXES):
+                    return True
+    except AttributeError:
+        return False
+    return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Process DynamoDB Streams events and detect write-source anomalies.
 
@@ -238,6 +260,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     clean = 0
 
     for record in records:
+        if _is_s28_meta_row(record):
+            continue  # ENC-TSK-S28-0D: audit/marker row has no write_source by design
         event_name = record.get("eventName", "")
         # Only inspect INSERT and MODIFY events (not REMOVE)
         if event_name not in ("INSERT", "MODIFY"):

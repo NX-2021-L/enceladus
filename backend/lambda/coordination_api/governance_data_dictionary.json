@@ -9947,7 +9947,7 @@
       "usage_guidance": "Invoked only by tools/write-bench/bench.py with the product-lead or an inspect profile; payloads carry X-Correlation-Id and the X-Enc-* client headers so audit lines join to bench samples. Not part of any governed write path."
     },
     "tracker.audit_item": {
-      "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error).",
+      "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error). Stream consumers (graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry) drop any record whose key begins `audit#` or `idem#` before doing any work; skipped records are consumed, never reported in batchItemFailures.",
       "fields": {
         "audit_type": {
           "type": "string",
@@ -10004,7 +10004,7 @@
       }
     },
     "tracker.idempotency_marker": {
-      "description": "ENC-TSK-S28-0D: durable idempotency marker committed in the same TransactWriteItems as the write it protects, written only when the request carries an Idempotency-Key header or body idempotency_key. Keys on the tracker table: project_id = `idem#<project_id>#<key>`, record_id = `marker` (documents table, hash-only: document_id = `idem#<project_id>#<key>#marker`). Before writing, create/update/put/patch read the marker (consistent); a live marker returns the stored receipt byte-identical with HTTP 200 and response header `idempotent_replay: true`, with no second transaction. The marker Put is conditioned on attribute_not_exists OR ttl < now, so a concurrent twin loses inside the transaction, rolls back, and replays. TTL: `ttl` (epoch seconds, now + 24 h) is stored on the row and enforced on read; DynamoDB table-level TTL is NOT enabled on devops-project-tracker or documents, so expired markers persist until a TTL specification on attribute `ttl` is declared (open question on ENC-TSK-S28-0D). Same key reused for a different write tool replays the first receipt (keys are caller-unique by contract).",
+      "description": "ENC-TSK-S28-0D: durable idempotency marker committed in the same TransactWriteItems as the write it protects, written only when the request carries an Idempotency-Key header or body idempotency_key. Keys on the tracker table: project_id = `idem#<project_id>#<key>`, record_id = `marker` (documents table, hash-only: document_id = `idem#<project_id>#<key>#marker`). Before writing, create/update/put/patch read the marker (consistent); a live marker returns the stored receipt byte-identical with HTTP 200 and response header `idempotent_replay: true`, with no second transaction. The marker Put is conditioned on attribute_not_exists OR ttl < now, so a concurrent twin loses inside the transaction, rolls back, and replays. TTL: `ttl` (epoch seconds, now + 24 h) is the DynamoDB TimeToLiveSpecification attribute on both devops-project-tracker and documents (infrastructure/cloudformation/01-data.yaml, ENC-TSK-S28-0D), so expired markers are deleted by DynamoDB (deletion may lag by up to ~48 h); the read path also ignores a marker whose ttl has passed, and a new marker Put overwrites an expired one. Same key reused for a different write tool replays the first receipt (keys are caller-unique by contract).",
       "fields": {
         "receipt": {
           "type": "string",
@@ -10028,7 +10028,7 @@
         },
         "ttl": {
           "type": "number",
-          "definition": "Epoch seconds, creation + 24 h; read-time expiry and candidate DynamoDB TTL attribute."
+          "definition": "Epoch seconds, creation + 24 h; DynamoDB TTL attribute on the tracker and documents tables, also enforced on read."
         },
         "expires_at": {
           "type": "string",

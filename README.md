@@ -62,6 +62,18 @@ With either value the request returns HTTP 500 and the `[WRITE-AUDIT]` line carr
 counts as one DynamoDB op) and `t_commit_ms` to the line. Never set the variable on production functions outside a
 planned fault drill.
 
+Table-level DynamoDB TTL on attribute `ttl` is enabled for the tracker and documents tables
+(`infrastructure/cloudformation/01-data.yaml`); the read path still ignores an expired marker. Stream consumers
+(graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry)
+skip any record whose key begins `audit#` or `idem#`.
+
+**PR notes (ENC-TSK-S28-0D):**
+- A replay of an idempotent write returns HTTP 200 with the stored receipt byte-identical (the first response was 201 for
+  creates) and the response header `idempotent_replay: true`.
+- Pre-S28 tests assert on `put_item` / `update_item` kwargs. The `conftest.py` shim in `backend/lambda/tracker_mutation`
+  and `backend/lambda/document_api` fans each transaction out to those calls for legacy tests only (skipping counter, audit
+  and marker rows). Test modules named `*s28*` bypass the shim and exercise the real `transact_write_items` on moto.
+
 ## License
 
 Enceladus is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE).

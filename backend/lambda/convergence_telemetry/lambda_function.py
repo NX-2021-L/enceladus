@@ -151,10 +151,34 @@ def _fanout_messages(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     return messages
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: audit / idempotency-marker rows are write-path bookkeeping, not records.
+# Their key (project_id on the tracker table, document_id on the documents table) begins
+# `audit#` or `idem#`; every stream consumer drops them before any work. A skipped record is
+# consumed (never reported in batchItemFailures).
+# ---------------------------------------------------------------------------
+_S28_META_PREFIXES = ("audit#", "idem#")
+
+
+def _is_s28_meta_row(stream_record: Any) -> bool:
+    try:
+        ddb = stream_record.get("dynamodb") if isinstance(stream_record.get("dynamodb"), dict) else stream_record
+        for image in (ddb.get("Keys"), ddb.get("NewImage"), ddb.get("OldImage")):
+            for attr in ("project_id", "document_id"):
+                value = ((image or {}).get(attr) or {}).get("S")
+                if isinstance(value, str) and value.startswith(_S28_META_PREFIXES):
+                    return True
+    except AttributeError:
+        return False
+    return False
+
+
 def _handle_fanout(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     sqs = _get_sqs()
     sent = 0
     for rec in records:
+        if _is_s28_meta_row(rec):
+            continue  # ENC-TSK-S28-0D
         if rec.get("eventName") not in ("INSERT", "MODIFY"):
             continue
         new_image = rec.get("dynamodb", {}).get("NewImage")
