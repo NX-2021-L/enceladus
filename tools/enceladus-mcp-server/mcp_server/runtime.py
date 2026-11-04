@@ -11,6 +11,8 @@ ParseRecordId = Callable[[str], tuple]
 InvokeHybridRetrieval = Callable[..., Dict[str, Any]]
 ErrorPayload = Callable[..., Dict[str, Any]]
 ActionCatalog = Callable[[], List[Dict[str, Any]]]
+# ENC-TSK-S29-0A (ruling D4): max_age_s -> current governance hash; "" means "no probe".
+GovernanceProbe = Callable[[float], str]
 
 
 class McpRuntime:
@@ -24,6 +26,8 @@ class McpRuntime:
     enable_context_nodes: bool = False
     # DVP-TSK-843: returns the unwrapped per-action contracts for search(actions.schemas).
     action_catalog: Optional[ActionCatalog] = None
+    # ENC-TSK-S29-0A: per-step governance re-check before each execute commit (None = skip).
+    current_governance_hash: Optional[GovernanceProbe] = None
 
 
 # ENC-TSK-S26-0A: 1-based execute step index for the step currently invoking a raw tool

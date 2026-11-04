@@ -2006,6 +2006,34 @@ def _current_governance_hash_for_validation(provided: str) -> str:
 _gov_cache_preload()
 
 
+def _execute_governance_probe(max_age_s: float) -> str:
+    """ENC-TSK-S29-0A (ruling D4): current governance hash for the per-step execute re-check.
+
+    Composed on the S28-0C in-process cache (``_GOV_CACHE``, keyed by hash, TTL GOVERNANCE_PROBE_TTL_S): a cached
+    value that is fresh AND was loaded no earlier than ``max_age_s`` ago (i.e. at or after the batch started) is
+    served with zero network hops; otherwise exactly one authoritative re-read of the canonical
+    governance-version-current record goes through ``_gov_refetch_verified`` (which repopulates the cache), after
+    which the remaining steps of the batch hit the cache. Never performs an uncached API read per step.
+    Disabled (returns "") by ENCELADUS_EXECUTE_GOVERNANCE_PROBE=off, which execute treats as "no probe".
+    """
+    if os.environ.get("ENCELADUS_EXECUTE_GOVERNANCE_PROBE", "on").strip().lower() in ("off", "0", "false", "no"):
+        return ""
+    cached = str(_GOV_CACHE["hash"] or "")
+    age = time.time() - float(_GOV_CACHE["loaded_at"])
+    if cached and _gov_cache_fresh() and age <= max(max_age_s, 0.0):
+        state = _CALL_STATE.get()
+        if state is not None:
+            state["governance_cache_hit"] = True
+        return cached
+    started = time.perf_counter()
+    try:
+        return _gov_refetch_verified()
+    finally:
+        state = _CALL_STATE.get()
+        if state is not None:
+            state["t_governance_ms"] = state.get("t_governance_ms", 0) + (time.perf_counter() - started) * 1000
+
+
 def _timed_governance_validation(provided: str) -> str:
     """_current_governance_hash_for_validation + write-audit timing (t_governance_ms, cache hit)."""
     state = _CALL_STATE.get()
@@ -4192,7 +4220,9 @@ def _code_mode_tool_catalog() -> list[Tool]:
                 "with resolved underlying calls. Top-level dry_run short-circuits every step; "
                 "step-level dry_run (or arguments.dry_run) short-circuits that step only. A dry step "
                 "never invokes the underlying tool and returns a ResolvedCall. Failures carry "
-                "RFC 9457 problem details (errors[].pointer)."
+                "RFC 9457 problem details (errors[].pointer). All steps are validated before the first "
+                "write. Steps may carry id and depends_on: a declared graph runs on a pool of eight "
+                "with per-step timings, and fails closed (governance_hash_stale) if governance rotates mid-batch."
             ),
             inputSchema={
                 "type": "object",
@@ -4243,6 +4273,12 @@ def _code_mode_tool_catalog() -> list[Tool]:
                                 "dry_run": {
                                     "type": "boolean",
                                     "description": "Optional step-level dry-run override.",
+                                },
+                                "id": {"type": "string", "description": "Optional step id for depends_on."},
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": {"type": ["string", "integer"]},
+                                    "description": "Optional step ids or zero-based indexes that must finish first.",
                                 },
                             },
                             "required": ["action"],
@@ -11472,6 +11508,7 @@ bind_runtime(
     error_payload=_error_payload,
     enable_context_nodes=ENABLE_CONTEXT_NODES,
     action_catalog=_action_catalog,
+    current_governance_hash=_execute_governance_probe,
 )
 
 
