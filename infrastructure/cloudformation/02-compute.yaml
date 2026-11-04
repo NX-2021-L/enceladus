@@ -806,6 +806,10 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt DocumentApiRole.Arn
+      # ENC-TSK-S26-0A (BRD DOC-E32D0ED08473 s7.2): active X-Ray tracing so the document-api hop
+      # appears in the write-path trace (correlation_id is propagated by the MCP server).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         - !If
@@ -5805,6 +5809,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-document-api${EnvironmentSuffix}*"
+              # ENC-TSK-S26-0A: required by TracingConfig Mode=Active on DocumentApiFunction.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBDocuments
                 Effect: Allow
                 Action:
@@ -5978,6 +5989,16 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
                   - !Sub "arn:aws:s3:::enceladus-content${EnvironmentSuffix}-${AWS::AccountId}-${AWS::Region}/mobile/v1/reference/*"
+              # ENC-TSK-S26-0A: gamma writes land under the S3EnvPrefix ("gamma/") in jreese-net;
+              # without this the 2026-11-04 gamma project-create rolled back on the reference write.
+              # Scoped to the reference prefix only (resolves to the statement above on prod).
+              - Sid: S3ReferenceWriteEnvPrefix
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}mobile/v1/reference/*"
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -8732,6 +8753,10 @@ Resources:
       SnapStart:
         ApplyOn: PublishedVersions
       Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-coordination-api-lambda-role-gamma"
+      # ENC-TSK-S26-0A: active X-Ray tracing. The out-of-band role above already carries the
+      # XRayTracing statement (CoordinationApiRole, ENC-TSK-K45 / B66 AC-1).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arm64)

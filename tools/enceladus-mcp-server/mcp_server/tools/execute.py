@@ -16,7 +16,7 @@ from mcp_server.meta_support import (
     meta_tool_success,
     raw_call_summary,
 )
-from mcp_server.runtime import RUNTIME
+from mcp_server.runtime import EXECUTE_STEP_INDEX, RUNTIME
 
 logger = logging.getLogger(__name__)
 
@@ -502,7 +502,11 @@ async def _execute_steps(args: dict, idempotency_key: str = "") -> list[TextCont
             continue
 
         try:
-            raw_call = await RUNTIME.invoke_raw_tool(entry["tool"], step_args)
+            _step_token = EXECUTE_STEP_INDEX.set(index)
+            try:
+                raw_call = await RUNTIME.invoke_raw_tool(entry["tool"], step_args)
+            finally:
+                EXECUTE_STEP_INDEX.reset(_step_token)
         except Exception as exc:
             error_message = str(exc)
             failed_steps.append({"step": index, "action": action, "error": error_message})
