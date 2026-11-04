@@ -5043,15 +5043,16 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
+                # ENC-ISS-891 / ENC-TSK-S26-0H: the role's five inline policies sit at IAM's
+                # 10240-byte aggregate cap, so the resources are expressed as three prefixes:
+                # the coordination API group, every /enceladus/* group (mcp/server, worker-runtime)
+                # and every /aws/lambda/enceladus-mcp-* group (mcp-code, mcp-streamable, the
+                # streaming gateway). Without the last one the prod MCP Lambdas never created a
+                # log stream and the ENC-PLN-104 W0 write-audit lines were lost.
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
-                  # ENC-ISS-891 / ENC-PLN-104 W0.8: the MCP server functions log under their own
-                  # /aws/lambda/<function> groups (LoggingConfig default); without these ARNs the
-                  # prod MCP Lambdas never created a log stream and the W0 write-audit lines were lost.
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-code${EnvironmentSuffix}*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-streamable${EnvironmentSuffix}*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-*"
               # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
               - Sid: XRayTracing
                 Effect: Allow
