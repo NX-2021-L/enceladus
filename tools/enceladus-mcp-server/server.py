@@ -1718,6 +1718,22 @@ def _write_audit_line(fields: Dict[str, Any]) -> None:
         logger.debug("write-audit emit failed", exc_info=True)
 
 
+def _audit_attempt_outcome(content: Any) -> str:
+    """success | rejected (governance/validation refusal) | error (ENC-TSK-S26-0A; query pack S26-0D reads `success`)."""
+    try:
+        if _tool_result_status(content) == "success":
+            return "success"
+        code = _tool_error_code(content)
+        text = str(getattr(content[0], "text", "") if content else "").lower()
+        if code in ("governance_stale", "governance_hash_missing", "record_not_found") or any(
+            m in text for m in ("http 400", "http 403", "http 404", "http 409", "http 412", "http 422", "rejected")
+        ):
+            return "rejected"
+    except Exception:
+        pass
+    return "error"
+
+
 def _build_write_audit_fields(
     name: str, args: Dict[str, Any], step_index: Optional[int], *,
     server_total_ms: int, t_route_ms: int, state: Dict[str, Any],
@@ -1736,6 +1752,9 @@ def _build_write_audit_fields(
         "idempotency_key": idem,
         "execute_step_index": step_index,
         "surface": "mcp_server",
+        "attempt_outcome": state.get("attempt_outcome", "error"),
+        "success": state.get("attempt_outcome", "error") == "success",
+        "dry_run": bool(args.get("dry_run")),
         "server_total_ms": server_total_ms,
         "cold_start": bool(ctx.get("cold_start")),
         "init_ms": int(ctx.get("init_ms") or 0),
@@ -1766,7 +1785,12 @@ async def _run_handler_with_write_audit(
     try:
         handler = handler_lookup()
         t_route_ms = int((time.perf_counter() - started) * 1000)
-        return await handler(args)
+        result = await handler(args)
+        state["attempt_outcome"] = _audit_attempt_outcome(result)
+        return result
+    except BaseException:
+        state.setdefault("attempt_outcome", "error")
+        raise
     finally:
         _CALL_STATE.reset(token)
         try:

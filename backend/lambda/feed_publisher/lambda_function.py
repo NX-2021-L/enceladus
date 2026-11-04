@@ -71,6 +71,73 @@ from boto3.dynamodb.types import TypeDeserializer
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S26-0A: stream-consumer write-audit line ([WRITE-AUDIT]) + governed_lag_ms.
+# Duplicated per consumer (stdlib only). One line per processed governed record
+# (image carries correlation_id or version_seq). governed_lag_ms = t_projection_done
+# - t_ack, where t_ack is the image's t_ack attribute when present, else the item's
+# updated_at (lag_basis says which). ONE EMF metric: governed_lag_ms (Milliseconds),
+# namespace Enceladus/WritePath, single dimension tool.
+# ---------------------------------------------------------------------------
+import datetime as _wa_dt
+import time as _wa_time
+
+
+def _wa_val(image: Dict[str, Any], key: str) -> Any:
+    v = (image or {}).get(key)
+    if isinstance(v, dict):
+        return v.get("S") if "S" in v else v.get("N")
+    return None
+
+
+def _wa_iso_ms(value: Any) -> Optional[int]:
+    try:
+        return int(_wa_dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wa_consumer_emit(
+    consumer: str, raw_record: Dict[str, Any], stream_record: Optional[Dict[str, Any]],
+    t_received_ms: int, t_done_ms: int, outcome: str = "success", phase: str = "projected",
+) -> None:
+    """Never raises; silent for non-governed records (no correlation_id / version_seq on the image)."""
+    try:
+        image = ((stream_record or {}).get("dynamodb") or {}).get("NewImage") or {}
+        cid, vseq = _wa_val(image, "correlation_id"), _wa_val(image, "version_seq")
+        if not image or (not cid and vseq is None):
+            return
+        t_ack, basis = _wa_val(image, "t_ack"), "t_ack"
+        if t_ack is None:
+            t_ack, basis = _wa_iso_ms(_wa_val(image, "updated_at")), "updated_at"
+        t_ack = int(t_ack) if t_ack is not None else None
+        lag = max(0, t_done_ms - t_ack) if t_ack is not None else None
+        tool = str(_wa_val(image, "write_tool") or "unknown")
+        rid = _wa_val(image, "item_id") or _wa_val(image, "document_id") or str(_wa_val(image, "record_id") or "").split("#")[-1]
+        attempt = int(((raw_record or {}).get("attributes") or {}).get("ApproximateReceiveCount") or 1)
+        line = {
+            "consumer": consumer, "surface": consumer, "correlation_id": cid or None, "record_id": rid or None,
+            "version_seq": int(vseq) if vseq is not None else None, "tool": tool, "attempt": attempt,
+            "event_name": (stream_record or {}).get("eventName"), "attempt_outcome": outcome,
+            "success": outcome == "success", "projection_phase": phase, "t_stream_received": t_received_ms,
+            "t_projection_done": t_done_ms, "t_ack": t_ack, "lag_basis": basis if t_ack is not None else None,
+            "governed_lag_ms": lag,
+        }
+        print("[WRITE-AUDIT] " + json.dumps(line, sort_keys=True, default=str), flush=True)
+        if lag is not None and outcome == "success" and phase == "projected":
+            print(json.dumps({
+                "_aws": {"Timestamp": t_done_ms, "CloudWatchMetrics": [{
+                    "Namespace": "Enceladus/WritePath", "Dimensions": [["tool"]],
+                    "Metrics": [{"Name": "governed_lag_ms", "Unit": "Milliseconds"}]}]},
+                "tool": tool, "governed_lag_ms": lag,
+            }, sort_keys=True), flush=True)
+    except Exception:  # noqa: BLE001 - audit must never break projection
+        pass
+
+
+def _wa_now_ms() -> int:
+    return int(_wa_time.time() * 1000)
+
 # Feed utils is bundled alongside this Lambda (same zip package)
 # Import all generation / publication utilities from the shared module.
 try:
@@ -1760,9 +1827,33 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     if _is_sweep_event(event):
         return _handle_sweep(context)
+    t_recv = _wa_now_ms()  # ENC-TSK-S26-0A
     if FEED_PUBLISH_MODE == FEED_PUBLISH_MODE_COALESCED:
-        return _handle_mark(event)
-    return _handle_per_batch(event)
+        resp = _handle_mark(event)
+        _wa_emit_feed_records(event, resp, t_recv, phase="marked")  # projection happens later, at the sweep
+        return resp
+    resp = _handle_per_batch(event)
+    _wa_emit_feed_records(event, resp, t_recv, phase="projected")
+    return resp
+
+
+def _wa_emit_feed_records(event: Dict[str, Any], resp: Any, t_recv: int, phase: str) -> None:
+    """ENC-TSK-S26-0A: one [WRITE-AUDIT] line per governed record in the SQS batch (never raises)."""
+    try:
+        failed = {f.get("itemIdentifier") for f in (resp or {}).get("batchItemFailures", [])}
+        t_done = _wa_now_ms()
+        for record in event.get("Records", []):
+            try:
+                body = json.loads(record.get("body", "{}"))
+                ddb_record = body.get("dynamodb", body)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            _wa_consumer_emit(
+                "feed_publisher", record, {"dynamodb": ddb_record, "eventName": body.get("eventName")},
+                t_recv, t_done, outcome="error" if record.get("messageId") in failed else "success", phase=phase,
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _handle_per_batch(event: Dict[str, Any]) -> Dict[str, Any]:

@@ -503,6 +503,11 @@
           "definition": "DOC-* document IDs that declare this record in their related_items.",
           "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
           "inverse_of": "docstore.document.related_items"
+        },
+        "correlation_id": {
+          "type": "string",
+          "definition": "Write-path correlation id from the X-Correlation-Id header or body field correlation_id, server-stamped on create and on every update (ENC-TSK-S26-0A). Joins the item to its [WRITE-AUDIT] lines.",
+          "usage_guidance": "Server-stamped; supplied values are accepted and stripped from field writes."
         }
       }
     },
@@ -5839,6 +5844,10 @@
           "type": "string",
           "definition": "S3 object key of the document body (.md) within s3_bucket. Written by document_api on every content upload as {S3_PREFIX}/{project_id}/{document_id}.md, where S3_PREFIX is env-prefixed (prod: agent-documents, gamma: gamma/agent-documents via S3EnvPrefix). ENC-TSK-M59 / ENC-ISS-526 read contract: the env-prefixed computed key is authoritative on read; when the computed key is absent and the stored s3_key/s3_bucket name a different location (e.g. gamma rows cloned from prod), _get_content falls back read-only to the stored location and lazily copies the body into the computed key so the env prefix self-provisions. Fallback tolerates AccessDenied (deploy-order safety); writes never target the stored fallback location.",
           "usage_guidance": "Read-only for clients; treat as provenance metadata, not a fetch instruction -- request content via GET /api/v1/documents/{id}?include_content=true (or MCP documents.get) and let document_api resolve storage. Do not construct S3 paths from s3_key in new code; the env-prefixed computed key wins on divergence after the next write."
+        },
+        "correlation_id": {
+          "type": "string",
+          "definition": "Write-path correlation id from the X-Correlation-Id header or body field correlation_id, stamped on documents.put and every documents.patch (ENC-TSK-S26-0A)."
         }
       }
     },
@@ -9717,7 +9726,7 @@
       }
     },
     "mcp_server.write_audit_line": {
-      "description": "ENC-TSK-S26-0A: one `[WRITE-AUDIT] {json}` stdout line per write-path tool call in the MCP server Lambda (tools/enceladus-mcp-server/server.py _write_audit_line). Emitted for tracker_create, tracker_set, documents_put, documents_patch, checkout_task/release_task/advance_task_status/append_worklog when called directly, and for EVERY execute step (execute_step_index set). Followed by an EMF envelope: namespace Enceladus/WritePath, single dimension `tool`, metrics server_total_ms (Milliseconds) and cold_start (Count, 1 or 0). governed_lag_ms is NOT emitted here (stream consumers, part 2). Outside Lambda the lines go to stderr so the stdio MCP transport is not corrupted.",
+      "description": "ENC-TSK-S26-0A: one `[WRITE-AUDIT] {json}` stdout line per write-path tool call in the MCP server Lambda (tools/enceladus-mcp-server/server.py _write_audit_line). Emitted for tracker_create, tracker_set, documents_put, documents_patch, checkout_task/release_task/advance_task_status/append_worklog when called directly, and for EVERY execute step (execute_step_index set). Followed by an EMF envelope: namespace Enceladus/WritePath, single dimension `tool`, metrics server_total_ms (Milliseconds) and cold_start (Count, 1 or 0). governed_lag_ms is emitted by the stream consumers, not here. Outside Lambda the lines go to stderr so the stdio MCP transport is not corrupted. The same `[WRITE-AUDIT]` line (same correlation_id join key, same attempt_outcome/success keys) is also emitted by the tool Lambdas tracker_mutation (surface tracker_mutation), document_api (surface document_api) and checkout_service (surface checkout_service) for each mutating request, and by the stream consumers graph_sync and feed_publisher (field `consumer`) for each governed record, with one extra EMF metric governed_lag_ms (Milliseconds, dimension tool) in namespace Enceladus/WritePath.",
       "fields": {
         "correlation_id": {
           "type": "string",
@@ -9815,6 +9824,98 @@
         "client_passthrough": {
           "type": "map",
           "definition": "Optional inbound headers copied into the line: X-Enc-T-Client-Start -> t_client_start, X-Enc-Client-Session-Reused -> client_session_reused, X-Enc-Client-Session-Init-Ms -> client_session_init_ms, X-Enc-Client-Tls-New -> client_tls_new, X-Enc-Client-Serialize-Ms -> client_serialize_ms, X-Enc-Surface -> surface."
+        },
+        "attempt_outcome": {
+          "type": "string",
+          "definition": "success | rejected (governance/validation refusal, HTTP 4xx) | error (handler exception or HTTP 5xx). Present on every surface."
+        },
+        "success": {
+          "type": "boolean",
+          "definition": "attempt_outcome == 'success'. The stale-hash/query-pack counters (ENC-TSK-S26-0D) read this key; a missing key is treated as accepted."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "definition": "MCP-server lines only: the dry_run argument of the call. Joined with ddb_ops > 0 to detect dry-run writes."
+        },
+        "t_auth_ms": {
+          "type": "integer",
+          "definition": "Tool-Lambda lines: time in the authentication step."
+        },
+        "t_validate_ms": {
+          "type": "integer",
+          "definition": "tracker_mutation lines: time validating the project (DynamoDB read)."
+        },
+        "t_counter_ms": {
+          "type": "integer",
+          "definition": "tracker_mutation lines: time allocating the record id (counter/ID service); a subset of t_ddb_ms on the counter path."
+        },
+        "t_ddb_ms": {
+          "type": "integer",
+          "definition": "Tool-Lambda lines: summed wall time of DynamoDB calls (botocore before/after-call hooks), including SDK retries."
+        },
+        "ddb_ops": {
+          "type": "integer",
+          "definition": "Tool-Lambda lines: number of DynamoDB calls in the request."
+        },
+        "ddb_retries": {
+          "type": "integer",
+          "definition": "Tool-Lambda lines: summed botocore RetryAttempts of those calls."
+        },
+        "t_s3_ms": {
+          "type": "integer",
+          "definition": "document_api lines: time in S3 content upload."
+        },
+        "t_compliance_ms": {
+          "type": "integer",
+          "definition": "document_api lines: time in the synchronous compliance scoring call."
+        },
+        "content_hash": {
+          "type": "string|null",
+          "definition": "document_api documents.put lines (ENC-TSK-E73): sha256 content_hash of the stored body."
+        },
+        "document_subtype": {
+          "type": "string",
+          "definition": "document_api lines (ENC-TSK-E73): document_subtype of the write."
+        },
+        "caller_environment": {
+          "type": "string",
+          "definition": "document_api documents.put lines (ENC-TSK-E73): ENVIRONMENT_SUFFIX/ENV_SUFFIX/ENVIRONMENT, else 'gamma' when the function name contains gamma, else 'prod'."
+        },
+        "version_seq": {
+          "type": "integer|null",
+          "definition": "Tool-Lambda and consumer lines: version_seq stamped on the written item."
+        },
+        "t_ack": {
+          "type": "integer|null",
+          "definition": "Epoch ms when the tool Lambda returned its response; on consumer lines the t_ack/updated_at derived ack time used for governed_lag_ms."
+        },
+        "consumer": {
+          "type": "string",
+          "definition": "Consumer lines: graph_sync | feed_publisher."
+        },
+        "attempt": {
+          "type": "integer",
+          "definition": "Consumer lines: SQS ApproximateReceiveCount, else 1."
+        },
+        "t_stream_received": {
+          "type": "integer",
+          "definition": "Consumer lines: epoch ms when the consumer began processing the record."
+        },
+        "t_projection_done": {
+          "type": "integer",
+          "definition": "Consumer lines: epoch ms when the projection (graph write / feed publish) finished."
+        },
+        "governed_lag_ms": {
+          "type": "integer|null",
+          "definition": "Consumer lines: t_projection_done - t_ack (EMF metric, Milliseconds, dimension tool; not emitted for projection_phase 'marked' or on error)."
+        },
+        "lag_basis": {
+          "type": "string|null",
+          "definition": "Consumer lines: 't_ack' when the image carries a t_ack attribute, else 'updated_at' (second granularity)."
+        },
+        "projection_phase": {
+          "type": "string",
+          "definition": "Consumer lines: 'projected', or 'marked' for feed_publisher in coalesced mode (publish happens later at the sweep)."
         }
       },
       "governing_records": [

@@ -18,6 +18,7 @@ REQUIRED_KEYS = {
     "execute_step_index", "surface", "server_total_ms", "cold_start", "init_ms", "hops", "t_route_ms",
     "t_governance_ms", "governance_cache_hit", "governance_hash_in", "governance_hash_verified",
     "t_invoke_ms", "memory_mb", "runtime", "arch", "function_version",
+    "attempt_outcome", "success", "dry_run",
 }
 
 
@@ -101,6 +102,7 @@ def test_direct_write_tool_emits_audit_line_and_emf():
     assert line["governance_hash_in"] == GOV[:16] and line["governance_hash_verified"] is True
     assert line["cold_start"] is True and isinstance(line["init_ms"], int)
     assert line["t_invoke_ms"] == 5
+    assert line["attempt_outcome"] == "success" and line["success"] is True and line["dry_run"] is False
     # client passthrough (surface header overrides the "mcp_server" default)
     assert line["t_client_start"] == "1730000000000" and line["client_session_reused"] == "1"
     assert line["client_session_init_ms"] == "12" and line["client_tls_new"] == "0"
