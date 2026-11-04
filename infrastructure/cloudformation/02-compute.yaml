@@ -1072,8 +1072,8 @@ Resources:
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
           # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
           # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
-          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
-          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod has the same
+          # statement in CheckoutServiceRoleInvokeTrackerLive (ENC-TSK-S50).
           - Sid: InvokeTrackerMutationLive
             Effect: Allow
             Action:
