@@ -20,7 +20,7 @@
       "COORDINATION_INTERNAL_API_KEY": "<from Secrets Manager>"
     },
     "handler": "lambda_function.lambda_handler",
-    "memory_size": 256,
+    "memory_size": 1024,
     "runtime": "python3.12",
     "timeout": 30,
     "layers": []

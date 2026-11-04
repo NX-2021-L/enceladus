@@ -11608,4 +11608,27 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         _wa_emit(tool, project_id, record_id or (_wa_find_id(resp) if resp else ""), status)
 
 
+# ENC-TSK-S28-0A (BRD DOC-E32D0ED08473 W1.1): construct the write-path boto3 clients at module import so a cold
+# start pays the client/service-model load during init (inside the SnapStart snapshot when enabled) instead of on the
+# first request. The lazy getters stay the single accessors (same singletons, same config); each warm-up is
+# failure-isolated and Lambda-only, so unit tests and local runs see no behavior change.
+def _warm_clients() -> None:
+    if not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return
+    if os.environ.get("AWS_LAMBDA_INITIALIZATION_TYPE") == "snap-start":
+        # A client built during the SnapStart init phase would freeze the snapshot-time credentials; leave the lazy
+        # memoized getters to build it after restore so it resolves fresh ones.
+        logger.info("[INFO] boto3 client warm-up skipped (SnapStart init: lazy post-restore build)")
+        return
+    logger.info("[INFO] boto3 client warm-up: eager init-time build")
+    for getter in (_get_ddb, _get_events, _get_sns, _get_lambda_client):
+        try:
+            getter()
+        except Exception:  # noqa: BLE001 - warm-up is best-effort; the lazy getter retries on first use
+            pass
+
+
+_warm_clients()
+
+
 _WA_INIT_MS = int((time.perf_counter() - _WA_T0) * 1000)
