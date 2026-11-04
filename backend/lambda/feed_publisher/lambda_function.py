@@ -417,6 +417,28 @@ def _all_project_entries() -> List[FeedProjectEntry]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: audit / idempotency-marker rows are write-path bookkeeping, not records.
+# Their key (project_id on the tracker table, document_id on the documents table) begins
+# `audit#` or `idem#`; every stream consumer drops them before any work. A skipped record is
+# consumed (never reported in batchItemFailures).
+# ---------------------------------------------------------------------------
+_S28_META_PREFIXES = ("audit#", "idem#")
+
+
+def _is_s28_meta_row(stream_record: Any) -> bool:
+    try:
+        ddb = stream_record.get("dynamodb") if isinstance(stream_record.get("dynamodb"), dict) else stream_record
+        for image in (ddb.get("Keys"), ddb.get("NewImage"), ddb.get("OldImage")):
+            for attr in ("project_id", "document_id"):
+                value = ((image or {}).get(attr) or {}).get("S")
+                if isinstance(value, str) and value.startswith(_S28_META_PREFIXES):
+                    return True
+    except AttributeError:
+        return False
+    return False
+
+
 def _extract_project_ids_and_failures_from_sqs_event(
     event: Dict[str, Any],
 ) -> Tuple[Set[str], List[str]]:
@@ -436,6 +458,8 @@ def _extract_project_ids_and_failures_from_sqs_event(
         # EventBridge Pipe forwards the DynamoDB stream record directly
         # Alternatively the body may already be parsed as the stream event
         ddb_record = body.get("dynamodb", body)
+        if _is_s28_meta_row(ddb_record):
+            continue  # ENC-TSK-S28-0D: audit/marker row, must not dirty a phantom project
         found_project_id = False
         for image_key in ("NewImage", "OldImage"):
             image = ddb_record.get(image_key, {})
@@ -505,6 +529,8 @@ def _extract_project_activity_from_sqs_event(event: Dict[str, Any]) -> Dict[str,
         try:
             body = json.loads(record.get("body", "{}"))
             ddb_record = body.get("dynamodb", body)
+            if _is_s28_meta_row(ddb_record):
+                continue  # ENC-TSK-S28-0D
             if "record_id" not in (ddb_record.get("Keys") or {}):
                 continue  # documents-table event (keyed by document_id)
             image = ddb_record.get("NewImage") or {}
@@ -756,6 +782,8 @@ def _extract_mark_work(event: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]]
         track_ids = _incremental_active()
         if isinstance(body, dict):
             ddb_record = body.get("dynamodb", body)
+            if isinstance(ddb_record, dict) and _is_s28_meta_row(ddb_record):
+                continue  # ENC-TSK-S28-0D: audit/marker row, consumed without a dirty mark
             if isinstance(ddb_record, dict):
                 if track_ids:
                     record_key, is_remove = _stream_record_key(body, ddb_record)
