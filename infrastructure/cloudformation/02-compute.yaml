@@ -2331,7 +2331,8 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.handler
-      MemorySize: 256
+      # ENC-TSK-S47-0C: 1024 MB (CPU scales with memory; Bolt TLS + UNWIND batch build were CPU-bound at 256).
+      MemorySize: 1024
       Timeout: 60
       Architectures:
         - arm64
