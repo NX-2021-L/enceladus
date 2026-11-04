@@ -10509,6 +10509,56 @@ Resources:
 
   # --- end ENC-TSK-O59 / ENC-ISS-648 forward-port ------------------------------
 
+  # ENC-TSK-S26-0C: write-bench in-region client arm (BRD DOC-E32D0ED08473 7.3). GAMMA ONLY and
+  # on-demand: no triggers, no schedule, no provisioned concurrency -> zero idle cost (cost rule-block C1).
+  # It only makes outbound HTTPS calls to mcp-gamma.jreese.net (host hard-allowlisted in the handler), so
+  # the role carries CloudWatch Logs write access and nothing else (no DynamoDB, S3, or secrets).
+  WriteBenchClientRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    Properties:
+      RoleName: !Sub "devops-write-bench-client-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: devops-write-bench-client-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-write-bench-client${EnvironmentSuffix}*"
+
+  WriteBenchClientFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-write-bench-client${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - arm64
+      Role: !GetAtt WriteBenchClientRole.Arn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: write-bench
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
