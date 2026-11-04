@@ -194,7 +194,11 @@ Resources:
 class Cli(unittest.TestCase):
     def run_main(self, argv, env=None):
         buf = io.StringIO()
-        with unittest.mock.patch.dict("os.environ", env or {}, clear=False), \
+        # A labeled PR exports COST_APPROVED=true into the job environment; the
+        # self-tests must not inherit it, or the "fails without label" case passes.
+        merged = {"COST_APPROVED": ""}
+        merged.update(env or {})
+        with unittest.mock.patch.dict("os.environ", merged, clear=False), \
                 unittest.mock.patch("sys.stdout", buf):
             rc = g.main(argv)
         return rc, buf.getvalue()

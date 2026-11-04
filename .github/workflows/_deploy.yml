@@ -946,6 +946,22 @@ jobs:
                   check=False,
               )
 
+              # ENC-ISS-681 / ENC-TSK-S28-0F: never move `live` onto a version that is not
+              # ready. Block until State == Active AND LastUpdateStatus == Successful on the
+              # function and on the just-published version (SnapStart versions sit in
+              # Pending while the snapshot is optimised; direct invokes of :live from the
+              # MCP server would otherwise hit a not-yet-active target).
+              for waiter in ('function-active-v2', 'function-updated-v2'):
+                  w = subprocess.run(
+                      ['aws', 'lambda', 'wait', waiter,
+                       '--region', region, '--function-name', mapped_name,
+                       '--qualifier', new_version],
+                      capture_output=True, text=True, check=False,
+                  )
+                  if w.returncode != 0:
+                      log(f'::error::{mapped_name}:{new_version} not ready ({waiter}): {(w.stderr or "").strip()}', err=True)
+                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': f'wait {waiter}'}
+
               # CodeDeploy canary path
               use_cd_succeeded = False
               if use_codedeploy:

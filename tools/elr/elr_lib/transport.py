@@ -578,6 +578,8 @@ class McpHttpClient:
 
         timing.response_bytes = len(raw)
 
+        timing.response_bytes = len(raw)
+
         # Tolerate an EMPTY (or entirely absent) mcp-session-id header --
         # the gateway is not required to mint one, and a blank value must
         # never fail the call.
