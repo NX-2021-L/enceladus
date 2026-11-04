@@ -1072,6 +1072,160 @@ def _get_cloudwatch():
 def _now_z() -> str:
     return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: atomic governed commit. One TransactWriteItems carries the
+# record write, an audit item (pk `audit#<record_id>`, sk `<iso_ts>#<cid>`),
+# the ID counter (tracker create only) and, when the caller sent an
+# Idempotency-Key, a 24 h marker (`idem#<project>#<key>`) holding the exact
+# receipt. Duplicated per Lambda (stdlib only, no shared layer change).
+# Audit/marker rows deliberately carry no record_type / feed_scope /
+# updated_at / version-seq GSI keys, so no GSI or feed projection sees them.
+# ---------------------------------------------------------------------------
+_S28_IDEM_TTL_SECONDS = 24 * 3600
+_S28_COUNTER_RETRIES = 3
+_S28_FAULT_MODES = ("before_commit", "cancel_commit")
+_S28_PK = "document_id"  # table hash-key attribute name
+_S28_SK = ""  # table range-key attribute name ("" when the table is hash-only)
+
+
+def _s28_key(pk: str, sk: str) -> Dict[str, Dict[str, str]]:
+    """Table key for an audit/marker row. Hash-only tables fold the sort key into the hash value."""
+    if _S28_SK:
+        return {_S28_PK: {"S": pk}, _S28_SK: {"S": sk}}
+    return {_S28_PK: {"S": f"{pk}#{sk}" if sk else pk}}
+
+
+class _WriteFaultInjected(Exception):
+    """WRITE_FAULT_INJECT=before_commit: raised after prechecks, before the transaction."""
+
+
+class _IdemReplay(Exception):
+    """A concurrent or earlier request already committed this Idempotency-Key."""
+
+    def __init__(self, receipt: str):
+        super().__init__("idempotent replay")
+        self.receipt = receipt
+
+
+def _wf_mode() -> str:
+    mode = os.environ.get("WRITE_FAULT_INJECT", "").strip().lower()
+    return mode if mode in _S28_FAULT_MODES else ""
+
+
+def _wf_before_commit() -> None:
+    if _wf_mode() == "before_commit":
+        if _WA:
+            _WA["extra"]["fault_inject"] = "before_commit"  # surfaces on the [WRITE-AUDIT] line (outcome=error)
+        raise _WriteFaultInjected("WRITE_FAULT_INJECT=before_commit")
+
+
+def _s28_receipt_hash(body: str) -> str:
+    return hashlib.sha256(str(body).encode("utf-8")).hexdigest()
+
+
+def _s28_idem_key(body: Optional[Dict] = None) -> str:
+    key = str((body or {}).get("idempotency_key") or "").strip()
+    return key or str(_WA.get("idempotency_key") or "").strip()
+
+
+def _s28_txn_codes(exc: Exception) -> Optional[List[str]]:
+    """Per-item cancellation codes (aligned with TransactItems) or None if exc is not a txn cancel."""
+    if not isinstance(exc, ClientError) or exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return None
+    return [str(r.get("Code") or "") for r in (exc.response.get("CancellationReasons") or [])]
+
+
+def _s28_audit_put(table: str, kind: str, project_id: str, record_id: str, status: int,
+                   receipt_hash: str, provider: str = "") -> Dict:
+    ts = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cid = str(_WA.get("correlation_id") or "")
+    item: Dict[str, Any] = {
+        **_s28_key(f"audit#{record_id}", f"{ts}#{cid or _WA.get('request_id') or 'none'}"),
+        "audit_type": {"S": kind},
+        "target_project_id": {"S": project_id},
+        "target_record_id": {"S": record_id},
+        "attempt_outcome": {"S": "success"},  # only committed writes reach the table; failures log via [WRITE-AUDIT]
+        "http_status": {"N": str(int(status))},
+        "receipt_hash": {"S": receipt_hash},
+        "audited_at": {"S": ts},
+    }
+    for attr, val in (("correlation_id", cid), ("write_tool", _WA.get("write_tool")), ("provider", provider),
+                      ("request_id", _WA.get("request_id")), ("idempotency_key", _WA.get("idempotency_key"))):
+        if val:
+            item[attr] = {"S": str(val)}
+    if _WA.get("version_seq") is not None:
+        item["version_seq"] = {"N": str(_WA["version_seq"])}
+    return {"Put": {"TableName": table, "Item": item}}
+
+
+def _s28_marker_key(project_id: str, key: str) -> Dict[str, Dict[str, str]]:
+    return _s28_key(f"idem#{project_id}#{key}", "marker")
+
+
+def _s28_marker_put(table: str, project_id: str, key: str, target_id: str, kind: str, status: int,
+                    receipt: str, receipt_hash: str) -> Dict:
+    exp = int(time.time()) + _S28_IDEM_TTL_SECONDS
+    item = dict(_s28_marker_key(project_id, key))
+    item.update({
+        "marker_type": {"S": kind}, "target_record_id": {"S": target_id},
+        "http_status": {"N": str(int(status))}, "receipt": {"S": receipt}, "receipt_hash": {"S": receipt_hash},
+        "ttl": {"N": str(exp)},  # TTL attribute (table-level TTL not enabled on this table: expiry enforced on read)
+        "expires_at": {"S": dt.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        "created_epoch": {"N": str(int(time.time()))},
+    })
+    return {"Put": {
+        "TableName": table, "Item": item,
+        "ConditionExpression": f"attribute_not_exists({_S28_PK}) OR #ttl < :s28now",
+        "ExpressionAttributeNames": {"#ttl": "ttl"},
+        "ExpressionAttributeValues": {":s28now": {"N": str(int(time.time()))}},
+    }}
+
+
+def _s28_idem_lookup(table: str, project_id: str, key: str) -> Optional[str]:
+    """Stored receipt (exact response body) for a live marker, else None. Fails open on read errors."""
+    if not key:
+        return None
+    try:
+        item = _get_ddb().get_item(TableName=table, Key=_s28_marker_key(project_id, key), ConsistentRead=True).get("Item")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[S28-0D] idempotency marker read failed (proceeding): %s", exc)
+        return None
+    if not item:
+        return None
+    if int((item.get("ttl") or {}).get("N", "0") or 0) < int(time.time()):
+        return None
+    return (item.get("receipt") or {}).get("S")
+
+
+def _s28_replay_response(receipt: str) -> Dict:
+    if _WA:
+        _WA["extra"]["idempotent_replay"] = True
+    return {
+        "statusCode": 200,
+        "headers": {**_cors_headers(), "Content-Type": "application/json", "idempotent_replay": "true"},
+        "body": receipt,
+    }
+
+
+def _s28_commit(table: str, items: List[Dict]) -> Any:
+    """Run one TransactWriteItems; honors WRITE_FAULT_INJECT=cancel_commit (always-false ConditionCheck)."""
+    items = list(items)
+    if _wf_mode() == "cancel_commit":
+        items.append({"ConditionCheck": {
+            "TableName": table, "Key": _s28_key("fault#cancel_commit", "x"),
+            "ConditionExpression": f"attribute_exists({_S28_PK}) AND attribute_not_exists({_S28_PK})",
+        }})
+        if _WA:
+            _WA["extra"]["fault_inject"] = "cancel_commit"
+    t0 = time.perf_counter()
+    try:
+        return _get_ddb().transact_write_items(TransactItems=items)
+    finally:
+        if _WA:
+            _WA["t"]["t_commit_ms"] = _WA["t"].get("t_commit_ms", 0.0) + (time.perf_counter() - t0) * 1000
+            _WA["extra"].update({"atomic_commit": True, "txn_items": len(items), "ddb_txn_ops": 1})
+
+
 
 # ---------------------------------------------------------------------------
 # Markdown compliance scoring (warn-only in v0.3)
@@ -2601,6 +2755,14 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         skill_fields["agentskills_spec_version"] = agentskills_spec_version.strip()
         skill_fields["runtime_variants"] = runtime_variants
 
+    # ENC-TSK-S28-0D: a live idempotency marker returns the stored receipt byte-identical,
+    # before any S3 write and without a second transaction.
+    _s28_key_val = _s28_idem_key(body)
+    if _s28_key_val:
+        _s28_stored = _s28_idem_lookup(DOCUMENTS_TABLE, project_id, _s28_key_val)
+        if _s28_stored is not None:
+            return _s28_replay_response(_s28_stored)
+
     # Generate document ID
     document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
     now = _now_z()
@@ -2731,15 +2893,43 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         item["correlation_id"] = {"S": _WA["correlation_id"]}
     if _WA.get("write_tool"):  # governed_lag_ms `tool` dimension source
         item["write_tool"] = {"S": _WA["write_tool"]}
+    # ENC-TSK-S28-0D: documents item + audit item (+ idempotency marker) in ONE TransactWriteItems.
+    # The S3 body is already written (unchanged order); any failure here deletes it as before.
+    _s28_receipt_dict: Dict[str, Any] = {
+        "success": True,
+        "document_id": document_id,
+        "s3_location": f"s3://{S3_BUCKET}/{s3_key}",
+        "content_hash": content_hash,
+        "size_bytes": size_bytes,
+        "created_at": now,
+        "compliance_score": compliance["compliance_score"],
+        "compliance_warnings": compliance["compliance_warnings"],
+    }
+    _s28_receipt = json.dumps(_s28_receipt_dict)
+    _s28_rhash = _s28_receipt_hash(_s28_receipt)
+    _s28_ops: List[Dict] = [
+        {"Put": {"TableName": DOCUMENTS_TABLE, "Item": item}},
+        _s28_audit_put(DOCUMENTS_TABLE, "create", project_id, document_id, 201, _s28_rhash, str(created_by)),
+    ]
+    if _s28_key_val:
+        _s28_ops.append(_s28_marker_put(
+            DOCUMENTS_TABLE, project_id, _s28_key_val, document_id, "create", 201, _s28_receipt, _s28_rhash))
+    _s28_replay: Optional[str] = None
     try:
-        ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
+        _wf_before_commit()
+        _s28_commit(DOCUMENTS_TABLE, _s28_ops)
     except Exception as exc:
-        logger.error("DynamoDB put_item failed: %s", exc)
+        logger.error("DynamoDB atomic put commit failed: %s", exc)
+        _codes = _s28_txn_codes(exc)
+        if _s28_key_val and _codes and len(_codes) >= len(_s28_ops) and _codes[len(_s28_ops) - 1] == "ConditionalCheckFailed":
+            _s28_replay = _s28_idem_lookup(DOCUMENTS_TABLE, project_id, _s28_key_val)
         # Attempt to clean up S3
         try:
             _content_store().delete_object(s3_key)
         except Exception:
             pass
+        if _s28_replay is not None:
+            return _s28_replay_response(_s28_replay)
         return _error(500, "Failed to save document metadata.")
 
     # ENC-TSK-L07 (B65 AC-5/AC-7): mirror related_items onto each target's related_document_ids.
@@ -2749,16 +2939,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         logger.warning("[ENC-TSK-L07] related_items mirror on create failed (non-fatal): %s", exc)
 
     logger.info("document created: %s project=%s size=%d", document_id, project_id, size_bytes)
-    return _response(201, {
-        "success": True,
-        "document_id": document_id,
-        "s3_location": f"s3://{S3_BUCKET}/{s3_key}",
-        "content_hash": content_hash,
-        "size_bytes": size_bytes,
-        "created_at": now,
-        "compliance_score": compliance["compliance_score"],
-        "compliance_warnings": compliance["compliance_warnings"],
-    })
+    return _response(201, _s28_receipt_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -3113,6 +3294,12 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     project_id = existing.get("project_id", {}).get("S", "")
     if _WA:
         _WA["project_id"] = project_id  # ENC-TSK-S26-0A
+    # ENC-TSK-S28-0D: a live idempotency marker returns the stored receipt byte-identical.
+    _s28_key_val = _s28_idem_key(body)
+    if _s28_key_val:
+        _s28_stored = _s28_idem_lookup(DOCUMENTS_TABLE, project_id, _s28_key_val)
+        if _s28_stored is not None:
+            return _s28_replay_response(_s28_stored)
     now = _now_z()
 
     # ENC-TSK-L47 / ENC-TSK-P70: If-Match / HTTP 409|412 per-record precondition
@@ -3898,15 +4085,61 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         "content_hash = :expected_hash" if precondition_kind == "hash" else "#ver = :expected"
     )
 
+    # ENC-TSK-S28-0D: the receipt is fixed BEFORE the write so the audit item / idempotency marker
+    # (same transaction as the conditional Update) carry its hash / exact body.
+    payload: Dict[str, Any] = {
+        "success": True,
+        "document_id": document_id,
+        "updated_at": now,
+        "version": current_version + 1,
+    }
+    if compliance is not None:
+        payload["compliance_score"] = compliance["compliance_score"]
+        payload["compliance_warnings"] = compliance["compliance_warnings"]
+    # ENC-TSK-P70 AC-4: absence of any precondition preserves the pre-existing
+    # unconditional write, flagged in the response, with a fire-and-forget metric.
+    if precondition_absent:
+        payload["precondition_absent"] = True
+    _s28_receipt = json.dumps(payload)
+    _s28_rhash = _s28_receipt_hash(_s28_receipt)
+    _s28_ops: List[Dict] = [
+        {"Update": {
+            "TableName": DOCUMENTS_TABLE,
+            "Key": {"document_id": {"S": document_id}},
+            "UpdateExpression": update_expr,
+            "ConditionExpression": _p70_condition_expression,
+            "ExpressionAttributeNames": attr_names,
+            "ExpressionAttributeValues": attr_values,
+        }},
+        _s28_audit_put(DOCUMENTS_TABLE, "update", project_id, document_id, 200, _s28_rhash,
+                       _section_actor(claims)),
+    ]
+    if _s28_key_val:
+        _s28_ops.append(_s28_marker_put(
+            DOCUMENTS_TABLE, project_id, _s28_key_val, document_id, "update", 200, _s28_receipt, _s28_rhash))
+
     try:
-        ddb.update_item(
-            TableName=DOCUMENTS_TABLE,
-            Key={"document_id": {"S": document_id}},
-            UpdateExpression=update_expr,
-            ConditionExpression=_p70_condition_expression,
-            ExpressionAttributeNames=attr_names,
-            ExpressionAttributeValues=attr_values,
-        )
+        try:
+            _wf_before_commit()
+            _s28_commit(DOCUMENTS_TABLE, _s28_ops)
+        except ClientError as _s28_txn_exc:
+            _codes = _s28_txn_codes(_s28_txn_exc)
+            if not _codes:
+                raise
+            if _s28_key_val and len(_codes) >= len(_s28_ops) and _codes[len(_s28_ops) - 1] == "ConditionalCheckFailed":
+                _stored = _s28_idem_lookup(DOCUMENTS_TABLE, project_id, _s28_key_val)
+                if _stored is not None:
+                    raise _IdemReplay(_stored)
+            if _codes[0] == "ConditionalCheckFailed":  # precondition lost the race: existing 409/412 handling
+                raise ddb.exceptions.ConditionalCheckFailedException(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "precondition failed"}},
+                    "UpdateItem",
+                ) from _s28_txn_exc
+            raise
+    except _IdemReplay as _s28_rep:
+        if _p70_staging_key is not None:
+            _delete_s3_object_best_effort(_p70_staging_key)
+        return _s28_replay_response(_s28_rep.receipt)
     except ddb.exceptions.ConditionalCheckFailedException:
         # ENC-TSK-P70 AC-3: a losing guarded writer must not leave its staged S3
         # object behind — delete it best-effort (WARNING-logged orphan on failure)
@@ -3999,19 +4232,7 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             logger.warning("[ENC-TSK-L07] related_items mirror on patch failed (non-fatal): %s", exc)
 
     logger.info("document updated: %s", document_id)
-    payload: Dict[str, Any] = {
-        "success": True,
-        "document_id": document_id,
-        "updated_at": now,
-        "version": current_version + 1,
-    }
-    if compliance is not None:
-        payload["compliance_score"] = compliance["compliance_score"]
-        payload["compliance_warnings"] = compliance["compliance_warnings"]
-    # ENC-TSK-P70 AC-4: absence of any precondition preserves the pre-existing
-    # unconditional write, flagged in the response, with a fire-and-forget metric.
     if precondition_absent:
-        payload["precondition_absent"] = True
         _emit_legacy_write_unguarded_metric(project_id, _derive_write_surface(event, claims))
     return _response(200, payload)
 

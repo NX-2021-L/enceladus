@@ -37,6 +37,7 @@ Environment variables:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -1493,6 +1494,160 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
     if not isinstance(exc, ClientError):
         return False
     return exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-S28-0D: atomic governed commit. One TransactWriteItems carries the
+# record write, an audit item (pk `audit#<record_id>`, sk `<iso_ts>#<cid>`),
+# the ID counter (tracker create only) and, when the caller sent an
+# Idempotency-Key, a 24 h marker (`idem#<project>#<key>`) holding the exact
+# receipt. Duplicated per Lambda (stdlib only, no shared layer change).
+# Audit/marker rows deliberately carry no record_type / feed_scope /
+# updated_at / version-seq GSI keys, so no GSI or feed projection sees them.
+# ---------------------------------------------------------------------------
+_S28_IDEM_TTL_SECONDS = 24 * 3600
+_S28_COUNTER_RETRIES = 3
+_S28_FAULT_MODES = ("before_commit", "cancel_commit")
+_S28_PK = "project_id"  # table hash-key attribute name
+_S28_SK = "record_id"  # table range-key attribute name ("" when the table is hash-only)
+
+
+def _s28_key(pk: str, sk: str) -> Dict[str, Dict[str, str]]:
+    """Table key for an audit/marker row. Hash-only tables fold the sort key into the hash value."""
+    if _S28_SK:
+        return {_S28_PK: {"S": pk}, _S28_SK: {"S": sk}}
+    return {_S28_PK: {"S": f"{pk}#{sk}" if sk else pk}}
+
+
+class _WriteFaultInjected(Exception):
+    """WRITE_FAULT_INJECT=before_commit: raised after prechecks, before the transaction."""
+
+
+class _IdemReplay(Exception):
+    """A concurrent or earlier request already committed this Idempotency-Key."""
+
+    def __init__(self, receipt: str):
+        super().__init__("idempotent replay")
+        self.receipt = receipt
+
+
+def _wf_mode() -> str:
+    mode = os.environ.get("WRITE_FAULT_INJECT", "").strip().lower()
+    return mode if mode in _S28_FAULT_MODES else ""
+
+
+def _wf_before_commit() -> None:
+    if _wf_mode() == "before_commit":
+        if _WA:
+            _WA["extra"]["fault_inject"] = "before_commit"  # surfaces on the [WRITE-AUDIT] line (outcome=error)
+        raise _WriteFaultInjected("WRITE_FAULT_INJECT=before_commit")
+
+
+def _s28_receipt_hash(body: str) -> str:
+    return hashlib.sha256(str(body).encode("utf-8")).hexdigest()
+
+
+def _s28_idem_key(body: Optional[Dict] = None) -> str:
+    key = str((body or {}).get("idempotency_key") or "").strip()
+    return key or str(_WA.get("idempotency_key") or "").strip()
+
+
+def _s28_txn_codes(exc: Exception) -> Optional[List[str]]:
+    """Per-item cancellation codes (aligned with TransactItems) or None if exc is not a txn cancel."""
+    if not isinstance(exc, ClientError) or exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return None
+    return [str(r.get("Code") or "") for r in (exc.response.get("CancellationReasons") or [])]
+
+
+def _s28_audit_put(table: str, kind: str, project_id: str, record_id: str, status: int,
+                   receipt_hash: str, provider: str = "") -> Dict:
+    ts = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cid = str(_WA.get("correlation_id") or "")
+    item: Dict[str, Any] = {
+        **_s28_key(f"audit#{record_id}", f"{ts}#{cid or _WA.get('request_id') or 'none'}"),
+        "audit_type": {"S": kind},
+        "target_project_id": {"S": project_id},
+        "target_record_id": {"S": record_id},
+        "attempt_outcome": {"S": "success"},  # only committed writes reach the table; failures log via [WRITE-AUDIT]
+        "http_status": {"N": str(int(status))},
+        "receipt_hash": {"S": receipt_hash},
+        "audited_at": {"S": ts},
+    }
+    for attr, val in (("correlation_id", cid), ("write_tool", _WA.get("write_tool")), ("provider", provider),
+                      ("request_id", _WA.get("request_id")), ("idempotency_key", _WA.get("idempotency_key"))):
+        if val:
+            item[attr] = {"S": str(val)}
+    if _WA.get("version_seq") is not None:
+        item["version_seq"] = {"N": str(_WA["version_seq"])}
+    return {"Put": {"TableName": table, "Item": item}}
+
+
+def _s28_marker_key(project_id: str, key: str) -> Dict[str, Dict[str, str]]:
+    return _s28_key(f"idem#{project_id}#{key}", "marker")
+
+
+def _s28_marker_put(table: str, project_id: str, key: str, target_id: str, kind: str, status: int,
+                    receipt: str, receipt_hash: str) -> Dict:
+    exp = int(time.time()) + _S28_IDEM_TTL_SECONDS
+    item = dict(_s28_marker_key(project_id, key))
+    item.update({
+        "marker_type": {"S": kind}, "target_record_id": {"S": target_id},
+        "http_status": {"N": str(int(status))}, "receipt": {"S": receipt}, "receipt_hash": {"S": receipt_hash},
+        "ttl": {"N": str(exp)},  # TTL attribute (table-level TTL not enabled on this table: expiry enforced on read)
+        "expires_at": {"S": dt.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        "created_epoch": {"N": str(int(time.time()))},
+    })
+    return {"Put": {
+        "TableName": table, "Item": item,
+        "ConditionExpression": f"attribute_not_exists({_S28_PK}) OR #ttl < :s28now",
+        "ExpressionAttributeNames": {"#ttl": "ttl"},
+        "ExpressionAttributeValues": {":s28now": {"N": str(int(time.time()))}},
+    }}
+
+
+def _s28_idem_lookup(table: str, project_id: str, key: str) -> Optional[str]:
+    """Stored receipt (exact response body) for a live marker, else None. Fails open on read errors."""
+    if not key:
+        return None
+    try:
+        item = _get_ddb().get_item(TableName=table, Key=_s28_marker_key(project_id, key), ConsistentRead=True).get("Item")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[S28-0D] idempotency marker read failed (proceeding): %s", exc)
+        return None
+    if not item:
+        return None
+    if int((item.get("ttl") or {}).get("N", "0") or 0) < int(time.time()):
+        return None
+    return (item.get("receipt") or {}).get("S")
+
+
+def _s28_replay_response(receipt: str) -> Dict:
+    if _WA:
+        _WA["extra"]["idempotent_replay"] = True
+    return {
+        "statusCode": 200,
+        "headers": {**_cors_headers(), "Content-Type": "application/json", "idempotent_replay": "true"},
+        "body": receipt,
+    }
+
+
+def _s28_commit(table: str, items: List[Dict]) -> Any:
+    """Run one TransactWriteItems; honors WRITE_FAULT_INJECT=cancel_commit (always-false ConditionCheck)."""
+    items = list(items)
+    if _wf_mode() == "cancel_commit":
+        items.append({"ConditionCheck": {
+            "TableName": table, "Key": _s28_key("fault#cancel_commit", "x"),
+            "ConditionExpression": f"attribute_exists({_S28_PK}) AND attribute_not_exists({_S28_PK})",
+        }})
+        if _WA:
+            _WA["extra"]["fault_inject"] = "cancel_commit"
+    t0 = time.perf_counter()
+    try:
+        return _get_ddb().transact_write_items(TransactItems=items)
+    finally:
+        if _WA:
+            _WA["t"]["t_commit_ms"] = _WA["t"].get("t_commit_ms", 0.0) + (time.perf_counter() - t0) * 1000
+            _WA["extra"].update({"atomic_commit": True, "txn_items": len(items), "ddb_txn_ops": 1})
+
 
 
 # ---------------------------------------------------------------------------
@@ -4092,6 +4247,115 @@ def _handle_pending_updates(query_params: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
+class _CreateIdExhausted(Exception):
+    """No unique record ID could be allocated within _TRACKER_CREATE_MAX_ATTEMPTS."""
+
+
+@_wa_timed("t_counter_ms")
+def _s28_counter_observe(project_id: str, record_type: str, parent_root: str) -> Dict[str, Any]:
+    """ENC-TSK-S28-0D: consistent read of the ID counter (observed value, no increment)."""
+    suffix = f"subtask#{parent_root}" if parent_root else record_type
+    ckey = {"project_id": _ser_s(project_id), "record_id": _ser_s(f"{_TRACKER_COUNTER_PREFIX}{suffix}")}
+    row = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=ckey, ConsistentRead=True).get("Item")
+    if row and "next_num" in row:
+        return {"key": ckey, "observed": int(row["next_num"]["N"]), "exists": True}
+    seed = 0 if (row or parent_root) else _max_existing_number(project_id, record_type)
+    return {"key": ckey, "observed": seed, "exists": False}
+
+
+def _s28_counter_op(ctr: Dict[str, Any], new_num: int, item_label: str) -> Dict:
+    vals: Dict[str, Any] = {
+        ":new": {"N": str(new_num)}, ":now": _ser_s(_now_z()),
+        ":ctype": _ser_s("counter"), ":cid": _ser_s(item_label),
+    }
+    if ctr["exists"]:
+        cond = "next_num = :obs"
+        vals[":obs"] = {"N": str(ctr["observed"])}
+    else:
+        cond = "attribute_not_exists(next_num)"
+    return {"Update": {
+        "TableName": DYNAMODB_TABLE, "Key": ctr["key"],
+        "UpdateExpression": (
+            "SET next_num = :new, updated_at = :now, created_at = if_not_exists(created_at, :now), "
+            "record_type = if_not_exists(record_type, :ctype), item_id = if_not_exists(item_id, :cid)"
+        ),
+        "ConditionExpression": cond, "ExpressionAttributeValues": vals,
+    }}
+
+
+def _s28_create_commit(
+    project_id: str, record_type: str, item: Dict[str, Dict], receipt_for: Any, *,
+    prefix: str, is_child: bool, parent_upper: str, fixed_id: str, idem_key: str, provider: str,
+) -> Tuple[str, str, str]:
+    """ENC-TSK-S28-0D: counter + record + audit item (+ idempotency marker) in ONE TransactWriteItems.
+
+    Returns (new_id, sort_key, receipt_body). Raises _IdemReplay when the key already committed.
+    """
+    parent_root = "-".join(parent_upper.split("-")[:3]) if (is_child and parent_upper) else ""
+    type_suffix = _TRACKER_TYPE_SUFFIX.get(record_type, "TSK")
+    skip = counter_conflicts = 0
+    for _attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
+        ops: List[Dict] = []
+        labels: List[str] = []
+        if fixed_id:
+            new_id = fixed_id
+        else:
+            ctr = _s28_counter_observe(project_id, record_type, parent_root)
+            new_num = ctr["observed"] + 1 + skip
+            if parent_root:
+                n = new_num - 1  # zero-based sub-task suffix, as _next_subtask_suffix
+                if n >= _SUBTASK_SUFFIX_CAPACITY:
+                    raise ValueError(
+                        f"Sub-task capacity exhausted for parent {parent_root}. "
+                        f"Maximum is {_SUBTASK_SUFFIX_CAPACITY} sub-tasks per parent."
+                    )
+                new_id = f"{parent_root}-{n // 26}{chr(ord('A') + n % 26)}"
+                item["parent"] = _ser_s(parent_upper)
+                label = f"COUNTER-SUBTASK-{parent_root}"
+            else:
+                new_id = f"{prefix}-{type_suffix}-{_encode_base36(new_num)}"
+                label = f"COUNTER-{record_type.upper()}"
+            ops.append(_s28_counter_op(ctr, new_num, label))
+            labels.append("counter")
+        sk = f"{record_type}#{new_id}"
+        item["record_id"] = _ser_s(sk)
+        item["item_id"] = _ser_s(new_id)
+        receipt = json.dumps(receipt_for(new_id), default=str)
+        rhash = _s28_receipt_hash(receipt)
+        ops.append({"Put": {"TableName": DYNAMODB_TABLE, "Item": item,
+                            "ConditionExpression": "attribute_not_exists(record_id)"}})
+        labels.append("record")
+        ops.append(_s28_audit_put(DYNAMODB_TABLE, "create", project_id, new_id, 201, rhash, provider))
+        labels.append("audit")
+        if idem_key:
+            ops.append(_s28_marker_put(DYNAMODB_TABLE, project_id, idem_key, new_id, "create", 201, receipt, rhash))
+            labels.append("marker")
+        _wf_before_commit()
+        try:
+            _s28_commit(DYNAMODB_TABLE, ops)
+            return new_id, sk, receipt
+        except ClientError as exc:
+            codes = _s28_txn_codes(exc)
+            if codes is None:
+                raise
+            failed = {labels[i] for i, c in enumerate(codes) if c == "ConditionalCheckFailed" and i < len(labels)}
+            if "marker" in failed:
+                stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, idem_key)
+                if stored is not None:
+                    raise _IdemReplay(stored)
+                raise
+            if "counter" in failed:  # lost the counter race: re-observe and retry (bounded)
+                counter_conflicts += 1
+                if counter_conflicts > _S28_COUNTER_RETRIES:
+                    raise
+                continue
+            if "record" in failed:  # counter behind existing records: skip past the collision
+                skip += 1
+                continue
+            raise
+    raise _CreateIdExhausted()
+
+
 def _handle_create_record(
     project_id: str,
     record_type: str,
@@ -4160,6 +4424,12 @@ def _handle_create_record(
     # key returns the SAME record_id instead of allocating a new one (ID Service contract;
     # inert when enable_id_service_extraction is OFF).
     idempotency_key = str(body.get("idempotency_key") or "").strip()
+    # ENC-TSK-S28-0D: a live idempotency marker returns the stored receipt byte-identical, no second write.
+    _s28_key_val = _s28_idem_key(body)
+    if _s28_key_val:
+        _s28_stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, _s28_key_val)
+        if _s28_stored is not None:
+            return _s28_replay_response(_s28_stored)
     # ENC-TSK-C26 / ENC-ISS-175: read transition_type at create time so the
     # create-time-only sealed values (no_code, code_only per ENC-FTR-060) can
     # actually be applied. Field-level immutability is enforced separately by
@@ -4591,6 +4861,7 @@ def _handle_create_record(
     # and HMAC provenance signing. FAIL-CLOSED — an invoke failure rejects the create; the
     # inline counter-based allocation below runs only as the flag-OFF rollback path.
     item_id_provenance: str = ""
+    fixed_id = ""
     if _id_service_enabled():
         ws = _normalize_write_source(body)
         _id_verdict = _invoke_id_service({
@@ -4620,64 +4891,45 @@ def _handle_create_record(
                 _id_err.get("message", "ID Service rejected the allocation."),
                 code=_id_err.get("code", "INVALID_INPUT"),
             )
-        new_id = _id_verdict["record_id"]
+        fixed_id = _id_verdict["record_id"]
         item_id_provenance = _id_verdict.get("item_id_provenance", "")
         if is_child and parent_task_id:
             item["parent"] = _ser_s(parent_task_id.upper())
-        sk = f"{record_type}#{new_id}"
-        item["record_id"] = _ser_s(sk)
-        item["item_id"] = _ser_s(new_id)
         if item_id_provenance:
             item["item_id_provenance"] = _ser_s(item_id_provenance)
-        _stamp_version_seq_on_create_item(item)
-        try:
-            ddb.put_item(
-                TableName=DYNAMODB_TABLE, Item=item,
-                ConditionExpression="attribute_not_exists(record_id)",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("create failed (ID Service path): %s", exc)
-            return _error(500, "Database write failed.")
-        # Falls through to the shared post-write continuation below (lesson scoring publish,
-        # parent subtask_ids update, bidirectional relationships, response construction) —
-        # identical for both the ID-Service and inline-rollback allocation paths.
-    else:
-        # --- Flag-OFF rollback path: inline counter-based allocation (unchanged from pre-L06) ---
-        try:
-            for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
-                if is_child and parent_task_id:
-                    # ENC-FTR-056: Generate hierarchical sub-task ID
-                    parent_upper = parent_task_id.upper()
-                    parent_parts = parent_upper.split("-")
-                    parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
-                    suffix = _next_subtask_suffix(project_id, parent_root)
-                    new_id = f"{parent_root}-{suffix}"
-                    item["parent"] = _ser_s(parent_upper)
-                else:
-                    new_id = _next_record_id(project_id, prefix, record_type)
-                sk = f"{record_type}#{new_id}"
-                item["record_id"] = _ser_s(sk)
-                item["item_id"] = _ser_s(new_id)
-                _stamp_version_seq_on_create_item(item)
-                try:
-                    ddb.put_item(
-                        TableName=DYNAMODB_TABLE, Item=item,
-                        ConditionExpression="attribute_not_exists(record_id)",
-                    )
-                    break
-                except ClientError as exc:
-                    if _is_conditional_check_failed(exc) and attempt < _TRACKER_CREATE_MAX_ATTEMPTS:
-                        continue
-                    raise
-            else:
-                return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
-        except ValueError as ve:
-            # Sub-task capacity exhausted
-            logger.error("create failed (capacity): %s", ve)
-            return _error(400, str(ve))
-        except Exception as exc:
-            logger.error("create failed: %s", exc)
-            return _error(500, "Database write failed.")
+    # ENC-TSK-S28-0D: record + audit item + counter (+ idempotency marker) commit in ONE
+    # TransactWriteItems, so a failure leaves no record, no audit item and no consumed counter.
+    # The ID-Service path (flag ON) has no inline counter: record + audit (+ marker) only.
+    def _s28_receipt_for(nid: str) -> Dict[str, Any]:
+        rec: Dict[str, Any] = {"success": True, "record_id": nid, "created_at": now}
+        if category_warning:
+            rec["warning"] = category_warning
+        if record_type == "issue" and location_context_warnings:
+            rec["location_context_warnings"] = location_context_warnings
+        return rec
+
+    try:
+        _s28_provider = str(_normalize_write_source(body).get("provider") or "")
+    except Exception:  # noqa: BLE001
+        _s28_provider = ""
+    _stamp_version_seq_on_create_item(item)
+    try:
+        new_id, sk, _s28_receipt = _s28_create_commit(
+            project_id, record_type, item, _s28_receipt_for,
+            prefix=prefix, is_child=is_child, parent_upper=parent_task_id.upper() if parent_task_id else "",
+            fixed_id=fixed_id, idem_key=_s28_key_val, provider=_s28_provider,
+        )
+    except _IdemReplay as rep:
+        return _s28_replay_response(rep.receipt)
+    except _CreateIdExhausted:
+        return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
+    except ValueError as ve:
+        # Sub-task capacity exhausted
+        logger.error("create failed (capacity): %s", ve)
+        return _error(400, str(ve))
+    except Exception as exc:  # noqa: BLE001 - includes WRITE_FAULT_INJECT and cancelled transactions
+        logger.error("create failed (atomic commit): %s", exc)
+        return _error(500, "Database write failed.")
 
     # ENC-TSK-H47 / B63 Phase 2B: a lesson written with scoring_status='pending' (flag ON) needs the
     # async Scoring Service kicked off. Publish AFTER the write succeeds (the lesson is the source of
@@ -4748,14 +5000,11 @@ def _handle_create_record(
             except Exception as exc:
                 bidi_warnings.append(f"Could not add inverse relationship on {target_id}: {exc}")
 
-    result: Dict[str, Any] = {"success": True, "record_id": new_id, "created_at": now}
-    if category_warning:
-        result["warning"] = category_warning
+    # ENC-TSK-S28-0D: the first response IS the committed receipt (the marker stores exactly this
+    # body); best-effort bidi warnings, which run after the commit, are the only additive field.
+    result: Dict[str, Any] = json.loads(_s28_receipt)
     if bidi_warnings:
         result["bidi_warnings"] = bidi_warnings
-    # ENC-ISS-105: surface location context warnings without blocking creation
-    if record_type == "issue" and location_context_warnings:
-        result["location_context_warnings"] = location_context_warnings
     return _response(201, result)
 
 
@@ -5779,6 +6028,13 @@ def _handle_update_field(
     if _sci_err:
         return _sci_err
 
+    # ENC-TSK-S28-0D: a live idempotency marker returns the stored receipt byte-identical.
+    _s28_key_val = _s28_idem_key(body)
+    if _s28_key_val:
+        _s28_stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, _s28_key_val)
+        if _s28_stored is not None:
+            return _s28_replay_response(_s28_stored)
+
     field = body.get("field", "").strip()
     value = body.get("value", "")
     # ENC-FTR-111 / ENC-TSK-H83: holds a latch-context dict when a human-initiated non-forward
@@ -6798,10 +7054,44 @@ def _handle_update_field(
         update_kwargs["ConditionExpression"] = "sync_version = :if_match_expected"
         attr_values[":if_match_expected"] = {"N": str(_current_rev)}
 
+    # ENC-TSK-S28-0D: the committed receipt is fixed BEFORE the write so the audit item and the
+    # idempotency marker (same transaction) carry its hash / exact body. Post-commit hooks below
+    # (arc-walk) only add fields to the first response; they are not part of the stored receipt.
+    result: Dict[str, Any] = {
+        "success": True, "record_id": record_id,
+        "field": field, "value": value, "updated_at": now,
+        "sync_version": _current_rev + 1,
+    }
+    if warnings:
+        result["warnings"] = warnings
+
+    # ENC-ISS-441 / ENC-TSK-J96: record reached its final lifecycle state — nudge the
+    # acting session toward retirement (additive-only envelope field).
+    if field == "status" and _is_terminal_transition(record_type, value):
+        result["retirement_prompt"] = RETIREMENT_PROMPT
+
+    _s28_receipt = json.dumps(result, default=str)
+    _s28_rhash = _s28_receipt_hash(_s28_receipt)
+    _s28_ops: List[Dict] = [{"Update": dict(update_kwargs)}]
+    _s28_ops.append(_s28_audit_put(
+        DYNAMODB_TABLE, "update", project_id, record_id, 200, _s28_rhash,
+        str(_normalize_write_source(body, claims).get("provider") or ""),
+    ))
+    if _s28_key_val:
+        _s28_ops.append(_s28_marker_put(
+            DYNAMODB_TABLE, project_id, _s28_key_val, record_id, "update", 200, _s28_receipt, _s28_rhash))
+
     try:
-        ddb.update_item(**update_kwargs)
+        _wf_before_commit()
+        _s28_commit(DYNAMODB_TABLE, _s28_ops)
     except ClientError as exc:
-        if _is_conditional_check_failed(exc):
+        _codes = _s28_txn_codes(exc)
+        _failed = {i for i, c in enumerate(_codes or []) if c == "ConditionalCheckFailed"}
+        if _s28_key_val and (len(_s28_ops) - 1) in _failed:  # marker lost a race: same key already committed
+            _stored = _s28_idem_lookup(DYNAMODB_TABLE, project_id, _s28_key_val)
+            if _stored is not None:
+                return _s28_replay_response(_stored)
+        if 0 in _failed and _if_match is not None:
             try:
                 _refreshed_raw = _get_record_raw(project_id, record_type, record_id)
                 _refreshed = _deser_item(_refreshed_raw) if _refreshed_raw else item_data
@@ -6818,10 +7108,10 @@ def _handle_update_field(
                 current_revision=_refreshed.get("sync_version"),
                 current=_refreshed,
             )
-        logger.error("update_item failed: %s", exc)
+        logger.error("atomic update commit failed: %s", exc)
         return _error(500, "Database write failed.")
     except Exception as exc:
-        logger.error("update_item failed: %s", exc)
+        logger.error("atomic update commit failed: %s", exc)
         return _error(500, "Database write failed.")
 
     # ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): mirror newly-added related_*_ids onto
@@ -6849,19 +7139,6 @@ def _handle_update_field(
             project_id, record_type, record_id, _optout_explicit,
             str(_normalize_write_source(body, claims).get("provider", "")).strip(),
         )
-
-    result: Dict[str, Any] = {
-        "success": True, "record_id": record_id,
-        "field": field, "value": value, "updated_at": now,
-        "sync_version": _current_rev + 1,
-    }
-    if warnings:
-        result["warnings"] = warnings
-
-    # ENC-ISS-441 / ENC-TSK-J96: record reached its final lifecycle state — nudge the
-    # acting session toward retirement (additive-only envelope field).
-    if field == "status" and _is_terminal_transition(record_type, value):
-        result["retirement_prompt"] = RETIREMENT_PROMPT
 
     # ENC-TSK-H85 / ENC-FTR-111 Phase 1: after a successful FORWARD task status advance, hand off to
     # the Universal Arc-Walker to walk forward across the mechanical gates in the same invocation
