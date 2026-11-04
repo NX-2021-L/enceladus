@@ -101,6 +101,25 @@ class StageTimingTests(unittest.TestCase):
         self.assertEqual((lines[0]["store_calls"], lines[1]["store_calls"]), (4, 4))
         self.assertEqual((lines[0]["edges_written"], lines[1]["edges_written"]), (1, 1))
 
+    def test_edge_guard_counters_and_stage_fields_union_s46_0d(self):
+        """S46-0D guard counters ride the same audit dict as the S46-0A stage fields, reset per record."""
+        driver, _ = _fake_driver()
+        calls = []
+
+        def proc(d, r):
+            _project(d, r)
+            if not calls:  # first record only
+                lf._EDGE_GUARD_STATS["edges_placeholder_targets"] += 2
+                lf._EDGE_GUARD_STATS["edges_skipped_missing_target"] += 1
+            calls.append(1)
+        lines = self._run([_rec("1", _img()), _rec("2", _img(vseq=8))], driver, process=proc)
+        l0, l1 = lines
+        self.assertEqual((l0["edges_placeholder_targets"], l0["edges_skipped_missing_target"]), (2, 1))
+        self.assertEqual((l1["edges_placeholder_targets"], l1["edges_skipped_missing_target"]), (0, 0))
+        for line in lines:  # stage timing still present alongside the guard counters
+            self.assertEqual((line["store_calls"], line["edges_written"]), (4, 1))
+            self.assertIn("batch_position", line)
+
     def test_cold_start_true_once_per_container(self):
         driver, _ = _fake_driver()
         with patch.object(lf, "_WA_COLD", True):

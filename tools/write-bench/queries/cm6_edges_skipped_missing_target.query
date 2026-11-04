@@ -1,0 +1,5 @@
+fields @timestamp, @message
+| filter @message like /\[WRITE-AUDIT\]/
+| parse @message /"edges_skipped_missing_target": ?(?<edges_skipped_missing_target>[0-9]+)/
+| filter ispresent(edges_skipped_missing_target)
+| stats sum(edges_skipped_missing_target) as violations

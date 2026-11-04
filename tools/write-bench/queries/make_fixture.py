@@ -125,6 +125,10 @@ def make(seed=26):
             if i == 61:  # CM5 planted: attempt 3 fails and never recovers
                 cons = {"correlation_id": corr, "request_id": f"con-{i:04d}", "consumer": "graph-sync",
                         "t_stream_received": iso(cts), "attempt": 3, "version_seq": i + 1}
+            if i == 70:  # CM6 planted (ENC-TSK-S46-0D): two edges skipped for a missing target
+                cons.update(edges_skipped_missing_target=2, edges_placeholder_targets=1)
+            if i == 71:  # CM6 decoy: placeholders materialized, nothing skipped
+                cons.update(edges_skipped_missing_target=0, edges_placeholder_targets=3)
             rows.append((cts, CONSUMER_GROUP, cons))
     # a final group of recent writes inside the grace window (no consumer line yet; must not count for CM2)
     last = max(r[0] for r in rows)

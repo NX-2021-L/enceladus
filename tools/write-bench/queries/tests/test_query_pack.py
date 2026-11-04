@@ -36,6 +36,9 @@ class QueryPackTests(unittest.TestCase):
         self.assertEqual(cm["unrecovered_consumer_failures"]["count"], 1)
         self.assertEqual(cm["unrecovered_consumer_failures"]["ids"], ["cor-0061"])
         self.assertEqual(cm["unrecovered_consumer_failures"]["literal_attempt_ge_3_without_done"], 2)  # decoy recovered at attempt 4
+        self.assertEqual(cm["edges_skipped_missing_target"]["count"], 2)                 # ENC-TSK-S46-0D
+        self.assertEqual(cm["edges_skipped_missing_target"]["ids"], ["cor-0070"])       # decoy cor-0071: placeholders only
+        self.assertEqual(cm["edges_skipped_missing_target"]["placeholder_targets"], 4)
 
     def test_dlq_depth_adds_to_unrecovered(self):
         lines, ws, we = rq.load_fixture(FIXTURE)
@@ -138,7 +141,7 @@ class QueryPackTests(unittest.TestCase):
         for n in ("01_server_latency_by_tool_surface.query", "03_stage_p50_p95_by_tool_surface.query",
                   "04_governed_lag_by_tool.query", "08_consumer_stage_lag.query", "06_extract_report_init.query", "cm1_stale_hash_acceptances.query",
                   "cm3_idempotent_replay_receipt_mismatch.query", "cm4_dry_run_writes.query",
-                  "cm5_unrecovered_consumer_failures.query"):
+                  "cm5_unrecovered_consumer_failures.query", "cm6_edges_skipped_missing_target.query"):
             self.assertIn(n, names)
         for p in QDIR.glob("*.query"):
             self.assertIn("[WRITE-AUDIT]", p.read_text().replace("\\[", "[").replace("\\]", "]") if p.name[:2] != "06" else "[WRITE-AUDIT]")

@@ -355,6 +355,14 @@ def compute(lines, reports, window_start, window_end, grace_min=15, dlq_depth=0)
         "literal_attempt_ge_3_without_done": len(failing), "dlq_depth": dlq_depth,
         "ids": [c.get("correlation_id") for c in unrecovered]}
 
+    # ENC-TSK-S46-0D: edges a consumer could not create because the target node was absent
+    # and could not be placed (graph_sync edge order guard). Summed over the window.
+    skipped = [c for c in consumers if (num(c.get("edges_skipped_missing_target")) or 0) > 0]
+    cm["edges_skipped_missing_target"] = {
+        "count": int(sum(num(c.get("edges_skipped_missing_target")) for c in skipped)),
+        "placeholder_targets": int(sum(num(c.get("edges_placeholder_targets")) or 0 for c in consumers)),
+        "ids": [c.get("correlation_id") for c in skipped]}
+
     return {"window": {"start": window_start.isoformat(), "end": window_end.isoformat()},
             "counts": {"write_lines": len(writes), "consumer_lines": len(consumers), "report_init_rows": len(init_by_req),
                        "report_joined": joined, "malformed_lines": malformed},
