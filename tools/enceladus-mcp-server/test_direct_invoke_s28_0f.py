@@ -36,6 +36,11 @@ def _load_server():
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
+    # ENC-TSK-S44: the hermetic conftest points every *_API_BASE at an inert host. These tests assert the route shape of
+    # the production URL while the transport is a recording fake (urlopen is patched per test), so pin the string here.
+    module.TRACKER_API_BASE = "https://enceladus.jreese.net/api/v1/tracker"
+    module.DOCUMENT_API_BASE = "https://enceladus.jreese.net/api/v1/documents"
+    module.CHECKOUT_SERVICE_API_BASE = "https://enceladus.jreese.net/api/v1/checkout"
     module.TRACKER_API_INTERNAL_API_KEY = KEY
     module.TRACKER_API_INTERNAL_API_KEYS = ()
     module.COMMON_INTERNAL_API_KEYS = ()
