@@ -25,6 +25,44 @@ class QueryPackTests(unittest.TestCase):
             self.assertEqual(len(rows), sum(1 for _ in fh))
         self.assertTrue(180 <= len(rows) <= 230)
 
+    def test_passthrough_surface_is_not_a_cm1_violation(self):
+        """ENC-ISS-896: tool-Lambda lines (no governance hash by design) are informational, not stale acceptances."""
+        res, _ = fixture_result()
+        self.assertEqual(res["counter_metrics"]["stale_hash_acceptances"]["count"], 1)  # only the mcp_server plant
+        self.assertNotIn("cor-pt-0", res["counter_metrics"]["stale_hash_acceptances"]["ids"])
+        pt = res["passthrough_unverified"]
+        self.assertEqual(pt["count"], 1)
+        self.assertEqual(pt["unique_correlation_ids"], 1)
+        self.assertEqual(pt["by_surface"], {"tracker_mutation": 1})
+        self.assertIn("not a violation", rq.render_markdown(res, "t"))
+
+    def test_cm1_isolated_pass_through_only_is_zero_and_mcp_unverified_is_one(self):
+        def mk(surface, verified, cid):
+            body = {"correlation_id": cid, "surface": surface, "tool": "tracker.set", "success": True,
+                    "governance_hash_verified": verified, "server_total_ms": 10.0}
+            return {"ts": "2026-11-04T10:00:00.000Z", "log_group": "g", "message": "[WRITE-AUDIT] " + json.dumps(body)}
+        ws = rq.parse_ts("2026-11-04T09:00:00.000Z")
+        we = rq.parse_ts("2026-11-04T11:00:00.000Z")
+        res = rq.compute([mk("tracker_mutation", False, "a"), mk("mcp_server", True, "a")], [], ws, we)
+        self.assertEqual(res["counter_metrics"]["stale_hash_acceptances"]["count"], 0)
+        self.assertEqual(res["passthrough_unverified"]["count"], 1)
+        res = rq.compute([mk("mcp_server", False, "b")], [], ws, we)
+        self.assertEqual(res["counter_metrics"]["stale_hash_acceptances"]["count"], 1)
+        self.assertEqual(res["passthrough_unverified"]["count"], 0)
+
+    def test_window_flags(self):
+        import argparse
+        a = argparse.Namespace(days=7, start="2026-11-04T19:10:00Z", end=None)
+        st, en = rq.resolve_window(a)
+        self.assertEqual(st.isoformat(), "2026-11-04T19:10:00+00:00")
+        self.assertGreater(en, st)
+        a = argparse.Namespace(days=7, start="2026-11-04T19:10:00Z", end="2026-11-04T20:10:00Z")
+        st, en = rq.resolve_window(a)
+        self.assertEqual((en - st).total_seconds(), 3600)
+        a = argparse.Namespace(days=2, start=None, end=None)
+        st, en = rq.resolve_window(a)
+        self.assertEqual((en - st).days, 2)
+
     def test_counter_metrics_equal_planted_violations(self):
         res, _ = fixture_result()
         cm = res["counter_metrics"]
