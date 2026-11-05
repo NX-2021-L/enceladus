@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.19",
-  "updated_at": "2026-11-04T19:00:00Z",
-  "last_change_summary": "ENC-TSK-S52 (ENC-ISS-895): tracker.set_acceptance_evidence is now a first-class governed write. tracker_mutation _handle_acceptance_evidence commits the acceptance_criteria[n] rewrite, the history worklog entry (\"Acceptance criterion [n] evidence accepted|updated\"), the sync_version increment and the version_seq/feed_scope, correlation_id, write_tool (tracker.set_acceptance_evidence), t_ack and projection_status stamps in ONE TransactWriteItems together with a tracker.audit_item (audit_type update) and, when an Idempotency-Key / idempotency_key is present, an idempotency marker (24 h, byte-identical replay). A failing audit or marker put cancels the whole transaction, so the record is unchanged. Previously the tool updated the record with a plain UpdateItem and wrote no audit item, so the write-path query pack reported every acceptance-evidence write as records_without_audit_item. When the caller supplies no correlation_id (X-Correlation-Id header or body field), tracker_mutation generates a server-side id prefixed `srv-` for this tool, stamps it on the record and the audit item and emits it on the [WRITE-AUDIT] line (correlation_id_generated true) so the audit item and the line join. The [WRITE-AUDIT] line for this tool now carries atomic_commit true, txn_items 2 (3 when keyed) and t_commit_ms. Response shape is unchanged (success, record_id, criterion_index, evidence_acceptance, updated_at, criteria_summary, all_criteria_accepted, completion_eligible, plus t_ack/version_seq/server_total_ms). Additive, no schema changes.",
+  "version": "2026-11-04.20",
+  "updated_at": "2026-11-04T20:00:00Z",
+  "last_change_summary": "ENC-TSK-S47-0C (ENC-PLN-104 W6b.3): graph_sync commits a stream batch's entity upserts in ONE graph write transaction: statements built by the unchanged Cypher helpers are captured per record and collapsed into UNWIND $__rows CALL { WITH __row ... } groups (record statement order kept by levels; a repeated node key starts a new wave), behind graph_repo.GraphRepository / Neo4jRepository (seam for the ENC-TSK-Q62 FalkorDB adapter). version_seq and embedding-hash reads become one batch prefetch. Projection marker stays per record after commit. On batch failure every record re-runs alone (batch_tx_fallback). [WRITE-AUDIT] graph_sync lines gain store_ms_basis and batch_tx_fallback; store_ms/store_calls/store_statements redefined for batched records. GraphSyncFunction MemorySize 256 -> 1024 (CFN apply only).",
   "owners": [
     "enceladus-platform"
   ],
@@ -10014,15 +10014,15 @@
         },
         "store_ms": {
           "type": "number",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: total milliseconds inside graph-store transactions (execute_read/execute_write) for this record."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: milliseconds inside graph-store transactions for this record. ENC-TSK-S47-0C: when store_ms_basis is batch_share the record's entity upsert committed in the stream batch's single UNWIND transaction and store_ms is (batch node-state read + batch write transaction time) / records in that transaction; when store_ms_basis is record it is this record's own transaction time (non-entity paths, kill switch, or batch_tx_fallback)."
         },
         "store_calls": {
           "type": "integer",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: graph transactions (execute_read/execute_write round trips) for this record; store_statements counts the tx.run statements inside them."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: graph-store transactions (execute_read/execute_write) this record ran. ENC-TSK-S47-0C: 1 for a batched record (the batch transaction it participated in); per-record fallback counts its own transactions."
         },
         "store_statements": {
           "type": "integer",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: Cypher statements run for this record."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: Cypher statements run for this record. ENC-TSK-S47-0C: for a batched record, the number of UNWIND statements of the batch transaction that carried at least one row of this record."
         },
         "edges_written": {
           "type": "integer",
@@ -10055,6 +10055,18 @@
         "edges_placeholder_targets": {
           "type": "integer",
           "definition": "ENC-TSK-S46-0D, graph_sync lines: placeholder target nodes the edge order guard materialized this record via _merge_placeholder (target not yet projected; the edge still landed). Per-record, reset by handler."
+        },
+        "store_ms_basis": {
+          "type": "string",
+          "enum": [
+            "record",
+            "batch_share"
+          ],
+          "definition": "ENC-TSK-S47-0C, graph_sync lines: how store_ms was measured. batch_share = per-record share of the stream batch's single graph transaction (one UNWIND execute_write per batch, driver built once per container); record = the record's own transaction(s)."
+        },
+        "batch_tx_fallback": {
+          "type": "boolean",
+          "definition": "ENC-TSK-S47-0C, graph_sync lines: true when the batch transaction failed (or a statement could not be rewritten for UNWIND) and this record was re-run in its own transaction with its original statements, so batchItemFailures names only records that failed alone. Kill switch: env GRAPH_SYNC_BATCH_TX=0 restores the per-record path."
         }
       },
       "governing_records": [
@@ -11447,6 +11459,11 @@
       "version": "2026-11-04.19",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S52 (ENC-ISS-895): tracker.set_acceptance_evidence is now a first-class governed write. tracker_mutation _handle_acceptance_evidence commits the acceptance_criteria[n] rewrite, the history worklog entry (\"Acceptance criterion [n] evidence accepted|updated\"), the sync_version increment and the version_seq/feed_scope, correlation_id, write_tool (tracker.set_acceptance_evidence), t_ack and projection_status stamps in ONE TransactWriteItems together with a tracker.audit_item (audit_type update) and, when an Idempotency-Key / idempotency_key is present, an idempotency marker (24 h, byte-identical replay). A failing audit or marker put cancels the whole transaction, so the record is unchanged. Previously the tool updated the record with a plain UpdateItem and wrote no audit item, so the write-path query pack reported every acceptance-evidence write as records_without_audit_item. When the caller supplies no correlation_id (X-Correlation-Id header or body field), tracker_mutation generates a server-side id prefixed `srv-` for this tool, stamps it on the record and the audit item and emits it on the [WRITE-AUDIT] line (correlation_id_generated true) so the audit item and the line join. The [WRITE-AUDIT] line for this tool now carries atomic_commit true, txn_items 2 (3 when keyed) and t_commit_ms. Response shape is unchanged (success, record_id, criterion_index, evidence_acceptance, updated_at, criteria_summary, all_criteria_accepted, completion_eligible, plus t_ack/version_seq/server_total_ms). Additive, no schema changes."
+    },
+    {
+      "version": "2026-11-04.20",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S47-0C (ENC-PLN-104 W6b.3): graph_sync commits a stream batch's entity upserts in ONE graph write transaction: statements built by the unchanged Cypher helpers are captured per record and collapsed into UNWIND $__rows CALL { WITH __row ... } groups (record statement order kept by levels; a repeated node key starts a new wave), behind graph_repo.GraphRepository / Neo4jRepository (seam for the ENC-TSK-Q62 FalkorDB adapter). version_seq and embedding-hash reads become one batch prefetch. Projection marker stays per record after commit. On batch failure every record re-runs alone (batch_tx_fallback). [WRITE-AUDIT] graph_sync lines gain store_ms_basis and batch_tx_fallback; store_ms/store_calls/store_statements redefined for batched records. GraphSyncFunction MemorySize 256 -> 1024 (CFN apply only)."
     }
   ]
 }
