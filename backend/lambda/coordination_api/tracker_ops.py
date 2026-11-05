@@ -140,7 +140,7 @@ def _create_tracker_record_auto(
         try:
             ddb.put_item(
                 TableName=TRACKER_TABLE,
-                Item={k: _serialize(v) for k, v in item.items()},
+                Item={k: _serialize(v) for k, v in {**item, "write_kind": "governed"}.items()},  # ENC-TSK-S47-0B
                 ConditionExpression="attribute_not_exists(record_id)",
             )
             return record_id
@@ -171,12 +171,13 @@ def _append_tracker_history(
         TableName=TRACKER_TABLE,
         Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
         UpdateExpression=(
-            "SET updated_at = :ts, last_update_note = :note, "
+            "SET write_kind = :wk, updated_at = :ts, last_update_note = :note, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "#history = list_append(if_not_exists(#history, :empty), :entry)"
         ),
         ExpressionAttributeNames={"#history": "history"},
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":ts": _serialize(now),
             ":note": _serialize(note[:1000]),
             ":zero": _serialize(0),
@@ -210,12 +211,13 @@ def _set_tracker_status(
             TableName=TRACKER_TABLE,
             Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
             UpdateExpression=(
-                "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
+                "SET write_kind = :wk, #status = :new_status, updated_at = :ts, last_update_note = :note, "
                 "sync_version = if_not_exists(sync_version, :zero) + :one"
             ),
             ConditionExpression="#status = :expected_prior",
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":new_status": _serialize(new_status),
                 ":expected_prior": _serialize(expected_prior_status),
                 ":ts": _serialize(now),

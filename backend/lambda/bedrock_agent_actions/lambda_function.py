@@ -616,10 +616,11 @@ def _handle_tracker_log(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
             "record_id": _ser_s(sk),
         },
         UpdateExpression=(
-            "SET updated_at = :now, write_source = :ws, "
+            "SET write_kind = :wk, updated_at = :now, write_source = :ws, "
             "history = list_append(if_not_exists(history, :empty), :entry)"
         ),
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":now": _ser_s(now),
             ":ws": _ser_value(ws),
             ":entry": {"L": [history_entry]},
@@ -663,11 +664,12 @@ def _handle_tracker_status(parameters: List[Dict], body: Dict) -> Dict[str, Any]
             "record_id": _ser_s(sk),
         },
         UpdateExpression=(
-            "SET #st = :status, updated_at = :now, write_source = :ws, "
+            "SET write_kind = :wk, #st = :status, updated_at = :now, write_source = :ws, "
             "history = list_append(if_not_exists(history, :empty), :entry)"
         ),
         ExpressionAttributeNames={"#st": "status"},
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":status": _ser_s(new_status),
             ":now": _ser_s(now),
             ":ws": _ser_value(ws),
@@ -731,6 +733,7 @@ def _handle_tracker_create(body: Dict) -> Dict[str, Any]:
         "updated_at": _ser_s(now),
         "sync_version": {"N": "1"},
         "write_source": _ser_value(ws),
+        "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
         "history": {
             "L": [{
                 "M": {

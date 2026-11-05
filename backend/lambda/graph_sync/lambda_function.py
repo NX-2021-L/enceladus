@@ -86,6 +86,8 @@ logger.setLevel(logging.INFO)
 # namespace Enceladus/WritePath, single dimension tool.
 # ---------------------------------------------------------------------------
 import datetime as _wa_dt
+
+import graph_repo as _graph_repo  # ENC-TSK-S47-0C: batched graph transaction seam
 import time as _wa_time
 
 
@@ -229,15 +231,6 @@ class _WaTimedSession:
         return getattr(self._s, name)
 
 
-class _WaTimedDriver:
-    def __init__(self, driver: Any) -> None:
-        self._driver = driver
-
-    def session(self, *args: Any, **kwargs: Any) -> _WaTimedSession:
-        return _WaTimedSession(self._driver.session(*args, **kwargs))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._driver, name)
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-S28-0E (BRD DOC-E32D0ED08473 B3/W2.3): projection_status + loop guard +
@@ -253,6 +246,7 @@ class _WaTimedDriver:
 # ---------------------------------------------------------------------------
 PROJECTION_ONLY_ATTRS = frozenset({
     "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+    "write_kind",  # ENC-TSK-S47-0B: marker writers flip it to "marker"; governed writes set "governed"
 })
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
@@ -298,13 +292,14 @@ def _mark_source_projected(new_image: Dict[str, Any], vseq: int, ddb: Any = None
             return False
         (ddb or _get_s28_ddb()).update_item(
             TableName=table, Key=key,
-            UpdateExpression="SET projection_status = :p, projected_version_seq = :v, t_projected = :t",
+            UpdateExpression="SET projection_status = :p, projected_version_seq = :v, t_projected = :t, write_kind = :wk",
             ConditionExpression=(
                 f"attribute_exists({pk}) AND version_seq = :v AND "
                 "(attribute_not_exists(projected_version_seq) OR projected_version_seq < :v)"
             ),
             ExpressionAttributeValues={
                 ":p": {"S": "projected"}, ":v": {"N": str(int(vseq))}, ":t": {"N": str(_wa_now_ms())},
+                ":wk": {"S": "marker"},  # ENC-TSK-S47-0B: stream filter drops marker-only MODIFYs
             },
         )
         return True
@@ -935,11 +930,20 @@ def _result_value(result: Any, key: str) -> Any:
         return None
 
 
+def _on_result_value(result: Any, key: str, fn: Any) -> None:
+    """ENC-TSK-S47-0C: apply fn to one column now, or after commit for a staged (batched) statement."""
+    if isinstance(result, _graph_repo.DeferredResult):
+        result.add_callback(lambda row: fn(row.get(key) if row else None))
+    else:
+        fn(_result_value(result, key))
+
+
 def _count_edge_rows(result: Any) -> None:
     """Count a skipped edge when an unlabelled-endpoint MERGE reports zero rows."""
-    n = _result_value(result, "n")
-    if isinstance(n, int) and not isinstance(n, bool) and n == 0:
-        _EDGE_GUARD_STATS["edges_skipped_missing_target"] += 1
+    def _apply(n: Any) -> None:
+        if isinstance(n, int) and not isinstance(n, bool) and n == 0:
+            _EDGE_GUARD_STATS["edges_skipped_missing_target"] += 1
+    _on_result_value(result, "n", _apply)
 
 
 def _merge_placeholder(tx, label: str, record_id: str, project_id: Optional[str] = None) -> None:
@@ -963,8 +967,10 @@ def _merge_placeholder(tx, label: str, record_id: str, project_id: Optional[str]
         rid=record_id, project_id=(project_id or None),
         now=_wa_dt.datetime.now(_wa_dt.timezone.utc).isoformat(),
     )
-    if _result_value(result, "created") is True:
-        _EDGE_GUARD_STATS["edges_placeholder_targets"] += 1
+    def _apply(created: Any) -> None:
+        if created is True:
+            _EDGE_GUARD_STATS["edges_placeholder_targets"] += 1
+    _on_result_value(result, "created", _apply)
 
 
 def _guard_field_target(tx, expected_label: str, target_id: str, project_id: Optional[str]) -> None:
@@ -2186,6 +2192,67 @@ def _extract_stream_record(sqs_body: Dict) -> Optional[Dict]:
     return sqs_body
 
 
+def _stage_entity_record(repo, record: Dict[str, Any], record_type: str, record_id: str,
+                         new_image: Dict[str, Any], incoming_vseq: Optional[int],
+                         stale_placeholder_refs: Set[PlaceholderRef], event_name: str) -> None:
+    """ENC-TSK-S47-0C: the entity INSERT/MODIFY projection, staged into the batch transaction.
+
+    Same statements, same order as the per-record path in _process_record (project node,
+    node upsert, owner-scoped edge reconcile incl. order-guard placeholders, placeholder purge,
+    embedding, MUTATED edge); the version_seq and embedding-hash reads come from the batch's
+    node-state prefetch. The projection marker and the Synced log run per record after commit.
+    """
+    label = RECORD_TYPE_TO_LABEL[record_type]
+    bare = _bare_id(record_id)
+    state = repo.node_state(label, bare)
+    if incoming_vseq is not None:  # ENC-TSK-S28-0E: duplicate / out-of-order delivery -> skip
+        stored_vseq = state.get("v")
+        if stored_vseq is not None and incoming_vseq <= stored_vseq:
+            logger.info("[INFO] Skipped stale %s %s (version_seq %s <= stored %s)",
+                        record_type, record_id, incoming_vseq, stored_vseq)
+            return
+    staged = repo.begin_record((label, bare))
+    tx = staged.capture()
+    project_id = record.get("project_id", "")
+    if project_id:
+        _upsert_project_node(tx, project_id)
+    _upsert_node(tx, record)
+    _reconcile_edges(tx, record)
+    if stale_placeholder_refs:
+        _purge_orphan_placeholders(tx, stale_placeholder_refs)
+    new_hash = None
+    if record_type in EMBEDDABLE_RECORD_TYPES:  # ENC-TSK-B94: never breaks the primary projection
+        try:
+            record["_existing_embedding_hash"] = state.get("h") or ""
+            payload = compute_embedding_for_record(record)
+            if payload is not None:
+                _write_embedding(staged.capture(optional=True), label, bare, payload)
+                new_hash = payload[EMBEDDING_HASH_PROPERTY]
+                logger.info("[INFO] Embedded %s %s (dims=%d, hash=%s)", record_type, bare,
+                            len(payload[EMBEDDING_PROPERTY]), new_hash)
+            else:
+                logger.info("[INFO] Skipped embedding for %s %s (no-op or empty text or bedrock failure)",
+                            record_type, bare)
+        except Exception:
+            logger.exception("[ERROR] Incremental embedding failed for %s %s; primary projection preserved",
+                             record_type, record_id)
+    _project_mutated_edge(_graph_repo.CaptureSession(tx), record)
+    staged.guard_stats = _edge_guard_audit_fields()
+
+    def _after_commit() -> None:
+        if incoming_vseq is not None:  # ENC-TSK-S28-0E: projected marker on the source item
+            _wa_m0 = _wa_time.perf_counter()
+            try:
+                _mark_source_projected(new_image, incoming_vseq)
+            finally:
+                _WA_REC["mark_ms"] += (_wa_time.perf_counter() - _wa_m0) * 1000.0
+        logger.info("[INFO] Synced %s %s (event=%s, project=%s)",
+                    record_type, record_id, event_name, record.get("project_id", ""))
+
+    staged.post_commit = _after_commit
+    repo.stage(staged, version_seq=record.get("version_seq"), embedding_hash=new_hash)
+
+
 def _process_record(driver, stream_record: Dict) -> None:
     """Process a single DynamoDB stream record."""
     event_name = stream_record.get("eventName", "")
@@ -2271,6 +2338,10 @@ def _process_record(driver, stream_record: Dict) -> None:
             return
 
         incoming_vseq = _image_version_seq(new_image)
+        if isinstance(driver, _graph_repo.GraphRepository) and driver.batching:  # ENC-TSK-S47-0C
+            _stage_entity_record(driver, record, record_type, record_id, new_image, incoming_vseq,
+                                 stale_placeholder_refs, event_name)
+            return
         with driver.session() as session:
             if incoming_vseq is not None:  # ENC-TSK-S28-0E: duplicate / out-of-order delivery -> skip
                 stored_vseq = session.execute_read(
@@ -2382,6 +2453,34 @@ def _process_record(driver, stream_record: Dict) -> None:
 # Lambda handler
 # ---------------------------------------------------------------------------
 
+# ENC-TSK-S47-0C: kill switch for the batched graph transaction (default on).
+_GRAPH_BATCH_TX = os.environ.get("GRAPH_SYNC_BATCH_TX", "1").strip().lower() not in ("0", "false", "off")
+
+
+def _wa_prefetch_keys(records: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """(label, record_id) of the batch's entity INSERT/MODIFY records, for one node-state read.
+    Best effort: a key missed here is read singly by the repository."""
+    keys: List[Tuple[str, str]] = []
+    for raw in records:
+        try:
+            src, _ident = _record_source_and_identifier(raw)
+            body = raw.get("body", "{}") if src == "sqs" else raw
+            if isinstance(body, str):
+                body = json.loads(body)
+            srec = body if isinstance(body, dict) else None  # same shape _extract_stream_record yields
+            if not srec or srec.get("eventName") not in ("INSERT", "MODIFY"):
+                continue
+            new_image = (srec.get("dynamodb") or {}).get("NewImage") or {}
+            rec = _normalize_record_for_graph(_deser_image(new_image)) if new_image else {}
+            label = RECORD_TYPE_TO_LABEL.get(rec.get("record_type", ""))
+            rid = _bare_id(str(rec.get("record_id", rec.get("item_id", "")) or ""))
+            if label and rid and not rid.startswith("COUNTER-"):
+                keys.append((label, rid))
+        except Exception:  # noqa: BLE001
+            continue
+    return keys
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Processes DynamoDB stream records, from either the legacy SQS-fed path
     (GraphSyncSqsTrigger, prod/v3) or the direct DynamoDB Streams
@@ -2417,8 +2516,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         _wa_mem = int(_wa_mem) if _wa_mem is not None else None
     except (TypeError, ValueError):
         _wa_mem = None
-    if driver is not None:
-        driver = _WaTimedDriver(driver)
     if driver is None:
         logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
         # Report every record as failed so the source retries the whole batch
@@ -2436,8 +2533,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     errors = 0
     failed_identifiers: List[str] = []
 
-    def _wa_stage(position: int, raw: Dict[str, Any], t_rec_start: int, marker_only: bool = False) -> Dict[str, Any]:
+    def _wa_stage(position: int, raw: Dict[str, Any], t_rec_start: int, marker_only: bool = False,
+                  basis: str = "record", fallback: bool = False) -> Dict[str, Any]:
         return {
+            "store_ms_basis": basis, "batch_tx_fallback": fallback,  # ENC-TSK-S47-0C
             "t_batch_start": _wa_t_batch, "batch_size": len(records), "batch_position": position,
             "t_record_start": t_rec_start, "cold_start": _wa_cold, "init_ms": _wa_init_ms,
             "store_ms": round(_WA_REC["store_ms"], 3), "store_calls": _WA_REC["store_calls"],
@@ -2445,6 +2544,47 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "mark_ms": round(_WA_REC["mark_ms"], 3), "marker_only_skipped": marker_only,
             "shard_id": _wa_shard_id(raw), "memory_mb": _wa_mem,
         }
+
+    def _on_batch_commit(staged_records: List[Any]) -> None:
+        """ENC-TSK-S47-0C: per-record post-commit work + audit line for each batched record."""
+        nonlocal processed, errors
+        saved_rec, saved_guard = dict(_WA_REC), _edge_guard_audit_fields()
+        try:
+            for st in staged_records:
+                pos, raw, srec, t_recv, src, ident = st.meta
+                _WA_REC.update({"store_ms": st.store_ms, "store_calls": st.store_calls,
+                                "store_statements": st.store_statements, "mark_ms": 0.0,
+                                "edges_written": sum(1 for x in st.statements if _WA_EDGE_MERGE_RE.search(x.query))})
+                _EDGE_GUARD_STATS.update(st.guard_stats)
+                st.resolve_results()
+                if st.error is None:
+                    try:
+                        if st.post_commit is not None:
+                            st.post_commit()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error = exc
+                stage = _wa_stage(pos, raw, t_recv, basis="record" if st.batch_tx_fallback else "batch_share",
+                                  fallback=st.batch_tx_fallback)
+                if st.error is None:
+                    _wa_consumer_emit("graph_sync", raw, srec, t_recv, _wa_now_ms(), stage=stage)
+                    continue
+                processed -= 1
+                errors += 1
+                _wa_consumer_emit("graph_sync", raw, srec, t_recv, _wa_now_ms(), outcome="error", stage=stage)
+                logger.error("[ERROR] Failed to process %s record identifier=%s: %r", src, ident, st.error)
+                if not ident:
+                    raise st.error  # ENC-ISS-543: fail closed
+                failed_identifiers.append(ident)
+        finally:
+            _WA_REC.update(saved_rec)
+            _EDGE_GUARD_STATS.update(saved_guard)
+
+    # ENC-TSK-S47-0C: one repository per invocation over the module-level driver (built once per
+    # container); entity upserts of the batch commit in one UNWIND transaction.
+    repo = _graph_repo.Neo4jRepository(driver, session_wrapper=_WaTimedSession, on_commit=_on_batch_commit,
+                                       batching=_GRAPH_BATCH_TX, state_property_hash=EMBEDDING_HASH_PROPERTY)
+    if repo.batching:
+        repo.prefetch_node_state(_wa_prefetch_keys(records))
 
     for _wa_pos, raw_record in enumerate(records):
         source, identifier = _record_source_and_identifier(raw_record)
@@ -2471,8 +2611,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                                   phase="marker_skipped", stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv, True))
                 continue  # ENC-TSK-S28-0E loop guard: consumer-originated projection marker write
             if stream_record and "dynamodb" in stream_record:
-                _process_record(driver, stream_record)
+                _process_record(repo, stream_record)
                 processed += 1
+                staged = repo.take_last_staged()
+                if staged is not None:  # ENC-TSK-S47-0C: audit line after the batch commit
+                    staged.meta = (_wa_pos, raw_record, stream_record, _wa_t_recv, source, identifier)
+                    continue
                 _wa_consumer_emit("graph_sync", raw_record, stream_record, _wa_t_recv, _wa_now_ms(),
                                   stage=_wa_stage(_wa_pos, raw_record, _wa_t_recv))
         except Exception:
@@ -2492,6 +2636,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 )
                 raise
 
+    repo.flush()  # ENC-TSK-S47-0C: commit the batch transaction; emits the deferred audit lines
     logger.info("[INFO] Batch complete: processed=%d, errors=%d, total=%d", processed, errors, len(records))
 
     if failed_identifiers:

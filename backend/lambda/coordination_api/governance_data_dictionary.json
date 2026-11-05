@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.17",
-  "updated_at": "2026-11-04T18:00:00Z",
-  "last_change_summary": "ENC-TSK-S46-0D (ENC-ISS-180 defect A, ENC-PLN-104 W6a.4, io decision E2): graph_sync edge order guard. When an edge's target node is not yet projected (out-of-order stream delivery, parallel shards, burst execute), graph_sync MERGEs a placeholder for the target through the single placeholder convention _merge_placeholder (key (label, record_id); ON CREATE is_placeholder=true, project_id, placeholder_created_at) and then creates the edge; this now also covers the field-projection edges that previously used MATCH-only targets (CHILD_OF, RELATED_TO/ADDRESSES/IMPLEMENTS from related_task_ids/related_issue_ids/related_feature_ids, SUCCEEDS, TARGETS_GENERATION/BELONGS_TO_GENERATION/EXECUTES_WITHIN), and every existing E01 placeholder site (plan/lesson/document/MENTIONS/relationship-record) routes through the same helper. The target's later real projection completes the placeholder in place (same node, is_placeholder=false, no duplicate). S33 owner-scoped reconcile and the SUPERSEDED_BY canonical redirect are unchanged. graph_sync [WRITE-AUDIT] consumer line gains edges_skipped_missing_target (int: edges not created because the target was absent and could not be placed, i.e. an unrecognised id prefix on an unlabelled-MATCH fallback or relationship-record endpoint, or an id whose prefix names a different label than the field declares, for which no wrong-label placeholder is created; steady state 0) and edges_placeholder_targets (int: placeholder target nodes the guard materialized for this record). Write-bench counter-metric 6 (cm6_edges_skipped_missing_target.query) sums edges_skipped_missing_target over the window. Additive, no schema changes.",
+  "version": "2026-11-04.21",
+  "updated_at": "2026-11-05T00:40:00Z",
+  "last_change_summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document.",
   "owners": [
     "enceladus-platform"
   ],
@@ -537,6 +537,15 @@
           "type": "number",
           "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
           "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "write_kind": {
+          "type": "string",
+          "enum": [
+            "governed",
+            "marker"
+          ],
+          "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
+          "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
         }
       }
     },
@@ -5906,6 +5915,15 @@
           "type": "number",
           "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
           "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "write_kind": {
+          "type": "string",
+          "enum": [
+            "governed",
+            "marker"
+          ],
+          "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
+          "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
         }
       }
     },
@@ -10014,15 +10032,15 @@
         },
         "store_ms": {
           "type": "number",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: total milliseconds inside graph-store transactions (execute_read/execute_write) for this record."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: milliseconds inside graph-store transactions for this record. ENC-TSK-S47-0C: when store_ms_basis is batch_share the record's entity upsert committed in the stream batch's single UNWIND transaction and store_ms is (batch node-state read + batch write transaction time) / records in that transaction; when store_ms_basis is record it is this record's own transaction time (non-entity paths, kill switch, or batch_tx_fallback)."
         },
         "store_calls": {
           "type": "integer",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: graph transactions (execute_read/execute_write round trips) for this record; store_statements counts the tx.run statements inside them."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: graph-store transactions (execute_read/execute_write) this record ran. ENC-TSK-S47-0C: 1 for a batched record (the batch transaction it participated in); per-record fallback counts its own transactions."
         },
         "store_statements": {
           "type": "integer",
-          "definition": "ENC-TSK-S46-0A, graph_sync lines: Cypher statements run for this record."
+          "definition": "ENC-TSK-S46-0A, graph_sync lines: Cypher statements run for this record. ENC-TSK-S47-0C: for a batched record, the number of UNWIND statements of the batch transaction that carried at least one row of this record."
         },
         "edges_written": {
           "type": "integer",
@@ -10055,6 +10073,18 @@
         "edges_placeholder_targets": {
           "type": "integer",
           "definition": "ENC-TSK-S46-0D, graph_sync lines: placeholder target nodes the edge order guard materialized this record via _merge_placeholder (target not yet projected; the edge still landed). Per-record, reset by handler."
+        },
+        "store_ms_basis": {
+          "type": "string",
+          "enum": [
+            "record",
+            "batch_share"
+          ],
+          "definition": "ENC-TSK-S47-0C, graph_sync lines: how store_ms was measured. batch_share = per-record share of the stream batch's single graph transaction (one UNWIND execute_write per batch, driver built once per container); record = the record's own transaction(s)."
+        },
+        "batch_tx_fallback": {
+          "type": "boolean",
+          "definition": "ENC-TSK-S47-0C, graph_sync lines: true when the batch transaction failed (or a statement could not be rewritten for UNWIND) and this record was re-run in its own transaction with its original statements, so batchItemFailures names only records that failed alone. Kill switch: env GRAPH_SYNC_BATCH_TX=0 restores the per-record path."
         }
       },
       "governing_records": [
@@ -10107,7 +10137,7 @@
       }
     },
     "tracker.audit_item": {
-      "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error). Stream consumers (graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry) drop any record whose key begins `audit#` or `idem#` before doing any work; skipped records are consumed, never reported in batchItemFailures.",
+      "description": "ENC-TSK-S28-0D: one immutable audit row written in the SAME TransactWriteItems as every governed tracker create/update, including tracker.set_acceptance_evidence since ENC-TSK-S52 / ENC-ISS-895 (tracker table devops-project-tracker) and document create/update (documents table), so a committed write and its audit row exist together or not at all. Keys on the tracker table: project_id = `audit#<record_id>` (record_id is the bare human id, e.g. ENC-TSK-123), record_id = `<iso_ts_microseconds>Z#<correlation_id>` (request_id when no correlation_id). The documents table is hash-only, so document_id = `audit#<DOC-id>#<iso_ts>#<correlation_id>`. The row deliberately carries no record_type, feed_scope, updated_at or version_seq GSI keys: it appears in no GSI, feed projection or list query. Only successful commits write an audit row; failed attempts are visible solely on the [WRITE-AUDIT] stdout line (attempt_outcome=error). Stream consumers (graph_sync, opensearch_indexer, appsync_feed_publisher, feed_publisher, governance_audit, convergence_telemetry) drop any record whose key begins `audit#` or `idem#` before doing any work; skipped records are consumed, never reported in batchItemFailures.",
       "fields": {
         "audit_type": {
           "type": "string",
@@ -11442,6 +11472,21 @@
       "version": "2026-11-04.17",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S46-0D (ENC-ISS-180 defect A, ENC-PLN-104 W6a.4, io decision E2): graph_sync edge order guard. When an edge's target node is not yet projected (out-of-order stream delivery, parallel shards, burst execute), graph_sync MERGEs a placeholder for the target through the single placeholder convention _merge_placeholder (key (label, record_id); ON CREATE is_placeholder=true, project_id, placeholder_created_at) and then creates the edge; this now also covers the field-projection edges that previously used MATCH-only targets (CHILD_OF, RELATED_TO/ADDRESSES/IMPLEMENTS from related_task_ids/related_issue_ids/related_feature_ids, SUCCEEDS, TARGETS_GENERATION/BELONGS_TO_GENERATION/EXECUTES_WITHIN), and every existing E01 placeholder site (plan/lesson/document/MENTIONS/relationship-record) routes through the same helper. The target's later real projection completes the placeholder in place (same node, is_placeholder=false, no duplicate). S33 owner-scoped reconcile and the SUPERSEDED_BY canonical redirect are unchanged. graph_sync [WRITE-AUDIT] consumer line gains edges_skipped_missing_target (int: edges not created because the target was absent and could not be placed, i.e. an unrecognised id prefix on an unlabelled-MATCH fallback or relationship-record endpoint, or an id whose prefix names a different label than the field declares, for which no wrong-label placeholder is created; steady state 0) and edges_placeholder_targets (int: placeholder target nodes the guard materialized for this record). Write-bench counter-metric 6 (cm6_edges_skipped_missing_target.query) sums edges_skipped_missing_target over the window. Additive, no schema changes."
+    },
+    {
+      "version": "2026-11-04.19",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S52 (ENC-ISS-895): tracker.set_acceptance_evidence is now a first-class governed write. tracker_mutation _handle_acceptance_evidence commits the acceptance_criteria[n] rewrite, the history worklog entry (\"Acceptance criterion [n] evidence accepted|updated\"), the sync_version increment and the version_seq/feed_scope, correlation_id, write_tool (tracker.set_acceptance_evidence), t_ack and projection_status stamps in ONE TransactWriteItems together with a tracker.audit_item (audit_type update) and, when an Idempotency-Key / idempotency_key is present, an idempotency marker (24 h, byte-identical replay). A failing audit or marker put cancels the whole transaction, so the record is unchanged. Previously the tool updated the record with a plain UpdateItem and wrote no audit item, so the write-path query pack reported every acceptance-evidence write as records_without_audit_item. When the caller supplies no correlation_id (X-Correlation-Id header or body field), tracker_mutation generates a server-side id prefixed `srv-` for this tool, stamps it on the record and the audit item and emits it on the [WRITE-AUDIT] line (correlation_id_generated true) so the audit item and the line join. The [WRITE-AUDIT] line for this tool now carries atomic_commit true, txn_items 2 (3 when keyed) and t_commit_ms. Response shape is unchanged (success, record_id, criterion_index, evidence_acceptance, updated_at, criteria_summary, all_criteria_accepted, completion_eligible, plus t_ack/version_seq/server_total_ms). Additive, no schema changes."
+    },
+    {
+      "version": "2026-11-04.20",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S47-0C (ENC-PLN-104 W6b.3): graph_sync commits a stream batch's entity upserts in ONE graph write transaction: statements built by the unchanged Cypher helpers are captured per record and collapsed into UNWIND $__rows CALL { WITH __row ... } groups (record statement order kept by levels; a repeated node key starts a new wave), behind graph_repo.GraphRepository / Neo4jRepository (seam for the ENC-TSK-Q62 FalkorDB adapter). version_seq and embedding-hash reads become one batch prefetch. Projection marker stays per record after commit. On batch failure every record re-runs alone (batch_tx_fallback). [WRITE-AUDIT] graph_sync lines gain store_ms_basis and batch_tx_fallback; store_ms/store_calls/store_statements redefined for batched records. GraphSyncFunction MemorySize 256 -> 1024 (CFN apply only)."
+    },
+    {
+      "version": "2026-11-04.21",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document."
     }
   ]
 }

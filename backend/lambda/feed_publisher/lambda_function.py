@@ -158,6 +158,7 @@ _WA_COLD = True
 # ---------------------------------------------------------------------------
 PROJECTION_ONLY_ATTRS = frozenset({
     "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
+    "write_kind",  # ENC-TSK-S47-0B: marker writers flip it to "marker"; governed writes set "governed"
 })
 
 
@@ -197,9 +198,9 @@ def _s28_claim_version(new: Dict[str, Any], vseq: int, ddb: Any) -> Tuple[bool, 
     table, key, pk = target
     try:
         resp = ddb.update_item(
-            TableName=table, Key=key, UpdateExpression="SET feed_published_version_seq = :v",
+            TableName=table, Key=key, UpdateExpression="SET feed_published_version_seq = :v, write_kind = :wk",  # ENC-TSK-S47-0B
             ConditionExpression=f"attribute_exists({pk}) AND (attribute_not_exists(feed_published_version_seq) OR feed_published_version_seq < :v)",
-            ExpressionAttributeValues={":v": {"N": str(vseq)}}, ReturnValues="UPDATED_OLD",
+            ExpressionAttributeValues={":v": {"N": str(vseq)}, ":wk": {"S": "marker"}}, ReturnValues="UPDATED_OLD",
         )
         return True, (resp.get("Attributes") or {}).get("feed_published_version_seq")
     except ClientError as exc:
@@ -212,12 +213,12 @@ def _s28_claim_version(new: Dict[str, Any], vseq: int, ddb: Any) -> Tuple[bool, 
 def _s28_release_claim(claim: Tuple[str, Dict[str, Any], int, Optional[Dict[str, Any]]], ddb: Any) -> None:
     table, key, vseq, prev = claim
     try:
-        vals: Dict[str, Any] = {":v": {"N": str(vseq)}}
+        vals: Dict[str, Any] = {":v": {"N": str(vseq)}, ":wk": {"S": "marker"}}
         if prev:
             vals[":prev"] = prev
         ddb.update_item(
             TableName=table, Key=key,
-            UpdateExpression="SET feed_published_version_seq = :prev" if prev else "REMOVE feed_published_version_seq",
+            UpdateExpression="SET feed_published_version_seq = :prev, write_kind = :wk" if prev else "REMOVE feed_published_version_seq SET write_kind = :wk",
             ConditionExpression="feed_published_version_seq = :v", ExpressionAttributeValues=vals,
         )
     except Exception as exc:  # noqa: BLE001

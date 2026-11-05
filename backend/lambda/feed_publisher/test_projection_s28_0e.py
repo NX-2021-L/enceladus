@@ -45,6 +45,24 @@ class FeedIdempotenceTests(unittest.TestCase):
         fp._s28_release_claim(("t", {"k": {"S": "1"}}, 7, {"N": "5"}), ddb)
         self.assertIn("feed_published_version_seq = :prev", ddb.update_item.call_args.kwargs["UpdateExpression"])
 
+    def test_claim_and_release_stamp_write_kind_marker(self):
+        """ENC-TSK-S47-0B: the feed marker write is tagged so the stream filter drops it."""
+        ddb = MagicMock()
+        ddb.update_item.return_value = {}
+        claimed, _ = fp._s28_claim_version({"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-1"}}, 7, ddb)
+        self.assertTrue(claimed)
+        kw = ddb.update_item.call_args.kwargs
+        self.assertIn("write_kind = :wk", kw["UpdateExpression"])
+        self.assertEqual(kw["ExpressionAttributeValues"][":wk"], {"S": "marker"})
+        for prev in ({"N": "5"}, None):
+            fp._s28_release_claim(("t", {"k": {"S": "1"}}, 7, prev), ddb)
+            kw = ddb.update_item.call_args.kwargs
+            self.assertIn("write_kind = :wk", kw["UpdateExpression"])
+            self.assertEqual(kw["ExpressionAttributeValues"][":wk"], {"S": "marker"})
+
+    def test_write_kind_is_projection_only_attr(self):
+        self.assertIn("write_kind", fp.PROJECTION_ONLY_ATTRS)
+
 
 if __name__ == "__main__":
     unittest.main()

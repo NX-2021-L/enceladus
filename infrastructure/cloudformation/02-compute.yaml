@@ -983,6 +983,11 @@ Resources:
           # ENC-TSK-O43 AC-5: multi-key accept-list, live-only on gamma and byte-equal to the
           # singular key above. Codified from the SAME parameter -- no new secret.
           COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
+          # ENC-TSK-S50 (ENC-PLN-104 W3b.4): canonical for both planes. Direct qualified invoke of the
+          # tracker mutation `live` alias (ENC-TSK-S39-0A). Needs lambda:InvokeFunction on the :live ARN
+          # (gamma: CheckoutServiceRoleAgentSessionsGammaAccess; prod: CheckoutServiceRoleInvokeTrackerLive).
+          # Rollback: set to `http`. The code default in checkout_service stays as the fallback.
+          CHECKOUT_TRACKER_INVOKE_MODE: direct
       Tags:
         - Key: Project
           Value: enceladus
@@ -1067,8 +1072,29 @@ Resources:
             Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
           # ENC-TSK-S39-0A (W3b.1): checkout_service reaches tracker_mutation by direct invoke of the
           # QUALIFIED `live` alias (no API Gateway hop). Qualified ARN ONLY -- no `:*`, nothing on $LATEST
-          # or the unqualified function ARN. Gamma-only like this whole policy; prod stays on
-          # CHECKOUT_TRACKER_INVOKE_MODE=http (mode default) until its role is granted the same statement.
+          # or the unqualified function ARN. Gamma-only like this whole policy; prod has the same
+          # statement in CheckoutServiceRoleInvokeTrackerLive (ENC-TSK-S50).
+          - Sid: InvokeTrackerMutationLive
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
+
+  # ENC-TSK-S50 (ENC-PLN-104 W3b.4): production counterpart of the gamma-only InvokeTrackerMutationLive
+  # statement above, so checkout_service can direct-invoke tracker_mutation (CHECKOUT_TRACKER_INVOKE_MODE=direct)
+  # on prod. Same attach-by-name precedent: the role is not CFN-managed. QUALIFIED `:live` ARN ONLY --
+  # no `:*`, nothing on $LATEST, nothing on the unqualified function ARN. Gamma keeps its statement in
+  # the gamma-only policy; this one is IsProduction so the two never overlap.
+  CheckoutServiceRoleInvokeTrackerLive:
+    Type: AWS::IAM::Policy
+    Condition: IsProduction
+    Properties:
+      PolicyName: InvokeTrackerMutationLiveCfn
+      Roles:
+        - !Sub "enceladus-checkout-service-role${EnvironmentSuffix}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
           - Sid: InvokeTrackerMutationLive
             Effect: Allow
             Action:
@@ -2305,7 +2331,8 @@ Resources:
         ZipFile: "# managed outside CloudFormation"
       Runtime: python3.12
       Handler: lambda_function.handler
-      MemorySize: 256
+      # ENC-TSK-S47-0C: 1024 MB (CPU scales with memory; Bolt TLS + UNWIND batch build were CPU-bound at 256).
+      MemorySize: 1024
       Timeout: 60
       Architectures:
         - arm64
@@ -4104,6 +4131,14 @@ Resources:
         Fn::Sub: ${DataStackName}-FeedPublishQueueArn
       FunctionName: !Ref FeedPublisherFunction
       BatchSize: 10
+      # ENC-TSK-S47-0B: the Pipe delivers the stream record as the SQS body. Drop marker-only
+      # MODIFYs (write_kind=marker) here; legacy/other-source records without the attribute pass
+      # via exists:false. The Pipe SourceParameters are deliberately untouched (ENC-TSK-Q22 gate).
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"body":{"dynamodb":{"NewImage":{"write_kind":{"S":[{"anything-but":["marker"]}]}}}}}'
+          - Pattern: '{"body":{"dynamodb":{"NewImage":{"write_kind":{"S":[{"exists":false}]}}}}}'
+          - Pattern: '{"body":{"eventName":["REMOVE"]}}'
       FunctionResponseTypes:
         - ReportBatchItemFailures
       Enabled: true
@@ -4152,6 +4187,14 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-S47-0B: the Pipe delivers the stream record as the SQS body. Drop marker-only
+      # MODIFYs (write_kind=marker) here; legacy/other-source records without the attribute pass
+      # via exists:false. The Pipe SourceParameters are deliberately untouched (ENC-TSK-Q22 gate).
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"body":{"dynamodb":{"NewImage":{"write_kind":{"S":[{"anything-but":["marker"]}]}}}}}'
+          - Pattern: '{"body":{"dynamodb":{"NewImage":{"write_kind":{"S":[{"exists":false}]}}}}}'
+          - Pattern: '{"body":{"eventName":["REMOVE"]}}'
       # ENC-TSK-L74: without partial-batch-failure reporting, a batch with even
       # one successful record returns HTTP 200 for the WHOLE batch and SQS
       # deletes every message in it -- including ones whose _process_record
@@ -4201,6 +4244,12 @@ Resources:
         Fn::Sub: ${DataStackName}-TrackerStreamArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): shard-parallel drain. A 20-step execute puts
+      # 20 records on one shard; with ParallelizationFactor 1 the mapping drains them
+      # serially (projection lag 10-16 s). Per-record order is preserved (Lambda keeps
+      # same-partition-key records on one concurrent batch); cross-record order is covered
+      # by the ENC-TSK-S46-0D placeholder guard. Raise only on evidence.
+      ParallelizationFactor: 4
       MaximumBatchingWindowInSeconds: 0
       StartingPosition: LATEST
       FunctionResponseTypes:
@@ -4211,9 +4260,12 @@ Resources:
       DestinationConfig:
         OnFailure:
           Destination: !GetAtt GraphSyncTrackerOnFailureQueue.Arn
+      # ENC-TSK-S47-0B: drop marker-only MODIFYs (write_kind=marker) at the mapping; legacy items
+      # without the attribute still pass via the exists:false filter. REMOVE is unchanged.
       FilterCriteria:
         Filters:
-          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]},"write_kind":{"S":[{"anything-but":["marker"]}]}}}}'
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]},"write_kind":{"S":[{"exists":false}]}}}}'
           - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
       Enabled: true
 
@@ -4239,6 +4291,12 @@ Resources:
         Fn::Sub: ${DataStackName}-DocumentsStreamArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): shard-parallel drain. A 20-step execute puts
+      # 20 records on one shard; with ParallelizationFactor 1 the mapping drains them
+      # serially (projection lag 10-16 s). Per-record order is preserved (Lambda keeps
+      # same-partition-key records on one concurrent batch); cross-record order is covered
+      # by the ENC-TSK-S46-0D placeholder guard. Raise only on evidence.
+      ParallelizationFactor: 4
       MaximumBatchingWindowInSeconds: 0
       StartingPosition: LATEST
       FunctionResponseTypes:
@@ -4249,9 +4307,11 @@ Resources:
       DestinationConfig:
         OnFailure:
           Destination: !GetAtt GraphSyncDocumentsOnFailureQueue.Arn
+      # ENC-TSK-S47-0B: see GraphSyncTrackerStreamTrigger.
       FilterCriteria:
         Filters:
-          - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"write_kind":{"S":[{"anything-but":["marker"]}]}}}}'
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"write_kind":{"S":[{"exists":false}]}}}}'
           - Pattern: '{"eventName":["REMOVE"]}'
       Enabled: true
 
@@ -4881,7 +4941,11 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: $.dynamodb.Keys.project_id.S
+          # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): group per tracker record_id so the FIFO drains records
+          # in parallel while each record stays strictly ordered. Was $.dynamodb.Keys.project_id.S (whole project/
+          # corpus drained serially). Cross-record order: ENC-TSK-S46-0D placeholder guard.
+          # MessageDeduplicationId stays $.eventID (ENC-TSK-Q57). Keys is present on REMOVE.
+          MessageGroupId: $.dynamodb.Keys.record_id.S
           MessageDeduplicationId: $.eventID
 
   # ENC-PLN-014 / ENC-FTR-065: Document node graph projection.
@@ -4910,7 +4974,11 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: document
+          # ENC-TSK-S47-0A (ENC-PLN-104 W6b.1): group per document_id so the FIFO drains records
+          # in parallel while each record stays strictly ordered. Was document (whole project/
+          # corpus drained serially). Cross-record order: ENC-TSK-S46-0D placeholder guard.
+          # MessageDeduplicationId stays $.eventID (ENC-TSK-Q57). Keys is present on REMOVE.
+          MessageGroupId: $.dynamodb.Keys.document_id.S
           MessageDeduplicationId: $.eventID
 
   # ENC-TSK-L41 / B67 Search2.0: dedicated search-index FIFO (NOT GraphSyncQueue).
