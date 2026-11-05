@@ -34,6 +34,9 @@ DLQ_QUEUES = {
     "gamma": ["devops-graph-sync-dlq-gamma.fifo", "devops-appsync-feed-publisher-dlq-gamma",
               "devops-search-index-cdc-dlq-gamma"],
 }
+# Only the MCP server validates the governance hash (ruling D3). Tool Lambdas (tracker_mutation,
+# document_api, checkout_service) never see it, so their unverified lines are pass-through, not violations.
+VALIDATING_SURFACES = {"mcp_server"}
 REPORT_RE = re.compile(r"^REPORT RequestId:\s*(\S+).*?Init Duration:\s*([0-9.]+)\s*ms", re.S)
 
 
@@ -171,6 +174,20 @@ def read_dlq_depth(sqs, names):
     return depth, detail
 
 
+def parse_iso(s):
+    t = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def resolve_window(args, now=None):
+    """--start/--end (ISO 8601) win over --days; end defaults to now, start to end - days."""
+    end = parse_iso(args.end) if getattr(args, "end", None) else (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    start = parse_iso(args.start) if getattr(args, "start", None) else end - timedelta(days=args.days)
+    if start >= end:
+        sys.exit("--start must be earlier than --end")
+    return start, end
+
+
 def load_aws(args):
     import boto3
     sess = boto3.Session(profile_name=args.profile, region_name=args.region)
@@ -183,8 +200,7 @@ def load_aws(args):
         print(f"[WARN] log group not found, skipped: {g}", file=sys.stderr)
     if not groups:
         sys.exit("no log groups found")
-    end = datetime.now(timezone.utc).replace(microsecond=0)
-    start = end - timedelta(days=args.days)
+    start, end = resolve_window(args)
     ins = Insights(logs)
     audit_q = (HERE / "05_extract_audit_lines.query").read_text()
     report_q = (HERE / "06_extract_report_init.query").read_text()
@@ -320,8 +336,16 @@ def compute(lines, reports, window_start, window_end, grace_min=15, dlq_depth=0)
 
     # --- governance counter-metrics (each must be 0)
     cm = {}
-    stale = [w for w in writes if as_bool(w.get("governance_hash_verified")) is False and as_bool(w.get("success")) is not False]
+    unverified = [w for w in writes if as_bool(w.get("governance_hash_verified")) is False and as_bool(w.get("success")) is not False]
+    stale = [w for w in unverified if w.get("surface") in VALIDATING_SURFACES]
     cm["stale_hash_acceptances"] = {"count": len(stale), "ids": [w.get("correlation_id") for w in stale]}
+    passthrough = [w for w in unverified if w.get("surface") not in VALIDATING_SURFACES]
+    by_surface = defaultdict(int)
+    for w in passthrough:
+        by_surface[str(w.get("surface") or "unknown")] += 1
+    passthrough_unverified = {"count": len(passthrough),
+                              "unique_correlation_ids": len({w.get("correlation_id") for w in passthrough}),
+                              "by_surface": dict(sorted(by_surface.items()))}
 
     cutoff = window_end - timedelta(minutes=grace_min)
     seen = {c.get("correlation_id") for c in consumers}
@@ -367,7 +391,8 @@ def compute(lines, reports, window_start, window_end, grace_min=15, dlq_depth=0)
             "counts": {"write_lines": len(writes), "consumer_lines": len(consumers), "report_init_rows": len(init_by_req),
                        "report_joined": joined, "malformed_lines": malformed},
             "latency_by_tool_surface": latency, "latency_by_tool": latency_by_tool, "stage_table": stage_table,
-            "governed_lag": governed_lag, "consumer_lag": consumer_lag, "cold_fraction": cold_fraction, "counter_metrics": cm}
+            "governed_lag": governed_lag, "consumer_lag": consumer_lag, "cold_fraction": cold_fraction, "counter_metrics": cm,
+            "passthrough_unverified": passthrough_unverified}
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -409,7 +434,20 @@ def render_markdown(res, title):
     for k, v in res["counter_metrics"].items():
         detail = v.get("note") or ", ".join(map(str, v["ids"][:5])) or ""
         out.append(f"| {k} | {'n/a' if v['count'] is None else v['count']} | {detail} |")
+    pt = res.get("passthrough_unverified")
+    if pt is not None:
+        surf = ", ".join(f"{k}: {n}" for k, n in pt["by_surface"].items()) or "-"
+        out += ["", "## Informational (not a violation)", "", "| metric | count | detail |", "|---|---|---|",
+                f"| passthrough_unverified | {pt['count']} | not a violation: tool-Lambda lines never see the governance hash "
+                f"(only mcp_server validates it); {pt['unique_correlation_ids']} unique correlation ids; by surface {surf} |"]
     return "\n".join(out) + "\n"
+
+
+def window_label(args, ws, we):
+    if args.start or args.end:
+        fmt = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"{fmt(ws)} to {fmt(we)}" if not args.fixture else "fixture window"
+    return "fixture window" if args.fixture else f"{args.days}d"
 
 
 # ----------------------------------------------------------------------------- main
@@ -417,6 +455,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env", choices=["gamma", "prod"])
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--start", help="window start, ISO 8601 (e.g. 2026-11-04T19:10:00Z); alternative to --days")
+    ap.add_argument("--end", help="window end, ISO 8601; defaults to now when only --start is given")
     ap.add_argument("--fixture", help="local JSONL of synthetic audit lines; no AWS calls")
     ap.add_argument("--out-dir", default="readings")
     ap.add_argument("--profile", default=None, help="AWS profile (default: the default credential chain)")
@@ -444,7 +484,7 @@ def main(argv=None):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base = out / f"write-path-reading-{label}-{stamp}"
     base.with_suffix(".json").write_text(json.dumps(res, indent=2, default=str))
-    base.with_suffix(".md").write_text(render_markdown(res, f"Write-path reading ({label}, {args.days}d)"))
+    base.with_suffix(".md").write_text(render_markdown(res, f"Write-path reading ({label}, {window_label(args, ws, we)})"))
     print(f"[INFO] wrote {base}.json and {base}.md")
     print(f"[INFO] scanned_bytes_total={res.get('scanned_bytes')} queries_run={res.get('queries_run', 0)}")
     for k, v in res["counter_metrics"].items():

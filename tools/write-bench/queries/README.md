@@ -38,12 +38,21 @@ day by day and halves any window that hits the cap (the discarded scan is includ
 
 | metric | Insights file | definition |
 |---|---|---|
-| stale_hash_acceptances | `cm1_...query` | `governance_hash_verified = false` and the write did not report `success = false` (the contract has no outcome key, so lines without `success` are treated as accepted) |
+| stale_hash_acceptances | `cm1_...query` | `governance_hash_verified = false`, the write did not report `success = false` (the contract has no outcome key, so lines without `success` are treated as accepted), **and the line is from a validating surface** (`VALIDATING_SURFACES = {mcp_server}`; only the MCP server checks the governance hash, ruling D3). Tool Lambdas (`tracker_mutation`, `document_api`, `checkout_service`) never see the hash, so their unverified lines are reported separately as `passthrough_unverified` (ENC-ISS-896). The `.query` file is not surface-filtered; add `surface = "mcp_server"` when pasting it |
 | records_without_audit_item | `cm2_audit_coverage_inputs.query` (inputs only) | write `correlation_id` never on a consumer line; computed by the Python merge. Excluded: `success=false`, `dry_run`, `idempotency_hit`, `ddb_ops=0`, and writes newer than `--grace-min` (default 15) |
 | idempotent_replay_receipt_mismatch | `cm3_...query` | same `idempotency_key`, more than one `receipt_hash`. Reported as `n/a` (not computable until W2.4 emits `receipt_hash`) when no line carries it |
 | dry_run_writes | `cm4_...query` | `dry_run = true` and `ddb_ops > 0` |
 | unrecovered_consumer_failures | `cm5_...query` | consumer line with `attempt >= 3` and no `t_projection_done`. The runner refines this (a later line for the same correlation_id and consumer with `t_projection_done` is a recovery, reported as `literal_attempt_ge_3_without_done` vs `unrecovered_lines`) and adds the on-failure queue depth read with SQS `get-queue-attributes` (visible + in flight + delayed) over the gamma/prod DLQs, overridable with `--dlq-queue` |
 | edges_skipped_missing_target | `cm6_...query` | sum of `edges_skipped_missing_target` on consumer lines (graph_sync edge order guard, ENC-TSK-S46-0D): edges not created because the target node was absent and could not be placed as a placeholder. Steady state 0; the runner also reports `placeholder_targets` (sum of `edges_placeholder_targets`, placeholders the guard materialized), which is informational, not a violation |
+
+`passthrough_unverified` (top-level key of the JSON, "Informational (not a violation)" row in the markdown) is
+`{count, unique_correlation_ids, by_surface}` over write lines from non-validating surfaces with
+`governance_hash_verified = false` (and no `success = false`). It is informational only and is never part of the
+must-be-0 set; the matching `mcp_server` line for the same correlation id is the one that carries the verdict.
+
+Window flags: `--days N` (default 7) reads the last N days. `--start` / `--end` (ISO 8601, e.g.
+`2026-11-04T19:10:00Z`) read an explicit window instead; `--end` defaults to now when only `--start` is given, and
+`--start` alone or with `--end` overrides `--days`. The markdown title shows the actual window.
 
 The `.query` counter files return a single `violations` count and can be pasted into the console; the runner
 computes the same counts from the extracts without extra scans (`--insights-queries` also runs the aggregate
