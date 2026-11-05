@@ -58,6 +58,14 @@ class AckTests(unittest.TestCase):
         self.assertIn("t_ack = :wa_tack", clauses)
         self.assertEqual(vals[":wa_pstat"], {"S": "pending"})
 
+    def test_item_stamp_write_kind_governed(self):
+        """ENC-TSK-S47-0B: documents update path stamps write_kind=governed (stream filter key)."""
+        m._WA.clear(); m._WA.update({"t0": 0.0})
+        with mock.patch.object(m, "_allocate_document_version_seq", return_value=7):
+            clauses, vals = m._document_version_seq_update_parts()
+        self.assertIn("write_kind = :wa_wkind", clauses)
+        self.assertEqual(vals[":wa_wkind"], {"S": "governed"})
+
 
 if __name__ == "__main__":
     unittest.main()

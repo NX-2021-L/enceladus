@@ -744,6 +744,8 @@ def _apply_deploy_arc_change(project_id: str, escalation: Dict, target: Dict) ->
     }
     if target.get("checkout_transition_type"):
         update_parts.append("checkout_transition_type = :arc")
+    update_parts.append("write_kind = :wk")  # ENC-TSK-S47-0B
+    values[":wk"] = {"S": "governed"}
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -768,6 +770,7 @@ def _apply_deploy_arc_change(project_id: str, escalation: Dict, target: Dict) ->
 _RESERVED_OVERRIDE_PATHS = {
     "status", "updated_at", "last_update_note", "sync_version",
     "history", "escalation_provenance", "escalated_closure", "closed_count",
+    "write_kind",  # ENC-TSK-S47-0B: stamped by the applier; field_values may not set it
 }
 
 
@@ -875,7 +878,9 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
         ("escalation_provenance",
          "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
+        ("write_kind", "write_kind = :wk"),  # ENC-TSK-S47-0B
     ]
+    values[":wk"] = {"S": "governed"}
 
     for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
@@ -1361,6 +1366,7 @@ def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
     # ENC-TSK-S28-0E: ack basis + projection marker (graph_sync flips it to "projected")
     item["t_ack"] = {"N": str(_wa_ack_now())}
     item["projection_status"] = {"S": "pending"}
+    item["write_kind"] = {"S": "governed"}  # ENC-TSK-S47-0B: stream filter key (markers write "marker")
     if not _VERSION_SEQ_AVAILABLE:
         return
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
@@ -1369,9 +1375,26 @@ def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
         _WA["version_seq"] = seq
 
 
+def _stamp_governed_transact_updates(items: List[Dict]) -> List[Dict]:
+    """ENC-TSK-S47-0B: add `write_kind = governed` to every `Update` entry of a TransactItems list built
+    by the shared layer (relationship_store.build_archive_transact_updates), so a sticky marker is cleared
+    in the same write. Done here, not in the layer, to avoid a layer republish."""
+    for entry in items:
+        upd = entry.get("Update")
+        if not upd:
+            continue
+        expr = str(upd.get("UpdateExpression") or "")
+        if expr.startswith("SET "):
+            upd["UpdateExpression"] = "SET write_kind = :wk, " + expr[len("SET "):]
+            upd["ExpressionAttributeValues"] = {**upd.get("ExpressionAttributeValues", {}), ":wk": {"S": "governed"}}
+    return items
+
+
 def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
     if not _VERSION_SEQ_AVAILABLE:
-        return "", {}
+        # ENC-TSK-S47-0B: even without version_seq the write MUST clear a sticky write_kind=marker,
+        # or the stream filter drops this governed MODIFY.
+        return ", write_kind = :wa_wkind", {":wa_wkind": {"S": "governed"}}
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
     expr, vals = version_seq_update_clause(seq)
     if _WA:
@@ -1387,9 +1410,10 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
             vals[":wa_tool"] = {"S": wtool}
     if expr:  # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
         vals = dict(vals)
-        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat"
+        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat, write_kind = :wa_wkind"
         vals[":wa_tack"] = {"N": str(_wa_ack_now())}
         vals[":wa_pstat"] = {"S": "pending"}
+        vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return expr, vals
 
 
@@ -3221,7 +3245,7 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             "timestamp": _ser_s(now2),
         }}
         update_expr = (
-            "SET #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "SET write_kind = :wk, #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "history = list_append(if_not_exists(history, :empty), :hentry)"
             + extra_set + add_clause
@@ -3231,6 +3255,7 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             ":zero": {"N": "0"}, ":one": {"N": "1"},
             ":hentry": {"L": [hentry]}, ":empty": {"L": []},
             ":expected": _ser_s(current),
+            ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
         }
         attr_vals.update(extra_vals)
         try:
@@ -5037,10 +5062,11 @@ def _handle_create_record(
                     "record_id": _ser_s(parent_sk),
                 },
                 UpdateExpression=(
-                    "SET subtask_ids = list_append(if_not_exists(subtask_ids, :empty_list), :new_child), "
+                    "SET write_kind = :wk, subtask_ids = list_append(if_not_exists(subtask_ids, :empty_list), :new_child), "
                     "updated_at = :now"
                 ),
                 ExpressionAttributeValues={
+                    ":wk": {"S": "governed"},
                     ":empty_list": {"L": []},
                     ":new_child": {"L": [_ser_s(new_id)]},
                     ":now": _ser_s(_now_z()),
@@ -5072,9 +5098,10 @@ def _handle_create_record(
                 target_key = _build_key(target_project, target_type, target_id_upper)
                 ddb.update_item(
                     TableName=DYNAMODB_TABLE, Key=target_key,
-                    UpdateExpression="SET #rel = list_append(if_not_exists(#rel, :empty), :new_id)",
+                    UpdateExpression="SET write_kind = :wk, #rel = list_append(if_not_exists(#rel, :empty), :new_id)",
                     ExpressionAttributeNames={"#rel": inverse_field},
                     ExpressionAttributeValues={
+                        ":wk": {"S": "governed"},
                         ":new_id": {"L": [_ser_s(new_id)]},
                         ":empty": {"L": []},
                     },
@@ -5713,11 +5740,12 @@ def _apply_reverse_relation_edges(
                 TableName=DYNAMODB_TABLE,
                 Key=target_key,
                 UpdateExpression=(
-                    "SET #rf = list_append(if_not_exists(#rf, :empty), :new), updated_at = :now"
+                    "SET write_kind = :wk, #rf = list_append(if_not_exists(#rf, :empty), :new), updated_at = :now"
                 ),
                 ConditionExpression="attribute_not_exists(#rf) OR NOT contains(#rf, :rid)",
                 ExpressionAttributeNames={"#rf": reverse_field},
                 ExpressionAttributeValues={
+                    ":wk": {"S": "governed"},
                     ":empty": {"L": []},
                     ":new": {"L": [_ser_s(record_id.strip().upper())]},
                     ":rid": _ser_s(record_id.strip().upper()),
@@ -5831,10 +5859,11 @@ def _apply_user_initiated_advance(
     ddb.update_item(
         TableName=DYNAMODB_TABLE, Key=key,
         UpdateExpression=(
-            "SET active_agent_session = :t, active_agent_session_id = :aid, "
+            "SET write_kind = :wk, active_agent_session = :t, active_agent_session_id = :aid, "
             "checkout_state = :checked_out, updated_at = :now"
         ),
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":t": {"BOOL": True}, ":aid": _ser_s(cognito_user),
             ":checked_out": _ser_s("checked_out"), ":now": _ser_s(now),
         },
@@ -5873,7 +5902,7 @@ def _apply_user_initiated_advance(
     # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
     # gate observes the counter the instant the transition commits.
     ui_update_expr = (
-        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+        "SET write_kind = :wk, #fld = :val, updated_at = :now, last_update_note = :note, "
         "transition_evidence = :te, "
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
         "history = list_append(if_not_exists(history, :empty), :hentry)"
@@ -5887,6 +5916,7 @@ def _apply_user_initiated_advance(
         ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
         ":zero": {"N": "0"}, ":one": {"N": "1"},
         ":hentry": {"L": hentry_list}, ":empty": {"L": []},
+        ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
     }
     if latch_nf:
         ui_attr_values[":optout"] = {"BOOL": True}
@@ -5910,11 +5940,12 @@ def _apply_user_initiated_advance(
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
             UpdateExpression=(
-                "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                "SET write_kind = :wk, active_agent_session = :f, active_agent_session_id = :empty_s, "
                 "checkout_state = :checked_in, checked_in_by = :cib, checked_in_at = :now, "
                 "updated_at = :now"
             ),
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
                 ":checked_in": _ser_s("checked_in"), ":cib": _ser_s(cognito_user),
                 ":now": _ser_s(now),
@@ -5924,8 +5955,9 @@ def _apply_user_initiated_advance(
         # Restore previous agent's checkout so in-flight work is not disrupted
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression="SET active_agent_session_id = :prev_id, updated_at = :now",
+            UpdateExpression="SET write_kind = :wk, active_agent_session_id = :prev_id, updated_at = :now",
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":prev_id": _ser_s(previous_session_id), ":now": _ser_s(now),
             },
         )
@@ -5934,11 +5966,12 @@ def _apply_user_initiated_advance(
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
             UpdateExpression=(
-                "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                "SET write_kind = :wk, active_agent_session = :f, active_agent_session_id = :empty_s, "
                 "checkout_state = :checked_in, checked_in_by = :cib, checked_in_at = :now, "
                 "updated_at = :now"
             ),
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
                 ":checked_in": _ser_s("checked_in"), ":cib": _ser_s(cognito_user),
                 ":now": _ser_s(now),
@@ -6905,7 +6938,7 @@ def _handle_update_field(
             # → tracker_mutation PATCH (field=active_agent_session value=True) →
             # this UpdateExpression. Atomic with the state transition itself.
             checkout_update_expr = (
-                "SET active_agent_session = :t, active_agent_session_id = :aid, "
+                "SET write_kind = :wk, active_agent_session = :t, active_agent_session_id = :aid, "
                 "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
                 "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
                 "sync_version = if_not_exists(sync_version, :zero) + :one, "
@@ -6919,6 +6952,7 @@ def _handle_update_field(
                     UpdateExpression=checkout_update_expr,
                     ConditionExpression="active_agent_session <> :t OR attribute_not_exists(active_agent_session)",
                     ExpressionAttributeValues={
+                        ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
                         ":t": {"BOOL": True}, ":aid": _ser_s(agent_id),
                         ":checked_out": _ser_s("checked_out"),
                         ":now": _ser_s(now), ":note": _ser_s(checkout_note),
@@ -6949,13 +6983,14 @@ def _handle_update_field(
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
-                    "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                    "SET write_kind = :wk, active_agent_session = :f, active_agent_session_id = :empty_s, "
                     "checkout_state = :checked_in, checked_in_by = :checkin_by, checked_in_at = :now, "
                     "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
                     "sync_version = if_not_exists(sync_version, :zero) + :one, "
                     "history = list_append(if_not_exists(history, :empty_l), :hentry)"
                 ),
                 ExpressionAttributeValues={
+                    ":wk": {"S": "governed"},
                     ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
                     ":checked_in": _ser_s("checked_in"), ":checkin_by": _ser_s(release_agent),
                     ":now": _ser_s(now), ":note": _ser_s(release_note),
@@ -7674,7 +7709,8 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
 
     # Build update expression: always append extension + history, optionally append evidence
     update_parts = [
-        "SET updated_at = :now",
+        "SET write_kind = :wk",  # ENC-TSK-S47-0B
+        "updated_at = :now",
         "last_update_note = :note",
         "write_source = :wsrc",
         "sync_version = if_not_exists(sync_version, :zero) + :one",
@@ -7683,6 +7719,7 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
         "history = list_append(if_not_exists(history, :empty), :hentry)",
     ]
     expr_values = {
+        ":wk": {"S": "governed"},
         ":now": _ser_s(now),
         ":note": _ser_s(f"Extension by {author}"),
         ":wsrc": _build_write_source(body),
@@ -8335,6 +8372,7 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
             "created_at": _ser_s(now),
             "updated_at": _ser_s(now),
             "write_source": _ser_value(ws) if ws else _ser_value({}),
+            "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
         }
 
     forward_item = _rel_item(forward_sk, relationship_type, source_id, target_id, False, forward_sk)
@@ -8408,13 +8446,13 @@ def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
         from enceladus_shared.relationship_store import build_archive_transact_updates
 
         ddb.transact_write_items(
-            TransactItems=build_archive_transact_updates(
+            TransactItems=_stamp_governed_transact_updates(build_archive_transact_updates(
                 DYNAMODB_TABLE,
                 project_id_attr=_ser_s(project_id),
                 forward_sk=forward_sk,
                 inverse_sk=inverse_sk,
                 archived_at_attr=_ser_s(now),
-            )
+            ))
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
@@ -8627,6 +8665,7 @@ def _put_relationship_pair_idempotent(project_id: str, source_id: str, target_id
             "is_inverse": {"BOOL": is_inv}, "canonical_edge_id": _ser_s(forward_sk),
             "created_at": _ser_s(now), "updated_at": _ser_s(now),
             "write_source": _ser_value(ws) if ws else _ser_value({}),
+            "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
         }
 
     try:
@@ -8656,15 +8695,15 @@ def _unarchive_relationship_edge(project_id: str, source_id: str, target_id: str
         _get_ddb().transact_write_items(TransactItems=[
             {"Update": {"TableName": DYNAMODB_TABLE,
                         "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
-                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now, write_kind = :wk",
                         "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ExpressionAttributeValues": {":now": _ser_s(now), ":wk": _ser_s("governed")},
                         "ConditionExpression": "attribute_exists(record_id)"}},
             {"Update": {"TableName": DYNAMODB_TABLE,
                         "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
-                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now, write_kind = :wk",
                         "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ExpressionAttributeValues": {":now": _ser_s(now), ":wk": _ser_s("governed")},
                         "ConditionExpression": "attribute_exists(record_id)"}},
         ])
         return True
@@ -8726,7 +8765,7 @@ def _apply_supersession(project_id: str, b_id: str, a_id: str, ctx: Dict, body: 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
         UpdateExpression=(
-            "SET #st = :superseded, superseded_by = :canon, superseded_at = :now, "
+            "SET write_kind = :wk, #st = :superseded, superseded_by = :canon, superseded_at = :now, "
             "pre_supersession_status = if_not_exists(pre_supersession_status, :prev), "
             "superseded_migrated_edges = :migrated, "
             "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
@@ -8735,6 +8774,7 @@ def _apply_supersession(project_id: str, b_id: str, a_id: str, ctx: Dict, body: 
         ),
         ExpressionAttributeNames={"#st": "status"},
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":superseded": _ser_s("superseded"), ":canon": _ser_s(a_id), ":now": _ser_s(now),
             ":prev": _ser_s(prev_status), ":migrated": _ser_value(migrated),
             ":note": _ser_s(note), ":wsrc": _build_write_source(body),
@@ -8789,13 +8829,14 @@ def _revert_supersession(project_id: str, b_id: str, body: Dict) -> Optional[Dic
     note = f"Un-superseded (restored to {prev}){_write_source_note_suffix(body)}"
     hist_entries = [{"M": {"timestamp": _ser_s(now), "status": _ser_s(prev), "description": _ser_s(note)}}]
     set_clause = (
-        "SET #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+        "SET write_kind = :wk, #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
     )
     eav: Dict[str, Any] = {
         ":prev": _ser_s(prev), ":now": _ser_s(now), ":note": _ser_s(note),
         ":wsrc": _build_write_source(body),
         ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []},
+        ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
     }
     latched_by = ""
     if auto_merged:
@@ -10012,6 +10053,7 @@ def _handle_escalation_request(project_id: str, body: Dict, hub: Optional[Dict] 
         "record_id": _ser_s(f"escalation#{escalation_id}"),
         "item_id": _ser_s(escalation_id),
         "record_type": _ser_s("escalation"),
+        "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
         "target_record_id": _ser_s(target_record_id),
         "target_record_type": _ser_s(target_type),
         "mutation_type": _ser_s(mutation_type),
@@ -10227,6 +10269,7 @@ def _handle_escalation_produce(project_id: str, body: Dict, hub: Optional[Dict] 
         "record_id": _ser_s(f"escalation#{escalation_id}"),
         "item_id": _ser_s(escalation_id),
         "record_type": _ser_s("escalation"),
+        "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
         "source": _ser_s(source),
         "requested_by": {"M": {
             "session_id": _ser_s(principal),
@@ -10729,6 +10772,7 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
         "#st = :to_status",
         "updated_at = :now",
         "#ev = list_append(if_not_exists(#ev, :empty), :event)",
+        "write_kind = :wk",  # ENC-TSK-S47-0B
     ] + (extra_sets or [])
     names = {"#st": "status", "#ev": "events"}
     names.update(extra_names or {})
@@ -10739,6 +10783,7 @@ def _escalation_fsm_transition(project_id: str, escalation_id: str,
         ":now": _ser_s(now),
         ":empty": {"L": []},
         ":event": {"L": event_list},
+        ":wk": {"S": "governed"},
     }
     values.update(extra_values or {})
     condition = "#st = :from_status"
@@ -11079,7 +11124,7 @@ def _recipe_context():
             kwargs["ExpressionAttributeNames"] = {"#rv": attr}
             kwargs["ExpressionAttributeValues"] = {":rv": {"N": str(value)} if isinstance(value, (int, float)) else _ser_s(str(value))}
         try:
-            ddb.put_item(TableName=DYNAMODB_TABLE, Item=_recipe_to_ddb(dict(item, project_id=project)), **kwargs)
+            ddb.put_item(TableName=DYNAMODB_TABLE, Item=_recipe_to_ddb(dict(item, project_id=project, write_kind="governed")), **kwargs)  # ENC-TSK-S47-0B: override any sticky marker read back with the item
             return True
         except Exception as exc:  # noqa: BLE001
             if "ConditionalCheckFailed" in str(exc):

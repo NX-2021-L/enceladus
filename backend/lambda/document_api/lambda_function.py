@@ -1936,13 +1936,14 @@ def _mirror_related_items_to_tracker(
                 TableName=TRACKER_TABLE,
                 Key={"project_id": {"S": project_id}, "record_id": {"S": target_sk}},
                 UpdateExpression=(
-                    "SET related_document_ids = list_append(if_not_exists(related_document_ids, :empty), :new), "
+                    "SET write_kind = :wk, related_document_ids = list_append(if_not_exists(related_document_ids, :empty), :new), "
                     "updated_at = :now"
                 ),
                 ConditionExpression=(
                     "attribute_not_exists(related_document_ids) OR NOT contains(related_document_ids, :did)"
                 ),
                 ExpressionAttributeValues={
+                    ":wk": {"S": "governed"},
                     ":empty": {"L": []},
                     ":new": {"L": [{"S": document_id}]},
                     ":did": {"S": document_id},
@@ -2032,7 +2033,7 @@ def _upsert_synced_document(
                 TableName=DOCUMENTS_TABLE,
                 Key={"document_id": {"S": document_id}},
                 UpdateExpression=(
-                    "SET title = :title, description = :desc, file_name = :fn, "
+                    "SET write_kind = :wk, title = :title, description = :desc, file_name = :fn, "
                     "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
                     "content_hash = :hash, size_bytes = :size, keywords = :kw, "
                     "updated_at = :ts, #status = :status, "
@@ -2048,6 +2049,7 @@ def _upsert_synced_document(
                     "#ver": "version",
                 },
                 ExpressionAttributeValues={
+                    ":wk": {"S": "governed"},
                     ":title": {"S": title},
                     ":desc": {"S": description},
                     ":fn": {"S": file_name},
@@ -2095,6 +2097,7 @@ def _upsert_synced_document(
         # ENC-PLN-014 / ENC-FTR-065: stamp record_type so graph_sync can route
         # document mutations through _process_record / _reconcile_edges.
         "record_type": {"S": "document"},
+        "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
     }
     try:
         ddb.put_item(
@@ -2928,6 +2931,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     # ENC-TSK-S28-0E: ack basis + projection marker (graph_sync flips it to "projected")
     item["t_ack"] = {"N": str(_wa_ack_now())}
     item["projection_status"] = {"S": "pending"}
+    item["write_kind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     # ENC-TSK-S28-0D: documents item + audit item (+ idempotency marker) in ONE TransactWriteItems.
     # The S3 body is already written (unchanged order); any failure here deletes it as before.
     _s28_receipt_dict: Dict[str, Any] = {
@@ -4460,9 +4464,10 @@ def _document_version_seq_update_parts() -> Tuple[List[str], Dict[str, Any]]:
             clauses.append("write_tool = :wa_tool")
             vals[":wa_tool"] = {"S": _WA["write_tool"]}
     # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
-    clauses.extend(["t_ack = :wa_tack", "projection_status = :wa_pstat"])
+    clauses.extend(["t_ack = :wa_tack", "projection_status = :wa_pstat", "write_kind = :wa_wkind"])
     vals[":wa_tack"] = {"N": str(_wa_ack_now())}
     vals[":wa_pstat"] = {"S": "pending"}
+    vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return clauses, vals
 
 

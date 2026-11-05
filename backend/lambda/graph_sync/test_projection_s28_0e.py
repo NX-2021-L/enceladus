@@ -38,6 +38,23 @@ class LoopGuardTests(unittest.TestCase):
         self.assertEqual(out["statusCode"], 200)
 
 
+class MarkerKindTests(unittest.TestCase):
+    """ENC-TSK-S47-0B: write_kind is a loop-guard attr, so governed->marker flips stay projection-only."""
+
+    def test_write_kind_flip_is_projection_only(self):
+        old = _img(5, write_kind={"S": "governed"})
+        new = _img(5, status="projected", projected_version_seq={"N": "5"}, t_projected={"N": "1"},
+                   write_kind={"S": "marker"})
+        self.assertTrue(lf._projection_only_diff(old, new))
+        legacy = _img(5)  # legacy item without the attribute
+        self.assertTrue(lf._projection_only_diff(legacy, new))
+
+    def test_governed_write_after_marker_is_not_projection_only(self):
+        old = _img(5, status="projected", write_kind={"S": "marker"})
+        new = _img(6, write_kind={"S": "governed"})
+        self.assertFalse(lf._projection_only_diff(old, new))
+
+
 class MarkProjectedTests(unittest.TestCase):
     def test_conditional_minimal_update(self):
         ddb = MagicMock()
@@ -46,7 +63,9 @@ class MarkProjectedTests(unittest.TestCase):
         self.assertIn("projected_version_seq < :v", kw["ConditionExpression"])
         self.assertIn("version_seq = :v", kw["ConditionExpression"])
         self.assertEqual(kw["Key"], {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-1"}})
-        self.assertEqual(kw["UpdateExpression"], "SET projection_status = :p, projected_version_seq = :v, t_projected = :t")
+        self.assertEqual(kw["UpdateExpression"],
+                         "SET projection_status = :p, projected_version_seq = :v, t_projected = :t, write_kind = :wk")
+        self.assertEqual(kw["ExpressionAttributeValues"][":wk"], {"S": "marker"})  # ENC-TSK-S47-0B
 
     def test_condition_failure_is_silent(self):
         ddb = MagicMock()

@@ -554,6 +554,7 @@ def _put_lesson_candidate(payload: Dict[str, Any]) -> str:
         "status": {"S": payload["status"]},
         "version": {"N": "1"},
         "record_type": {"S": "document"},
+        "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
         "write_source": {
             "M": {
                 "channel": {"S": WRITE_SOURCE_CHANNEL},

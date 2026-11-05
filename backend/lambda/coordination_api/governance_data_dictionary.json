@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.20",
-  "updated_at": "2026-11-04T20:00:00Z",
-  "last_change_summary": "ENC-TSK-S47-0C (ENC-PLN-104 W6b.3): graph_sync commits a stream batch's entity upserts in ONE graph write transaction: statements built by the unchanged Cypher helpers are captured per record and collapsed into UNWIND $__rows CALL { WITH __row ... } groups (record statement order kept by levels; a repeated node key starts a new wave), behind graph_repo.GraphRepository / Neo4jRepository (seam for the ENC-TSK-Q62 FalkorDB adapter). version_seq and embedding-hash reads become one batch prefetch. Projection marker stays per record after commit. On batch failure every record re-runs alone (batch_tx_fallback). [WRITE-AUDIT] graph_sync lines gain store_ms_basis and batch_tx_fallback; store_ms/store_calls/store_statements redefined for batched records. GraphSyncFunction MemorySize 256 -> 1024 (CFN apply only).",
+  "version": "2026-11-04.21",
+  "updated_at": "2026-11-05T00:40:00Z",
+  "last_change_summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document.",
   "owners": [
     "enceladus-platform"
   ],
@@ -537,6 +537,15 @@
           "type": "number",
           "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
           "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "write_kind": {
+          "type": "string",
+          "enum": [
+            "governed",
+            "marker"
+          ],
+          "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
+          "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
         }
       }
     },
@@ -5906,6 +5915,15 @@
           "type": "number",
           "definition": "Highest version_seq feed_publisher has published, a conditional marker making feed delivery idempotent (ENC-TSK-S28-0E).",
           "usage_guidance": "Consumer-owned; changes to it never re-trigger consumers."
+        },
+        "write_kind": {
+          "type": "string",
+          "enum": [
+            "governed",
+            "marker"
+          ],
+          "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
+          "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
         }
       }
     },
@@ -11464,6 +11482,11 @@
       "version": "2026-11-04.20",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S47-0C (ENC-PLN-104 W6b.3): graph_sync commits a stream batch's entity upserts in ONE graph write transaction: statements built by the unchanged Cypher helpers are captured per record and collapsed into UNWIND $__rows CALL { WITH __row ... } groups (record statement order kept by levels; a repeated node key starts a new wave), behind graph_repo.GraphRepository / Neo4jRepository (seam for the ENC-TSK-Q62 FalkorDB adapter). version_seq and embedding-hash reads become one batch prefetch. Projection marker stays per record after commit. On batch failure every record re-runs alone (batch_tx_fallback). [WRITE-AUDIT] graph_sync lines gain store_ms_basis and batch_tx_fallback; store_ms/store_calls/store_statements redefined for batched records. GraphSyncFunction MemorySize 256 -> 1024 (CFN apply only)."
+    },
+    {
+      "version": "2026-11-04.21",
+      "date": "2026-11-04",
+      "summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document."
     }
   ]
 }

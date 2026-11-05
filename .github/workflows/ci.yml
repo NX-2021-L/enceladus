@@ -170,6 +170,14 @@ jobs:
           set -euo pipefail
           python3 tools/test_gamma_tracker_mirror.py
 
+      # ENC-TSK-S47-0B: every non-marker write to the tracker/documents tables must
+      # stamp write_kind=governed (a sticky write_kind=marker makes the event source
+      # mappings drop that writer's MODIFYs). Static ast scan, stdlib-only, no AWS.
+      - name: write_kind stamp guard (ENC-TSK-S47-0B)
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.test_write_kind_stamp_guard_s47_0b -v
+
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.

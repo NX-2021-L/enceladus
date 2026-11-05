@@ -2142,7 +2142,7 @@ def _create_tracker_record_auto(
         try:
             ddb.put_item(
                 TableName=TRACKER_TABLE,
-                Item={k: _serialize(v) for k, v in item.items()},
+                Item={k: _serialize(v) for k, v in {**item, "write_kind": "governed"}.items()},  # ENC-TSK-S47-0B
                 ConditionExpression="attribute_not_exists(record_id)",
             )
             return record_id
@@ -2173,12 +2173,13 @@ def _append_tracker_history(
         TableName=TRACKER_TABLE,
         Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
         UpdateExpression=(
-            "SET updated_at = :ts, last_update_note = :note, "
+            "SET write_kind = :wk, updated_at = :ts, last_update_note = :note, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "#history = list_append(if_not_exists(#history, :empty), :entry)"
         ),
         ExpressionAttributeNames={"#history": "history"},
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":ts": _serialize(now),
             ":note": _serialize(note[:1000]),
             ":zero": _serialize(0),
@@ -2217,12 +2218,13 @@ def _set_tracker_status(
             TableName=TRACKER_TABLE,
             Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
             UpdateExpression=(
-                "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
+                "SET write_kind = :wk, #status = :new_status, updated_at = :ts, last_update_note = :note, "
                 "sync_version = if_not_exists(sync_version, :zero) + :one"
             ),
             ConditionExpression="#status = :expected_prior",
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
+                ":wk": {"S": "governed"},
                 ":new_status": _serialize(new_status),
                 ":expected_prior": _serialize(expected_prior_status),
                 ":ts": _serialize(now),
@@ -5028,6 +5030,7 @@ def _record_dispatch_edge(
                 "channel": {"S": "coordination_api"},
                 "timestamp": {"S": now},
             }},
+            "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
         }
         ddb.put_item(TableName=TRACKER_TABLE, Item=item)
         logger.info("[DISPATCH_EDGE] dispatches edge created: %s -> %s", request_id, dispatch_id)
@@ -9971,6 +9974,7 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
             "canonical_edge_id": {"S": canon_sk},
             "created_at": {"S": now},
             "updated_at": {"S": now},
+            "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
         }
 
     forward_rel = _rel_item(forward_sk, rel_type, component_id, proposing_agent_session_id, False, forward_sk)
@@ -10456,7 +10460,7 @@ def _create_lesson_record(
         try:
             ddb.put_item(
                 TableName=TRACKER_TABLE,
-                Item={k: _serialize(v) for k, v in item.items()},
+                Item={k: _serialize(v) for k, v in {**item, "write_kind": "governed"}.items()},  # ENC-TSK-S47-0B
                 ConditionExpression="attribute_not_exists(record_id)",
             )
             return record_id
@@ -10492,13 +10496,14 @@ def _finalize_lesson_candidate_decision(
         TableName=DOCUMENTS_TABLE,
         Key={"document_id": _serialize(document_id)},
         UpdateExpression=(
-            "SET handoff_status = :new, updated_at = :now, "
+            "SET write_kind = :wk, handoff_status = :new, updated_at = :now, "
             "decision_log = list_append(if_not_exists(decision_log, :empty), :entry)"
         ),
         ConditionExpression=(
             "attribute_exists(document_id) AND document_subtype = :subtype AND handoff_status = :pending"
         ),
         ExpressionAttributeValues={
+            ":wk": {"S": "governed"},
             ":new": _serialize(new_handoff_status),
             ":now": _serialize(now),
             ":empty": _serialize([]),
@@ -11785,9 +11790,9 @@ def _append_escalation_log_entry(project_id: str, escalation_id: str,
             TableName=TRACKER_TABLE,
             Key={"project_id": _serialize(project_id),
                  "record_id": _serialize(f"escalation#{escalation_id}")},
-            UpdateExpression="SET decision_log = list_append(decision_log, :entry)",
+            UpdateExpression="SET write_kind = :wk, decision_log = list_append(decision_log, :entry)",
             ConditionExpression="attribute_exists(record_id) AND size(decision_log) = :n",
-            ExpressionAttributeValues={":entry": _serialize([entry]),
+            ExpressionAttributeValues={":wk": {"S": "governed"}, ":entry": _serialize([entry]),
                                        ":n": _serialize(int(prev_entry["seq"]))},
         )
         return entry
@@ -11868,6 +11873,8 @@ def _record_escalation_decision(
         update_parts.append("#dec = :decision_record")
         names["#dec"] = "decision"
         values[":decision_record"] = _serialize(decision_record)
+    update_parts.append("write_kind = :wk")  # ENC-TSK-S47-0B: governed write (stream filter key)
+    values[":wk"] = {"S": "governed"}
     if expected_updated_at:
         condition += " AND updated_at = :expected_updated_at"
         values[":expected_updated_at"] = _serialize(expected_updated_at)
@@ -13169,6 +13176,7 @@ def _handle_components_add_edge(
             "edge_type": {"S": edge_type},
             "created_at": {"S": now},
             "updated_at": {"S": now},
+            "write_kind": {"S": "governed"},  # ENC-TSK-S47-0B
         }
 
     forward = _rel_item(forward_sk, rel_type, component_id, task_id, False, forward_sk)

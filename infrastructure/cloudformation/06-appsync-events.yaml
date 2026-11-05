@@ -420,6 +420,13 @@ Resources:
         OnFailure:
           Destination: !GetAtt AppSyncFeedPublisherDlq.Arn
       StartingPosition: LATEST
+      # ENC-TSK-S47-0B: drop marker-only MODIFYs (write_kind=marker); legacy items without the
+      # attribute pass via exists:false; REMOVE (no NewImage) passes unchanged.
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"dynamodb":{"NewImage":{"write_kind":{"S":[{"anything-but":["marker"]}]}}}}'
+          - Pattern: '{"dynamodb":{"NewImage":{"write_kind":{"S":[{"exists":false}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"]}'
       FunctionResponseTypes:
         - ReportBatchItemFailures
       Enabled: true
@@ -446,9 +453,12 @@ Resources:
       StartingPosition: LATEST
       # Every document write also bumps the __COUNTER__VERSION_SEQ__ sentinel row; the
       # publisher drops it, so filter it out at the mapping (no invocation, cost rule 4).
+      # ENC-TSK-S47-0B: also drop marker-only MODIFYs (write_kind=marker); legacy items pass via exists:false.
       FilterCriteria:
         Filters:
-          - Pattern: '{"dynamodb":{"Keys":{"document_id":{"S":[{"anything-but":["__COUNTER__VERSION_SEQ__"]}]}}}}'
+          - Pattern: '{"dynamodb":{"Keys":{"document_id":{"S":[{"anything-but":["__COUNTER__VERSION_SEQ__"]}]}},"NewImage":{"write_kind":{"S":[{"anything-but":["marker"]}]}}}}'
+          - Pattern: '{"dynamodb":{"Keys":{"document_id":{"S":[{"anything-but":["__COUNTER__VERSION_SEQ__"]}]}},"NewImage":{"write_kind":{"S":[{"exists":false}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"Keys":{"document_id":{"S":[{"anything-but":["__COUNTER__VERSION_SEQ__"]}]}}}}'
       FunctionResponseTypes:
         - ReportBatchItemFailures
       Enabled: true
