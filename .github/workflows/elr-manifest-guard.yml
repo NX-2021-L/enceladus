@@ -1,0 +1,38 @@
+name: ELR Manifest Guard
+
+# ENC-ISS-902 / ENC-TSK-S58: ENC-TSK-S26-0B and S28-0B changed tools/elr
+# runtime files (and added elr_lib/client_timing.py, elr_lib/keepalive.py)
+# without regenerating tools/elr/elr_manifest.json, so `elr_sync.py pull`
+# refused activation on every host. Fail any PR whose committed manifest does
+# not match the runtime files in the tree.
+# Fix a failure with: python3 tools/elr/elr_sync.py generate-manifest
+
+on:
+  pull_request:
+    branches: [main, 'v[0-9]*/main']
+    paths:
+      - 'tools/elr/**'
+      - '.github/workflows/elr-manifest-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: ELR manifest matches tree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unit test sync and manifest
+        working-directory: tools/elr
+        run: python3 -m unittest tests.test_sync tests.test_manifest
+
+      - name: Check manifest is current
+        run: python3 tools/elr/elr_sync.py generate-manifest --check
