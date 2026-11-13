@@ -319,6 +319,74 @@ class GenerateManifestCliTests(_GitFixtureCase):
         self.assertNotIn("tools/elr/tests/test_should_be_excluded.py", paths)
 
 
+class CheckManifestTests(_GitFixtureCase):
+    """generate-manifest --check (ENC-ISS-902 / ENC-TSK-S58): the CI guard
+    that fails when a runtime file changes without a regenerated manifest."""
+
+    def _check(self, *extra_argv: str) -> dict:
+        manifest_path = self.elr_dir / elr_sync.MANIFEST_FILENAME
+        before = manifest_path.read_bytes()
+        with patch.object(elr_sync, "ELR_ROOT", self.elr_dir), patch.object(elr_sync, "REPO_ROOT", self.repo_dir):
+            args = elr_sync.build_parser().parse_args(["generate-manifest", "--check", *extra_argv])
+            digest = elr_sync.cmd_generate_manifest(args)
+        self.assertEqual(manifest_path.read_bytes(), before, "--check must never write the manifest")
+        return digest
+
+    def test_current_manifest_passes(self):
+        digest = self._check()
+        self.assertTrue(digest["ok"])
+        self.assertEqual(digest["operation"], "elr_sync.check_manifest")
+        self.assertEqual(digest["counts"]["violation_count"], 0)
+
+    def test_stale_source_ref_and_generated_at_are_not_drift(self):
+        manifest_path = self.elr_dir / elr_sync.MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["source_ref"] = "0" * 40
+        manifest["generated_at"] = "1999-01-01T00:00:00Z"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertTrue(self._check()["ok"])
+
+    def test_changed_runtime_file_fails_with_hash_mismatch(self):
+        (self.elr_dir / "elr_lib" / "mod.py").write_text("VALUE = 2\n", encoding="utf-8")
+        digest = self._check()
+        self.assertFalse(digest["ok"])
+        self.assertEqual(digest["refusal"]["reason"], "manifest-stale")
+        self.assertIn({"path": "tools/elr/elr_lib/mod.py", "reason": "hash-mismatch"}, digest["refusal"]["violations"])
+
+    def test_new_runtime_module_not_listed_fails(self):
+        # The ENC-ISS-902 shape: a new elr_lib module imported by transport.py
+        # merged without regenerating the manifest.
+        (self.elr_dir / "elr_lib" / "keepalive.py").write_text("X = 1\n", encoding="utf-8")
+        digest = self._check()
+        self.assertFalse(digest["ok"])
+        self.assertIn(
+            {"path": "tools/elr/elr_lib/keepalive.py", "reason": "runtime-file-not-in-manifest"},
+            digest["refusal"]["violations"],
+        )
+
+    def test_listed_file_removed_fails(self):
+        (self.elr_dir / "elr_x.py").unlink()
+        digest = self._check()
+        self.assertFalse(digest["ok"])
+        self.assertIn({"path": "tools/elr/elr_x.py", "reason": "listed-file-missing"}, digest["refusal"]["violations"])
+
+    def test_test_files_never_count_as_drift(self):
+        (self.elr_dir / "tests" / "test_new.py").write_text("# test only\n", encoding="utf-8")
+        self.assertTrue(self._check()["ok"])
+
+    def test_unreadable_manifest_fails(self):
+        (self.elr_dir / elr_sync.MANIFEST_FILENAME).write_text("{not json", encoding="utf-8")
+        digest = self._check()
+        self.assertFalse(digest["ok"])
+        self.assertEqual(digest["refusal"]["reason"], "manifest-unreadable")
+
+    def test_main_exit_code_reflects_check(self):
+        (self.elr_dir / "elr_lib" / "mod.py").write_text("VALUE = 3\n", encoding="utf-8")
+        with patch.object(elr_sync, "ELR_ROOT", self.elr_dir), patch.object(elr_sync, "REPO_ROOT", self.repo_dir), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(elr_sync.main(["generate-manifest", "--check"]), 1)
+
+
 # ---------------------------------------------------------------------------
 # pull -- happy path, refusals, and the corrupted-script drill
 # ---------------------------------------------------------------------------
