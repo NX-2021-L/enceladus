@@ -1,0 +1,91 @@
+<!-- @dsCard group="Product" height=4000 width=1240 page subtitle="Every status of every record kind, before and after" -->
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:var(--canvas);color:var(--text);font-family:var(--font-body)}body{padding:24px;box-sizing:border-box;width:1240px}*{box-sizing:border-box}
+h2{font-family:var(--font-heading);font-size:1.125rem;color:var(--text-display);border:0;padding:0;margin:34px 0 4px}h2:first-child{margin-top:0}
+.sub{font-size:12.5px;color:var(--text-dim);line-height:1.55;margin:0 0 14px;max-width:92ch}
+.lbl{font-family:var(--font-heading);font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--text-dim);margin:0}
+.g{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.legend div{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px}.legend p{font-size:12px;line-height:1.5;color:var(--text-dim);margin:6px 0 0}
+.kind{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;padding:12px 0;border-top:1px solid var(--divider)}
+.kind>b{font-family:var(--font-mono);font-size:12px;font-weight:500;color:var(--text);grid-row:span 4}.kind>b small{display:block;font-family:var(--font-body);font-size:11px;color:var(--text-dim);margin-top:4px}
+.strip{display:grid;grid-template-columns:64px 1fr;align-items:center;gap:10px;padding:7px 10px;border-radius:6px}.strip>span{font-size:11px;color:var(--text-dim)}
+.c{background:var(--canvas);border:1px solid var(--divider)}.s{background:var(--surface);border:1px solid var(--border)}.r{background:var(--surface-raised);border:1px solid var(--surface-raised)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+/* BEFORE: the shipped scheme, reproduced from the catalog (sections 4.3, 5.1 to 5.3) */
+.oc{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-heading);font-weight:500;font-size:12px;letter-spacing:.07em;text-transform:uppercase;padding:2px 8px;border:1px solid currentColor;border-radius:4px;white-space:nowrap}
+.oc:not([data-nodot])::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}.oc.glow::before{box-shadow:0 0 6px currentColor}
+.ob{display:inline-flex;font-family:var(--font-mono);font-weight:500;font-size:11px;line-height:1.6;padding:1px 8px;border:1px solid currentColor;border-radius:4px}
+.orow{background:#111827;border:1px solid rgba(61,155,168,.2);border-left:3px solid;border-radius:8px;padding:13px 16px;margin-top:8px;min-height:44px}.orow:first-of-type{margin-top:0}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;align-items:start;margin-bottom:8px}
+.why{grid-column:1/-1;font-size:12px;color:var(--text);margin:18px 0 2px}
+.dim{display:grid;grid-template-columns:150px 1fr 1fr;gap:10px 16px;align-items:center;padding:9px 0;border-top:1px solid var(--divider);font-size:12.5px}.dim>span:first-child{color:var(--text-dim)}
+</style></head><body>
+<h2>The nine roles</h2><p class="sub">A role says what the operator needs to know, whatever the record kind. Each has one color treatment and one glyph. Waiting and failed are the only filled pills, so the two states that ask for a person are the two that stand out.</p>
+<div class="legend" id="legend"></div>
+<h2>Every governed status, by record kind</h2><p class="sub">First strip: the shipped pill on the card surface. Next three: the new pill on canvas, surface and raised surface. Kinds marked "no pill today" are designed here so they have a place to land.</p>
+<div id="matrix"></div>
+<h2>Feed rows</h2><p class="sub">The same records, shipped rules on the left and the new rules on the right. The rail shows record type (teal, seafoam for plans, lavender for lessons) unless the role is caution, waiting or failed.</p>
+<div class="pair"><p class="lbl">Before</p><p class="lbl">After</p></div><div id="feed"></div>
+<h2>The other dimensions</h2><p class="sub">Each fact has its own channel. None uses a status hue, and none is a capsule.</p>
+<div class="dim"><span></span><p class="lbl">Before</p><p class="lbl">After</p></div><div id="dims"></div>
+<h2>Open choice</h2><p class="sub">One place where either design is defensible. The first is the one built into the status map.</p>
+<div id="alts"></div>
+<script>
+const D={"roles": {"todo": {"m": "Not started. Ready or queued; nobody is working on it.", "g": "ring", "e": "outline"}, "active": {"m": "Moving. An agent or the pipeline is working on it; nothing is needed from the operator.", "g": "play", "e": "tint"}, "caution": {"m": "Off the forward path: sent back, deferred or gone stale. No action is required yet, but it will not finish on its own momentum.", "g": "return", "e": "tint"}, "waiting": {"m": "Waiting on a human decision or gate. The operator is the next actor.", "g": "pause", "e": "strong"}, "done": {"m": "Ended well. The goal was reached and nothing more is needed.", "g": "check", "e": "tint"}, "live": {"m": "In service. A steady good state with no end expected (a live feature, an active project).", "g": "disc", "e": "outline"}, "failed": {"m": "Ended badly or is broken now: failed, denied, dead-lettered, objectives not met.", "g": "cross", "e": "strong"}, "retired": {"m": "Ended without a verdict: superseded, cancelled, deprecated, archived, expired.", "g": "dash", "e": "outline"}, "unknown": {"m": "A status this map does not contain. Shown verbatim so it is readable, and marked so it is noticed.", "g": "diamond", "e": "outline"}}, "kinds": {"task": {"s": {"open": "todo", "in-progress": "active", "coding-complete": "active", "committed": "active", "pr": "waiting", "merged-main": "active", "deploy-init": "active", "deploy-success": "active", "coding-updates": "caution", "deployed": "active", "closed": "done", "superseded": "retired"}, "p": true}, "issue": {"s": {"open": "todo", "in-progress": "active", "closed": "done", "superseded": "retired"}, "p": true}, "feature": {"s": {"planned": "todo", "in-progress": "active", "completed": "done", "production": "live", "deprecated": "retired"}, "p": true}, "plan": {"s": {"drafted": "todo", "started": "active", "complete": "done", "incomplete": "active"}, "p": true}, "lesson": {"s": {"draft": "todo", "proposed": "waiting", "accepted": "done", "active": "live", "superseded": "retired", "archived": "retired"}, "p": true}, "escalation": {"s": {"requested": "waiting", "approved": "active", "denied": "failed", "denied_with_guidance": "failed", "applying": "active", "applied": "done", "failed": "failed"}, "p": true}, "coordination_request": {"s": {"intake_received": "todo", "queued": "todo", "dispatching": "active", "running": "active", "succeeded": "done", "failed": "failed", "cancelled": "retired", "dead_letter": "failed"}, "p": true}, "agent_session": {"s": {"allocated": "todo", "claimed": "active", "retired": "retired"}, "p": true}, "project": {"s": {"active": "live", "archived": "retired"}, "p": true}, "deployment_decision": {"s": {"pending_approval": "waiting", "approved": "active", "diverted": "caution", "reverted": "failed", "deploying": "active", "deployed": "done", "failed": "failed"}, "p": false}, "component": {"s": {"active": "live", "deprecated": "retired", "archived": "retired"}, "p": false}, "component_lifecycle": {"s": {"proposed": "waiting", "approved": "active", "designed": "active", "development": "active", "production": "live", "code-red": "failed", "deprecated": "retired", "archived": "retired"}, "p": false}, "handoff": {"s": {"pending": "todo", "claimed": "active", "completed": "done", "stale": "caution"}, "p": false}, "lesson_candidate": {"s": {"pending": "waiting", "approved": "done", "stale": "caution"}, "p": false}, "relationship": {"s": {"active": "live", "archived": "retired"}, "p": false}, "recipe_run": {"s": {"queued": "todo", "running": "active", "awaiting_gate": "waiting", "completed": "done", "failed": "failed", "cancelled": "retired", "expired": "retired"}, "p": false}, "recipe_step": {"s": {"pending": "todo", "ok": "done", "error": "failed", "skipped": "retired", "awaiting": "waiting"}, "p": false}, "recipe": {"s": {"draft": "todo", "validated": "active", "published": "live", "deprecated": "retired", "retired": "retired"}, "p": false}, "gate": {"s": {"pending": "waiting", "snoozed": "caution", "decided": "done", "expired": "retired", "superseded": "retired"}, "p": true}, "gate_verdict": {"s": {"approve": "done", "ack": "done", "promote": "done", "deny": "failed", "snooze": "caution", "edit": "caution"}, "p": false}, "search_signal": {"s": {"available": "live", "ranked": "done", "no_match": "retired", "disabled_by_user": "retired", "unavailable": "failed", "timed_out": "failed"}, "p": false}}};
+const OLD={open:'#3D9BA8','in-progress':'#7AC8D4',closed:'#2E4D5C',planned:'#8A8CB5',completed:'#3D9BA8',production:'#3D9BA8',deprecated:'#2E4D5C',drafted:'#8A8CB5',started:'#7AC8D4',complete:'#3D9BA8',incomplete:'#C85060',blocked:'#C85060',draft:'#8A8CB5',active:'#3D9BA8',archived:'#2E4D5C'};
+const DUST='#6B8A94',lab=s=>s.replace(/[-_]/g,' ');
+function oldChip(kind,st,pri){let c,glow=false;
+  if(kind==='lesson'){c='#8A8CB5';glow=true}else if(pri==='P0'){c='#C85060';glow=true}
+  else if(kind==='agent_session'){c={claimed:'#3D9BA8',retired:DUST}[st]||'#7AC8D4'}
+  else{c=OLD[st]||DUST;glow=st==='blocked'}
+  return `<span class="oc${glow?' glow':''}" style="color:${c}">${lab(st)}</span>`}
+function oldRail(st,pri){if(pri==='P0'||st==='blocked')return'#C85060';if(['in-progress','started','active'].includes(st))return'#7AC8D4';if(['closed','archived','retired','deprecated'].includes(st))return'#2E4D5C';return'#3D9BA8'}
+const role=(k,s)=>(D.kinds[k]&&D.kinds[k].s[s])||(k==='document'&&s==='active'?'live':'unknown');
+const pill=(r,s)=>`<span class="enc-pill" data-role="${r}">${lab(s)}</span>`;
+document.getElementById('legend').innerHTML=Object.entries(D.roles).map(([r,v])=>`<div>${pill(r,r)}<p>${v.m}</p></div>`).join('');
+document.getElementById('matrix').innerHTML=Object.entries(D.kinds).map(([k,v])=>{const st=Object.keys(v.s);
+  return `<div class="kind"><b>${k.replace(/_/g,' ')}${v.p?'':'<small>no pill today</small>'}</b>
+  <div class="strip s"><span>Before</span><div class="g">${v.p?st.map(s=>oldChip(k,s)).join(''):'<span style="font-size:12px;color:#6B8A94">plain text or not shown</span>'}</div></div>
+  ${[['c','Canvas'],['s','Surface'],['r','Raised']].map(([c,n])=>`<div class="strip ${c}"><span>${n}</span><div class="g">${st.map(s=>pill(v.s[s],s)).join('')}</div></div>`).join('')}</div>`}).join('');
+const PR={P0:'#C85060',P1:'#C9A15C',P2:DUST,P3:DUST};
+const COPY='<span style="color:#6B8A94;font-size:11px">&#x29C9;</span>';
+const rows=[
+ ['task','ENC-TSK-960','devops','3d','Switch function updates to S3-reference upload','closed','P0',0,'A closed P0 was a red, glowing pill with a red rail. Now it is done, and P0 stays in its own badge.'],
+ ['task','ENC-TSK-A57','enceladus','4h','Add census mode to tracker list responses','pr','P2',1,'A task in pr was grey. Now it is the waiting role, with the rail.'],
+ ['task','ENC-TSK-B02','enceladus','1d','Update the bootstrap file for the new init order','open','P2',0,'Open task and open issue share todo; the issue is told apart by its ID, type and urgency.'],
+ ['issue','ENC-ISS-208','enceladus','1d','Deploy record key uses a separator the index cannot sort','open','P1',0,''],
+ ['task','ENC-TSK-A41','enceladus','2h','Route record reads through the local runner on shell surfaces','in-progress','P1',1,'Checked out is routine, so it is neutral with a lock, not the warning color.'],
+ ['task','ENC-TSK-A63','enceladus','5h','Stack tables under the small breakpoint','coding-updates','P1',1,'Sent back for rework is caution, distinct from forward motion.'],
+ ['lesson','ENC-LSN-058','enceladus','2d','Skill records are the logical canonical, not the physical package','draft','',0,'Lessons were lavender in every state. Now the pill shows lifecycle and the rail carries the lavender.'],
+ ['lesson','ENC-LSN-063','enceladus','2d','Pre-flight hard gates convert migration risk into tracked closures','proposed','',0,''],
+ ['lesson','ENC-LSN-002','enceladus','9d','New sub-resources need explicit route entries','accepted','',0,''],
+ ['lesson','ENC-LSN-044','enceladus','6d','State-machine updates carry a condition on prior state','active','',0,''],
+ ['lesson','ENC-LSN-021','enceladus','30d','Earlier guidance on layer packaging','superseded','',0,''],
+ ['lesson','ENC-LSN-009','enceladus','41d','Notes from the first projection rebuild','archived','',0,''],
+ ['escalation','ENC-ESC-014','enceladus','12m','Request to close a task outside its arc','requested','P1',0,'An escalation waiting on io was grey, identical to an approval and a failure.'],
+ ['plan','ENC-PLN-041','enceladus','8d','Retire the legacy dictionary surface','incomplete','',0,'An incomplete plan is still in progress, not a failure. Plans carry the seafoam rail.'],
+ ['escalation','ENC-ESC-011','enceladus','2d','Request to reopen a deployed task','failed','',0,'Red is only for things that ended badly or are broken; the rail takes the same red.'],
+ ['document','DOC-C8B611A5CB39','enceladus','1h','Design system: shipped-state catalog','active','',0,'Documents get a type tag, one brand color per type, and a subtype-pattern tag that is the same for every value.','doc','research'],
+ ['document','DOC-4A08878F66D0','enceladus','1h','Idea: one status map for every surface','active','',0,'','idea',''],
+ ['feature','ENC-FTR-110','enceladus','12d','Dispersion weighting for multi-source retrieval','production','',0,'Live and not-started no longer share teal.'],
+ ['task','ENC-TSK-C19','enceladus','1h','Example of a status the map does not know','triaged','P3',0,'An unmapped status was the same grey as P3 and as metadata. Now it is dotted, with a diamond.']];
+const oldRow=([k,id,pj,t,title,st,pri,co])=>`<div class="orow" style="border-left-color:${oldRail(st,pri)}"><div style="display:flex;gap:8px;align-items:center;font-family:var(--font-mono);font-size:11px;color:#6B8A94"><span style="color:#3D9BA8;font-size:13px;opacity:.85">${id}</span>${COPY}<span>${pj}</span><span style="margin-left:auto">${t}</span></div><div style="font-size:13.5px;font-weight:500;line-height:1.35;margin:4px 0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div><div class="g">${oldChip(k,st,pri)}${pri?`<span class="ob" style="color:${PR[pri]}">${pri}</span>`:''}<span class="ob" style="color:${co?'#C9A15C':'#3D9BA8'}">${co?'CHECKED OUT':'CHECKED IN'}</span></div></div>`;
+const newRow=([k,id,pj,t,title,st,pri,co,why,dt,sp],alt)=>{const r=alt||role(k,st),rail=` data-type="${k}"`+((r==='waiting'||r==='failed'||r==='caution')?` data-rail="${r}"`:'');
+ return `<div class="enc-row"${rail}><div class="enc-row__top"><span class="enc-id" style="font-size:13px">${id}</span>${COPY}<span>${pj}</span><time>${t}</time></div><div class="enc-row__title">${title}</div><div class="enc-row__chips">${pill(r,st)}${pri?`<span class="enc-badge" data-level="${pri[1]}">${pri}</span>`:''}${co?'<span class="enc-op" data-op="held">Checked out</span>':''}${dt?`<span class="enc-tag" data-doctype="${dt}">${dt}</span>`:''}${sp?`<span class="enc-tag" data-kind="code">${sp}</span>`:''}</div></div>`};
+document.getElementById('feed').innerHTML=rows.map(r=>`<div class="pair">${r[8]?`<p class="why">${r[8]}</p>`:''}<div>${oldRow(r)}</div><div>${newRow(r)}</div></div>`).join('');
+const ob=(c,t)=>`<span class="ob" style="color:${c}">${t}</span>`,oc2=(c,t)=>`<span class="oc" style="color:${c}">${t}</span>`.replace('class="oc"','class="oc" data-nodot');
+const bd=(l,t)=>`<span class="enc-badge" data-level="${l}">${t}</span>`,lv=(l,n,t)=>`<span class="enc-level" data-level="${l}"><span>${[0,1,2].map(i=>`<i${i<n?' data-on':''}></i>`).join('')}</span>${t}</span>`;
+const dims=[
+ ['Priority',[ob('#C85060','P0'),ob('#C9A15C','P1'),ob(DUST,'P2'),ob(DUST,'P3')],[0,1,2,3].map(i=>bd(i,'P'+i))],
+ ['Severity',[oc2('#C85060','critical'),oc2('#C85060','high'),oc2('#C9A15C','medium'),oc2(DUST,'low')],['critical','high','medium','low'].map((w,i)=>bd(i,w))],
+ ['Checkout',[ob('#C9A15C','CHECKED OUT'),ob('#3D9BA8','CHECKED IN')],['<span class="enc-op" data-op="held">Checked out</span>','<span class="enc-op" data-op="free">Checked in</span>']],
+ ['Active session',[oc2('#3D9BA8','Active')],['<span class="enc-op" data-op="session">Active</span>']],
+ ['Category',[oc2('#8A8CB5','implementation'),oc2('#8A8CB5','security')],['<span class="enc-tag">implementation</span>','<span class="enc-tag">security</span>']],
+ ['Component',[oc2('#7AC8D4','comp-tracker-api')],['<span class="enc-tag" data-kind="code">comp-tracker-api</span>']],
+ ['Search tier',[oc2('#3D9BA8','Local'),oc2('#3D9BA8','Hybrid')],['<span class="enc-tag" data-kind="code" data-glyph="local">Local</span>','<span class="enc-tag" data-kind="code" data-glyph="hybrid">Hybrid</span>']],
+ ['Context score',['<span style="font-size:12px;color:#6ee7b7">Fresh 0.82</span>','<span style="font-size:12px;color:#fcd34d">Struct 0.55</span>','<span style="font-size:12px;color:#fca5a5">Dense 0.21</span>'],[lv('high',3,'Fresh 0.82'),lv('mid',2,'Struct 0.55'),lv('low',1,'Dense 0.21')]],
+ ['Diff',['<span style="font-family:var(--font-mono);font-size:12px;padding:2px 8px;background:rgba(46,160,67,.15)">added line</span>','<span style="font-family:var(--font-mono);font-size:12px;padding:2px 8px;background:rgba(248,81,73,.15)">removed line</span>'],['<span style="font-family:var(--font-mono);font-size:12px;padding:2px 8px;background:var(--diff-add-fill)"><b style="color:var(--diff-add-text)">+</b> added line</span>','<span style="font-family:var(--font-mono);font-size:12px;padding:2px 8px;background:var(--diff-remove-fill)"><b style="color:var(--diff-remove-text)">-</b> removed line</span>']]];
+document.getElementById('dims').innerHTML=dims.map(([n,a,b])=>`<div class="dim"><span>${n}</span><div class="g">${a.join('')}</div><div class="g">${b.join('')}</div></div>`).join('');
+const pr=rows[1];
+document.getElementById('alts').innerHTML=`<div class="pair"><p class="why">A task in pr: waiting (picked) or active.</p><div>${newRow(pr)}</div><div>${newRow(pr,'active')}</div></div>`;
+</script></body></html>

@@ -1,0 +1,46 @@
+<!-- @dsCard group="Product" height=560 width=980 page subtitle="Search, filter and sort: the Cloudscape-derived components, re-skinned" -->
+<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:var(--canvas);color:var(--text);font-family:var(--font-body)}body{padding:20px;box-sizing:border-box}.bar{display:grid;grid-template-columns:1fr 220px auto;gap:12px;align-items:center;margin-bottom:10px}.foot{display:flex;justify-content:flex-end;margin-top:12px}.pf{margin-bottom:12px}</style>
+</head><body><div id="root"></div>
+<script>
+const { TextFilter, PropertyFilter, Select, SegmentedControl, Table, Pagination, Header } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+const ROLE = { open:'todo', 'in-progress':'active', pr:'waiting', 'coding-updates':'caution', closed:'done' };
+const rows = [
+  { id:'ENC-TSK-A41', title:'Route record reads through the local runner', status:'in-progress', priority:1 },
+  { id:'ENC-TSK-A57', title:'Add census mode to tracker list responses', status:'pr', priority:2 },
+  { id:'ENC-TSK-A63', title:'Stack tables under the small breakpoint', status:'coding-updates', priority:1 },
+  { id:'ENC-TSK-960', title:'Switch function updates to S3-reference upload', status:'closed', priority:0 },
+  { id:'ENC-TSK-B02', title:'Update the bootstrap file for the new init order', status:'open', priority:2 },
+];
+const cols = [
+  { id:'id', header:'Record', sortingField:'id', cell:(r)=>e('span',{className:'enc-id'},r.id) },
+  { id:'title', header:'Title', sortingField:'title', cell:(r)=>r.title },
+  { id:'status', header:'Status', sortingField:'status', cell:(r)=>e('span',{className:'enc-pill','data-role':ROLE[r.status]},r.status.replace(/-/g,' ')) },
+  { id:'priority', header:'Priority', sortingField:'priority', cell:(r)=>e('span',{className:'enc-badge','data-level':r.priority},'P'+r.priority) },
+];
+const sorts = [{ value:'updated', label:'Recently updated' }, { value:'priority', label:'Priority' }, { value:'id', label:'Record ID' }];
+function Demo(){
+  const [text,setText]=React.useState('');
+  const [q,setQ]=React.useState({ tokens:[{ propertyKey:'project', operator:'=', value:'enceladus' },{ propertyKey:'type', operator:'=', value:'task' }], operation:'and' });
+  const [sortOpt,setSortOpt]=React.useState(sorts[0]);
+  const [view,setView]=React.useState('all');
+  const [page,setPage]=React.useState(1);
+  const [sel,setSel]=React.useState([]);
+  const [sort,setSort]=React.useState({col:{sortingField:'id'},desc:false});
+  const shown=rows.filter(r=>(view==='all'||r.status!=='closed')&&r.title.toLowerCase().includes(text.toLowerCase()))
+    .sort((a,b)=>{const f=sort.col.sortingField;return (a[f]>b[f]?1:a[f]<b[f]?-1:0)*(sort.desc?-1:1);});
+  return e('div',null,
+    e('div',{className:'bar'},
+      e(TextFilter,{filteringText:text,placeholder:'Find records',countText:shown.length+' matches',onChange:(ev)=>setText(ev.detail.filteringText)}),
+      e(Select,{selectedOption:sortOpt,options:sorts,onChange:(ev)=>setSortOpt(ev.detail.selectedOption)}),
+      e(SegmentedControl,{selectedId:view,options:[{id:'all',text:'All'},{id:'open',text:'Not closed'}],onChange:(ev)=>setView(ev.detail.selectedId)})),
+    e('div',{className:'pf'},e(PropertyFilter,{query:q,filteringProperties:[{key:'project'},{key:'type'},{key:'status'},{key:'priority'}],onChange:(ev)=>setQ(ev.detail)})),
+    e(Table,{columnDefinitions:cols,items:shown,selectionType:'multi',selectedItems:sel,trackBy:'id',sortingColumn:sort.col,sortingDescending:sort.desc,
+      onSelectionChange:(ev)=>setSel(ev.detail.selectedItems),onSortingChange:(ev)=>setSort({col:ev.detail.sortingColumn,desc:ev.detail.isDescending}),
+      header:e(Header,{variant:'h2',counter:'('+shown.length+')'},'Tasks')}),
+    e('div',{className:'foot'},e(Pagination,{currentPageIndex:page,pagesCount:5,onChange:(ev)=>setPage(ev.detail.currentPageIndex)})));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

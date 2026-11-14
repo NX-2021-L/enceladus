@@ -1,6 +1,6 @@
 # Enceladus Design System
 
-**Version:** v1.0 · April 2026
+**Version:** v1.1 · November 2026 (v1.0 April 2026; revised against the shipped UI)
 **Maintainer:** J. Reese
 **Scope:** Brand identity + visual system governing the Enceladus platform across the PWA 2.0 governance cockpit, the public showcase at `jreese.net/enceladus-showcase`, and hiring / collaborator documents.
 
@@ -22,7 +22,7 @@ The brand is named for Saturn's sixth-largest moon: small, strange, and alive be
 
 | Surface | Audience | Where it lives |
 |---|---|---|
-| **PWA 2.0 governance cockpit** | Sole operator (J. Reese), on mobile | `frontend/ui/` in `NX-2021-L/enceladus` — React 19 + Vite + Tailwind. Dark, mobile-first. |
+| **PWA 2.0 governance cockpit** | Sole operator (J. Reese), on mobile | `frontend/ui-v2/` in `NX-2021-L/enceladus` — React + Vite, plain CSS over this system's tokens (Tailwind is installed and effectively unused). Dark, mobile-first. `frontend/ui/` is dormant since 2026-09-16. |
 | **Showcase site** | Hiring managers, collaborators | `jreese.net/enceladus-showcase.html` in `NX-2021-L/enceladus-showcase` — static HTML. Portfolio artefact. |
 | **One-pagers / hiring docs** | Hiring managers | Print. Inverted (light) palette; identity preserved through typography + telemetry. |
 
@@ -46,9 +46,14 @@ Both repos were read through the GitHub tools rather than cloned locally; if you
 
 ```
 README.md                   ← you are here
-SKILL.md                    ← Claude Code / Agent Skills manifest
+assets/notes/SKILL.from-standalone.md ← Claude Code / Agent Skills manifest
 styles.css                  ← compiler entry: v1 tokens + v2 component tokens
 colors_and_type.css         ← all CSS variables + semantic element styles
+tokens.json                 ← the tokens: colors, type, spacing, radii, shadows
+status-map.json             ← status string to role, and each role's tokens
+status.md, migration.md, io-kit-mapping.md, report.md ← status color, token tiers, kit mapping, revision report
+tokens.css                  ← compiled from tokens.json
+components/                 ← bundle.js, bundle.css, index.d.ts; one folder per component (README.md, preview.html)
 assets/                     ← logos, favicons, moon photo, showcase screenshots
   favicons/                 ← .ico + PNG set + site.webmanifest (orbital mark)
   logos/                    ← mark (SVG + 64/180/512/1024 PNG), void tile, og-image
@@ -73,6 +78,8 @@ Cloudscape-derived, deep re-branded, exposed on `window.EnceladusDesignSystem_7e
 - **Phase 6 · Charts:** AreaChart, BarChart, LineChart, MixedChart, PieChart
 - All six phases complete — the full Cloudscape catalog, deep re-branded (65 components). See `v2/README.md`.
 
+The app uses 25 of these. Its signature surfaces are product components documented under the Product group: `RecordCard`, `StatusPill`, `Pill`, `RecordId`, `RecordDetailHeader`, `DocumentSection`, `WorklogEntry`, `HomeCountTile`, `SkeletonCard`, with `StatusOverview` and `SearchFilterSort` as reference pages. The search, filter and sort components and `SideNavigation` keep their implementation and are re-skinned onto the role tokens. 36 of the 65 are never exposed to the app; what to do with them is in `report.md`.
+
 ---
 
 ## 01 · Content fundamentals
@@ -84,7 +91,7 @@ The writing voice is distinctive, load-bearing, and extremely specific. Honour i
 **Casing:**
 - `ENCELADUS` wordmark: **ALL CAPS**, letter-spacing 0.15em, Space Grotesk Bold (or Syne for hero only).
 - Page / section headings: Title Case or Sentence case, never ALL CAPS.
-- Uppercase labels allowed for chip/badge labels only — JetBrains Mono, tight letterspacing.
+- Uppercase labels allowed for pill, chip and tag labels only — Space Grotesk medium, 12px, tracking 0.07em. Mono badges (priority, scores, identifiers) keep their case.
 
 **Pronoun:** First-person singular. "I am the sole architect, developer, and operator." The platform's authorship is part of the brand. Never "we."
 
@@ -101,7 +108,7 @@ The writing voice is distinctive, load-bearing, and extremely specific. Honour i
 
 **Emoji:** No. Not in UI, not in copy, not in docs. The platform uses structured data (record IDs, pillar scores, mono tokens) as its texture instead. The showcase uses a diamond bullet `◆` once, in the floating action strip, rendered via HTML entity — this is the limit.
 
-**Icons:** Lucide-style single-stroke line icons at 1.5–2px weight only (the PWA ships inline `<svg>` paths matching this weight). Never filled, never duotone.
+**Icons:** Lucide-style single-stroke line icons at 1.5–2px weight only (the app imports them from `lucide-react`). Never filled, never duotone.
 
 **Examples — pulled directly from the sources:**
 
@@ -123,27 +130,27 @@ Note the rhythm: short assertive sentence, then a complex technical sentence wit
 
 ## 02 · Visual foundations
 
-**Colors.** See `colors_and_type.css` for the full token set. The system has exactly **6 core colors** to memorize: Void Black `#0A0A0F` (canvas), Cosmic Teal `#3D9BA8` (primary), Seafoam `#C8DDD9` (display text), Nebula Lavender `#8A8CB5` (knowledge), Stellar Crimson `#C85060` (alerts), Terminator Slate `#2E4D5C` (code/muted). Everything else is a derivative.
+**Colors.** See `tokens.json` for the full token set, in three tiers (primitives, roles, component tokens; `migration.md`). Status color is its own role layer with one meaning per color (`status.md`); teal is the brand, links, record IDs and focus, and is not a status. The system has exactly **6 core colors** to memorize: Void Black `#0A0A0F` (canvas), Cosmic Teal `#3D9BA8` (primary), Seafoam `#C8DDD9` (display text), Nebula Lavender `#8A8CB5` (knowledge), Stellar Crimson `#C85060` (alerts), Terminator Slate `#2E4D5C` (code/muted). Everything else is a derivative.
 
-**Typography.** Four families, each with a single job: **Syne ExtraBold 800** for hero display *only*; **Space Grotesk 400/500/700** for headings and chip labels; **Inter 400/500/600** for all body copy; **JetBrains Mono 400/500** for record IDs, scores, hex values. Font files are pulled from Google Fonts — no self-hosted binaries in this repo. If you need offline builds, add `fonts/` later.
+**Typography.** Four families, each with a single job: **Syne ExtraBold 800** for hero display *only* (showcase and cover; the app downloads it and never uses it); **Space Grotesk 400/500/700** for headings and chip labels; **Inter 400/500/600** for all body copy; **JetBrains Mono 400/500** for record IDs, scores, hex values. Font files are pulled from Google Fonts — no self-hosted binaries in this repo. If you need offline builds, add `fonts/` later.
 
 **Backgrounds.** The default is **near-black (`#0A0A0F` → `#111827`)** — the void. The Enceladus moon photo appears **only** as an atmospheric layer (`opacity: 0.15–0.20`) behind hero text; it never competes with content. No gradient meshes, no stock photos, no humans, no illustrations. Print inverts to white `#FFFFFF` or very light seafoam tint `#F5FAFA`.
 
 **Imagery vibe.** Cool, cosmic, high-contrast. One hero photo (the moon) recurs as motif. Screenshots of the platform itself are admissible — never decorative stock.
 
-**Spacing.** 4px baseline scale (`--space-1` … `--space-16`). PWA cards use `px-4 py-3` internally with `space-y-2` between siblings. Showcase sections breathe more: `padding: 4rem 1.5rem` on article wrappers.
+**Spacing.** 4px baseline scale (`--space-1` … `--space-16`). The feed row is `13px 16px` with 8px between rows; a compact card is `1rem`; the detail card is `2rem`. Showcase sections breathe more: `padding: 4rem 1.5rem` on article wrappers.
 
-**Corner radii.** Small radii, not pill-shaped. `3px` on code pills, `4px` on status chips, `6–8px` on cards, `12px` on large panels. Never rounded-full except for circular carousel arrows.
+**Corner radii.** Small radii, not pill-shaped. `3px` on code pills, `4px` on badges and chips, `6–8px` on cards, `12px` on large panels. Full radius (`radius-pill`) is for lifecycle status pills and document section markers; `radius-round` is for dots and circular controls. **Decision for io:** status chips ship at 4px; the capsule is proposed so that shape separates lifecycle from every other pill.
 
 **Cards.**
 ```
 background: var(--bg-surface);       /* #111827 */
 border:     1px solid rgba(61,155,168,0.20);
 border-radius: 8px;
-padding: 1.25rem 1.5rem;
+padding: 13px 16px;                  /* feed row; 1rem compact; 2rem detail */
 transition: border-color 200ms cubic-bezier(0.4,0,0.2,1);
 ```
-On hover, the border brightens to `rgba(61,155,168,0.50)`. No shadow change, no lift — the card stays grounded. (Floating action buttons DO lift, see below.)
+On hover, the border brightens to `rgba(61,155,168,0.50)`. No shadow change, no lift — the card stays grounded. The one detail card ships with `--shadow-md`. **Decision for io:** recommended rule is one shadow tier for the single detail card and for floating bars, none on cards in lists. (Floating action buttons DO lift, see below.)
 
 **Hover states.** Border-color brightens (teal 0.20 → 0.50), text shifts from slate to teal-light. No scale, no shadow bloom. Floating elements (CTAs) DO translateY(-2px) and deepen shadow.
 
@@ -156,11 +163,13 @@ On hover, the border brightens to `rgba(61,155,168,0.50)`. No shadow change, no 
 
 Plus three **glow** shadows for telemetry decoration: `--glow-teal`, `--glow-lavender`, `--glow-crimson`. Use sparingly, on things like high-confidence lesson cards or P0 alerts.
 
-**Borders.** All borders are teal-with-alpha: `rgba(61,155,168,0.1)` for dividers, `0.2` for subtle card edges, `0.5` on hover. The _only_ solid-color borders are on alert states (`--enc-crimson`) and chip outlines.
+**Borders.** All borders are teal-with-alpha: `rgba(61,155,168,0.1)` for dividers, `0.2` for subtle card edges, `0.5` on hover. The _only_ solid-color borders are on alert states and pill outlines.
+
+**Left rails.** Every feed row has a 3px left rail. It shows the record type: brand teal for tasks, issues, features and documents, seafoam for plans, nebula lavender for lessons. When the row's lifecycle role is caution, waiting or failed, the rail takes that role's amber or red instead. The rail is removed on hover. Elsewhere a rail marks state, never decoration.
 
 **Transparency + blur.** Sparingly. The PWA header uses `bg-slate-900/95 backdrop-blur` as a sticky nav. The showcase carousel overlay is `rgba(10,10,15,0.95)` — near-opaque. Everything else is solid.
 
-**Animation.** **Orbital motion, not spring physics.** Use `cubic-bezier(0.4, 0, 0.2, 1)` — Material's "standard" easing. No bouncing, no elastic. Durations: 150ms (tiny state flips), 200ms (card entry, hover), 300ms (graph nodes, modals). The TTL countdown and "In Progress" badge pulse via `animate-pulse` only — don't invent new keyframes.
+**Animation.** **Orbital motion, not spring physics.** Use `cubic-bezier(0.4, 0, 0.2, 1)` — Material's "standard" easing. No bouncing, no elastic. Durations: 150ms (tiny state flips), 200ms (card entry, hover), 300ms (graph nodes, modals). The skeleton card uses one `enc-shimmer` keyframe at 1.4s. Don't invent new keyframes, and stop motion under `prefers-reduced-motion` (the app has no such rule yet).
 
 **Layout rules.**
 - Max content width **880px** on article pages (showcase).
@@ -175,16 +184,16 @@ Plus three **glow** shadows for telemetry decoration: `--glow-teal`, `--glow-lav
 
 ## 03 · Iconography
 
-**Approach.** The PWA ships **inline SVG `<path>`s** stroked at 1.5–2px — no external icon font, no sprite sheet, no icon components library. Each icon is pasted directly into its consuming component as a hand-crafted path `d="..."`. The set is tiny and purposeful (~10 icons in production: home, projects, feed, docs, clock/changelog, hamburger, chevron, copy, close, arrow).
+**Approach.** The app imports **`lucide-react`** (8 icons) stroked at 1.5–2px. One inline SVG pair remains, copy and check on the record ID. Status, urgency, lock and signal glyphs are the small filled shapes defined with the pill components; they are marks inside a pill, not icons.
 
-**Source set — substitution flagged.** The stroke weight, corner treatment, and overall silhouettes match **[Lucide](https://lucide.dev)** almost exactly. For this design system, we link Lucide via CDN in the UI-kit previews to avoid recreating each path by hand. **Substitution flagged to the user: these are Lucide icons, not the exact PWA-shipped paths. They visually match, but if you need byte-identical parity with production, copy the `d=""` attributes out of `Header.tsx` / `BottomNav.tsx` / `TaskRow.tsx`.**
+**Source set.** [Lucide](https://lucide.dev) is the shipped icon source, not a stand-in.
 
 **Rules.**
 - **Stroke-only**, never filled. `fill="none"`, `stroke="currentColor"`, `stroke-width="1.5"` or `2`.
 - `stroke-linecap="round"` and `stroke-linejoin="round"` everywhere — no sharp corners.
 - Color inherits from text (`currentColor`), so icons pick up the parent's teal / dust / starlight.
 - Sizes: `w-4 h-4` (16px) inline with text, `w-5 h-5` (20px) in chips, `w-6 h-6` (24px) in nav/header.
-- **No emoji.** **No unicode symbol icons** — except **`◆`** (U+25C6, BLACK DIAMOND) used exactly once in the showcase's floating CTA strip as a brand easter egg.
+- **No emoji.** The app ships seven unicode glyphs as icons: `▸ ▾ ● ○ ↗ → ×`, and the showcase uses `◆` once. **Decision for io:** recommended rule is to allow exactly this set as typographic marks (disclosure, bullet, external link, arrow, close) and use Lucide for everything else.
 
 **Logos / marks.**
 - The **finalized logomark** is the Enceladus **orbital mark** — a striped icy moon (three cosmic-teal fissure bars over a dark sphere) crossed by an elliptical orbital ring, teal line-work on the void. Full favicon set in `assets/favicons/`; logo set in `assets/logos/` — `enceladus-mark.svg`, transparent PNG at 64/180/512/1024, a pre-composited `enceladus-mark-void-512.png` tile, and `og-image-1200x630.png` for social share. See `preview/24-logo-lockups.html`.
@@ -208,8 +217,8 @@ Apply in order; earlier laws override later ones.
 
 - **Designing a new Enceladus surface?** Start with `colors_and_type.css`. Use CSS variables, not magic hex codes.
 - **Writing copy?** Reread `01 · Content fundamentals` out loud. If it sounds like a startup landing page, rewrite.
-- **Building a component?** Look at the `ui_kits/pwa/` source. Don't reinvent — the PWA has production patterns for feed cards, status chips, pillar charts.
-- **Exporting to Claude Code / Agent Skills?** `SKILL.md` is the manifest; this folder drops directly into an Agent Skill.
+- **Building a component?** Start from the Product components (`RecordCard`, `StatusPill`, `Pill`); they describe what ships. The `ui_kits/pwa/` kit recreates the earlier app.
+- **Exporting to Claude Code / Agent Skills?** `assets/notes/SKILL.from-standalone.md` is the manifest; this folder drops directly into an Agent Skill.
 
 ---
 
@@ -219,5 +228,3 @@ Apply in order; earlier laws override later ones.
 - **No finalized logomark.** ~~The brand doc describes two concepts but neither has been rendered.~~ **Resolved** — the orbital-mark favicon set now lives in `assets/favicons/` and is wired into both UI kits.
 - **Iconography is Lucide, not PWA-exact.** Visually identical stroke weight and geometry, but not byte-identical to shipped paths.
 - **Showcase UI-kit uses CDN Bootstrap.** The live `jreese.net` site loads `jreese.net/css/styles.css` which we don't have access to. The recreation uses the tokens from the inline `<style>` block only — good for 95% fidelity, missing the outer nav styling.
-
----
