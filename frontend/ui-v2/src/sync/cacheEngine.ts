@@ -43,9 +43,13 @@ function normalizeRecordType(raw: string): RecordType | null {
 // corpora served it as a phantom document, and clients that cached it keep it in
 // IndexedDB because a seed only upserts. It is never a record.
 export const DOCUMENT_COUNTER_SENTINEL_ID = '__COUNTER__VERSION_SEQ__'
+// ENC-ISS-903: ENC-TSK-S28 audit#/idem# rows in the same tables are bookkeeping too.
+const META_ROW_PREFIXES = ['audit#', 'idem#'] as const
+const isBookkeepingRecordId = (id: string | null | undefined): boolean =>
+  typeof id === 'string' && (id === DOCUMENT_COUNTER_SENTINEL_ID || META_ROW_PREFIXES.some((p) => id.startsWith(p)))
 
 export function corpusItemToTier1(item: FeedCorpusItem): Tier1Record | null {
-  if (item.record_id === DOCUMENT_COUNTER_SENTINEL_ID) return null
+  if (isBookkeepingRecordId(item.record_id)) return null
   const recordType = normalizeRecordType(item.record_type)
   if (!recordType) return null
   const versionSeq = versionSeqFromItem(item)
@@ -151,7 +155,7 @@ export class CacheEngine {
   private async withoutCounterSentinel(rows: Tier1Record[]): Promise<Tier1Record[]> {
     const kept: Tier1Record[] = []
     for (const row of rows) {
-      if (row.recordId === DOCUMENT_COUNTER_SENTINEL_ID) {
+      if (isBookkeepingRecordId(row.recordId)) {
         await idb.deleteTier1(row.projectId, row.recordId)
         continue
       }
