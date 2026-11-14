@@ -28,13 +28,13 @@ export function TaskPrimitive({ record }: { record: Task }) {
       chips={
         <>
           <PriorityChip priority={record.priority} />
-          <ComponentChips components={record.components} />
           <ActiveSessionChip active={record.active_agent_session} sessionId={record.active_agent_session_id} />
           <CheckoutChip
             checkedOut={checkedOut}
             checkedOutBy={record.checked_out_by}
             checkedInBy={record.checked_in_by}
           />
+          <ComponentChips components={record.components} />
         </>
       }
       mutation={{
@@ -76,7 +76,7 @@ export function TaskPrimitive({ record }: { record: Task }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="task" />}
       evidence={<EvidenceTab criteria={record.acceptance_criteria} projectId={record.project_id} />}
     />
   )

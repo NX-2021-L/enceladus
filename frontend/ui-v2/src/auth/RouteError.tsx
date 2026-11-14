@@ -26,7 +26,7 @@ export function RouteError({ error }: ErrorComponentProps) {
         justifyContent: 'center',
         textAlign: 'center',
         padding: 'var(--space-8) var(--space-6)',
-        color: 'var(--fg)',
+        color: 'var(--text)',
       }}
     >
       <h1
@@ -34,7 +34,7 @@ export function RouteError({ error }: ErrorComponentProps) {
           fontFamily: 'var(--font-heading)',
           fontWeight: 'var(--fw-bold)',
           fontSize: 'var(--text-lg)',
-          color: 'var(--fg-display)',
+          color: 'var(--text-display)',
           margin: '0 0 var(--space-2)',
         }}
       >
@@ -44,7 +44,7 @@ export function RouteError({ error }: ErrorComponentProps) {
         style={{
           fontFamily: 'var(--font-mono)',
           fontSize: 'var(--text-xs)',
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
           margin: '0 0 var(--space-4)',
           maxWidth: '52ch',
           wordBreak: 'break-word',
@@ -58,9 +58,11 @@ export function RouteError({ error }: ErrorComponentProps) {
         style={{
           fontFamily: 'var(--font-body)',
           fontSize: 'var(--text-sm)',
-          color: 'var(--fg)',
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border-subtle)',
+          color: 'var(--text)',
+          background: 'var(--surface)',
+          borderWidth: 1,
+          borderStyle: 'solid',
+          borderColor: 'var(--border)',
           borderRadius: 'var(--radius-md)',
           padding: 'var(--space-2) var(--space-5)',
           cursor: 'pointer',

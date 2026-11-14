@@ -1,20 +1,21 @@
 // Enceladus v2 · Select — Cloudscape Select, deep re-brand.
+// ENC-TSK-S63-0C: style string re-skinned onto the v1.1 role tokens (design system artifact 1794603005-04d0); props, events, DOM and class names unchanged.
 const ev2SelectCss = `
 .ev2-select{position:relative;font-family:var(--font-body,'Inter',sans-serif);width:100%}
-.ev2-select__trigger{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;height:var(--v2-control-height,32px);padding:0 10px 0 12px;background:var(--v2-field-bg,#0D1220);border:1px solid var(--v2-field-border,rgba(61,155,168,.25));border-radius:var(--v2-control-radius,6px);color:var(--enc-starlight,#EEF2F7);font-size:14px;cursor:pointer;transition:border-color var(--dur-base,200ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1)),box-shadow var(--dur-base,200ms) var(--ease-orbit);box-sizing:border-box;text-align:left}
-.ev2-select__trigger:hover{border-color:var(--v2-field-border-hover,rgba(61,155,168,.45))}
-.ev2-select--open .ev2-select__trigger{border-color:var(--v2-field-border-focus,#3D9BA8);box-shadow:var(--v2-focus-ring)}
-.ev2-select--placeholder .ev2-select__value{color:var(--v2-field-placeholder,#4A5E68)}
+.ev2-select__trigger{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;height:var(--control-h,32px);padding:0 10px 0 12px;background:var(--surface-sunken,#0D1220);border:1px solid var(--tint-teal-25,rgba(61,155,168,.25));border-radius:var(--v2-control-radius,6px);color:var(--text,#EEF2F7);font-size:var(--text-sm,14px);cursor:pointer;transition:border-color var(--dur-base,200ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1)),box-shadow var(--dur-base,200ms) var(--ease-orbit);box-sizing:border-box;text-align:left}
+.ev2-select__trigger:hover{border-color:var(--tint-teal-45,rgba(61,155,168,.45))}
+.ev2-select--open .ev2-select__trigger{border-color:var(--focus,#3D9BA8);box-shadow:var(--v2-focus-ring)}
+.ev2-select--placeholder .ev2-select__value{color:var(--text-placeholder,#4A5E68)}
 .ev2-select__value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ev2-select__chev{flex:0 0 auto;color:var(--enc-dust,#6B8A94);transition:transform var(--dur-base,200ms) var(--ease-orbit)}
+.ev2-select__chev{flex:0 0 auto;color:var(--text-dim,#6B8A94);transition:transform var(--dur-base,200ms) var(--ease-orbit)}
 .ev2-select--open .ev2-select__chev{transform:rotate(180deg)}
-.ev2-select__menu{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:20;background:var(--enc-surface,#111827);border:1px solid var(--v2-panel-border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:4px;max-height:240px;overflow-y:auto}
-.ev2-select__opt{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:14px;color:var(--enc-starlight,#EEF2F7);transition:background var(--dur-fast,150ms) var(--ease-orbit)}
-.ev2-select__opt:hover{background:rgba(61,155,168,.1)}
-.ev2-select__opt--selected{color:var(--enc-teal-light,#7AC8D4)}
-.ev2-select__opt--selected::after{content:'✓';font-family:var(--font-mono,monospace);font-size:12px}
-.ev2-select__optdesc{font-size:11.5px;color:var(--enc-dust,#6B8A94);display:block;margin-top:1px}
-.ev2-select__tag{font-family:var(--font-mono,monospace);font-size:11px;color:var(--enc-dust,#6B8A94)}
+.ev2-select__menu{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:20;background:var(--surface,#111827);border:1px solid var(--border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:4px;max-height:240px;overflow-y:auto}
+.ev2-select__opt{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:var(--text-sm,14px);color:var(--text,#EEF2F7);transition:background var(--dur-fast,150ms) var(--ease-orbit)}
+.ev2-select__opt:hover{background:var(--tint-teal-10,rgba(61,155,168,.1))}
+.ev2-select__opt--selected{color:var(--accent-hover,#7AC8D4)}
+.ev2-select__opt--selected::after{content:'✓';font-family:var(--font-mono,monospace);font-size:var(--text-xs,12px)}
+.ev2-select__optdesc{font-size:var(--text-xs,12px);color:var(--text-dim,#6B8A94);display:block;margin-top:1px}
+.ev2-select__tag{font-family:var(--font-mono,monospace);font-size:var(--text-2xs,11px);color:var(--text-dim,#6B8A94)}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-select-css')){const s=document.createElement('style');s.id='ev2-select-css';s.textContent=ev2SelectCss;document.head.appendChild(s);}})();
 

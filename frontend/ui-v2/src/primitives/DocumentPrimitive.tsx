@@ -4,6 +4,8 @@ import type { Document } from '../types/records'
 import { DocumentSectionsView } from '../components/DocumentSectionsView'
 import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub } from '../components/RecordDetailHub'
+import { Tag } from '../components/Pill'
+import { MaturityMeter } from '../components/LevelMeter'
 import { downloadTextFile } from '../utils/downloadTextFile'
 
 /** ENC-TSK-P81 — code-split: the History tab (list + rewind + diff) only
@@ -38,6 +40,9 @@ export function DocumentPrimitive({ record }: { record: Document }) {
     { label: 'Project', value: record.project_id },
     { label: 'Version', value: `v${record.version ?? '?'}` },
     ...(record.document_subtype ? [{ label: 'Subtype', value: record.document_subtype }] : []),
+    ...(record.document_maturity_state
+      ? [{ label: 'Maturity', value: <MaturityMeter state={record.document_maturity_state} /> }]
+      : []),
   ]
 
   const sizeLabel = formatSize(record.size_bytes)
@@ -56,6 +61,15 @@ export function DocumentPrimitive({ record }: { record: Document }) {
       kindLabel="Document"
       title={record.title}
       status={record.status}
+      recordType="document"
+      chips={
+        record.document_subtype || record.subtypepattern ? (
+          <>
+            {record.document_subtype ? <Tag doctype={record.document_subtype}>{record.document_subtype}</Tag> : null}
+            {record.subtypepattern ? <Tag code>{record.subtypepattern}</Tag> : null}
+          </>
+        ) : undefined
+      }
       initialTabId={hasSectionDeepLink ? 'content' : undefined}
       vitals={vitals}
       actions={[
@@ -83,7 +97,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
           ) : null}
           {record.content_hash ? (
             <MetaRow label="Hash">
-              <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all', color: 'var(--fg-muted)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all', color: 'var(--text-dim)' }}>
                 {record.content_hash}
               </span>
             </MetaRow>
@@ -101,7 +115,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
             <MetaRow label="Compliance">
               <Metric>{record.compliance_score}</Metric>
               {record.compliance_warnings?.length ? (
-                <span style={{ color: 'var(--fg-muted)' }}> · {record.compliance_warnings.length} warning(s)</span>
+                <span style={{ color: 'var(--text-dim)' }}> · {record.compliance_warnings.length} warning(s)</span>
               ) : null}
             </MetaRow>
           ) : null}

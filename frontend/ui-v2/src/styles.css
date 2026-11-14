@@ -12,6 +12,8 @@
  * easing and the semantic element styles. Imported, never copied. */
 @import '../../design-system-2/colors_and_type.css';
 @import '../../design-system-2/v2/tokens.css';
+/* v1.1 role tier (ENC-TSK-S60-0A): generated from design-system-2/tokens.json, additive only. */
+@import '../../design-system-2/v2/roles.css';
 
 /* Tailwind v4 — utilities layered on top of the token system. */
 @import 'tailwindcss';
@@ -43,8 +45,8 @@ body,
 }
 
 #root {
-  background-color: var(--enc-void);
-  color: var(--fg);
+  background-color: var(--canvas);
+  color: var(--text);
 }
 
 /* Law 4 — orbital motion, not spring physics. */
@@ -54,6 +56,14 @@ a {
     color var(--dur-base) var(--ease-orbit),
     background-color var(--dur-base) var(--ease-orbit),
     border-color var(--dur-base) var(--ease-orbit);
+}
+
+/* ENC-TSK-S65-0B: reduced motion drops the orbital colour transition on controls. */
+@media (prefers-reduced-motion: reduce) {
+  button,
+  a {
+    transition: none;
+  }
 }
 
 /* ENC-TSK-M37 (global accent reconcile) — a keyboard-focused control with no

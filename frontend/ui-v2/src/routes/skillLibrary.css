@@ -24,5 +24,5 @@
   gap: var(--space-2);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  color: var(--status-blocked);
+  color: var(--danger-text);
 }

@@ -18,7 +18,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--enc-dust, currentColor);
+  color: var(--text-dim);
   cursor: pointer;
   vertical-align: middle;
   -webkit-tap-highlight-color: transparent;
@@ -30,7 +30,7 @@
 }
 
 .ev2-copy:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
@@ -46,12 +46,12 @@
   transform: translateX(-50%);
   padding: 2px 6px;
   border-radius: 4px;
-  background: var(--bg-elevated, #111);
-  color: var(--fg, #fff);
+  background: var(--surface-raised);
+  color: var(--text);
   border: 1px solid var(--accent);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.2;
+  font-size: var(--text-2xs);
+  line-height: var(--lh-tight);
   white-space: nowrap;
   pointer-events: none;
 }
@@ -61,4 +61,14 @@
   align-items: baseline;
   gap: 2px;
   max-width: 100%;
+}
+
+/* ENC-TSK-S63-0A · Record ID (Design System v1.1 spec 6.6): JetBrains Mono, 0.95em,
+ * tracking-id, link color at 0.85 opacity. Was an inline style on RecordId. */
+.enc-id {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  letter-spacing: var(--tracking-id);
+  color: var(--link);
+  opacity: 0.85;
 }

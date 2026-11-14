@@ -27,7 +27,7 @@ import '@io-kit/search-ui/themes/enceladus.css'
 import '../routes/feed.css'
 
 // R16: the split (and the reading pane) starts at the kit's 960px switch.
-const WIDE_MEDIA = '(min-width: 960px)'
+const WIDE_MEDIA = '(min-width: 60rem)' // 960px, spec 3.9 breakpoint
 const HYBRID_CAP_MS = 15_000
 const DATE_PRESETS = [
   { key: '1d', days: 1 },

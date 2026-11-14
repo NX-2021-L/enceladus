@@ -1,7 +1,8 @@
 // Enceladus v2 · TextFilter — Cloudscape TextFilter, deep re-brand.
+// ENC-TSK-S63-0C: style string re-skinned onto the v1.1 role tokens (design system artifact 1794603005-04d0); props, events, DOM and class names unchanged.
 const ev2TfCss = `
 .ev2-tf{display:flex;flex-direction:column;gap:4px;font-family:var(--font-body,'Inter',sans-serif);width:100%;max-width:420px}
-.ev2-tf__count{font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--enc-dust,#6B8A94)}
+.ev2-tf__count{font-family:var(--font-mono,monospace);font-size:var(--text-xs,12px);color:var(--text-dim,#6B8A94)}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-tf-css')){const s=document.createElement('style');s.id='ev2-tf-css';s.textContent=ev2TfCss;document.head.appendChild(s);}})();
 

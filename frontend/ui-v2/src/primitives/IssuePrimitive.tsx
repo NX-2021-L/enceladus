@@ -37,14 +37,14 @@ export function IssuePrimitive({ record }: { record: Issue }) {
         <>
           <PriorityChip priority={record.priority} />
           <SeverityChip severity={record.severity} />
-          <CategoryChip category={record.category} />
-          <ComponentChips components={record.components} />
           <ActiveSessionChip active={record.active_agent_session} sessionId={record.active_agent_session_id} />
           <CheckoutChip
             checkedOut={checkedOut}
             checkedOutBy={record.checked_out_by}
             checkedInBy={record.checked_in_by}
           />
+          <CategoryChip category={record.category} />
+          <ComponentChips components={record.components} />
         </>
       }
       mutation={{
@@ -66,7 +66,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
               <AlertTriangle
                 size={14}
                 strokeWidth={1.5}
-                color={record.severity === 'critical' ? 'var(--danger)' : 'var(--fg-muted)'}
+                color={record.severity === 'critical' ? 'var(--danger)' : 'var(--text-dim)'}
               />
               {record.severity}
             </span>
@@ -82,7 +82,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="issue" />}
       evidence={<IssueEvidenceTab entries={record.evidence} projectId={record.project_id} />}
     />
   )

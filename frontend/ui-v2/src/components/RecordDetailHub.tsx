@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, type ReactNode } from 'react'
 import { RecordId } from './RecordId'
-import { StatusChip } from './StatusChip'
+import { StatusPill } from './StatusPill'
+import { statusRole } from '../status/statusRole'
 import { Modal } from '../design-system'
 import { Tabs } from './StripTabs'
 import { RecordMetadataPanel } from './RecordMetadataPanel'
@@ -63,10 +64,10 @@ export interface HubAction {
 /**
  * RecordDetailHub -- the mobile-first Record Details organism (ENC-TSK-M23 /
  * FND-03, cutover-blocking). Mobile base: a focused head (kind + ID + title
- * + StatusChip + a key-value vitals grid) above the fold, a sticky bottom
+ * + StatusPill + a key-value vitals grid) above the fold, a sticky bottom
  * action bar in the thumb zone, and Overview/Neighbors/Worklog/Evidence
  * behind a segmented `Tabs` control (design-system-2) so non-Overview
- * content is only constructed once its tab is opened. Desktop (>= 64rem)
+ * content is only constructed once its tab is opened. Desktop (>= 60rem, 960px)
  * projects the same segments into a two-column hub: head+actions become a
  * sticky sidebar, tab content sits alongside it.
  *
@@ -87,7 +88,6 @@ export function RecordDetailHub({
   kindLabel,
   title,
   status,
-  priority,
   recordType,
   chips,
   vitals = [],
@@ -108,7 +108,7 @@ export function RecordDetailHub({
   priority?: string
   recordType?: string
   /** Extra chips (severity/category/active-session/checkout/component)
-   *  rendered after the built-in StatusChip -- see components/ChipRow.tsx. */
+   *  rendered after the built-in StatusPill -- see components/ChipRow.tsx. */
   chips?: ReactNode
   vitals?: HubVital[]
   overview: ReactNode
@@ -324,7 +324,7 @@ export function RecordDetailHub({
               <RecordId id={recordId} />
             </RecordLink>
             {status ? (
-              <StatusChip status={status} priority={priority} recordType={recordType} />
+              <StatusPill status={status} kind={recordType} />
             ) : null}
             {chips}
           </div>
@@ -676,9 +676,12 @@ export function NeighborsTab({
 export function WorklogTab({
   history,
   projectId,
+  kind,
 }: {
   history: HistoryEntry[] | undefined
   projectId?: string
+  /** Record kind, so an entry that records a lifecycle status reads that kind's map (spec 4.2). */
+  kind?: string
 }) {
   if (!history?.length) return null
   return (
@@ -687,7 +690,13 @@ export function WorklogTab({
         <li className="ev2-rdh__worklog-item" key={`${h.timestamp}-${i}`}>
           <div className="ev2-rdh__worklog-meta">
             <span className="ev2-rdh__worklog-ts">{h.timestamp}</span>
-            <StatusChip status={h.status} />
+            {/* Entries record either a lifecycle status (pill) or an entry kind such as
+                "created" or "worklog" (plain label, not a status). */}
+            {statusRole(kind, h.status) !== 'unknown' ? (
+              <StatusPill status={h.status} kind={kind} />
+            ) : (
+              <span className="ev2-rdh__worklog-kind">{h.status}</span>
+            )}
           </div>
           <MarkdownContent text={h.description} projectId={projectId} className="ev2-rdh__worklog-desc" />
         </li>

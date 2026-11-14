@@ -257,7 +257,7 @@ describe('record detail hub sticky action bar (ENC-TSK-M23)', () => {
   })
 
   it('folds the action bar inline and hides the fixed bar at the desktop breakpoint', () => {
-    const desktopBlock = extractBlock(hubCss, /@media \(min-width: 64rem\) \{/)
+    const desktopBlock = extractBlock(hubCss, /@media \(min-width: 60rem\) \{/)
     expect(desktopBlock.length).toBeGreaterThan(0)
     expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--inline\s*\{[^}]*display:\s*flex/)
     expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--sticky\s*\{[^}]*display:\s*none/)
@@ -424,15 +424,16 @@ describe('PWA UI polish (ENC-TSK-M75)', () => {
     const stickyMatch = hubCss.match(/\.ev2-rdh__actionbar--sticky\s*\{([^}]*)\}/)
     expect(stickyMatch, 'expected a .ev2-rdh__actionbar--sticky rule').not.toBeNull()
     const rule = stickyMatch?.[1] ?? ''
-    // background must be an opaque --enc-* surface token...
-    expect(rule).toMatch(/background:\s*var\(--enc-[a-z-]+\)/)
+    // background must be an opaque surface: an --enc-* primitive or, since ENC-TSK-S63-0B,
+    // an opaque surface role (canvas, surface, surface-raised alias opaque primitives)...
+    expect(rule).toMatch(/background:\s*var\(--(enc-[a-z-]+|canvas|surface|surface-raised)\)/)
     // ...never the undefined --bg-elevated token (renders transparent) or a
     // literal transparent fill.
     expect(rule).not.toMatch(/background:[^;]*--bg-elevated/)
     expect(rule).not.toMatch(/background:\s*transparent/)
     // still pinned + stacked above content, with content padding reserved.
     expect(rule).toMatch(/position:\s*fixed/)
-    expect(rule).toMatch(/z-index:\s*\d+/)
+    expect(rule).toMatch(/z-index:\s*(\d+|var\(--z-[a-z]+\))/)
     expect(hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)?.[1] ?? '').toMatch(/padding-bottom:/)
   })
 

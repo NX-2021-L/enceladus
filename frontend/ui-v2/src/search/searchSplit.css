@@ -20,7 +20,7 @@
    * padding-top 16px (= --space-4), and sticky positions inside that padding box, so a 0 edge stuck the block 16px
    * below the scroller top with cards showing through above it. Pull the edge up by the padding... */
   --io-search-sticky-top: calc(-1 * var(--space-4));
-  --io-search-sticky-bg: var(--enc-void);
+  --io-search-sticky-bg: var(--canvas);
 }
 @media (max-width: 959.98px) {
   /* ...and give the block an equal opaque band (padding cancelled by a negative margin, so the unstuck layout is

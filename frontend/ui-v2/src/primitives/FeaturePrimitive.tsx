@@ -25,14 +25,14 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
       vitals={vitals}
       chips={
         <>
-          <CategoryChip category={record.category} />
-          <ComponentChips components={record.components} />
           <ActiveSessionChip active={record.active_agent_session} sessionId={record.active_agent_session_id} />
           <CheckoutChip
             checkedOut={checkedOut}
             checkedOutBy={record.checked_out_by}
             checkedInBy={record.checked_in_by}
           />
+          <CategoryChip category={record.category} />
+          <ComponentChips components={record.components} />
         </>
       }
       mutation={{
@@ -74,7 +74,7 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="feature" />}
       evidence={<EvidenceTab criteria={record.acceptance_criteria} projectId={record.project_id} />}
     />
   )

@@ -30,7 +30,7 @@ import {
   serializeFilterQuery,
   type FeedRouteSearch,
 } from '../search/feedUrl'
-import { StatusChip } from '../components/StatusChip'
+import { StatusPill } from '../components/StatusPill'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import './projects.css'
 
@@ -162,7 +162,7 @@ export function ProjectsRoute() {
         search={projectFeedSearch(project.project_id)}
         className="projects-route__card-link"
       >
-        <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, opacity: 0.7, marginRight: 8 }}>
+        <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 'var(--text-2xs)', opacity: 0.7, marginRight: 8 }}>
           {project.prefix}
         </span>
         {project.name ?? project.project_id}
@@ -187,7 +187,7 @@ export function ProjectsRoute() {
         id: 'status',
         header: 'Status',
         content: (project: ProjectSummary) =>
-          project.status ? <StatusChip status={project.status} /> : '—',
+          project.status ? <StatusPill status={project.status} kind="project" /> : '—',
       },
       {
         id: 'summary',

@@ -4,7 +4,7 @@
 .ev2-kitdoc {
   display: block;
   padding: var(--space-4) 0;
-  color: var(--enc-starlight);
+  color: var(--text);
 }
 
 .ev2-kitdoc > .ev2-md__heading:first-child {

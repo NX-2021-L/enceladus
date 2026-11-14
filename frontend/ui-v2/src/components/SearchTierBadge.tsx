@@ -1,35 +1,20 @@
 import type { SearchTier } from '../types/search'
+import { Tag } from './Pill'
 
 const TIER_LABEL: Record<SearchTier, string> = {
   local: 'Local',
   hybrid: 'Hybrid',
 }
 
-const TIER_COLOR: Record<SearchTier, string> = {
-  local: 'var(--status-open)',
-  hybrid: 'var(--accent)',
-}
-
-/** Tier label for merged search results (FTR-127 — local vs hybrid semantic tier). */
+/**
+ * Tier label for merged search results (FTR-127 local vs hybrid semantic tier).
+ * ENC-TSK-S62-0A: a code tag; the two tiers differ by glyph (single ring vs linked rings),
+ * not by a status hue (Design System v1.1 spec 4.5).
+ */
 export function SearchTierBadge({ tier }: { tier: SearchTier }) {
-  const color = TIER_COLOR[tier]
   return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        fontFamily: 'var(--font-heading)',
-        fontSize: 'var(--text-xs)',
-        fontWeight: 'var(--fw-medium)',
-        textTransform: 'uppercase',
-        letterSpacing: 'var(--tracking-label)',
-        color,
-        border: `1px solid ${color}`,
-        borderRadius: 'var(--radius-sm)',
-        padding: '1px var(--space-2)',
-      }}
-    >
+    <Tag code glyph={tier}>
       {TIER_LABEL[tier]}
-    </span>
+    </Tag>
   )
 }

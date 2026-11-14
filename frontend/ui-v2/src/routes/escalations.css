@@ -13,7 +13,7 @@
   margin-bottom: 12px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 42.99rem) {
   .ev2-esc__filters {
     max-width: none;
   }
@@ -21,22 +21,22 @@
 
 .ev2-esc__hint {
   margin-top: 8px;
-  font-size: 12.5px;
+  font-size: var(--text-xs);
   line-height: 1.55;
-  color: var(--enc-dust, #6b8a94);
+  color: var(--text-dim);
 }
 
 .ev2-esc__mono {
   font-family: var(--font-mono, monospace);
-  font-size: 13px;
-  color: var(--enc-starlight, #eef2f7);
+  font-size: var(--text-row);
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .ev2-esc__idlink {
   font-family: var(--font-mono, monospace);
-  font-size: 13px;
-  color: var(--enc-teal, #3d9ba8);
+  font-size: var(--text-row);
+  color: var(--accent);
   background: none;
   border: none;
   padding: 0;
@@ -60,12 +60,12 @@
   padding: 1px 6px;
   border-radius: 3px;
   font-family: var(--font-body, 'Inter', sans-serif);
-  font-size: 10.5px;
+  font-size: var(--text-2xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--v2-status-warning, #c9a15c);
-  border: 1px solid rgba(201, 161, 92, 0.4);
+  color: var(--warning-text);
+  border: 1px solid var(--tint-amber-40);
 }
 
 .ev2-esc__detail {
@@ -76,9 +76,9 @@
 
 .ev2-esc__prose {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--enc-starlight, #eef2f7);
+  font-size: var(--text-sm);
+  line-height: var(--lh-normal);
+  color: var(--text);
   white-space: pre-wrap;
 }
 
@@ -87,12 +87,12 @@
   overflow-x: auto;
   padding: 12px;
   border-radius: var(--v2-control-radius, 6px);
-  background: var(--v2-field-bg, #0d1220);
-  border: 1px solid var(--v2-field-border, rgba(61, 155, 168, 0.25));
+  background: var(--surface-sunken);
+  border: 1px solid var(--tint-teal-25);
   font-family: var(--font-mono, monospace);
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--enc-seafoam, #c8ddd9);
+  font-size: var(--text-xs);
+  line-height: var(--lh-normal);
+  color: var(--enc-seafoam);
 }
 
 .ev2-esc__deny {
@@ -102,24 +102,24 @@
 .ev2-esc__textarea {
   width: 100%;
   padding: 8px 12px;
-  background: var(--v2-field-bg, #0d1220);
-  border: 1px solid var(--v2-field-border, rgba(61, 155, 168, 0.25));
+  background: var(--surface-sunken);
+  border: 1px solid var(--tint-teal-25);
   border-radius: var(--v2-control-radius, 6px);
-  color: var(--enc-starlight, #eef2f7);
+  color: var(--text);
   font-family: var(--font-body, 'Inter', sans-serif);
-  font-size: 13.5px;
+  font-size: var(--text-row);
   line-height: 1.55;
   resize: vertical;
   transition: border-color var(--dur-base, 200ms) var(--ease-orbit, cubic-bezier(0.4, 0, 0.2, 1));
 }
 
 .ev2-esc__textarea:hover:not(:disabled) {
-  border-color: var(--v2-field-border-hover, rgba(61, 155, 168, 0.45));
+  border-color: var(--tint-teal-45);
 }
 
 .ev2-esc__textarea:focus {
   outline: none;
-  border-color: var(--v2-field-border-focus, #3d9ba8);
+  border-color: var(--focus);
   box-shadow: var(--v2-focus-ring);
 }
 
@@ -136,13 +136,13 @@
 
 .ev2-esc__actions--closed {
   justify-content: flex-start;
-  font-size: 13px;
-  color: var(--enc-dust, #6b8a94);
+  font-size: var(--text-row);
+  color: var(--text-dim);
 }
 
 /* Mobile-first: the v4 PWA mandate. The decision controls must stay reachable
    and full-width on a phone — io approves escalations from wherever io is. */
-@media (max-width: 600px) {
+@media (max-width: 42.99rem) {
   .ev2-esc__actions {
     flex-direction: column-reverse;
     align-items: stretch;
@@ -162,7 +162,7 @@
 }
 
 /* Tablet / large phone: two tracks still read cleanly. */
-@media (min-width: 601px) and (max-width: 900px) {
+@media (min-width: 43rem) and (max-width: 59.99rem) {
   .ev2-esc__detail .ev2-kv {
     grid-template-columns: repeat(2, 1fr) !important;
   }
@@ -187,9 +187,9 @@
 
 /* DVP-TSK-A20: kit-card additions on the restored cockpit */
 .ev2-esc__candidate { display: block; margin: 4px 0; }
-.ev2-esc__receipt { margin: 4px 0 0; font-size: 12px; }
+.ev2-esc__receipt { margin: 4px 0 0; font-size: var(--text-xs); }
 .ev2-esc__expiry { white-space: nowrap; }
 
 /* DVP-TSK-A24: push deep-link decide panel, first in the page so Approve/Deny sit above the fold at 375x812. */
-.ev2-esc__focus { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid var(--border, #444); border-radius: 8px; }
+.ev2-esc__focus { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; }
 .ev2-esc__focus .ev2-esc__actions { position: static; }

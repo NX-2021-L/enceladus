@@ -1,13 +1,14 @@
 // Enceladus v2 · CollectionPreferences — Cloudscape CollectionPreferences, deep re-brand.
+// ENC-TSK-S63-0C: style string re-skinned onto the v1.1 role tokens (design system artifact 1794603005-04d0); props, events, DOM and class names unchanged.
 const ev2CpCss = `
 .ev2-cp{position:relative;font-family:var(--font-body,'Inter',sans-serif)}
-.ev2-cp__gear{width:var(--v2-control-height,32px);height:var(--v2-control-height,32px);border:1px solid var(--v2-field-border,rgba(61,155,168,.3));background:var(--v2-field-bg,#0D1220);border-radius:var(--v2-control-radius,6px);color:var(--enc-dust,#6B8A94);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:all var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1))}
-.ev2-cp__gear:hover{color:var(--enc-teal-light,#7AC8D4);border-color:rgba(61,155,168,.5)}
-.ev2-cp__pop{position:absolute;top:calc(100% + 4px);right:0;z-index:20;width:280px;background:var(--enc-surface,#111827);border:1px solid var(--v2-panel-border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:14px 16px}
-.ev2-cp__title{font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:700;font-size:14px;color:var(--enc-seafoam,#C8DDD9);margin:0 0 10px}
+.ev2-cp__gear{width:var(--control-h,32px);height:var(--control-h,32px);border:1px solid var(--tint-teal-25,rgba(61,155,168,.3));background:var(--surface-sunken,#0D1220);border-radius:var(--v2-control-radius,6px);color:var(--text-dim,#6B8A94);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:all var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1))}
+.ev2-cp__gear:hover{color:var(--accent-hover,#7AC8D4);border-color:var(--tint-teal-50,rgba(61,155,168,.5))}
+.ev2-cp__pop{position:absolute;top:calc(100% + 4px);right:0;z-index:20;width:280px;background:var(--surface,#111827);border:1px solid var(--border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:14px 16px}
+.ev2-cp__title{font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:700;font-size:var(--text-sm,14px);color:var(--text-display,#C8DDD9);margin:0 0 10px}
 .ev2-cp__group{margin-bottom:14px}
-.ev2-cp__grouplbl{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--enc-dust,#6B8A94);margin-bottom:6px}
-.ev2-cp__foot{display:flex;justify-content:flex-end;gap:8px;margin-top:6px;padding-top:12px;border-top:1px solid var(--v2-divider,rgba(61,155,168,.12))}
+.ev2-cp__grouplbl{font-size:var(--text-2xs,11px);font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim,#6B8A94);margin-bottom:6px}
+.ev2-cp__foot{display:flex;justify-content:flex-end;gap:8px;margin-top:6px;padding-top:12px;border-top:1px solid var(--divider,rgba(61,155,168,.12))}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-cp-css')){const s=document.createElement('style');s.id='ev2-cp-css';s.textContent=ev2CpCss;document.head.appendChild(s);}})();
 

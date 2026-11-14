@@ -78,7 +78,7 @@ export function SessionPrimitive({ record }: { record: Session }) {
           fontWeight: 'var(--fw-medium)',
           textTransform: 'uppercase',
           letterSpacing: 'var(--tracking-label)',
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
           margin: '0 0 var(--space-3)',
         }}
       >
@@ -90,7 +90,7 @@ export function SessionPrimitive({ record }: { record: Session }) {
           style={{
             fontFamily: 'var(--font-body)',
             fontSize: 'var(--text-sm)',
-            color: 'var(--fg-muted)',
+            color: 'var(--text-dim)',
           }}
         >
           No worklog entries have been mirrored onto this session yet.
@@ -105,7 +105,7 @@ export function SessionPrimitive({ record }: { record: Session }) {
           }}
         >
           <thead>
-            <tr style={{ background: 'var(--bg-surface-alt)' }}>
+            <tr style={{ background: 'var(--surface-raised)' }}>
               <th style={worklogHeaderCellStyle}>Timestamp</th>
               <th style={worklogHeaderCellStyle}>Source Record</th>
               <th style={worklogHeaderCellStyle}>Description</th>
@@ -113,7 +113,7 @@ export function SessionPrimitive({ record }: { record: Session }) {
           </thead>
           <tbody>
             {history.map((entry, index) => (
-              <tr key={`${entry.timestamp}-${index}`} style={{ borderTop: 'var(--border-divider)' }}>
+              <tr key={`${entry.timestamp}-${index}`} style={{ borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--divider)' }}>
                 <td style={{ ...worklogCellStyle, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
                   {entry.timestamp}
                 </td>
@@ -140,11 +140,11 @@ const worklogHeaderCellStyle: CSSProperties = {
   fontWeight: 'var(--fw-medium)',
   textTransform: 'uppercase',
   letterSpacing: 'var(--tracking-label)',
-  color: 'var(--fg-muted)',
+  color: 'var(--text-dim)',
 }
 
 const worklogCellStyle: CSSProperties = {
   padding: 'var(--space-2) var(--space-3)',
-  color: 'var(--fg)',
+  color: 'var(--text)',
   verticalAlign: 'top',
 }

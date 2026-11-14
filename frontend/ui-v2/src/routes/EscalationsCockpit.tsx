@@ -13,8 +13,8 @@ import { DiffView, ProposedCallPreview } from '@io-kit/gates/react'
 import { Alert, Button, Container, FormField, Header, KeyValuePairs, Modal } from '../design-system'
 import { Table } from '../components/StackedTable'
 import { Tabs } from '../components/StripTabs'
-import { Badge } from '../components/Badge'
-import { StatusChip } from '../components/StatusChip'
+import { Tag, UrgencyBadge } from '../components/Pill'
+import { StatusPill } from '../components/StatusPill'
 import { RecordLink } from '../components/RecordLink'
 import { useCanExecute } from '../auth/useCan'
 import { useEscalationRealtimeNonce } from './GateInboxPanel'
@@ -93,9 +93,9 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
         <button className="ev2-esc__idlink" onClick={() => setOpenKey(row.key)}>{row.id}</button>
       ),
     },
-    { id: 'project', header: 'Project', cell: (row: EscalationRow) => <Badge color="teal">{row.projectId}</Badge> },
-    { id: 'kind', header: 'Kind', cell: (row: EscalationRow) => <Badge color="amber">{row.kind.replace('_', ' ')}</Badge> },
-    { id: 'status', header: 'Status', cell: (row: EscalationRow) => <StatusChip status={row.status} /> },
+    { id: 'project', header: 'Project', cell: (row: EscalationRow) => <Tag code>{row.projectId}</Tag> },
+    { id: 'kind', header: 'Kind', cell: (row: EscalationRow) => <Tag>{row.kind.replace('_', ' ')}</Tag> },
+    { id: 'status', header: 'Status', cell: (row: EscalationRow) => <StatusPill status={row.status} kind="escalation" /> },
     {
       id: 'target', header: 'Target record',
       cell: (row: EscalationRow) => (
@@ -159,7 +159,7 @@ export function EscalationsCockpit({ compact = false, onPendingCount, focusId }:
       {focusRow && (
         <div className="ev2-esc__focus" data-testid="escalation-focus">
           <div className="ev2-esc__focus-head">
-            <span className="ev2-esc__mono">{focusRow.id}</span> <Badge color="teal">{focusRow.projectId}</Badge> <Badge color="amber">{focusRow.kind.replace('_', ' ')}</Badge> <span className="ev2-esc__mono">risk {focusRow.risk}</span> <StatusChip status={focusRow.status} />
+            <span className="ev2-esc__mono">{focusRow.id}</span> <Tag code>{focusRow.projectId}</Tag> <Tag>{focusRow.kind.replace('_', ' ')}</Tag> <UrgencyBadge value={focusRow.risk} title="Gate risk" /> <StatusPill status={focusRow.status} kind="escalation" />
           </div>
           <div className="ev2-esc__prose">{focusRow.title}</div>
           {focusCanAct ? (
@@ -280,9 +280,9 @@ function EscalationDetail({ row, candidateId, onCandidate, disabled }: {
       <KeyValuePairs
         columns={3}
         items={[
-          { label: 'Status', value: <StatusChip status={row.status} /> },
+          { label: 'Status', value: <StatusPill status={row.status} kind="escalation" /> },
           { label: 'Kind', value: row.kind, mono: true },
-          { label: 'Risk', value: row.risk, mono: true },
+          { label: 'Risk', value: <UrgencyBadge value={row.risk} title="Gate risk" /> },
           { label: 'Project', value: row.projectId, mono: true },
           { label: 'Target record', value: <RecordLink id={row.targetRecordId} />, mono: true },
           { label: 'Requested by', value: row.requestedBy, mono: true },

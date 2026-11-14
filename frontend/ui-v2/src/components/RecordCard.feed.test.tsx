@@ -13,7 +13,7 @@ vi.mock('@tanstack/react-router', () => ({
 import { RecordCard } from './RecordCard'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { Badge } from './Badge'
+import { OpChip, UrgencyBadge } from './Pill'
 
 const copyCss = readFileSync(resolve(process.cwd(), 'src/components/copyIdButton.css'), 'utf8')
 
@@ -51,11 +51,10 @@ describe('RecordCard variant="feed"', () => {
           variant="feed"
           projectLabel="enceladus"
           timestamp="46m ago"
-          accentColor="var(--enc-crimson)"
           badges={
             <>
-              <Badge color="crimson">P0</Badge>
-              <Badge color="amber">CHECKED OUT</Badge>
+              <UrgencyBadge value="P0" />
+              <OpChip op="held">Checked out</OpChip>
             </>
           }
         />,
@@ -65,30 +64,42 @@ describe('RecordCard variant="feed"', () => {
     expect(container.textContent).toContain('enceladus')
     expect(container.textContent).toContain('46m ago')
     expect(container.textContent).toContain('ISS-519 fix')
-    expect(container.textContent).toContain('in-progress')
+    expect(container.textContent).toContain('in progress')
     expect(container.textContent).toContain('P0')
-    expect(container.textContent).toContain('CHECKED OUT')
+    expect(container.textContent).toContain('Checked out')
+    expect(container.querySelector('.enc-badge')?.getAttribute('data-level')).toBe('0')
+    expect(container.querySelector('.enc-op')?.getAttribute('data-op')).toBe('held')
 
     const titleEl = container.querySelector('.ev2-rc__feed-title')
     expect(titleEl).not.toBeNull()
   })
 
-  it('applies the accent color as the left border', () => {
+  it('draws the rail from record type, not priority (closed P0 task: done pill, task rail)', () => {
     act(() => {
-      root.render(
-        <RecordCard
-          recordId="ENC-ISS-501"
-          title="P0 SEV-1"
-          status="open"
-          priority="P0"
-          variant="feed"
-          accentColor="rgb(200, 80, 96)"
-        />,
-      )
+      root.render(<RecordCard recordId="ENC-TSK-Q91" recordType="task" title="closed P0" status="closed" priority="P0" variant="feed" />)
     })
     const card = container.querySelector('.ev2-rc--feed') as HTMLElement
-    expect(card).not.toBeNull()
-    expect(card.style.borderLeftColor).toBe('rgb(200, 80, 96)')
+    expect(card.getAttribute('data-type')).toBe('task')
+    expect(card.hasAttribute('data-rail')).toBe(false)
+    expect(card.style.borderLeftColor).toBe('')
+    expect(container.querySelector('.enc-pill')?.getAttribute('data-role')).toBe('done')
+  })
+
+  it('lets a waiting, caution or failed role take the rail (task in pr)', () => {
+    act(() => {
+      root.render(<RecordCard recordId="ENC-TSK-S59-0B" recordType="task" title="in review" status="pr" variant="feed" />)
+    })
+    const card = container.querySelector('.ev2-rc--feed') as HTMLElement
+    expect(card.getAttribute('data-rail')).toBe('waiting')
+    expect(container.querySelector('.enc-pill')?.getAttribute('data-role')).toBe('waiting')
+  })
+
+  it('reads underscore task statuses from the feed (merged_main is active)', () => {
+    act(() => {
+      root.render(<RecordCard recordId="ENC-TSK-X1" recordType="task" title="t" status="merged_main" variant="feed" />)
+    })
+    expect(container.querySelector('.enc-pill')?.getAttribute('data-role')).toBe('active')
+    expect(container.textContent).toContain('merged main')
   })
 
   it('is clickable via onSelect when no href is supplied (wide master-detail mode, FTR-128 AC-18)', () => {

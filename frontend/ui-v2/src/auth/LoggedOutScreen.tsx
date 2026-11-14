@@ -21,7 +21,7 @@ export function LoggedOutScreen() {
         textAlign: 'center',
         padding:
           'calc(var(--space-6) + var(--io-safe-top)) calc(var(--space-6) + var(--io-safe-right)) calc(var(--space-6) + var(--io-safe-bottom)) calc(var(--space-6) + var(--io-safe-left))',
-        background: 'var(--enc-void)',
+        background: 'var(--canvas)',
       }}
     >
       <p
@@ -30,7 +30,7 @@ export function LoggedOutScreen() {
           fontSize: 'var(--text-xs)',
           textTransform: 'uppercase',
           letterSpacing: 'var(--tracking-label)',
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
           margin: '0 0 var(--space-2)',
         }}
       >
@@ -42,7 +42,7 @@ export function LoggedOutScreen() {
           fontWeight: 'var(--fw-bold)',
           fontSize: 'var(--text-2xl)',
           lineHeight: 'var(--lh-tight)',
-          color: 'var(--fg-display)',
+          color: 'var(--text-display)',
           margin: '0 0 var(--space-2)',
         }}
       >
@@ -50,7 +50,7 @@ export function LoggedOutScreen() {
       </h1>
       <p
         style={{
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
           fontSize: 'var(--text-sm)',
           lineHeight: 'var(--lh-relaxed)',
           margin: '0 0 var(--space-6)',
@@ -69,7 +69,9 @@ export function LoggedOutScreen() {
           fontWeight: 'var(--fw-medium)',
           color: 'var(--enc-void)',
           background: 'var(--accent)',
-          border: '1px solid var(--accent)',
+          borderWidth: 1,
+          borderStyle: 'solid',
+          borderColor: 'var(--accent)',
           borderRadius: 'var(--radius-md)',
           padding: 'var(--space-3) var(--space-6)',
           cursor: 'pointer',

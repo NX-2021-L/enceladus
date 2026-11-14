@@ -15,9 +15,9 @@
 
 .ev2-md__p {
   font-family: var(--font-body);
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--enc-starlight);
+  font-size: var(--text-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--text);
   margin: 0 0 var(--space-4);
 }
 
@@ -30,28 +30,28 @@
 }
 
 h3.ev2-md__heading {
-  font-size: 16px;
+  font-size: var(--text-base);
 }
 
 h4.ev2-md__heading {
-  font-size: 14px;
+  font-size: var(--text-sm);
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: var(--enc-teal);
+  color: var(--accent);
 }
 
 h5.ev2-md__heading {
-  font-size: 13px;
-  color: var(--enc-dust);
+  font-size: var(--text-row);
+  color: var(--text-dim);
 }
 
 .ev2-md__list {
   margin: 0 0 var(--space-4);
   padding-left: 1.25em;
   font-family: var(--font-body);
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--enc-starlight);
+  font-size: var(--text-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--text);
 }
 
 .ev2-md__list li {
@@ -59,18 +59,18 @@ h5.ev2-md__heading {
 }
 
 .ev2-md__quote {
-  border-left: 4px solid var(--enc-teal);
+  border-left: 4px solid var(--accent);
   margin: var(--space-4) 0;
   padding: var(--space-3) var(--space-5);
   font-style: italic;
-  background: rgba(61, 155, 168, 0.08);
+  background: var(--tint-teal-08);
   border-radius: var(--radius-md);
-  color: var(--enc-starlight);
+  color: var(--text);
 }
 
 .ev2-md__pre {
   background: var(--enc-slate);
-  border: 1px solid rgba(61, 155, 168, 0.2);
+  border: 1px solid var(--tint-teal-20);
   border-radius: var(--radius-sm);
   padding: var(--space-3) var(--space-4);
   overflow-x: auto;
@@ -80,8 +80,8 @@ h5.ev2-md__heading {
 
 .ev2-md__pre code {
   font-family: var(--font-mono);
-  font-size: 12.5px;
-  color: var(--enc-starlight);
+  font-size: var(--text-xs);
+  color: var(--text);
   background: none;
   border: none;
   padding: 0;
@@ -95,7 +95,7 @@ h5.ev2-md__heading {
   color: var(--enc-teal-light);
   padding: 0.15rem 0.4rem;
   border-radius: var(--radius-xs);
-  border: 1px solid rgba(61, 155, 168, 0.2);
+  border: 1px solid var(--tint-teal-20);
   word-break: break-all;
 }
 
@@ -119,9 +119,9 @@ h5.ev2-md__heading {
 }
 
 .ev2-md__id-link {
-  color: var(--enc-teal);
+  color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid rgba(61, 155, 168, 0.35);
+  border-bottom: 1px solid var(--tint-teal-35);
   transition: color var(--dur-fast) var(--ease-orbit), border-color var(--dur-fast) var(--ease-orbit);
 }
 
@@ -131,5 +131,5 @@ h5.ev2-md__heading {
 }
 
 .ev2-md__id-plain {
-  color: var(--enc-dust);
+  color: var(--text-dim);
 }

@@ -98,7 +98,7 @@ export function parsePx(value: string | null | undefined): number {
 
 /** Left offset and width of a row in `lane` of `lanes` lanes separated by `columnGap` px, as CSS (percent of the list width). */
 export function laneStyle(lanes: number, columnGap: number, lane: number): { left: string; width: string } {
-  if (lanes <= 1) return { left: '0px', width: '100%' }
+  if (lanes <= 1) return { left: '0', width: '100%' }
   return {
     left: `calc((100% + ${columnGap}px) / ${lanes} * ${lane})`,
     width: `calc((100% - ${columnGap * (lanes - 1)}px) / ${lanes})`,

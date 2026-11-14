@@ -52,6 +52,10 @@ on:
       - 'v4/**'
     paths:
       - "frontend/ui-v2/**"
+      # ui-v2 imports tokens and components from design-system-2 by relative
+      # path, so a design-system-only change must also rebuild and deploy
+      # (ENC-ISS-728, ENC-TSK-S59-0B).
+      - "frontend/design-system-2/**"
       - ".github/workflows/_ui_deploy.yml"
   workflow_dispatch:
     inputs:

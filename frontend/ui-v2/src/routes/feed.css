@@ -60,7 +60,7 @@
   flex-direction: column;
   gap: var(--space-1);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .feed-route__sort select {
@@ -68,16 +68,16 @@
   font-size: var(--text-sm);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  border: var(--border-subtle);
-  background: var(--bg-surface);
-  color: var(--fg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .feed-route__telemetry {
   flex-basis: 100%;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .feed-route__telemetry > summary {
@@ -114,18 +114,18 @@
   gap: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .feed-route__meta-error {
-  color: var(--status-blocked);
+  color: var(--danger-text);
 }
 
 .feed-route__empty {
   margin: var(--space-0);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .feed-route__empty-action {
@@ -136,7 +136,7 @@
   padding: 0;
   font: inherit;
   font-weight: 500;
-  color: var(--accent, #3d9ba8);
+  color: var(--accent);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -159,7 +159,7 @@
   margin: var(--space-3) var(--space-0) var(--space-0);
   font-family: var(--font-body);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   text-align: center;
 }
 
@@ -175,7 +175,7 @@
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .feed-recent-nav .ev2-pag__btn:not([aria-label='Previous page']):not([aria-label='Next page']),
@@ -187,7 +187,7 @@
    the feed reading pane.
  *
  * recordDetailHub.css turns `.ev2-rdh` into a two-column grid
- * (`22rem minmax(0, 1fr)`) at `@media (min-width: 64rem)`, with
+ * (`22rem minmax(0, 1fr)`) at `@media (min-width: 60rem)` (was 64rem; snapped to 960 by ENC-TSK-S64-0A), with
  * `.ev2-rdh__main { display: contents }` promoting the header card and the tab
  * content to sibling grid columns. On the full-page record routes that is
  * right -- the hub owns the whole content width.
@@ -211,7 +211,7 @@
  * layout (the header card is now full pane width, so two columns reads better,
  * not worse), and the action bar stays inline rather than reverting to the
  * mobile sticky variant. */
-@media (min-width: 64rem) {
+@media (min-width: 60rem) {
   .feed-route__pane .ev2-rdh {
     display: block;
   }

@@ -87,6 +87,9 @@ export function PlanGraphExplorer({
     const cy = cytoscape({
       container: el,
       elements,
+      /* eslint-disable no-restricted-syntax -- ENC-TSK-S64-0A recorded decision (PR #1852): the Cytoscape
+         literals stay as shipped; Cytoscape style objects do not read CSS custom properties. Follow-up
+         filed under ENC-PLN-106 W6. */
       style: [
         {
           selector: 'node',
@@ -131,6 +134,7 @@ export function PlanGraphExplorer({
           },
         },
       ],
+      /* eslint-enable no-restricted-syntax */
       layout: { name: 'concentric', concentric: (node) => (node.id() === planId ? 2 : 1), levelWidth: () => 2 },
       minZoom: 0.2,
       maxZoom: 2.5,

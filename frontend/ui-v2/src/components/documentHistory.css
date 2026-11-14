@@ -11,8 +11,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-3);
 }
@@ -25,7 +25,7 @@
 }
 
 .ev2-history__filter-label {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.09em;
   font-weight: var(--fw-bold);
@@ -35,20 +35,20 @@
 .ev2-history__filter-select {
   font: inherit;
   color: inherit;
-  background: var(--bg-inset, var(--bg-surface));
-  border: var(--border-subtle);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-2);
 }
 
 .ev2-history__status {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-size: var(--text-xs);
   padding: var(--space-1);
 }
 
 .ev2-history__status--error {
-  color: var(--enc-crimson, var(--danger));
+  color: var(--danger);
 }
 
 .ev2-history__list {
@@ -66,8 +66,8 @@
   text-align: left;
   font: inherit;
   color: inherit;
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-2);
   cursor: pointer;
@@ -78,7 +78,7 @@
 }
 
 .ev2-history__event--rejected {
-  border-color: var(--enc-crimson, var(--danger));
+  border-color: var(--danger);
 }
 
 .ev2-history__event-op {
@@ -88,7 +88,7 @@
 
 .ev2-history__event-actor,
 .ev2-history__event-surface {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-size: var(--text-xs);
 }
 
@@ -107,13 +107,13 @@
 
 .ev2-history__event-ts {
   margin-left: auto;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-size: var(--text-xs);
 }
 
 .ev2-history__event-badge {
-  color: var(--enc-crimson, var(--danger));
-  border: 1px solid var(--enc-crimson, var(--danger));
+  color: var(--danger);
+  border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   padding: 0 var(--space-1);
   font-size: var(--text-xs);
@@ -124,7 +124,7 @@
   align-self: flex-start;
   font: inherit;
   background: none;
-  border: var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-3);
   cursor: pointer;
@@ -132,8 +132,8 @@
 
 .ev2-history__rewind,
 .ev2-history__diff {
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-3);
 }
@@ -150,8 +150,8 @@
 .ev2-history__rewind-pill {
   text-transform: uppercase;
   letter-spacing: 0.09em;
-  color: var(--fg-muted);
-  border: var(--border-subtle);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 var(--space-2);
 }
@@ -168,28 +168,28 @@
 }
 
 .ev2-history__rewind-badge--mismatch {
-  color: var(--enc-crimson, var(--danger));
-  border: 1px solid var(--enc-crimson, var(--danger));
+  color: var(--danger);
+  border: 1px solid var(--danger);
 }
 
 .ev2-history__rewind-version {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-family: var(--font-mono);
 }
 
 .ev2-history__rewind-status,
 .ev2-history__diff-status {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-size: var(--text-xs);
 }
 
 .ev2-history__rewind-status--error,
 .ev2-history__diff-status--error {
-  color: var(--enc-crimson, var(--danger));
+  color: var(--danger);
 }
 
 .ev2-history__diff-truncated {
-  color: var(--v2-status-warning, #c9a15c);
+  color: var(--warning-text);
 }
 
 .ev2-history__diff-body {
@@ -202,9 +202,12 @@
 }
 
 .ev2-history__diff-line--add {
-  background: rgba(46, 160, 67, 0.15);
+  /* ENC-TSK-S62-0B: system green and red tints (spec 4.5); the line keeps its + / - sign. */
+  background: var(--diff-add-fill);
+  color: var(--diff-add-text);
 }
 
 .ev2-history__diff-line--del {
-  background: rgba(248, 81, 73, 0.15);
+  background: var(--diff-remove-fill);
+  color: var(--diff-remove-text);
 }

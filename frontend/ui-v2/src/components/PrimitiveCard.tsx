@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { RecordId } from './RecordId'
-import { StatusChip } from './StatusChip'
+import { StatusPill } from './StatusPill'
 import { MarkdownContent } from './MarkdownContent'
 
 /**
@@ -13,7 +13,6 @@ export function PrimitiveCard({
   kindLabel,
   title,
   status,
-  priority,
   recordType,
   children,
 }: {
@@ -28,8 +27,10 @@ export function PrimitiveCard({
   return (
     <article
       style={{
-        background: 'var(--bg-surface)',
-        border: 'var(--border-subtle)',
+        background: 'var(--surface)',
+        borderWidth: 1,
+        borderStyle: 'solid',
+        borderColor: 'var(--border)',
         borderRadius: 'var(--radius-lg)',
         padding: 'var(--space-8)',
         boxShadow: 'var(--shadow-md)',
@@ -58,7 +59,7 @@ export function PrimitiveCard({
           {kindLabel}
         </span>
         <RecordId id={recordId} />
-        {status ? <StatusChip status={status} priority={priority} recordType={recordType} /> : null}
+        {status ? <StatusPill status={status} kind={recordType} /> : null}
       </header>
 
       <h3
@@ -67,7 +68,7 @@ export function PrimitiveCard({
           fontWeight: 'var(--fw-medium)',
           fontSize: 'var(--text-2xl)',
           lineHeight: 'var(--lh-snug)',
-          color: 'var(--fg-display)',
+          color: 'var(--text-display)',
           margin: '0 0 var(--space-5)',
         }}
       >
@@ -88,7 +89,9 @@ export function MetaRow({ label, children }: { label: string; children: ReactNod
         gridTemplateColumns: '10rem 1fr',
         gap: 'var(--space-4)',
         padding: 'var(--space-2) 0',
-        borderTop: 'var(--border-divider)',
+        borderTopWidth: 1,
+        borderTopStyle: 'solid',
+        borderTopColor: 'var(--divider)',
       }}
     >
       <span
@@ -98,12 +101,12 @@ export function MetaRow({ label, children }: { label: string; children: ReactNod
           fontWeight: 'var(--fw-medium)',
           textTransform: 'uppercase',
           letterSpacing: 'var(--tracking-label)',
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
         }}
       >
         {label}
       </span>
-      <span style={{ color: 'var(--fg)', fontSize: 'var(--text-sm)' }}>{children}</span>
+      <span style={{ color: 'var(--text)', fontSize: 'var(--text-sm)' }}>{children}</span>
     </div>
   )
 }
@@ -120,7 +123,7 @@ export function SectionHeading({ children }: { children: ReactNode }) {
         fontWeight: 'var(--fw-bold)',
         textTransform: 'uppercase',
         letterSpacing: 'var(--tracking-label)',
-        color: 'var(--fg-muted)',
+        color: 'var(--text-dim)',
         margin: '0 0 var(--space-2)',
       }}
     >
