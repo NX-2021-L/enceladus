@@ -5,6 +5,7 @@ import { DocumentSectionsView } from '../components/DocumentSectionsView'
 import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub } from '../components/RecordDetailHub'
 import { Tag } from '../components/Pill'
+import { MaturityMeter } from '../components/LevelMeter'
 import { downloadTextFile } from '../utils/downloadTextFile'
 
 /** ENC-TSK-P81 — code-split: the History tab (list + rewind + diff) only
@@ -39,6 +40,9 @@ export function DocumentPrimitive({ record }: { record: Document }) {
     { label: 'Project', value: record.project_id },
     { label: 'Version', value: `v${record.version ?? '?'}` },
     ...(record.document_subtype ? [{ label: 'Subtype', value: record.document_subtype }] : []),
+    ...(record.document_maturity_state
+      ? [{ label: 'Maturity', value: <MaturityMeter state={record.document_maturity_state} /> }]
+      : []),
   ]
 
   const sizeLabel = formatSize(record.size_bytes)

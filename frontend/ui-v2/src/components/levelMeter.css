@@ -1,0 +1,8 @@
+/* ENC-TSK-S62-0B · Level meter (Design System v1.1 spec DOC-8253497AC9FC section 6.5).
+ * Ported from design-system-2/components/bundle.css. Context score, document maturity and
+ * changelog confidence: a mono number with segments on a neutral ramp. The band is carried by
+ * the segment count, not by hue (replaces the emerald/amber/red score literals). */
+.enc-level { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; color: var(--_t); }
+.enc-level i { display: inline-block; width: 10px; height: 4px; border-radius: 1px; background: var(--_t); opacity: .28; margin-right: 2px; } .enc-level i[data-on] { opacity: 1; }
+.enc-level[data-level="high"] { --_t: var(--level-high-text); } .enc-level[data-level="mid"] { --_t: var(--level-mid-text); } .enc-level[data-level="low"] { --_t: var(--level-low-text); }
+.enc-level__label { color: var(--text-dim); margin-right: 2px; }

@@ -206,6 +206,8 @@ export interface Document {
   document_subtype?: string
   /** ENC-FTR-078 AC-16 subtype pattern (only with document_subtype 'doc'). */
   subtypepattern?: string
+  /** GDMP maturity stage: raw, compliant, contextualized, mature (ENC-FTR-065). */
+  document_maturity_state?: string
   /** Full raw markdown body. Present when fetched with include_content=true
    *  (the default for a single-document GET) — ENC-TSK-M34. */
   content?: string

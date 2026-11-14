@@ -1,13 +1,14 @@
 // Enceladus v2 · Flashbar — Cloudscape Flashbar, deep re-brand.
+// ENC-TSK-S62-0B: colors read the v1.1 alert roles (info, success, warning, danger).
 const ev2FlashbarCss = `
 .ev2-flashbar{display:flex;flex-direction:column;gap:8px}
 .ev2-flash{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:var(--v2-panel-radius,8px);font-family:var(--font-body,'Inter',sans-serif);font-size:14px;line-height:1.5;color:var(--enc-void,#0A0A0F);animation:ev2-flash-in var(--dur-slow,300ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1))}
 @keyframes ev2-flash-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.ev2-flash{animation:none}}
-.ev2-flash--success{background:var(--enc-teal,#3D9BA8)}
-.ev2-flash--error{background:var(--enc-crimson,#C85060);color:var(--enc-starlight,#EEF2F7)}
-.ev2-flash--warning{background:var(--v2-status-warning,#C9A15C)}
-.ev2-flash--info{background:var(--enc-surface-alt,#1C2333);color:var(--enc-starlight,#EEF2F7);border:1px solid rgba(122,200,212,.3)}
+.ev2-flash--success{background:var(--success,#3FBF85)}
+.ev2-flash--error{background:var(--danger,#C85060);color:var(--enc-starlight,#EEF2F7)}
+.ev2-flash--warning{background:var(--warning,#C9A15C)}
+.ev2-flash--info{background:var(--surface-raised,#1C2333);color:var(--text,#EEF2F7);border:1px solid var(--tint-blue-45,rgba(127,176,255,.45))}
 .ev2-flash--in-progress{background:var(--enc-surface-alt,#1C2333);color:var(--enc-starlight,#EEF2F7);border:1px solid rgba(122,200,212,.3)}
 .ev2-flash__header{font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:700;margin:0 0 2px}
 .ev2-flash__body{flex:1;min-width:0}
