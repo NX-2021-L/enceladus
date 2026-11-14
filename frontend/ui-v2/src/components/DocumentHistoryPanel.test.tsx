@@ -229,7 +229,10 @@ describe('DocumentHistoryPanel', () => {
       container.querySelector<HTMLButtonElement>('[data-testid="history-event-evt-1"]')?.click()
     })
     await flush()
-    expect(container.querySelector('[data-testid="document-rewind-pane"]')).toBeTruthy()
+    // ENC-TSK-S80: the rewind pane mounts after its fetch + sha256 resolve; wait instead of assuming one flush.
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="document-rewind-pane"]')).toBeTruthy()
+    })
     expect(container.querySelector('[data-testid="document-diff-pane"]')).toBeFalsy()
 
     act(() => {
@@ -316,10 +319,14 @@ describe('DocumentRewindPane', () => {
     })
     await flush()
 
-    const pane = container.querySelector('[data-testid="document-rewind-pane"]')
-    expect(pane?.textContent).toContain('reconstructed')
-    expect(pane?.textContent).toContain('hash verified')
-    expect(pane?.textContent).toContain('Historical body text.')
+    // ENC-TSK-S80: the pane mounts only after the fetch and a real crypto.subtle sha256 resolve, which one
+    // setTimeout flush does not cover under CI load (job 132336832437). Same fix as the mismatch test below.
+    await vi.waitFor(() => {
+      const pane = container.querySelector('[data-testid="document-rewind-pane"]')
+      expect(pane?.textContent ?? '').toContain('reconstructed')
+      expect(pane?.textContent ?? '').toContain('hash verified')
+      expect(pane?.textContent ?? '').toContain('Historical body text.')
+    })
   })
 
   it('shows a hash-mismatch badge when the server content_hash disagrees with the event after_hash', async () => {
