@@ -84,6 +84,62 @@ def test_invalid_cursor_decode_returns_none():
     assert corpus.decode_cursor("not-valid") is None
 
 
+def test_s28_meta_rows_are_never_documents():
+    """ENC-ISS-903: ENC-TSK-S28 audit#/idem# rows in DOCUMENTS_TABLE are bookkeeping (corpus and document delta)."""
+    audit = {"document_id": "audit#DOC-BA9C5729413C#2026-11-07T06:55:09.367765Z#f51a4002"}
+    idem = {"document_id": "idem#enceladus#key-1#marker"}
+    for row in (audit, idem):
+        assert corpus.is_document_counter_row(row)  # the document delta skips on this predicate
+        assert corpus.build_document_entry(row) is None
+    assert not corpus.is_document_counter_row({"document_id": "DOC-AUDIT"})
+    entries = [
+        entry
+        for entry in (
+            corpus.build_document_entry(row)
+            for row in (audit, idem, {"document_id": "DOC-A", "title": "A", "updated_at": "2026-11-07T00:00:00Z"})
+        )
+        if entry
+    ]
+    page = corpus.paginate_corpus(entries, corpus.parse_corpus_query({"limit": "10"}))
+    assert [item["record_id"] for item in page["items"]] == ["DOC-A"]
+    assert page["facets"]["record_type"] == {"document": 1}
+
+
+def _walk(entries, limit, monkeypatch, signed):
+    if signed:
+        monkeypatch.setenv("COORDINATION_INTERNAL_API_KEY", "test-key-iss-903")
+    else:
+        monkeypatch.delenv("COORDINATION_INTERNAL_API_KEY", raising=False)
+        monkeypatch.delenv("FEED_CURSOR_KEYS", raising=False)
+    seen, cursor, pages = [], None, 0
+    while True:
+        query = corpus.parse_corpus_query({"limit": str(limit), **({"cursor": cursor} if cursor else {})})
+        if cursor:
+            # the handler's pre-check (lambda_function._handle_corpus): a None here is the 400 cursor_invalid
+            assert corpus.decode_cursor(cursor, corpus.cursor_filter(query)) is not None
+        page = corpus.paginate_corpus(entries, query)
+        seen += [item["record_id"] for item in page["items"]]
+        pages += 1
+        cursor = page["next_cursor"]
+        if not cursor or pages > 20:
+            return seen, cursor
+
+
+def test_walk_crosses_rows_without_a_sort_value(monkeypatch):
+    """ENC-ISS-903: a page ending on a row with no updated_at/created_at mints a cursor with an empty sort value;
+    the server must accept that cursor, or a full walk stops there with 400 cursor_invalid."""
+    entries = [_entry("ENC-TSK-A", updated_at="2026-11-07T02:00:00Z"), _entry("ENC-TSK-B", updated_at="2026-11-07T01:00:00Z")]
+    entries += [
+        corpus.build_document_entry({"document_id": f"DOC-NODATE{i}", "title": f"No date {i}"}) for i in range(5)
+    ]
+    assert all(e["updated_at"] is None for e in entries[2:])
+    for signed in (True, False):
+        seen, cursor = _walk(entries, 2, monkeypatch, signed)
+        assert cursor is None
+        assert sorted(seen) == sorted(e["record_id"] for e in entries)
+        assert len(seen) == len(set(seen))
+
+
 def test_document_entry_skips_deleted():
     assert corpus.build_document_entry({"document_id": "DOC-1", "status": "deleted"}) is None
 

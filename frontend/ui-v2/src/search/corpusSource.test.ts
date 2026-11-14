@@ -6,6 +6,7 @@ import {
   createEnceladusCorpusSource,
   docsDeltaWanted,
   getEnceladusCorpusStore,
+  isBookkeepingId,
   resetEnceladusCorpusStoreForTests,
   withDocsDelta,
   liveChangeFromEvent,
@@ -51,6 +52,30 @@ describe('mapCorpusItem', () => {
   it('drops the document counter sentinel and unknown types', () => {
     expect(mapCorpusItem(item({ record_id: '__COUNTER__VERSION_SEQ__', record_type: 'document' }))).toBeNull()
     expect(mapCorpusItem(item({ record_id: 'X-1', record_type: 'session' }))).toBeNull()
+  })
+  it('drops S28 audit#/idem# bookkeeping rows (ENC-ISS-903)', () => {
+    expect(mapCorpusItem(item({ record_id: 'audit#DOC-BA9C5729413C#2026-11-07T06:55:09Z#f51a', record_type: 'document' }))).toBeNull()
+    expect(mapCorpusItem(item({ record_id: 'idem#enceladus#k#marker', record_type: 'document' }))).toBeNull()
+    expect(isBookkeepingId('DOC-AUDIT')).toBe(false)
+    expect(isBookkeepingId('__COUNTER__VERSION_SEQ__')).toBe(true)
+  })
+})
+
+describe('cached bookkeeping rows are purged on load (ENC-ISS-903)', () => {
+  afterEach(() => resetEnceladusCorpusStoreForTests())
+  it('the app store drops audit#/idem# and counter rows a pre-fix corpus cached', async () => {
+    const storage = createMemoryCorpusStorage()
+    const seeded = new CorpusStore(storage, { budget: 100, seqSpaces: ['tracker', 'document'] })
+    await seeded.upsertMany([
+      mapCorpusItem(doc('DOC-REAL', 5))!,
+      { ...mapCorpusItem(doc('DOC-X', 6))!, id: 'audit#DOC-X#2026-11-07T00:00:00Z#u', key: 'document::audit#DOC-X#2026-11-07T00:00:00Z#u' },
+    ])
+    const control = new CorpusStore(storage, { budget: 100, seqSpaces: ['tracker', 'document'] })
+    await control.ready()
+    expect(control.rows()).toHaveLength(2) // the cached audit row is really there without the purge
+    const reloaded = new CorpusStore(storage, { budget: 100, seqSpaces: ['tracker', 'document'], dropOnLoad: (row) => isBookkeepingId(row.id) })
+    await reloaded.ready()
+    expect(reloaded.rows().map((r) => r.id)).toEqual(['DOC-REAL'])
   })
 })
 

@@ -69,6 +69,10 @@ interface FetchInit {
   headers?: HeadersInit
 }
 
+/** ENC-ISS-903: error text shows the path only. A query string (a signed corpus cursor runs to ~300 characters) is
+ *  unreadable in a banner and is not something a user can act on. */
+export const pathForMessage = (url: string): string => url.split('?')[0] ?? url
+
 async function requestJson<T>(url: string, init?: FetchInit): Promise<T> {
   const res = await fetch(url, {
     signal: init?.signal,
@@ -78,7 +82,7 @@ async function requestJson<T>(url: string, init?: FetchInit): Promise<T> {
   })
   if (res.status === 401) throw new SessionExpiredError()
   if (res.status === 404) throw new NotFoundError(`Not found: ${url}`)
-  if (!res.ok) throw new Error(`Request failed (${res.status}): ${url}`)
+  if (!res.ok) throw new Error(`Request failed (${res.status}): ${pathForMessage(url)}`)
   return (await res.json()) as T
 }
 
@@ -185,7 +189,7 @@ export async function fetchHybridGraphsearch(
       body.fallback_hint,
     )
   }
-  if (!res.ok) throw new Error(`Request failed (${res.status}): ${url}`)
+  if (!res.ok) throw new Error(`Request failed (${res.status}): ${pathForMessage(url)}`)
   return (await res.json()) as HybridGraphsearchResponse
 }
 
