@@ -1,33 +1,6 @@
 import { useState } from 'react'
+import { ScoreMeter } from './LevelMeter'
 import type { ContextNodeMeta } from '../types/records'
-
-function scoreColor(score: number): string {
-  if (score >= 0.7) return 'var(--status-success-fg, #6ee7b7)'
-  if (score >= 0.4) return 'var(--status-warning-fg, #fcd34d)'
-  return 'var(--status-danger-fg, #fca5a5)'
-}
-
-function ScoreBadge({ label, value }: { label: string; value: number }) {
-  return (
-    <span
-      title={`${label}: ${value.toFixed(3)}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 'var(--space-1)',
-        padding: '2px var(--space-2)',
-        borderRadius: 'var(--radius-sm)',
-        fontSize: 'var(--text-xs)',
-        fontFamily: 'var(--font-body)',
-        background: 'color-mix(in srgb, var(--bg-elevated) 80%, transparent)',
-        color: scoreColor(value),
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>{label}</span>
-      {value.toFixed(2)}
-    </span>
-  )
-}
 
 export function ContextNodeBadges({ contextNode }: { contextNode?: ContextNodeMeta }) {
   const [expanded, setExpanded] = useState(false)
@@ -81,9 +54,9 @@ export function ContextNodeBadges({ contextNode }: { contextNode?: ContextNodeMe
             marginTop: 'var(--space-3)',
           }}
         >
-          <ScoreBadge label="Fresh" value={freshness_score} />
-          <ScoreBadge label="Struct" value={structural_importance} />
-          <ScoreBadge label="Dense" value={information_density} />
+          <ScoreMeter label="Fresh" score={freshness_score} />
+          <ScoreMeter label="Struct" score={structural_importance} />
+          <ScoreMeter label="Dense" score={information_density} />
           {access_frequency > 0 ? (
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
               Accessed {access_frequency}×

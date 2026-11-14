@@ -257,7 +257,7 @@
   gap: var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--accent);
-  background: rgba(90, 155, 212, 0.08);
+  background: var(--tint-blue-08); /* ENC-TSK-S62-0B: in-focus highlight (spec 6.9) */
   padding: var(--space-3);
   margin-bottom: var(--space-4);
   font-size: var(--text-xs);

@@ -202,9 +202,12 @@
 }
 
 .ev2-history__diff-line--add {
-  background: rgba(46, 160, 67, 0.15);
+  /* ENC-TSK-S62-0B: system green and red tints (spec 4.5); the line keeps its + / - sign. */
+  background: var(--diff-add-fill);
+  color: var(--diff-add-text);
 }
 
 .ev2-history__diff-line--del {
-  background: rgba(248, 81, 73, 0.15);
+  background: var(--diff-remove-fill);
+  color: var(--diff-remove-text);
 }
