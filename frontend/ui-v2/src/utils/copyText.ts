@@ -25,7 +25,7 @@ function legacyCopy(text: string): boolean {
   area.setAttribute('aria-hidden', 'true')
   area.style.position = 'fixed'
   area.style.top = '0'
-  area.style.left = '-9999px'
+  area.style.left = '-100vw'
   area.style.opacity = '0'
   document.body.appendChild(area)
   try {

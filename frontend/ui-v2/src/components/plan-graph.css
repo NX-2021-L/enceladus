@@ -5,7 +5,7 @@
   border: 1px solid var(--border);
   background: linear-gradient(
     165deg,
-    color-mix(in srgb, var(--bg-elevated) 92%, #0ea5a4 8%) 0%,
+    color-mix(in srgb, var(--bg-elevated) 92%, var(--accent) 8%) 0%,
     var(--bg-elevated) 55%
   );
 }
@@ -36,7 +36,7 @@
   max-height: calc(var(--space-16) * 8);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface) 85%, #020617 15%);
+  background: color-mix(in srgb, var(--surface) 85%, var(--enc-void) 15%);
 }
 
 .plan-graph__status {

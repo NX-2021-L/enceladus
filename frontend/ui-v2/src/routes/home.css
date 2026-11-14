@@ -23,8 +23,8 @@
   background-size: cover;
   background-position: 60% 30%;
   opacity: 0.13;
-  -webkit-mask-image: linear-gradient(to bottom, #000, transparent);
-  mask-image: linear-gradient(to bottom, #000, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, var(--enc-void), transparent);
+  mask-image: linear-gradient(to bottom, var(--enc-void), transparent);
   pointer-events: none;
 }
 

@@ -161,7 +161,7 @@ describe('virtual list geometry helpers', () => {
     expect(parsePx('')).toBe(0)
   })
   it('places lane n at (100% + gap) / lanes * n with width (100% - gaps) / lanes', () => {
-    expect(laneStyle(1, 12, 0)).toEqual({ left: '0px', width: '100%' })
+    expect(laneStyle(1, 12, 0)).toEqual({ left: '0', width: '100%' })
     expect(laneStyle(2, 16, 1)).toEqual({ left: 'calc((100% + 16px) / 2 * 1)', width: 'calc((100% - 16px) / 2)' })
     expect(laneStyle(3, 10, 2).width).toBe('calc((100% - 20px) / 3)')
   })
