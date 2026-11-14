@@ -4,9 +4,9 @@
   display: block;
   width: 100%;
   box-sizing: border-box;
-  min-height: 44px;
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  min-height: var(--tap-min);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   margin: 0 0 var(--space-3);
@@ -28,17 +28,18 @@ button.ev2-rc {
 
 a.ev2-rc:hover,
 button.ev2-rc:hover {
-  border: var(--border-hover);
+  border: 1px solid var(--border-strong);
 }
 
 a.ev2-rc:focus-visible,
 button.ev2-rc:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 
+/* Selected (spec 6.7): border-strong plus glow-teal. */
 .ev2-rc--selected {
-  border: var(--border-hover);
+  border: 1px solid var(--border-strong);
   box-shadow: var(--glow-teal);
 }
 
@@ -56,7 +57,8 @@ button.ev2-rc:focus-visible {
   font-weight: var(--fw-bold);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--accent);
+  /* Spec 6.7: the kind label is text-dim; teal is the brand and record IDs, not a type marker. */
+  color: var(--text-dim);
 }
 
 .ev2-rc__title {
@@ -65,7 +67,7 @@ button.ev2-rc:focus-visible {
   font-weight: var(--fw-medium);
   font-size: var(--text-base);
   line-height: var(--lh-snug);
-  color: var(--fg-display);
+  color: var(--text-display);
 }
 
 .ev2-rc__desc {
@@ -73,7 +75,7 @@ button.ev2-rc:focus-visible {
   font-family: var(--font-body);
   font-size: var(--text-sm);
   line-height: var(--lh-normal);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -109,7 +111,7 @@ button.ev2-rc:focus-visible {
  * the pill). Priority is never an input. Hover replaces the rail with the
  * hover border, as shipped. */
 .ev2-rc--feed {
-  padding: 13px 16px;
+  padding: var(--row-pad-y) var(--row-pad-x);
   margin: 0 0 var(--space-2);
   border-left: var(--rail-width) solid var(--_rail, var(--rail-default));
 }
@@ -140,24 +142,24 @@ button.ev2-rc:focus-visible {
 
 .ev2-rc__feed-project {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--enc-dust);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
 }
 
 .ev2-rc__feed-time {
   margin-left: auto;
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--enc-dust);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
 }
 
 .ev2-rc__feed-title {
   font-family: var(--font-body);
-  font-size: 13.5px;
+  font-size: var(--text-row);
   font-weight: var(--fw-medium);
   line-height: var(--lh-snug);
-  color: var(--fg);
+  color: var(--text);
   margin-bottom: var(--space-2);
   overflow: hidden;
   text-overflow: ellipsis;
