@@ -58,6 +58,14 @@ a {
     border-color var(--dur-base) var(--ease-orbit);
 }
 
+/* ENC-TSK-S65-0B: reduced motion drops the orbital colour transition on controls. */
+@media (prefers-reduced-motion: reduce) {
+  button,
+  a {
+    transition: none;
+  }
+}
+
 /* ENC-TSK-M37 (global accent reconcile) — a keyboard-focused control with no
  * explicit `:focus-visible` rule falls back to the browser's native focus
  * ring, which is blue in every major engine. Individual components may
