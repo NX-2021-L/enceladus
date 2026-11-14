@@ -81,7 +81,7 @@ def _decode_legacy(raw: str) -> Optional[Tuple[str, str]]:
         payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
         sort_value = str(payload.get("sort_value") or "")
         record_key = str(payload.get("record_key") or "")
-        if not sort_value or not record_key:
+        if not record_key:  # ENC-ISS-903: an empty sort_value is valid (see decode_cursor)
             return None
         return sort_value, record_key
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
@@ -104,7 +104,9 @@ def decode_cursor(raw: str, filter_value: Any = None) -> Optional[Tuple[str, str
         return _decode_legacy(key)
     try:
         sort_value, record_key = json.loads(key)
-        return (str(sort_value), str(record_key)) if sort_value and record_key else None
+        # ENC-ISS-903: an empty sort_value is legitimate (a row with no updated_at/created_at sorts last, and
+        # encode_cursor mints a cursor for it). Only the record_key is required, or the server rejects its own cursor.
+        return (str(sort_value or ""), str(record_key)) if record_key else None
     except (ValueError, TypeError):
         return None
 
@@ -320,13 +322,22 @@ def build_tracker_entry(
 # ENC-TSK-P72: document_api keeps its version_seq counter as a sentinel row in
 # DOCUMENTS_TABLE itself. It is bookkeeping, not a document.
 DOCUMENT_COUNTER_SENTINEL_ID = "__COUNTER__VERSION_SEQ__"
+# ENC-ISS-903: ENC-TSK-S28's atomic commit writes audit and idempotency rows into DOCUMENTS_TABLE, keyed by these
+# document_id prefixes. Every other consumer already skips them (_S28_META_PREFIXES in feed_publisher, graph_sync,
+# opensearch_indexer, ...). They have no updated_at, so in the corpus they sorted last with an empty sort value.
+S28_META_PREFIXES = ("audit#", "idem#")
 
 
 def is_document_counter_row(item: Mapping[str, Any]) -> bool:
-    """ENC-TSK-Q34 (AC-5): the counter sentinel must never surface as a document."""
+    """Bookkeeping rows that must never surface as documents: the counter sentinel (ENC-TSK-Q34 AC-5) and the
+    S28 audit#/idem# rows (ENC-ISS-903). Used by build_document_entry (corpus) and the document delta."""
     document_id = str(item.get("document_id") or "").strip()
     record_type = str(item.get("record_type") or "").strip().lower()
-    return document_id == DOCUMENT_COUNTER_SENTINEL_ID or record_type == "counter"
+    return (
+        document_id == DOCUMENT_COUNTER_SENTINEL_ID
+        or record_type == "counter"
+        or document_id.startswith(S28_META_PREFIXES)
+    )
 
 
 def coerce_version_seq(raw: Any) -> Optional[int]:

@@ -34,6 +34,11 @@ export const SEED_PAGE_LIMIT = 200
 const VALID_TYPES = new Set(['task', 'issue', 'feature', 'plan', 'lesson', 'document'])
 // document_api's version_seq counter row; never a record (ENC-TSK-Q34).
 export const DOCUMENT_COUNTER_SENTINEL_ID = '__COUNTER__VERSION_SEQ__'
+// ENC-ISS-903: ENC-TSK-S28 writes audit and idempotency rows into the same tables as records. They are never records.
+export const META_ROW_PREFIXES = ['audit#', 'idem#'] as const
+/** True for table rows that are bookkeeping, not records: the counter sentinel and S28 audit#/idem# rows. */
+export const isBookkeepingId = (id: string | null | undefined): boolean =>
+  typeof id === 'string' && (id === DOCUMENT_COUNTER_SENTINEL_ID || META_ROW_PREFIXES.some((p) => id.startsWith(p)))
 
 export const rowKeyFor = (type: string, projectId: string, id: string): string =>
   type === 'document' ? `document::${id}` : `tracker:${projectId}:${id}`
@@ -46,7 +51,7 @@ const list = (v: unknown): string[] | undefined => {
 
 /** feed_query item -> IndexRow (record_type, project_id, status, priority, category, checkout_state, components[], tags[], dates, title, id). */
 export function mapCorpusItem(item: FeedCorpusItem): IndexRow | null {
-  if (item.record_id === DOCUMENT_COUNTER_SENTINEL_ID) return null
+  if (isBookkeepingId(item.record_id)) return null
   const type = String(item.record_type ?? '').toLowerCase()
   if (!VALID_TYPES.has(type)) return null
   const attrs = (item.attrs ?? {}) as Record<string, unknown>
@@ -166,7 +171,8 @@ export function getEnceladusCorpusStore(): CorpusStore {
     store = new CorpusStore(createCorpusStorage(CORPUS_ID), {
       budget: CORPUS_BUDGET,
       seqSpaces: [...SEQ_SPACES],
-      dropOnLoad: (row) => row.id === DOCUMENT_COUNTER_SENTINEL_ID,
+      // Purges bookkeeping rows a pre-fix corpus left in IndexedDB (counter: ENC-TSK-Q37; audit#/idem#: ENC-ISS-903).
+      dropOnLoad: (row) => isBookkeepingId(row.id),
     })
   }
   return store
@@ -186,7 +192,7 @@ export function liveChangeFromEvent(
   projects: ProjectSummary[] = [],
 ): LiveChange | null {
   const type = String(event.record_type ?? '').toLowerCase()
-  if (!VALID_TYPES.has(type) || event.recordId === DOCUMENT_COUNTER_SENTINEL_ID) return null
+  if (!VALID_TYPES.has(type) || isBookkeepingId(event.recordId)) return null
   const existing = rows.find((r) => r.id === event.recordId)
   if (event.action === 'removed') {
     return existing ? { remove: { key: existing.key ?? existing.id, ...(existing.version ? { version: existing.version } : {}) } } : null
