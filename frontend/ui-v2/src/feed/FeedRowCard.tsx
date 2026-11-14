@@ -4,7 +4,7 @@ import { Badge } from '../components/Badge'
 import { RecordCard } from '../components/RecordCard'
 import { formatRelativeTime } from '../format/relativeTime'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
-import { feedRowAccent, priorityBadgeColor, sessionStateBadge } from '../search/feedRowPresentation'
+import { priorityBadgeColor, sessionStateBadge } from '../search/feedRowPresentation'
 import type { SearchResultHit } from '../types/search'
 import { SignalReadout } from '@io-kit/search/react'
 import type { SignalAvailability, SignalEvidence } from '@io-kit/search'
@@ -45,7 +45,6 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
       variant="feed"
       projectLabel={project}
       timestamp={formatRelativeTime(hit.updatedAt) ?? undefined}
-      accentColor={feedRowAccent(hit)}
       badges={
         <>
           {hit.priority ? <Badge color={priorityBadgeColor(hit.priority)}>{hit.priority}</Badge> : null}

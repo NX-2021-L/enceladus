@@ -76,7 +76,7 @@ export function TaskPrimitive({ record }: { record: Task }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="task" />}
       evidence={<EvidenceTab criteria={record.acceptance_criteria} projectId={record.project_id} />}
     />
   )

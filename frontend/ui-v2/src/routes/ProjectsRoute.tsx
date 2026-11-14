@@ -30,7 +30,7 @@ import {
   serializeFilterQuery,
   type FeedRouteSearch,
 } from '../search/feedUrl'
-import { StatusChip } from '../components/StatusChip'
+import { StatusPill } from '../components/StatusPill'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import './projects.css'
 
@@ -187,7 +187,7 @@ export function ProjectsRoute() {
         id: 'status',
         header: 'Status',
         content: (project: ProjectSummary) =>
-          project.status ? <StatusChip status={project.status} /> : '—',
+          project.status ? <StatusPill status={project.status} kind="project" /> : '—',
       },
       {
         id: 'summary',

@@ -92,7 +92,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="plan" />}
     />
   )
 }

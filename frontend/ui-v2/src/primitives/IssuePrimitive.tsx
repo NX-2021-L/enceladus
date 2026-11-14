@@ -82,7 +82,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="issue" />}
       evidence={<IssueEvidenceTab entries={record.evidence} projectId={record.project_id} />}
     />
   )

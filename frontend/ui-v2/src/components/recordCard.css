@@ -103,13 +103,26 @@ button.ev2-rc:focus-visible {
 }
 
 /* ENC-TSK-M35 · dense feed row (Enceladus-v4-Feed-Review.md §3/§4, PAR-01→08).
- * ~72px tall: ids+time / single-line title / chip strip. 3px severity accent
- * on the left, set inline per-row via `accentColor` (feedRowAccent()). */
+ * ~72px tall: ids+time / single-line title / chip strip.
+ * ENC-TSK-S61-0A: the 3px left rail shows record type (spec 4.4). A status role
+ * of caution, waiting or failed replaces it (data-rail, from the same lookup as
+ * the pill). Priority is never an input. Hover replaces the rail with the
+ * hover border, as shipped. */
 .ev2-rc--feed {
   padding: 13px 16px;
   margin: 0 0 var(--space-2);
-  border-left: 3px solid var(--enc-teal);
+  border-left: var(--rail-width) solid var(--_rail, var(--rail-default));
 }
+
+.ev2-rc--feed[data-type='task'] { --_rail: var(--rail-task); }
+.ev2-rc--feed[data-type='issue'] { --_rail: var(--rail-issue); }
+.ev2-rc--feed[data-type='feature'] { --_rail: var(--rail-feature); }
+.ev2-rc--feed[data-type='document'] { --_rail: var(--rail-document); }
+.ev2-rc--feed[data-type='plan'] { --_rail: var(--rail-plan); }
+.ev2-rc--feed[data-type='lesson'] { --_rail: var(--rail-lesson); }
+.ev2-rc--feed[data-rail='caution'] { --_rail: var(--status-caution-rail); }
+.ev2-rc--feed[data-rail='waiting'] { --_rail: var(--status-waiting-rail); }
+.ev2-rc--feed[data-rail='failed'] { --_rail: var(--status-failed-rail); }
 
 .ev2-rc__feed-top {
   display: flex;
