@@ -1,11 +1,12 @@
 // Enceladus v2 · Pagination — Cloudscape Pagination, deep re-brand.
+// ENC-TSK-S63-0C: style string re-skinned onto the v1.1 role tokens (design system artifact 1794603005-04d0); props, events, DOM and class names unchanged.
 const ev2PagCss = `
 .ev2-pag{display:inline-flex;align-items:center;gap:2px;font-family:var(--font-mono,monospace)}
-.ev2-pag__btn{min-width:28px;height:28px;padding:0 6px;border:1px solid transparent;background:none;border-radius:5px;color:var(--enc-dust,#6B8A94);font-family:var(--font-mono,monospace);font-size:13px;cursor:pointer;transition:all var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1));display:inline-flex;align-items:center;justify-content:center}
-.ev2-pag__btn:hover:not(:disabled){color:var(--enc-teal-light,#7AC8D4);background:rgba(61,155,168,.1)}
-.ev2-pag__btn--active{background:var(--enc-teal,#3D9BA8);color:var(--enc-void,#0A0A0F)}
+.ev2-pag__btn{min-width:28px;height:28px;padding:0 6px;border:1px solid transparent;background:none;border-radius:5px;color:var(--text-dim,#6B8A94);font-family:var(--font-mono,monospace);font-size:var(--text-row,13.5px);cursor:pointer;transition:all var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1));display:inline-flex;align-items:center;justify-content:center}
+.ev2-pag__btn:hover:not(:disabled){color:var(--accent-hover,#7AC8D4);background:var(--tint-teal-10,rgba(61,155,168,.1))}
+.ev2-pag__btn--active{background:var(--accent,#3D9BA8);color:var(--text-on-accent,#0A0A0F)}
 .ev2-pag__btn:disabled{opacity:.35;cursor:not-allowed}
-.ev2-pag__ellipsis{color:var(--enc-dust,#6B8A94);padding:0 4px;font-size:13px}
+.ev2-pag__ellipsis{color:var(--text-dim,#6B8A94);padding:0 4px;font-size:var(--text-row,13.5px)}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-pag-css')){const s=document.createElement('style');s.id='ev2-pag-css';s.textContent=ev2PagCss;document.head.appendChild(s);}})();
 
