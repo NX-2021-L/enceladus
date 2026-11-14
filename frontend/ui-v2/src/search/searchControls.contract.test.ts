@@ -94,7 +94,7 @@ describe('frozen controls: sticky to the page scroller below 960px', () => {
   it('the sticky edge is 0 (the app bar is outside the scroller) and the bg is the page background token', () => {
     const split = css('search/searchSplit.css')
     // DVP-TSK-A14: the stuck edge is pulled up by the page scroller's 16px top padding, with an equal opaque band.
-    expect(split).toMatch(/\.ev2-fill\s*\{[^}]*--io-search-sticky-top:\s*calc\(-1 \* var\(--space-4\)\);[^}]*--io-search-sticky-bg:\s*var\(--enc-void\)/)
+    expect(split).toMatch(/\.ev2-fill\s*\{[^}]*--io-search-sticky-top:\s*calc\(-1 \* var\(--space-4\)\);[^}]*--io-search-sticky-bg:\s*var\(--canvas\)/)
     expect(split).toMatch(/@media \(max-width: 959\.98px\)\s*\{[\s\S]*\.ev2-fill \.io-search__controls\s*\{[^}]*padding-block-start:\s*var\(--space-4\);[^}]*margin-block-start:\s*calc\(-1 \* var\(--space-4\)\)/)
     const tokens = readFileSync(resolve(uiRoot, '..', 'design-system-2', 'colors_and_type.css'), 'utf8')
     expect(tokens).toMatch(/--enc-void:\s*#0A0A0F/i)

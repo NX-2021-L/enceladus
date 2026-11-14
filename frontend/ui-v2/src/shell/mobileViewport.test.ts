@@ -257,7 +257,7 @@ describe('record detail hub sticky action bar (ENC-TSK-M23)', () => {
   })
 
   it('folds the action bar inline and hides the fixed bar at the desktop breakpoint', () => {
-    const desktopBlock = extractBlock(hubCss, /@media \(min-width: 64rem\) \{/)
+    const desktopBlock = extractBlock(hubCss, /@media \(min-width: 60rem\) \{/)
     expect(desktopBlock.length).toBeGreaterThan(0)
     expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--inline\s*\{[^}]*display:\s*flex/)
     expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--sticky\s*\{[^}]*display:\s*none/)
@@ -433,7 +433,7 @@ describe('PWA UI polish (ENC-TSK-M75)', () => {
     expect(rule).not.toMatch(/background:\s*transparent/)
     // still pinned + stacked above content, with content padding reserved.
     expect(rule).toMatch(/position:\s*fixed/)
-    expect(rule).toMatch(/z-index:\s*\d+/)
+    expect(rule).toMatch(/z-index:\s*(\d+|var\(--z-[a-z]+\))/)
     expect(hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)?.[1] ?? '').toMatch(/padding-bottom:/)
   })
 

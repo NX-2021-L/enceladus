@@ -97,7 +97,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
           ) : null}
           {record.content_hash ? (
             <MetaRow label="Hash">
-              <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all', color: 'var(--fg-muted)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all', color: 'var(--text-dim)' }}>
                 {record.content_hash}
               </span>
             </MetaRow>
@@ -115,7 +115,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
             <MetaRow label="Compliance">
               <Metric>{record.compliance_score}</Metric>
               {record.compliance_warnings?.length ? (
-                <span style={{ color: 'var(--fg-muted)' }}> · {record.compliance_warnings.length} warning(s)</span>
+                <span style={{ color: 'var(--text-dim)' }}> · {record.compliance_warnings.length} warning(s)</span>
               ) : null}
             </MetaRow>
           ) : null}

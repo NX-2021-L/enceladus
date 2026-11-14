@@ -2,9 +2,6 @@
   "src/actions/ActionsRoute.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 2
   },
-  "src/actions/actions.css": {
-    "css:deprecated-token": 1
-  },
   "src/auth/LoggedOutScreen.tsx": {
     "eslint:no-restricted-syntax:Raw px value": 1
   },
@@ -33,30 +30,8 @@
   "src/components/__parity__/MarkdownContentLegacy.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 1
   },
-  "src/components/documentHistory.css": {
-    "css:deprecated-token": 12,
-    "css:raw-color:hex": 1
-  },
-  "src/components/documentSections.css": {
-    "css:deprecated-token": 12,
-    "css:font-size-px": 1
-  },
-  "src/components/markdownContent.css": {
-    "css:font-size-px": 6,
-    "css:raw-color:rgb": 4
-  },
-  "src/components/pageHeader.css": {
-    "css:deprecated-token": 1
-  },
   "src/components/plan-graph.css": {
-    "css:deprecated-token": 6,
     "css:raw-color:hex": 2
-  },
-  "src/components/recordDetailHub.css": {
-    "css:deprecated-token": 21
-  },
-  "src/components/strips.css": {
-    "css:deprecated-token": 2
   },
   "src/feed/FeedSearchPage.tsx": {
     "eslint:no-restricted-syntax:Raw px value": 1
@@ -91,48 +66,11 @@
   "src/routes/SkillLibraryRoute.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 1
   },
-  "src/routes/coordination.css": {
-    "css:deprecated-token": 1,
-    "css:font-size-px": 1,
-    "css:raw-color:hex": 1
-  },
-  "src/routes/docs.css": {
-    "css:deprecated-token": 7,
-    "css:raw-color:hex": 1
-  },
-  "src/routes/escalations.css": {
-    "css:deprecated-token": 7,
-    "css:font-size-px": 9,
-    "css:raw-color:hex": 12,
-    "css:raw-color:rgb": 4
-  },
-  "src/routes/feed.css": {
-    "css:deprecated-token": 9,
-    "css:raw-color:hex": 1
-  },
-  "src/routes/governance.css": {
-    "css:deprecated-token": 5
-  },
   "src/routes/home.css": {
-    "css:deprecated-token": 10,
-    "css:raw-color:hex": 2,
-    "css:raw-color:rgb": 1
-  },
-  "src/routes/recordNotFound.css": {
-    "css:deprecated-token": 3
+    "css:raw-color:hex": 2
   },
   "src/routes/recordRoute.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 2
-  },
-  "src/routes/skillLibrary.css": {
-    "css:deprecated-token": 1
-  },
-  "src/shell/shell.css": {
-    "css:deprecated-token": 7,
-    "css:raw-color:rgb": 1
-  },
-  "src/styles.css": {
-    "css:deprecated-token": 1
   },
   "src/utils/copyText.ts": {
     "eslint:no-restricted-syntax:Raw px value": 1

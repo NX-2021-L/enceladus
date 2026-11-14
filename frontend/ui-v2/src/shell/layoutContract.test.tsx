@@ -174,6 +174,6 @@ describe('one page header component', () => {
     const h1 = container.querySelector('h1.ev2-header__title')
     expect(h1?.textContent).toBe('Feed (5,573)')
     expect(container.querySelector('.ev2-page-header .ev2-header__counter')?.textContent).toBe('(5,573)')
-    expect(css('components/pageHeader.css')).toMatch(/\.ev2-header__counter\s*\{[^}]*color: var\(--fg-muted\)/)
+    expect(css('components/pageHeader.css')).toMatch(/\.ev2-header__counter\s*\{[^}]*color: var\(--text-dim\)/)
   })
 })

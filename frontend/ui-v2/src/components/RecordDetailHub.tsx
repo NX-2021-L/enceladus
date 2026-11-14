@@ -67,7 +67,7 @@ export interface HubAction {
  * + StatusPill + a key-value vitals grid) above the fold, a sticky bottom
  * action bar in the thumb zone, and Overview/Neighbors/Worklog/Evidence
  * behind a segmented `Tabs` control (design-system-2) so non-Overview
- * content is only constructed once its tab is opened. Desktop (>= 64rem)
+ * content is only constructed once its tab is opened. Desktop (>= 60rem, 960px)
  * projects the same segments into a two-column hub: head+actions become a
  * sticky sidebar, tab content sits alongside it.
  *

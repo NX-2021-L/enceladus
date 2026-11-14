@@ -43,7 +43,7 @@
   flex-direction: column;
   gap: var(--space-1);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .docs-route__sort select {
@@ -51,9 +51,9 @@
   font-size: var(--text-sm);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  border: var(--border-subtle);
-  background: var(--bg-surface);
-  color: var(--fg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .docs-route__meta {
@@ -62,18 +62,18 @@
   gap: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .docs-route__meta-error {
-  color: var(--status-blocked);
+  color: var(--danger-text);
 }
 
 .docs-route__empty {
   margin: var(--space-0);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .docs-route__empty-action {
@@ -84,7 +84,7 @@
   padding: 0;
   font: inherit;
   font-weight: 500;
-  color: var(--accent, #3d9ba8);
+  color: var(--accent);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -103,7 +103,7 @@
 .docs-route__card-id {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 @media (max-width: 48rem) {

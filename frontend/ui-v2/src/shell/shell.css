@@ -12,7 +12,7 @@
  * ONLY consumer of the top inset; the strip it adds is void-coloured so the
  * status bar area blends with the bar. */
 .ev2-shell__bar {
-  background: var(--enc-void);
+  background: var(--canvas);
 }
 
 /* DVP-TSK-956: useVisualViewportFrame sets --io-vv-height/--io-vv-top and
@@ -89,13 +89,13 @@
     /* DVP-TSK-956: the app bar wrapper owns the top inset (.io-safe-top), so
      * the drawer starts below bar + inset; it touches left and bottom, so
      * those take their insets too. */
-    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
+    top: calc(var(--control-h) + var(--space-6) + var(--io-safe-top));
     padding-bottom: var(--io-safe-bottom);
     z-index: 4;
     width: min(calc(100% - var(--io-safe-left) - var(--io-safe-right)), calc(var(--space-16) * 14));
     max-width: min(calc(100% - var(--io-safe-left) - var(--io-safe-right)), calc(var(--space-16) * 14));
     box-shadow: var(--shadow-lg);
-    background: var(--enc-surface-alt);
+    background: var(--surface-raised);
   }
 
   .ev2-shell .ev2-al__tools {
@@ -116,9 +116,9 @@
     inset: var(--space-0);
     /* io-inset-exempt left right bottom: a full-bleed backdrop paints under
      * the notch and home indicator; only its top edge follows the app bar. */
-    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
+    top: calc(var(--control-h) + var(--space-6) + var(--io-safe-top));
     z-index: 3;
-    background: rgba(10, 10, 15, 0.6);
+    background: var(--tint-void-60);
     border: none;
     padding: 0;
   }
@@ -137,7 +137,7 @@
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-placeholder__title {
@@ -146,7 +146,7 @@
   font-weight: var(--fw-bold);
   font-size: var(--text-3xl);
   line-height: var(--lh-tight);
-  color: var(--fg-display);
+  color: var(--text-display);
 }
 
 .ev2-placeholder__body {
@@ -154,7 +154,7 @@
   font-family: var(--font-body);
   font-size: var(--text-lg);
   line-height: var(--lh-relaxed);
-  color: var(--fg);
+  color: var(--text);
 }
 
 .ev2-placeholder__path {
@@ -170,7 +170,7 @@
 /* The nav panel runs the full available height and scrolls as its own .io-scroll (.ev2-shell__nav). */
 .ev2-shell .ev2-al__nav {
   overflow: hidden;
-  box-shadow: inset -1px 0 0 var(--v2-divider);
+  box-shadow: inset -1px 0 0 var(--divider);
 }
 .ev2-shell__nav {
   flex: 1 1 auto;
@@ -188,7 +188,7 @@
     align-self: stretch;
     min-height: 0;
     padding-bottom: var(--io-safe-bottom);
-    background: var(--enc-surface-alt);
+    background: var(--surface-raised);
   }
 }
 
@@ -234,11 +234,11 @@
   /* io-inset-exempt top right bottom left: a full-screen blocking backdrop
    * paints under the notch and home indicator by design; its centred text sits
    * well inside every safe-area inset. */
-  z-index: 9999;
+  z-index: var(--z-top);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--enc-void);
+  background: var(--canvas);
   cursor: progress;
 }
 .iok-refresh-overlay__text {
@@ -247,5 +247,5 @@
   font-weight: var(--fw-bold);
   font-size: var(--text-2xl);
   line-height: var(--lh-tight);
-  color: var(--fg-display);
+  color: var(--text-display);
 }

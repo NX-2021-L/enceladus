@@ -21,6 +21,6 @@
 .ev2-recipes__plan { margin: 0; padding-left: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
 .ev2-recipes__pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-1) 0 0; }
 .ev2-recipes__error { display: flex; flex-direction: column; gap: var(--space-2); }
-@media (max-width: 687px) {
+@media (max-width: 42.99rem) {
   .ev2-recipes__facts { grid-template-columns: minmax(0, 1fr); }
 }

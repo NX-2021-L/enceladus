@@ -2,7 +2,7 @@
   margin-top: var(--space-5);
   padding: var(--space-4);
   border-radius: var(--radius-md);
-  border: var(--border-subtle);
+  border: 1px solid var(--border);
   background: linear-gradient(
     165deg,
     color-mix(in srgb, var(--bg-elevated) 92%, #0ea5a4 8%) 0%,
@@ -18,14 +18,14 @@
   margin: var(--space-0);
   font-family: var(--font-heading);
   font-size: var(--text-sm);
-  color: var(--fg-display);
+  color: var(--text-display);
 }
 
 .plan-graph__subtitle {
   margin: var(--space-1) var(--space-0) var(--space-0);
   font-family: var(--font-body);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .plan-graph__canvas {
@@ -35,22 +35,22 @@
   min-height: calc(var(--space-16) * 7);
   max-height: calc(var(--space-16) * 8);
   border-radius: var(--radius-sm);
-  border: var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-surface) 85%, #020617 15%);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 85%, #020617 15%);
 }
 
 .plan-graph__status {
   margin: var(--space-0) var(--space-0) var(--space-3);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .plan-graph__status--error {
-  color: var(--status-blocked);
+  color: var(--danger-text);
 }
 
 .plan-graph__summary {
   margin: var(--space-3) var(--space-0) var(--space-0);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }

@@ -12,7 +12,7 @@
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-record-notfound__title {
@@ -21,7 +21,7 @@
   font-weight: var(--fw-bold);
   font-size: var(--text-3xl);
   line-height: var(--lh-tight);
-  color: var(--fg-display);
+  color: var(--text-display);
   overflow-wrap: anywhere;
 }
 
@@ -35,7 +35,7 @@
   font-family: var(--font-body);
   font-size: var(--text-lg);
   line-height: var(--lh-relaxed);
-  color: var(--fg);
+  color: var(--text);
 }
 
 .ev2-record-notfound__links {

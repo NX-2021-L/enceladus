@@ -1,6 +1,6 @@
 /* ENC-TSK-M23 -- Record Detail Hub, mobile-first record details organism.
    Mobile base: single column, sticky bottom action bar in the thumb zone.
-   Desktop (>= 64rem): two-column hub; head becomes a sticky sidebar and the
+   Desktop (>= 60rem, 960px): two-column hub; head becomes a sticky sidebar and the
    action bar folds inline into it instead of pinning to the viewport. */
 
 .ev2-rdh {
@@ -17,8 +17,8 @@
 }
 
 .ev2-rdh__head {
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
   box-shadow: var(--shadow-md);
@@ -48,7 +48,7 @@
   font-weight: var(--fw-medium);
   font-size: var(--text-2xl);
   line-height: var(--lh-snug);
-  color: var(--fg-display);
+  color: var(--text-display);
   margin: 0 0 var(--space-5);
 }
 
@@ -72,20 +72,20 @@
   font-weight: var(--fw-medium);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   margin: 0;
 }
 
 .ev2-rdh__vital-value {
   font-size: var(--text-sm);
-  color: var(--fg);
+  color: var(--text);
   margin: 0;
   overflow-wrap: anywhere;
 }
 
 .ev2-rdh__body {
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-2) var(--space-6) var(--space-6);
   box-shadow: var(--shadow-md);
@@ -110,7 +110,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 20;
+  z-index: var(--z-sticky);
   /* DVP-TSK-956: touches left, right and bottom, so each takes its inset. */
   padding: var(--space-3) max(var(--space-4), var(--io-safe-right))
     calc(var(--space-3) + var(--io-safe-bottom)) max(var(--space-4), var(--io-safe-left));
@@ -151,7 +151,7 @@
 
 .ev2-rdh__action:hover {
   background: var(--accent);
-  color: var(--bg-surface);
+  color: var(--surface);
 }
 
 .ev2-rdh__action:focus-visible {
@@ -184,11 +184,11 @@
 .ev2-rdh__action-feedback {
   margin: 0 0 var(--space-3);
   font-size: var(--text-xs);
-  color: var(--enc-teal, var(--accent));
+  color: var(--accent);
 }
 
 .ev2-rdh__action-feedback.is-error {
-  color: var(--enc-crimson, var(--danger));
+  color: var(--danger);
   white-space: pre-wrap;
 }
 
@@ -197,9 +197,9 @@
   min-height: 7rem;
   resize: vertical;
   box-sizing: border-box;
-  background: var(--bg-void, var(--enc-void));
-  color: var(--fg);
-  border: var(--border-subtle);
+  background: var(--bg-void);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
   font-family: var(--font-body);
@@ -214,14 +214,14 @@
 .ev2-rdh__modal-hint {
   margin: 0 0 var(--space-3);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-rdh__modal-cancel {
   flex: 0 0 auto;
   min-width: 5rem;
-  border-color: var(--fg-muted);
-  color: var(--fg-muted);
+  border-color: var(--text-dim);
+  color: var(--text-dim);
 }
 
 .ev2-rdh__modal-submit {
@@ -230,20 +230,20 @@
 }
 
 .ev2-rdh__modal-submit--danger {
-  border-color: var(--enc-crimson, var(--danger));
-  color: var(--enc-crimson, var(--danger));
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .ev2-rdh__modal-submit--danger:hover:not(:disabled) {
-  background: var(--enc-crimson, var(--danger));
-  color: var(--bg-surface);
+  background: var(--danger);
+  color: var(--surface);
 }
 
 .ev2-rdh__evidence-steps {
   margin: var(--space-2) 0 0;
   padding-left: 1.25rem;
   font-size: var(--text-sm);
-  color: var(--fg);
+  color: var(--text);
 }
 
 .ev2-rdh__evidence-steps li {
@@ -261,7 +261,7 @@
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: var(--tracking-label);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   margin-bottom: var(--space-2);
 }
 
@@ -287,12 +287,12 @@
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   text-decoration: none;
-  border: var(--border-subtle);
+  border: 1px solid var(--border);
   transition: border-color var(--dur-base) var(--ease-orbit);
 }
 
 .ev2-rdh__neighbor-row:hover {
-  border: var(--border-hover);
+  border: 1px solid var(--border-strong);
 }
 
 /* ENC-TSK-R81-0C: the id anchor inside a neighbor row (copy button is its sibling). */
@@ -315,7 +315,7 @@
 }
 
 .ev2-rdh__worklog-item {
-  border-top: var(--border-divider);
+  border-top: 1px solid var(--divider);
   padding-top: var(--space-3);
 }
 
@@ -330,7 +330,7 @@
 .ev2-rdh__worklog-ts {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-rdh__worklog-kind {
@@ -342,7 +342,7 @@
 .ev2-rdh__worklog-desc {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg);
+  color: var(--text);
 }
 
 .ev2-rdh__evidence-list {
@@ -357,7 +357,7 @@
 .ev2-rdh__evidence-item {
   display: flex;
   gap: var(--space-3);
-  border-top: var(--border-divider);
+  border-top: 1px solid var(--divider);
   padding-top: var(--space-3);
 }
 
@@ -366,30 +366,30 @@
 .ev2-rdh__evidence-badge {
   flex: 0 0 auto;
   height: fit-content;
-  line-height: 1;
+  line-height: var(--lh-none);
   font-size: var(--text-lg, 1.1em);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-rdh__evidence-badge.is-accepted {
-  color: var(--status-open);
+  color: var(--status-todo-text);
 }
 
 .ev2-rdh__evidence-desc {
   margin: 0 0 var(--space-1);
   font-size: var(--text-sm);
-  color: var(--fg);
+  color: var(--text);
 }
 
 .ev2-rdh__evidence-proof {
   margin: 0;
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 
-@media (min-width: 64rem) {
+@media (min-width: 60rem) {
   .ev2-rdh {
     display: grid;
     grid-template-columns: 22rem minmax(0, 1fr);
@@ -428,14 +428,14 @@
   margin: var(--space-0);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .ev2-rdh__neighbor-title {
   margin-left: var(--space-3);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  color: var(--fg);
+  color: var(--text);
   overflow-wrap: anywhere;
 }
 

@@ -7,7 +7,7 @@
   font-family: inherit;
   font-size: inherit;
   font-weight: 400;
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 .ev2-page-header .ev2-header__actions {
   flex-wrap: wrap;
@@ -18,5 +18,5 @@
   display: inline-flex;
   align-items: baseline;
   font-weight: 400;
-  line-height: 1;
+  line-height: var(--lh-none);
 }
