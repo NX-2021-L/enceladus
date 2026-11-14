@@ -1,13 +1,14 @@
 // Enceladus v2 · Autosuggest — Cloudscape Autosuggest, deep re-brand.
+// ENC-TSK-S63-0C: style string re-skinned onto the v1.1 role tokens (design system artifact 1794603005-04d0); props, events, DOM and class names unchanged.
 const ev2AutoCss = `
 .ev2-auto{position:relative;font-family:var(--font-body,'Inter',sans-serif);width:100%}
-.ev2-auto__menu{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:20;background:var(--enc-surface,#111827);border:1px solid var(--v2-panel-border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:4px;max-height:220px;overflow-y:auto}
-.ev2-auto__opt{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:14px;color:var(--enc-starlight,#EEF2F7);transition:background var(--dur-fast,150ms) var(--ease-orbit)}
-.ev2-auto__opt:hover{background:rgba(61,155,168,.1)}
-.ev2-auto__opt--active,.ev2-auto__opt--active:hover{background:rgba(61,155,168,.22);box-shadow:inset 0 0 0 1px rgba(61,155,168,.55)}
-.ev2-auto__opt mark{background:none;color:var(--enc-teal-light,#7AC8D4);font-weight:600}
-.ev2-auto__tag{font-family:var(--font-mono,monospace);font-size:11px;color:var(--enc-dust,#6B8A94)}
-.ev2-auto__empty{padding:9px 10px;font-size:13px;color:var(--enc-dust,#6B8A94)}
+.ev2-auto__menu{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:20;background:var(--surface,#111827);border:1px solid var(--border,rgba(61,155,168,.25));border-radius:var(--v2-panel-radius,8px);box-shadow:var(--v2-dropdown-shadow,0 8px 32px rgba(0,0,0,.6));padding:4px;max-height:220px;overflow-y:auto}
+.ev2-auto__opt{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:var(--text-sm,14px);color:var(--text,#EEF2F7);transition:background var(--dur-fast,150ms) var(--ease-orbit)}
+.ev2-auto__opt:hover{background:var(--tint-teal-10,rgba(61,155,168,.1))}
+.ev2-auto__opt--active,.ev2-auto__opt--active:hover{background:var(--tint-teal-20,rgba(61,155,168,.2));box-shadow:inset 0 0 0 1px var(--tint-teal-50,rgba(61,155,168,.5))}
+.ev2-auto__opt mark{background:none;color:var(--accent-hover,#7AC8D4);font-weight:600}
+.ev2-auto__tag{font-family:var(--font-mono,monospace);font-size:var(--text-2xs,11px);color:var(--text-dim,#6B8A94)}
+.ev2-auto__empty{padding:9px 10px;font-size:var(--text-row,13.5px);color:var(--text-dim,#6B8A94)}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-auto-css')){const s=document.createElement('style');s.id='ev2-auto-css';s.textContent=ev2AutoCss;document.head.appendChild(s);}else if(typeof document!=='undefined'){const s=document.getElementById('ev2-auto-css');if(s&&s.textContent!==ev2AutoCss)s.textContent=ev2AutoCss;}})();
 
