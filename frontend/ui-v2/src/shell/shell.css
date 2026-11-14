@@ -89,7 +89,7 @@
     /* DVP-TSK-956: the app bar wrapper owns the top inset (.io-safe-top), so
      * the drawer starts below bar + inset; it touches left and bottom, so
      * those take their insets too. */
-    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
+    top: calc(var(--control-h) + var(--space-6) + var(--io-safe-top));
     padding-bottom: var(--io-safe-bottom);
     z-index: 4;
     width: min(calc(100% - var(--io-safe-left) - var(--io-safe-right)), calc(var(--space-16) * 14));
@@ -116,7 +116,7 @@
     inset: var(--space-0);
     /* io-inset-exempt left right bottom: a full-bleed backdrop paints under
      * the notch and home indicator; only its top edge follows the app bar. */
-    top: calc(var(--v2-control-height) + var(--space-6) + var(--io-safe-top));
+    top: calc(var(--control-h) + var(--space-6) + var(--io-safe-top));
     z-index: 3;
     background: var(--tint-void-60);
     border: none;

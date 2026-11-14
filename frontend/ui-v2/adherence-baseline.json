@@ -66,17 +66,11 @@
   "src/routes/SkillLibraryRoute.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 1
   },
-  "src/routes/escalations.css": {
-    "css:deprecated-token": 4
-  },
   "src/routes/home.css": {
     "css:raw-color:hex": 2
   },
   "src/routes/recordRoute.tsx": {
     "eslint:no-restricted-syntax:<Link> doesn't accept that prop": 2
-  },
-  "src/shell/shell.css": {
-    "css:deprecated-token": 2
   },
   "src/utils/copyText.ts": {
     "eslint:no-restricted-syntax:Raw px value": 1

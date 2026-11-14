@@ -88,7 +88,7 @@
   padding: 12px;
   border-radius: var(--v2-control-radius, 6px);
   background: var(--surface-sunken);
-  border: 1px solid var(--v2-field-border);
+  border: 1px solid var(--tint-teal-25);
   font-family: var(--font-mono, monospace);
   font-size: var(--text-xs);
   line-height: var(--lh-normal);
@@ -103,7 +103,7 @@
   width: 100%;
   padding: 8px 12px;
   background: var(--surface-sunken);
-  border: 1px solid var(--v2-field-border);
+  border: 1px solid var(--tint-teal-25);
   border-radius: var(--v2-control-radius, 6px);
   color: var(--text);
   font-family: var(--font-body, 'Inter', sans-serif);
@@ -114,12 +114,12 @@
 }
 
 .ev2-esc__textarea:hover:not(:disabled) {
-  border-color: var(--v2-field-border-hover);
+  border-color: var(--tint-teal-45);
 }
 
 .ev2-esc__textarea:focus {
   outline: none;
-  border-color: var(--v2-field-border-focus);
+  border-color: var(--focus);
   box-shadow: var(--v2-focus-ring);
 }
 
