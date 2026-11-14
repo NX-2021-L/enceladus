@@ -74,7 +74,7 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} kind="feature" />}
       evidence={<EvidenceTab criteria={record.acceptance_criteria} projectId={record.project_id} />}
     />
   )

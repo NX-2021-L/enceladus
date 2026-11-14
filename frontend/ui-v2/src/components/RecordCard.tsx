@@ -2,7 +2,8 @@ import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { CopyIdButton } from './CopyIdButton'
 import { RecordId } from './RecordId'
-import { StatusChip } from './StatusChip'
+import { StatusPill } from './StatusPill'
+import { railOverrides, statusRole } from '../status/statusRole'
 import './recordCard.css'
 
 /**
@@ -17,13 +18,14 @@ import './recordCard.css'
  */
 export interface RecordCardProps {
   recordId: string
-  /** Governed record kind, e.g. "task" — also escalates StatusChip (lesson -> lavender). */
+  /** Governed record kind, e.g. "task". Picks the status vocabulary and, on the feed row, the default rail. */
   recordType?: string
   /** Human label shown above the record ID, e.g. "Task". */
   kindLabel?: string
   title?: string
   description?: string
   status?: string
+  /** Kept for callers; priority is drawn by the badge strip, never by the status pill or rail. */
   priority?: string
   href?: string
   variant?: 'compact' | 'standard' | 'selectable' | 'feed'
@@ -38,9 +40,7 @@ export interface RecordCardProps {
   projectLabel?: string
   /** Pre-formatted relative time ("37m ago"), PAR-01. Omitted when unknown. */
   timestamp?: string
-  /** 3px left-accent color, e.g. from `feedRowAccent()` (PAR-06, §4.5/§5.4). */
-  accentColor?: string
-  /** Priority/CCI/PR/deploy Badge strip rendered after the StatusChip (PAR-02/03/04/05). */
+  /** Priority/CCI/PR/deploy Badge strip rendered after the StatusPill (PAR-02/03/04/05). */
   badges?: ReactNode
 }
 
@@ -51,7 +51,6 @@ export function RecordCard({
   title,
   description,
   status,
-  priority,
   href,
   variant = 'compact',
   selected = false,
@@ -59,11 +58,16 @@ export function RecordCard({
   trailing,
   projectLabel,
   timestamp,
-  accentColor,
   badges,
 }: RecordCardProps) {
   const className = `ev2-rc ev2-rc--${variant}${selected ? ' ev2-rc--selected' : ''}`
-  const style = variant === 'feed' && accentColor ? { borderLeftColor: accentColor } : undefined
+  // Feed rail (spec 4.4): record type by default; the status role's own rail for caution,
+  // waiting and failed. Read from the same lookup as the pill, so the two cannot disagree.
+  const role = status ? statusRole(recordType, status) : undefined
+  const railAttrs =
+    variant === 'feed'
+      ? { 'data-type': recordType?.toLowerCase() || undefined, 'data-rail': role && railOverrides(role) ? role : undefined }
+      : {}
 
   const body =
     variant === 'feed' ? (
@@ -80,7 +84,7 @@ export function RecordCard({
         {title ? <div className="ev2-rc__feed-title">{title}</div> : null}
         {status || badges ? (
           <div className="ev2-rc__feed-chips">
-            {status ? <StatusChip status={status} priority={priority} recordType={recordType} /> : null}
+            {status ? <StatusPill status={status} kind={recordType} /> : null}
             {badges}
           </div>
         ) : null}
@@ -96,7 +100,7 @@ export function RecordCard({
         {description ? <p className="ev2-rc__desc">{description}</p> : null}
         {status ? (
           <div className="ev2-rc__footer">
-            <StatusChip status={status} priority={priority} recordType={recordType} />
+            <StatusPill status={status} kind={recordType} />
           </div>
         ) : null}
       </>
@@ -104,7 +108,7 @@ export function RecordCard({
 
   if (variant === 'selectable') {
     return (
-      <button type="button" className={className} style={style} aria-pressed={selected} onClick={onSelect}>
+      <button type="button" className={className} {...railAttrs} aria-pressed={selected} onClick={onSelect}>
         {body}
       </button>
     )
@@ -112,7 +116,7 @@ export function RecordCard({
 
   if (href) {
     return (
-      <Link to={href} className={className} style={style} onClick={onSelect}>
+      <Link to={href} className={className} {...railAttrs} onClick={onSelect}>
         {body}
       </Link>
     )
@@ -127,7 +131,7 @@ export function RecordCard({
       <button
         type="button"
         className={className}
-        style={style}
+        {...railAttrs}
         aria-pressed={variant === 'feed' ? selected : undefined}
         onClick={onSelect}
       >
@@ -137,7 +141,7 @@ export function RecordCard({
   }
 
   return (
-    <article className={className} style={style}>
+    <article className={className} {...railAttrs}>
       {body}
     </article>
   )

@@ -337,6 +337,12 @@
   color: var(--fg-muted);
 }
 
+.ev2-rdh__worklog-kind {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
 .ev2-rdh__worklog-desc {
   margin: 0;
   font-size: var(--text-sm);

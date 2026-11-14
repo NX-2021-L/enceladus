@@ -24,7 +24,7 @@ import { Tabs } from '../components/StripTabs'
 import { PageHeader } from '../components/PageHeader'
 import { Link } from '@tanstack/react-router'
 import { RecordLink } from '../components/RecordLink'
-import { StatusChip } from '../components/StatusChip'
+import { StatusPill } from '../components/StatusPill'
 import { RecordCard } from '../components/RecordCard'
 import { VirtualList } from '../components/VirtualList'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -157,7 +157,7 @@ export function CoordinationRoute() {
               { id: 'surface', header: 'Surface', content: (row) => row.surface },
               { id: 'model', header: 'Model', content: (row) => row.model },
               { id: 'cost_tier', header: 'Cost tier', content: (row) => row.cost_tier },
-              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'status', header: 'Status', content: (row) => <StatusPill status={row.status} kind="agent_type" /> },
               { id: 'usage_count', header: 'Usage count', content: (row) => String(row.usage_count) },
             ],
           }}
@@ -180,7 +180,7 @@ export function CoordinationRoute() {
             header: (row) => <RecordLink id={row.item_id}>{row.title}</RecordLink>,
             sections: [
               { id: 'id', header: 'ID', content: (row) => row.item_id },
-              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'status', header: 'Status', content: (row) => <StatusPill status={row.status} kind="lesson" /> },
               { id: 'provenance', header: 'Provenance', content: (row) => row.provenance },
             ],
           }}
@@ -206,7 +206,7 @@ export function CoordinationRoute() {
             // ENC-TSK-P59 (obs 7): escalation cards open the decision cockpit.
             header: (row) => <Link to="/escalations">{row.item_id ?? row.record_id ?? '(unknown)'}</Link>,
             sections: [
-              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
+              { id: 'status', header: 'Status', content: (row) => <StatusPill status={row.status} kind="escalation" /> },
               { id: 'target', header: 'Target record', content: (row) => row.target_record_id ?? '—' },
               { id: 'created_at', header: 'Created at', content: (row) => row.created_at },
             ],
@@ -228,7 +228,7 @@ export function CoordinationRoute() {
             header: (row) => row.initiative_title || row.request_id,
             sections: [
               { id: 'id', header: 'Request ID', content: (row) => row.request_id },
-              { id: 'state', header: 'State', content: (row) => <StatusChip status={row.state} /> },
+              { id: 'state', header: 'State', content: (row) => <StatusPill status={row.state} kind="coordination_request" /> },
               { id: 'project', header: 'Project', content: (row) => row.project_id },
               { id: 'updated_at', header: 'Updated at', content: (row) => row.updated_at },
             ],

@@ -1,23 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { feedRowAccent, priorityBadgeColor, sessionStateBadge } from './feedRowPresentation'
-
-describe('feedRowAccent', () => {
-  it('escalates P0 to the alert accent regardless of status', () => {
-    expect(feedRowAccent({ status: 'open', priority: 'P0' })).toBe('var(--enc-crimson)')
-  })
-  it('renders blocked as alert', () => {
-    expect(feedRowAccent({ status: 'blocked', priority: 'P2' })).toBe('var(--enc-crimson)')
-  })
-  it('renders in-progress as active (teal-light)', () => {
-    expect(feedRowAccent({ status: 'in-progress', priority: 'P1' })).toBe('var(--enc-teal-light)')
-  })
-  it('renders closed as slate', () => {
-    expect(feedRowAccent({ status: 'closed', priority: 'P2' })).toBe('var(--enc-slate)')
-  })
-  it('defaults open/neutral to teal', () => {
-    expect(feedRowAccent({ status: 'open', priority: 'P2' })).toBe('var(--enc-teal)')
-  })
-})
+import { priorityBadgeColor, sessionStateBadge } from './feedRowPresentation'
 
 describe('priorityBadgeColor', () => {
   it('maps P0 -> crimson, P1 -> amber, else dust', () => {

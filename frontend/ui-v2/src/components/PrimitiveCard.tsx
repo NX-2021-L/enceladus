@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { RecordId } from './RecordId'
-import { StatusChip } from './StatusChip'
+import { StatusPill } from './StatusPill'
 import { MarkdownContent } from './MarkdownContent'
 
 /**
@@ -13,7 +13,6 @@ export function PrimitiveCard({
   kindLabel,
   title,
   status,
-  priority,
   recordType,
   children,
 }: {
@@ -58,7 +57,7 @@ export function PrimitiveCard({
           {kindLabel}
         </span>
         <RecordId id={recordId} />
-        {status ? <StatusChip status={status} priority={priority} recordType={recordType} /> : null}
+        {status ? <StatusPill status={status} kind={recordType} /> : null}
       </header>
 
       <h3
