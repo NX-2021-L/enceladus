@@ -1,0 +1,829 @@
+{
+ "name": "Enceladus status map",
+ "version": "2026-11-13.2",
+ "sources": {
+  "catalog": "DOC-C8B611A5CB39 section 5.3",
+  "dictionary_version": "2026-11-04.21",
+  "research": "DOC-D679C86958C0"
+ },
+ "lookup": {
+  "order": [
+   "kinds[kind].statuses[status]",
+   "any[status]",
+   "legacy[status]",
+   "fallback"
+  ],
+  "normalize": "Trim and lowercase the status string. Do not fold hyphens and underscores: the dictionary uses both.",
+  "label": "The pill label is the status string with hyphens and underscores shown as spaces, uppercased by CSS.",
+  "inputs_forbidden": "Priority, severity, record type and checkout state are never inputs to the role lookup."
+ },
+ "fallback": {
+  "role": "unknown",
+  "rule": "Any string not found renders as the unknown role: dotted outline, diamond glyph, label verbatim. No code change is needed for it to be readable; adding it to this file gives it a role."
+ },
+ "roles": {
+  "todo": {
+   "meaning": "Not started. Ready or queued; nobody is working on it.",
+   "emphasis": "outline",
+   "tokens": {
+    "text": "status-todo-text",
+    "border": "status-todo-border",
+    "fill": "status-todo-fill",
+    "dot": "status-todo-dot"
+   },
+   "cue": {
+    "glyph": "ring",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  },
+  "active": {
+   "meaning": "Moving. An agent or the pipeline is working on it; nothing is needed from the operator.",
+   "emphasis": "tint",
+   "tokens": {
+    "text": "status-active-text",
+    "border": "status-active-border",
+    "fill": "status-active-fill",
+    "dot": "status-active-dot"
+   },
+   "cue": {
+    "glyph": "play",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  },
+  "caution": {
+   "meaning": "Off the forward path: sent back, deferred or gone stale. No action is required yet, but it will not finish on its own momentum.",
+   "emphasis": "tint",
+   "tokens": {
+    "text": "status-caution-text",
+    "border": "status-caution-border",
+    "fill": "status-caution-fill",
+    "dot": "status-caution-dot"
+   },
+   "cue": {
+    "glyph": "return",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": "status-caution-rail"
+  },
+  "waiting": {
+   "meaning": "Waiting on a human decision or gate. The operator is the next actor.",
+   "emphasis": "strong",
+   "tokens": {
+    "text": "status-waiting-text",
+    "border": "status-waiting-border",
+    "fill": "status-waiting-fill",
+    "dot": "status-waiting-dot"
+   },
+   "cue": {
+    "glyph": "pause",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": "status-waiting-rail"
+  },
+  "done": {
+   "meaning": "Ended well. The goal was reached and nothing more is needed.",
+   "emphasis": "tint",
+   "tokens": {
+    "text": "status-done-text",
+    "border": "status-done-border",
+    "fill": "status-done-fill",
+    "dot": "status-done-dot"
+   },
+   "cue": {
+    "glyph": "check",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  },
+  "live": {
+   "meaning": "In service. A steady good state with no end expected (a live feature, an active project).",
+   "emphasis": "outline",
+   "tokens": {
+    "text": "status-live-text",
+    "border": "status-live-border",
+    "fill": "status-live-fill",
+    "dot": "status-live-dot"
+   },
+   "cue": {
+    "glyph": "disc",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  },
+  "failed": {
+   "meaning": "Ended badly or is broken now: failed, denied, dead-lettered, objectives not met.",
+   "emphasis": "strong",
+   "tokens": {
+    "text": "status-failed-text",
+    "border": "status-failed-border",
+    "fill": "status-failed-fill",
+    "dot": "status-failed-dot"
+   },
+   "cue": {
+    "glyph": "cross",
+    "border_style": "solid",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": "status-failed-rail"
+  },
+  "retired": {
+   "meaning": "Ended without a verdict: superseded, cancelled, deprecated, archived, expired.",
+   "emphasis": "outline",
+   "tokens": {
+    "text": "status-retired-text",
+    "border": "status-retired-border",
+    "fill": "status-retired-fill",
+    "dot": "status-retired-dot"
+   },
+   "cue": {
+    "glyph": "dash",
+    "border_style": "dashed",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  },
+  "unknown": {
+   "meaning": "A status this map does not contain. Shown verbatim so it is readable, and marked so it is noticed.",
+   "emphasis": "outline",
+   "tokens": {
+    "text": "status-unknown-text",
+    "border": "status-unknown-border",
+    "fill": "status-unknown-fill",
+    "dot": "status-unknown-dot"
+   },
+   "cue": {
+    "glyph": "diamond",
+    "border_style": "dotted",
+    "shape": "capsule (radius-pill)"
+   },
+   "rail_token": null
+  }
+ },
+ "kinds": {
+  "task": {
+   "dictionary": "tracker.task.status",
+   "has_pill_today": true,
+   "statuses": {
+    "open": "todo",
+    "in-progress": "active",
+    "coding-complete": "active",
+    "committed": "active",
+    "pr": "waiting",
+    "merged-main": "active",
+    "deploy-init": "active",
+    "deploy-success": "active",
+    "coding-updates": "caution",
+    "deployed": "active",
+    "closed": "done",
+    "superseded": "retired"
+   }
+  },
+  "issue": {
+   "dictionary": "tracker.issue.status",
+   "has_pill_today": true,
+   "statuses": {
+    "open": "todo",
+    "in-progress": "active",
+    "closed": "done",
+    "superseded": "retired"
+   },
+   "note": "An open issue shares todo with an open task: lifecycle says only that nobody has started. That it is a defect is carried by the record type and the severity badge."
+  },
+  "feature": {
+   "dictionary": "tracker.feature.status",
+   "has_pill_today": true,
+   "statuses": {
+    "planned": "todo",
+    "in-progress": "active",
+    "completed": "done",
+    "production": "live",
+    "deprecated": "retired"
+   }
+  },
+  "plan": {
+   "dictionary": "tracker.plan.status",
+   "has_pill_today": true,
+   "statuses": {
+    "drafted": "todo",
+    "started": "active",
+    "complete": "done",
+    "incomplete": "active"
+   },
+   "note": "incomplete is read as still in progress: the plan has not met its objectives yet. It is not a failure."
+  },
+  "lesson": {
+   "dictionary": "tracker.lesson.status",
+   "has_pill_today": true,
+   "statuses": {
+    "draft": "todo",
+    "proposed": "waiting",
+    "accepted": "done",
+    "active": "live",
+    "superseded": "retired",
+    "archived": "retired"
+   },
+   "note": "proposed is mapped to waiting on the assumption that a person accepts lessons. If acceptance is automatic, map it to active."
+  },
+  "escalation": {
+   "dictionary": "tracker.escalation.status",
+   "has_pill_today": true,
+   "statuses": {
+    "requested": "waiting",
+    "approved": "active",
+    "denied": "failed",
+    "denied_with_guidance": "failed",
+    "applying": "active",
+    "applied": "done",
+    "failed": "failed"
+   }
+  },
+  "coordination_request": {
+   "dictionary": "coordination.request.state",
+   "has_pill_today": true,
+   "statuses": {
+    "intake_received": "todo",
+    "queued": "todo",
+    "dispatching": "active",
+    "running": "active",
+    "succeeded": "done",
+    "failed": "failed",
+    "cancelled": "retired",
+    "dead_letter": "failed"
+   }
+  },
+  "agent_session": {
+   "dictionary": "coordination.agent_session.status",
+   "has_pill_today": true,
+   "statuses": {
+    "allocated": "todo",
+    "claimed": "active",
+    "retired": "retired"
+   }
+  },
+  "project": {
+   "dictionary": "project.status",
+   "has_pill_today": true,
+   "statuses": {
+    "active": "live",
+    "archived": "retired"
+   }
+  },
+  "deployment_decision": {
+   "dictionary": "deployment decision",
+   "has_pill_today": false,
+   "statuses": {
+    "pending_approval": "waiting",
+    "approved": "active",
+    "diverted": "caution",
+    "reverted": "failed",
+    "deploying": "active",
+    "deployed": "done",
+    "failed": "failed"
+   },
+   "note": "diverted and reverted are read from their names; the catalog gives no definition. Confirm."
+  },
+  "component": {
+   "dictionary": "component.status",
+   "has_pill_today": false,
+   "statuses": {
+    "active": "live",
+    "deprecated": "retired",
+    "archived": "retired"
+   }
+  },
+  "component_lifecycle": {
+   "dictionary": "component.lifecycle",
+   "has_pill_today": false,
+   "statuses": {
+    "proposed": "waiting",
+    "approved": "active",
+    "designed": "active",
+    "development": "active",
+    "production": "live",
+    "code-red": "failed",
+    "deprecated": "retired",
+    "archived": "retired"
+   }
+  },
+  "handoff": {
+   "dictionary": "handoff.status",
+   "has_pill_today": false,
+   "statuses": {
+    "pending": "todo",
+    "claimed": "active",
+    "completed": "done",
+    "stale": "caution"
+   }
+  },
+  "lesson_candidate": {
+   "dictionary": "lesson candidate status",
+   "has_pill_today": false,
+   "statuses": {
+    "pending": "waiting",
+    "approved": "done",
+    "stale": "caution"
+   },
+   "note": "pending assumes a person approves candidates."
+  },
+  "relationship": {
+   "dictionary": "relationship.status",
+   "has_pill_today": false,
+   "statuses": {
+    "active": "live",
+    "archived": "retired"
+   }
+  },
+  "recipe_run": {
+   "dictionary": "io-kit recipes: run",
+   "has_pill_today": false,
+   "statuses": {
+    "queued": "todo",
+    "running": "active",
+    "awaiting_gate": "waiting",
+    "completed": "done",
+    "failed": "failed",
+    "cancelled": "retired",
+    "expired": "retired"
+   }
+  },
+  "recipe_step": {
+   "dictionary": "io-kit recipes: step",
+   "has_pill_today": false,
+   "statuses": {
+    "pending": "todo",
+    "ok": "done",
+    "error": "failed",
+    "skipped": "retired",
+    "awaiting": "waiting"
+   }
+  },
+  "recipe": {
+   "dictionary": "io-kit recipes: recipe",
+   "has_pill_today": false,
+   "statuses": {
+    "draft": "todo",
+    "validated": "active",
+    "published": "live",
+    "deprecated": "retired",
+    "retired": "retired"
+   }
+  },
+  "gate": {
+   "dictionary": "io-kit gates: state",
+   "has_pill_today": true,
+   "statuses": {
+    "pending": "waiting",
+    "snoozed": "caution",
+    "decided": "done",
+    "expired": "retired",
+    "superseded": "retired"
+   }
+  },
+  "gate_verdict": {
+   "dictionary": "io-kit gates: verdict",
+   "has_pill_today": false,
+   "statuses": {
+    "approve": "done",
+    "ack": "done",
+    "promote": "done",
+    "deny": "failed",
+    "snooze": "caution",
+    "edit": "caution"
+   }
+  },
+  "search_signal": {
+   "dictionary": "io-kit search: signal state",
+   "has_pill_today": false,
+   "statuses": {
+    "available": "live",
+    "ranked": "done",
+    "no_match": "retired",
+    "disabled_by_user": "retired",
+    "unavailable": "failed",
+    "timed_out": "failed"
+   }
+  }
+ },
+ "any": {
+  "accepted": "done",
+  "ack": "done",
+  "active": "live",
+  "allocated": "todo",
+  "applied": "done",
+  "applying": "active",
+  "approve": "done",
+  "archived": "retired",
+  "available": "live",
+  "awaiting": "waiting",
+  "awaiting_gate": "waiting",
+  "cancelled": "retired",
+  "claimed": "active",
+  "closed": "done",
+  "code-red": "failed",
+  "coding-complete": "active",
+  "coding-updates": "caution",
+  "committed": "active",
+  "complete": "done",
+  "completed": "done",
+  "dead_letter": "failed",
+  "decided": "done",
+  "denied": "failed",
+  "denied_with_guidance": "failed",
+  "deny": "failed",
+  "deploy-init": "active",
+  "deploy-success": "active",
+  "deploying": "active",
+  "deprecated": "retired",
+  "designed": "active",
+  "development": "active",
+  "disabled_by_user": "retired",
+  "dispatching": "active",
+  "diverted": "caution",
+  "draft": "todo",
+  "drafted": "todo",
+  "edit": "caution",
+  "error": "failed",
+  "expired": "retired",
+  "failed": "failed",
+  "in-progress": "active",
+  "incomplete": "active",
+  "intake_received": "todo",
+  "merged-main": "active",
+  "no_match": "retired",
+  "ok": "done",
+  "open": "todo",
+  "pending_approval": "waiting",
+  "planned": "todo",
+  "pr": "waiting",
+  "production": "live",
+  "promote": "done",
+  "proposed": "waiting",
+  "published": "live",
+  "queued": "todo",
+  "ranked": "done",
+  "requested": "waiting",
+  "retired": "retired",
+  "reverted": "failed",
+  "running": "active",
+  "skipped": "retired",
+  "snooze": "caution",
+  "snoozed": "caution",
+  "stale": "caution",
+  "started": "active",
+  "succeeded": "done",
+  "superseded": "retired",
+  "timed_out": "failed",
+  "unavailable": "failed",
+  "validated": "active"
+ },
+ "ambiguous_without_kind": {
+  "approved": [
+   "active",
+   "done"
+  ],
+  "deployed": [
+   "active",
+   "done"
+  ],
+  "pending": [
+   "todo",
+   "waiting"
+  ]
+ },
+ "legacy": {
+  "blocked": "waiting",
+  "retired": "retired",
+  "in_progress": "active",
+  "done": "done",
+  "cancelled": "retired",
+  "error": "failed"
+ },
+ "dimensions": {
+  "priority": {
+   "channel": "Urgency badge: mono label with a four-bar glyph. Neutral ramp, no hue.",
+   "values": {
+    "P0": "urgency-0",
+    "P1": "urgency-1",
+    "P2": "urgency-2",
+    "P3": "urgency-3"
+   },
+   "rule": "Never changes the status pill, the rail or the title color. P0 is the only filled badge; that is its whole emphasis."
+  },
+  "severity": {
+   "channel": "Same urgency scale as priority, with the word as the label.",
+   "values": {
+    "critical": "urgency-0",
+    "high": "urgency-1",
+    "medium": "urgency-2",
+    "low": "urgency-3"
+   },
+   "note": "Severity is defined in app code only, not in the governance dictionary."
+  },
+  "gate_risk": {
+   "channel": "Same urgency scale.",
+   "values": {
+    "critical": "urgency-0",
+    "high": "urgency-1",
+    "medium": "urgency-2",
+    "low": "urgency-3"
+   }
+  },
+  "checkout": {
+   "channel": "Operational chip with a lock glyph. Neutral.",
+   "values": {
+    "checked_out": "op-held",
+    "*": "op-free"
+   },
+   "rule": "Both values are routine. In the feed show only checked_out; checked in is the absence of the chip. On the detail page show both."
+  },
+  "active_session": {
+   "channel": "Operational chip with a signal glyph in the accent color.",
+   "values": {
+    "active": "op-session"
+   }
+  },
+  "record_type": {
+   "channel": "Text kind label and icon in text-dim. No color.",
+   "rule": "Type never recolors the status pill. Lessons show their lifecycle like every other record."
+  },
+  "category": {
+   "channel": "Tag: rectangular (radius-xs), tinted, no glyph, Space Grotesk.",
+   "tokens": {
+    "text": "tag-text",
+    "border": "tag-border",
+    "fill": "tag-fill"
+   },
+   "rule": "One look for every value; the word carries the value. Taxonomy never uses a status hue."
+  },
+  "component": {
+   "channel": "Tag, mono variant (component names are identifiers).",
+   "tokens": {
+    "text": "tag-code-text",
+    "border": "tag-code-border",
+    "fill": "tint-none"
+   }
+  },
+  "project": {
+   "channel": "Tag, mono variant.",
+   "tokens": {
+    "text": "tag-code-text",
+    "border": "tag-code-border",
+    "fill": "tint-none"
+   }
+  },
+  "escalation_kind": {
+   "channel": "Tag.",
+   "tokens": {
+    "text": "tag-text",
+    "border": "tag-border",
+    "fill": "tag-fill"
+   }
+  },
+  "search_tier": {
+   "channel": "Tag, mono variant, with a word and a glyph: Local = single ring, Hybrid = linked rings.",
+   "values": {
+    "local": "tier-local",
+    "hybrid": "tier-hybrid"
+   }
+  },
+  "context_score": {
+   "channel": "Level meter: three segments plus the number in mono. Neutral ramp.",
+   "bands": [
+    {
+     "min": 0.7,
+     "level": "level-high"
+    },
+    {
+     "min": 0.4,
+     "level": "level-mid"
+    },
+    {
+     "min": 0,
+     "level": "level-low"
+    }
+   ]
+  },
+  "document_maturity": {
+   "channel": "Level meter, four segments.",
+   "values": {
+    "raw": 1,
+    "compliant": 2,
+    "contextualized": 3,
+    "mature": 4
+   }
+  },
+  "changelog_confidence": {
+   "channel": "Level meter, three segments.",
+   "values": {
+    "high": "level-high",
+    "medium": "level-mid",
+    "low": "level-low"
+   }
+  },
+  "diff": {
+   "channel": "Line fill plus a + or - gutter sign.",
+   "values": {
+    "added": {
+     "fill": "diff-add-fill",
+     "text": "diff-add-text",
+     "sign": "+"
+    },
+    "removed": {
+     "fill": "diff-remove-fill",
+     "text": "diff-remove-text",
+     "sign": "-"
+    }
+   }
+  },
+  "alert": {
+   "channel": "Alert and Flashbar tone: icon plus heading word plus color.",
+   "values": {
+    "info": "info",
+    "success": "success",
+    "warning": "warning",
+    "error": "danger"
+   }
+  },
+  "left_rail": {
+   "channel": "Feed row inset rail, rail-width wide, on every feed row.",
+   "encodes": "record type by default; the lifecycle role when that role is caution, waiting or failed",
+   "by_record_type": {
+    "task": "rail-task",
+    "issue": "rail-issue",
+    "feature": "rail-feature",
+    "document": "rail-document",
+    "plan": "rail-plan",
+    "lesson": "rail-lesson",
+    "*": "rail-default"
+   },
+   "by_role_override": {
+    "caution": "status-caution-rail",
+    "waiting": "status-waiting-rail",
+    "failed": "status-failed-rail"
+   },
+   "rule": "Look up the role first. If it has a rail_token, use it; otherwise use the record type rail. The override reads the same role as the pill, so the two cannot disagree. Priority is never an input.",
+   "hover": "The rail is removed while the row is hovered (shipped behavior, kept)."
+  },
+  "transition_type": {
+   "channel": "Tag, mono variant. Not shown as a pill today.",
+   "tokens": {
+    "text": "tag-code-text",
+    "border": "tag-code-border",
+    "fill": "tint-none"
+   }
+  },
+  "document_type": {
+   "channel": "Tag with a page glyph. One brand color treatment per type.",
+   "field": "document_subtype",
+   "values": {
+    "doc": {
+     "text": "doctype-doc-text",
+     "border": "doctype-doc-border",
+     "fill": "doctype-doc-fill",
+     "family": "General document"
+    },
+    "idea": {
+     "text": "doctype-idea-text",
+     "border": "doctype-idea-border",
+     "fill": "doctype-idea-fill",
+     "family": "Planning"
+    },
+    "brd": {
+     "text": "doctype-brd-text",
+     "border": "doctype-brd-border",
+     "fill": "doctype-brd-fill",
+     "family": "Planning"
+    },
+    "handoff": {
+     "text": "doctype-handoff-text",
+     "border": "doctype-handoff-border",
+     "fill": "doctype-handoff-fill",
+     "family": "Coordination"
+    },
+    "wave": {
+     "text": "doctype-wave-text",
+     "border": "doctype-wave-border",
+     "fill": "doctype-wave-fill",
+     "family": "Coordination"
+    },
+    "governance_sync": {
+     "text": "doctype-governance_sync-text",
+     "border": "doctype-governance_sync-border",
+     "fill": "doctype-governance_sync-fill",
+     "family": "Coordination"
+    },
+    "lesson-candidate": {
+     "text": "doctype-lesson-candidate-text",
+     "border": "doctype-lesson-candidate-border",
+     "fill": "doctype-lesson-candidate-fill",
+     "family": "Learning"
+    },
+    "coe": {
+     "text": "doctype-coe-text",
+     "border": "doctype-coe-border",
+     "fill": "doctype-coe-fill",
+     "family": "Learning"
+    },
+    "skill": {
+     "text": "doctype-skill-text",
+     "border": "doctype-skill-border",
+     "fill": "doctype-skill-fill",
+     "family": "Agent context"
+    },
+    "context-node": {
+     "text": "doctype-context-node-text",
+     "border": "doctype-context-node-border",
+     "fill": "doctype-context-node-fill",
+     "family": "Agent context"
+    }
+   },
+   "unlisted": "Any other type uses the doc treatment.",
+   "note": "The type list is the set of document.* entities in dictionary version 2026-11-04.21. Confirm it is complete."
+  },
+  "document_subtype_pattern": {
+   "channel": "Tag, mono variant. One look for every value.",
+   "field": "subtypepattern",
+   "tokens": {
+    "text": "tag-code-text",
+    "border": "tag-code-border",
+    "fill": "tint-none"
+   }
+  }
+ },
+ "scales": {
+  "urgency": {
+   "0": {
+    "text": "urgency-0-text",
+    "border": "urgency-0-border",
+    "fill": "urgency-0-fill",
+    "bars_filled": 4
+   },
+   "1": {
+    "text": "urgency-1-text",
+    "border": "urgency-1-border",
+    "fill": "urgency-1-fill",
+    "bars_filled": 3
+   },
+   "2": {
+    "text": "urgency-2-text",
+    "border": "urgency-2-border",
+    "fill": "urgency-2-fill",
+    "bars_filled": 2
+   },
+   "3": {
+    "text": "urgency-3-text",
+    "border": "urgency-3-border",
+    "fill": "urgency-3-fill",
+    "bars_filled": 1
+   }
+  },
+  "level": {
+   "level-high": {
+    "text": "level-high-text",
+    "segments": "all"
+   },
+   "level-mid": {
+    "text": "level-mid-text",
+    "segments": "two of three"
+   },
+   "level-low": {
+    "text": "level-low-text",
+    "segments": "one of three"
+   }
+  },
+  "operational": {
+   "op-held": {
+    "text": "op-held-text",
+    "border": "op-held-border",
+    "glyph": "lock closed"
+   },
+   "op-free": {
+    "text": "op-free-text",
+    "border": "op-free-border",
+    "glyph": "lock open"
+   },
+   "op-session": {
+    "text": "op-session-text",
+    "border": "op-session-border",
+    "glyph": "signal"
+   }
+  }
+ },
+ "worklog": "A worklog entry uses the map of the record it belongs to, with the status recorded on that entry.",
+ "alternatives": [
+  {
+   "where": "kinds.task.statuses.pr",
+   "picked": "waiting",
+   "other": "active",
+   "why": "A task in pr is held by a review or merge gate. If merges are fully automatic in practice, active is the honest reading."
+  }
+ ]
+}
