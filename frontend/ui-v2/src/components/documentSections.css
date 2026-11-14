@@ -55,13 +55,13 @@
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--v2-status-warning, #c9a15c);
+  background: var(--warning);
   flex-shrink: 0;
 }
 
 .ev2-docsec__section {
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   margin-bottom: var(--space-3);
@@ -95,12 +95,13 @@
   appearance: none;
   border: none;
   cursor: pointer;
-  font-size: 10px;
+  /* Section marker (spec 6.9, ENC-TSK-S63-0B): tint-amber-16 ground, warning-text label, radius-pill, 11px. */
+  font-size: var(--text-2xs);
   font-family: var(--font-heading);
   padding: 2px var(--space-2);
-  border-radius: 999px;
-  background: rgba(201, 161, 92, 0.16);
-  color: var(--v2-status-warning, #c9a15c);
+  border-radius: var(--radius-pill);
+  background: var(--tint-amber-16);
+  color: var(--warning-text);
 }
 
 .ev2-docsec__edit-btn {
@@ -134,8 +135,8 @@
 
 .ev2-docsec__conflict-banner {
   border-radius: var(--radius-md);
-  border: 1px solid var(--v2-status-warning, #c9a15c);
-  background: rgba(201, 161, 92, 0.1);
+  border: 1px solid var(--tint-amber-40);
+  background: var(--tint-amber-10);
   padding: var(--space-3);
 }
 
@@ -143,7 +144,7 @@
   margin: 0;
   font-size: var(--text-xs);
   font-weight: var(--fw-medium);
-  color: var(--v2-status-warning, #c9a15c);
+  color: var(--warning-text);
 }
 
 .ev2-docsec__conflict-banner-hint {
@@ -197,8 +198,8 @@
 
 .ev2-docsec__editor-banner {
   border-radius: var(--radius-md);
-  border: 1px solid var(--v2-status-warning, #c9a15c);
-  background: rgba(201, 161, 92, 0.1);
+  border: 1px solid var(--tint-amber-40);
+  background: var(--tint-amber-10);
   padding: var(--space-3);
   margin-bottom: var(--space-3);
 }
@@ -206,7 +207,7 @@
 .ev2-docsec__editor-banner p {
   margin: 0;
   font-size: var(--text-xs);
-  color: var(--v2-status-warning, #c9a15c);
+  color: var(--warning-text);
 }
 
 .ev2-docsec__editor-loading {

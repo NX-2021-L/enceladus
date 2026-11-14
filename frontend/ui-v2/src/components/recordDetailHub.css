@@ -119,9 +119,10 @@
    * heading) bled through and garbled the buttons on scroll. Use the opaque
    * elevated-panel surface token so the bar fully occludes content beneath
    * it. Opaque design-system surface (#1C2333), no transparency. */
-  background: var(--enc-surface-alt);
-  border-top: var(--border-subtle);
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.28);
+  background: var(--surface-raised);
+  border-top: 1px solid var(--border);
+  /* Spec 6.8: surface-raised with shadow-bar (ENC-TSK-S63-0B). */
+  box-shadow: var(--shadow-bar);
   max-width: 100%;
 }
 
@@ -154,25 +155,20 @@
 }
 
 .ev2-rdh__action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 
 .ev2-rdh__action--copy {
   border-style: dashed;
 }
 
-/* ENC-TSK-M33 -- Check In uses the amber/warning token (matches the gold
-   CHECKED OUT chip -- releasing the lock is the meaningful action while
-   checked out, per DOC-B6B52E3BB9BB §7's direct v3 capture). */
+/* ENC-TSK-S63-0B: Check In is a normal action button (spec 6.8, io ruling 2026-11-13).
+   Amber now means caution or waiting, and checkout is neutral, so releasing the lock
+   no longer borrows the warning color (was ENC-TSK-M33's amber treatment). */
 .ev2-rdh__action--checkin {
-  border-color: var(--v2-status-warning, #C9A15C);
-  color: var(--v2-status-warning, #C9A15C);
-}
-
-.ev2-rdh__action--checkin:hover {
-  background: var(--v2-status-warning, #C9A15C);
-  color: var(--bg-surface);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .ev2-rdh__action:disabled {

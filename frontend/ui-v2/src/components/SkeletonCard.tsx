@@ -2,6 +2,8 @@
  * Suspense fallback. Each detail route wraps its component in a route-level
  * <Suspense fallback={<SkeletonCard />}> (AC-14). Void canvas, teal-alpha
  * border, 8px radius, orbital-eased shimmer — no spring physics (Law 4).
+ * ENC-TSK-S63-0B (spec 6.10): shimmer over surface-raised and tint-teal-12; it stops
+ * under prefers-reduced-motion.
  */
 export function SkeletonCard({ label = 'Loading record' }: { label?: string }) {
   return (
@@ -10,8 +12,8 @@ export function SkeletonCard({ label = 'Loading record' }: { label?: string }) {
       aria-busy="true"
       aria-label={label}
       style={{
-        background: 'var(--bg-surface)',
-        border: 'var(--border-subtle)',
+        background: 'var(--surface)',
+        border: '1px solid var(--border)',
         borderRadius: 'var(--radius-lg)',
         padding: 'var(--space-6)',
         boxShadow: 'var(--shadow-md)',
@@ -33,12 +35,13 @@ export function SkeletonCard({ label = 'Loading record' }: { label?: string }) {
 function SkeletonLine({ width, height }: { width: string; height: number }) {
   return (
     <div
+      className="enc-skeleton-line"
       style={{
         width,
         height,
         borderRadius: 'var(--radius-sm)',
         background:
-          'linear-gradient(90deg, var(--enc-surface-alt) 0%, var(--enc-slate) 50%, var(--enc-surface-alt) 100%)',
+          'linear-gradient(90deg, var(--surface-raised) 0%, var(--tint-teal-12) 50%, var(--surface-raised) 100%)',
         backgroundSize: '200% 100%',
         animation: 'enc-shimmer 1.4s var(--ease-orbit) infinite',
       }}
@@ -50,5 +53,8 @@ const shimmerKeyframes = `
 @keyframes enc-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .enc-skeleton-line { animation: none !important; }
 }
 `

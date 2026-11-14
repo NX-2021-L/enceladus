@@ -424,8 +424,9 @@ describe('PWA UI polish (ENC-TSK-M75)', () => {
     const stickyMatch = hubCss.match(/\.ev2-rdh__actionbar--sticky\s*\{([^}]*)\}/)
     expect(stickyMatch, 'expected a .ev2-rdh__actionbar--sticky rule').not.toBeNull()
     const rule = stickyMatch?.[1] ?? ''
-    // background must be an opaque --enc-* surface token...
-    expect(rule).toMatch(/background:\s*var\(--enc-[a-z-]+\)/)
+    // background must be an opaque surface: an --enc-* primitive or, since ENC-TSK-S63-0B,
+    // an opaque surface role (canvas, surface, surface-raised alias opaque primitives)...
+    expect(rule).toMatch(/background:\s*var\(--(enc-[a-z-]+|canvas|surface|surface-raised)\)/)
     // ...never the undefined --bg-elevated token (renders transparent) or a
     // literal transparent fill.
     expect(rule).not.toMatch(/background:[^;]*--bg-elevated/)

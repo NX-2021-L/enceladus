@@ -47,7 +47,9 @@
 }
 
 .home-route__section-label--alert {
-  border-left-color: var(--status-blocked);
+  /* ENC-TSK-S63-0B: Requires io is the waiting state (spec 6.10); was the crimson
+     status-blocked token. */
+  border-left-color: var(--status-waiting-rail);
 }
 
 .home-route__section-hint {
@@ -129,9 +131,9 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  min-height: 44px;
-  background: var(--bg-surface);
-  border: var(--border-subtle);
+  min-height: var(--tap-min);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   text-decoration: none;
@@ -141,12 +143,12 @@
 
 .home-route__count-tile:hover,
 .home-route__count-tile:focus-visible {
-  border: var(--border-hover);
+  border: 1px solid var(--border-strong);
 }
 
 .home-route__count-tile:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 
 .home-route__count-value {
@@ -169,7 +171,7 @@
 /* ENC-TSK-Q17-0A: marks a census count that hit its bounded-walk budget
  * (count_truncated) -- an honest undercount signal, not an error state. */
 .home-route__count-truncated {
-  color: var(--v2-status-warning, #c9a15c);
+  color: var(--warning-text);
   margin-left: var(--space-1);
 }
 
