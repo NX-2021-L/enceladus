@@ -13,7 +13,9 @@ export function SkeletonCard({ label = 'Loading record' }: { label?: string }) {
       aria-label={label}
       style={{
         background: 'var(--surface)',
-        border: '1px solid var(--border)',
+        borderWidth: 1,
+        borderStyle: 'solid',
+        borderColor: 'var(--border)',
         borderRadius: 'var(--radius-lg)',
         padding: 'var(--space-6)',
         boxShadow: 'var(--shadow-md)',

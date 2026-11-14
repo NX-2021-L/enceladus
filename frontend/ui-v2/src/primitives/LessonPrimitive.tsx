@@ -44,7 +44,9 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
           <Prose projectId={record.project_id}>{record.observation}</Prose>
           <blockquote
             style={{
-              borderLeft: '4px solid var(--accent-secondary)',
+              borderLeftWidth: 4,
+              borderLeftStyle: 'solid',
+              borderLeftColor: 'var(--accent-secondary)',
               margin: 'var(--space-4) 0',
               padding: 'var(--space-4) var(--space-5)',
               fontStyle: 'italic',

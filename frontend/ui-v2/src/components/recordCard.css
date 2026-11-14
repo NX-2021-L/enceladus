@@ -188,3 +188,10 @@ button.ev2-rc:focus-visible {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }
+
+/* ENC-TSK-S65-0B (spec 8, reduced motion): the row's border and shadow change at once. */
+@media (prefers-reduced-motion: reduce) {
+  .ev2-rc {
+    transition: none;
+  }
+}
