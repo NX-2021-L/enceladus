@@ -12,13 +12,13 @@ const require = createRequire(import.meta.url)
 const adherence = require('../design-system-2/_adherence.oxlintrc.json')
 delete adherence['x-omelette']
 
-const adherenceTargets = [
-  'src/shell/AppShell.tsx',
-  'src/design-system/**/*.{ts,tsx,js}',
-]
+// ENC-TSK-S64-0B: all of src (was AppShell.tsx and src/design-system only). Existing
+// violations are held by the ratchet in scripts/run-adherence-lint.mjs
+// (adherence-baseline.json); only new ones fail.
+const adherenceTargets = ['src/**/*.{ts,tsx,js}']
 
 export default tseslint.config(
-  { ignores: ['dist', 'dev-dist', 'node_modules'] },
+  { ignores: ['dist', 'dev-dist', 'node_modules', 'src/**/*.test.{ts,tsx,js}', 'src/test/**'] },
   {
     files: adherenceTargets,
     extends: [...tseslint.configs.recommended],
