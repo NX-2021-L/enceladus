@@ -66,7 +66,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
               <AlertTriangle
                 size={14}
                 strokeWidth={1.5}
-                color={record.severity === 'critical' ? 'var(--danger)' : 'var(--fg-muted)'}
+                color={record.severity === 'critical' ? 'var(--danger)' : 'var(--text-dim)'}
               />
               {record.severity}
             </span>

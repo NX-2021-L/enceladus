@@ -44,7 +44,7 @@ export function TypedRelationshipSection({
           margin: '0 0 var(--space-3)',
           fontFamily: 'var(--font-heading)',
           fontSize: 'var(--text-sm)',
-          color: 'var(--fg-display)',
+          color: 'var(--text-display)',
         }}
       >
         Typed relationships
@@ -74,7 +74,7 @@ export function TypedRelationshipSection({
                     className="ev2-rdh__typed-edge-link"
                   />
                   {edge.reason ? (
-                    <span style={{ color: 'var(--fg-muted)', fontSize: 'var(--text-xs)' }}>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 'var(--text-xs)' }}>
                       {' '}
                       — {edge.reason}
                     </span>

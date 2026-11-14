@@ -45,8 +45,8 @@ body,
 }
 
 #root {
-  background-color: var(--enc-void);
-  color: var(--fg);
+  background-color: var(--canvas);
+  color: var(--text);
 }
 
 /* Law 4 — orbital motion, not spring physics. */

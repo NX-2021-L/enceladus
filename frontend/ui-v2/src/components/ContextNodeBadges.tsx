@@ -19,7 +19,7 @@ export function ContextNodeBadges({ contextNode }: { contextNode?: ContextNodeMe
         marginTop: 'var(--space-5)',
         padding: 'var(--space-4)',
         borderRadius: 'var(--radius-md)',
-        border: 'var(--border-subtle)',
+        borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)',
         background: 'var(--bg-elevated)',
       }}
     >
@@ -35,7 +35,7 @@ export function ContextNodeBadges({ contextNode }: { contextNode?: ContextNodeMe
           border: 'none',
           padding: 0,
           cursor: 'pointer',
-          color: 'var(--fg-muted)',
+          color: 'var(--text-dim)',
           fontFamily: 'var(--font-body)',
           fontSize: 'var(--text-xs)',
           textTransform: 'uppercase',
@@ -58,7 +58,7 @@ export function ContextNodeBadges({ contextNode }: { contextNode?: ContextNodeMe
           <ScoreMeter label="Struct" score={structural_importance} />
           <ScoreMeter label="Dense" score={information_density} />
           {access_frequency > 0 ? (
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-dim)' }}>
               Accessed {access_frequency}×
             </span>
           ) : null}

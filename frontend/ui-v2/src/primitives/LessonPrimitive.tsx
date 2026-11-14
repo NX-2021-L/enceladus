@@ -36,7 +36,7 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
               alignItems: 'center',
               gap: 'var(--space-2)',
               marginBottom: 'var(--space-3)',
-              color: 'var(--knowledge)',
+              color: 'var(--accent-secondary)',
             }}
           >
             <Lightbulb size={16} strokeWidth={1.5} />
@@ -44,13 +44,13 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
           <Prose projectId={record.project_id}>{record.observation}</Prose>
           <blockquote
             style={{
-              borderLeft: '4px solid var(--knowledge)',
+              borderLeft: '4px solid var(--accent-secondary)',
               margin: 'var(--space-4) 0',
               padding: 'var(--space-4) var(--space-5)',
               fontStyle: 'italic',
-              background: 'rgba(138, 140, 181, 0.08)',
+              background: 'var(--tint-lavender-08)',
               borderRadius: 'var(--radius-md)',
-              color: 'var(--fg)',
+              color: 'var(--text)',
             }}
           >
             {record.insight}

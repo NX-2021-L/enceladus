@@ -213,7 +213,7 @@ export function HomeRoute() {
 
   const recentDocDefinition = {
     header: (doc: FeedCorpusItem) => (
-      <Link to={documentHref(doc.record_id)} style={{ textDecoration: 'none', color: 'var(--fg-display)' }}>
+      <Link to={documentHref(doc.record_id)} style={{ textDecoration: 'none', color: 'var(--text-display)' }}>
         {doc.title}
       </Link>
     ),
