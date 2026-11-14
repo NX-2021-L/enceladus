@@ -13,7 +13,7 @@ vi.mock('@tanstack/react-router', () => ({
 import { RecordCard } from './RecordCard'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { Badge } from './Badge'
+import { OpChip, UrgencyBadge } from './Pill'
 
 const copyCss = readFileSync(resolve(process.cwd(), 'src/components/copyIdButton.css'), 'utf8')
 
@@ -53,8 +53,8 @@ describe('RecordCard variant="feed"', () => {
           timestamp="46m ago"
           badges={
             <>
-              <Badge color="crimson">P0</Badge>
-              <Badge color="amber">CHECKED OUT</Badge>
+              <UrgencyBadge value="P0" />
+              <OpChip op="held">Checked out</OpChip>
             </>
           }
         />,
@@ -66,7 +66,9 @@ describe('RecordCard variant="feed"', () => {
     expect(container.textContent).toContain('ISS-519 fix')
     expect(container.textContent).toContain('in progress')
     expect(container.textContent).toContain('P0')
-    expect(container.textContent).toContain('CHECKED OUT')
+    expect(container.textContent).toContain('Checked out')
+    expect(container.querySelector('.enc-badge')?.getAttribute('data-level')).toBe('0')
+    expect(container.querySelector('.enc-op')?.getAttribute('data-op')).toBe('held')
 
     const titleEl = container.querySelector('.ev2-rc__feed-title')
     expect(titleEl).not.toBeNull()

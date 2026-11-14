@@ -28,13 +28,13 @@ export function TaskPrimitive({ record }: { record: Task }) {
       chips={
         <>
           <PriorityChip priority={record.priority} />
-          <ComponentChips components={record.components} />
           <ActiveSessionChip active={record.active_agent_session} sessionId={record.active_agent_session_id} />
           <CheckoutChip
             checkedOut={checkedOut}
             checkedOutBy={record.checked_out_by}
             checkedInBy={record.checked_in_by}
           />
+          <ComponentChips components={record.components} />
         </>
       }
       mutation={{

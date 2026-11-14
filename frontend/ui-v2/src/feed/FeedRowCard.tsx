@@ -1,10 +1,9 @@
 import { resolveProjectFromRecordId } from '../api/projectRegistry'
 import type { ProjectSummary } from '../api/projects'
-import { Badge } from '../components/Badge'
+import { OpChip, UrgencyBadge, isCheckedOut } from '../components/Pill'
 import { RecordCard } from '../components/RecordCard'
 import { formatRelativeTime } from '../format/relativeTime'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
-import { priorityBadgeColor, sessionStateBadge } from '../search/feedRowPresentation'
 import type { SearchResultHit } from '../types/search'
 import { SignalReadout } from '@io-kit/search/react'
 import type { SignalAvailability, SignalEvidence } from '@io-kit/search'
@@ -31,7 +30,8 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
   const project = hit.projectId || resolveProjectFromRecordId(hit.recordId, cx.projects) || 'enceladus'
   const href =
     hit.recordType === 'document' ? documentHref(hit.recordId) : recordHrefForType(project, hit.recordType, hit.recordId)
-  const cci = sessionStateBadge(hit.checkoutState)
+  // Feed shows checked out only; checked in is the routine state and appears on the detail page (spec 6.3).
+  const held = isCheckedOut(hit.checkoutState)
   const { isWide, selectedHit } = cx
 
   const card = (
@@ -47,8 +47,8 @@ export function renderFeedRow(hit: SearchResultHit, cx: FeedRowContext) {
       timestamp={formatRelativeTime(hit.updatedAt) ?? undefined}
       badges={
         <>
-          {hit.priority ? <Badge color={priorityBadgeColor(hit.priority)}>{hit.priority}</Badge> : null}
-          {cci ? <Badge color={cci.color}>{cci.label}</Badge> : null}
+          <UrgencyBadge value={hit.priority} />
+          {held ? <OpChip op="held">Checked out</OpChip> : null}
         </>
       }
       {...(isWide

@@ -4,6 +4,7 @@ import type { Document } from '../types/records'
 import { DocumentSectionsView } from '../components/DocumentSectionsView'
 import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub } from '../components/RecordDetailHub'
+import { Tag } from '../components/Pill'
 import { downloadTextFile } from '../utils/downloadTextFile'
 
 /** ENC-TSK-P81 — code-split: the History tab (list + rewind + diff) only
@@ -56,6 +57,15 @@ export function DocumentPrimitive({ record }: { record: Document }) {
       kindLabel="Document"
       title={record.title}
       status={record.status}
+      recordType="document"
+      chips={
+        record.document_subtype || record.subtypepattern ? (
+          <>
+            {record.document_subtype ? <Tag doctype={record.document_subtype}>{record.document_subtype}</Tag> : null}
+            {record.subtypepattern ? <Tag code>{record.subtypepattern}</Tag> : null}
+          </>
+        ) : undefined
+      }
       initialTabId={hasSectionDeepLink ? 'content' : undefined}
       vitals={vitals}
       actions={[

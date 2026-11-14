@@ -204,6 +204,8 @@ export interface Document {
   updated_at: string
   version: number
   document_subtype?: string
+  /** ENC-FTR-078 AC-16 subtype pattern (only with document_subtype 'doc'). */
+  subtypepattern?: string
   /** Full raw markdown body. Present when fetched with include_content=true
    *  (the default for a single-document GET) — ENC-TSK-M34. */
   content?: string
