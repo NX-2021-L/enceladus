@@ -143,6 +143,22 @@ const escalationDeepRoute = createRoute({
   path: '/escalations/$escalationId',
   component: lazyRouteComponent(() => import('./EscalationsRoute'), 'EscalationDeepRoute'),
 })
+// ENC-TSK-S81: component registry read surface (list + detail).
+const componentRegistryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/component-registry',
+  component: lazyRouteComponent(() => import('./ComponentRegistryRoute'), 'ComponentRegistryRoute'),
+})
+const proposalReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/component-registry/proposals/$ref',
+  component: lazyRouteComponent(() => import('./ProposalReviewRoute'), 'ProposalReviewRoute'),
+})
+const componentDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/component-registry/$componentId',
+  component: lazyRouteComponent(() => import('./ComponentRegistryRoute'), 'ComponentDetailRoute'),
+})
 // ENC-TSK-Q84: the shared @io-kit/settings page (Notifications + Passkeys sections).
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -192,7 +208,6 @@ const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRout
 // Remaining shell nav placeholders not yet built out (component registry,
 // deployment manager, access tokens, terminal sessions).
 const shellNavRoutes = [
-  { path: '/component-registry', title: 'Component registry' },
   { path: '/deployments', title: 'Deployment manager' },
   { path: '/access-tokens', title: 'Access tokens' },
   { path: '/terminal-sessions', title: 'Terminal sessions' },
@@ -235,6 +250,9 @@ const routeTree = rootRoute.addChildren([
   skillLibraryRoute,
   escalationsRoute,
   escalationDeepRoute,
+  componentRegistryRoute,
+  proposalReviewRoute,
+  componentDetailRoute,
   settingsRoute,
   notificationSettingsRedirectRoute,
   sessionRoute,

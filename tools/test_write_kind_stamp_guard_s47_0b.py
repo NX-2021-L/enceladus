@@ -58,6 +58,7 @@ STAMP_HELPERS = {
 # (path relative to backend/lambda, enclosing function) -> reason. Keep one line per entry.
 ALLOWLIST: Dict[Tuple[str, str], str] = {
     # (e) counters / generic executors on the tracker or documents table
+    ("coordination_api/lambda_function.py", "_approve_component_proposal"): "(e) component-registry table transaction (component Put + proposal Update); no tracker or documents item",
     ("tracker_mutation/lambda_function.py", "_next_record_id"): "(e) counter item `counter#<type>`, not a projected record",
     ("tracker_mutation/lambda_function.py", "_next_subtask_suffix"): "(e) counter item `counter#subtask#...`, not a projected record",
     ("tracker_mutation/lambda_function.py", "_s28_commit"): "(e) generic TransactWriteItems executor; Update entries are stamped by their builders, Puts are audit#/idempotency/counter items",

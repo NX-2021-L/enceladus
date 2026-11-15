@@ -83,6 +83,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
     def test_happy_path_publishes_with_expected_payload(self):
         fake_sns = mock.MagicMock()
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=self._ddb_ok()), \
+                mock.patch.object(coordination_lambda.notify_v2, "handle_component_proposal_push"), \
                 mock.patch.object(coordination_lambda.boto3, "client", return_value=fake_sns) as mk_client:
             resp = coordination_lambda._handle_components_propose(_event(_valid_body()), {})
 
@@ -96,10 +97,11 @@ class ComponentProposeSnsTests(unittest.TestCase):
             kwargs["TopicArn"],
             "arn:aws:sns:us-west-2:111122223333:enceladus-component-registry-events",
         )
-        self.assertIn("comp-test-sns", kwargs["Subject"])
+        self.assertRegex(kwargs["Subject"], r"cprop-[0-9a-f]{10}")
         payload = json.loads(kwargs["Message"])
         self.assertEqual(payload["event_type"], "component.proposed")
-        self.assertEqual(payload["component_id"], "comp-test-sns")
+        self.assertRegex(payload["proposal_ref"], r"^cprop-[0-9a-f]{10}$")  # ENC-TSK-S82
+        self.assertNotIn("component_id", payload)
         self.assertEqual(payload["project_id"], "enceladus")
         self.assertEqual(payload["proposing_agent_session_id"], "agent-session-sns-1")
         self.assertEqual(payload["requested_minimum_transition_type"], "external_deploy")
@@ -108,6 +110,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
     def test_no_topic_arn_skips_publish_silently(self):
         with mock.patch.object(coordination_lambda, "COMPONENT_EVENTS_TOPIC_ARN", ""), \
                 mock.patch.object(coordination_lambda, "_get_ddb", return_value=self._ddb_ok()), \
+                mock.patch.object(coordination_lambda.notify_v2, "handle_component_proposal_push"), \
                 mock.patch.object(coordination_lambda.boto3, "client") as mk_client:
             resp = coordination_lambda._handle_components_propose(_event(_valid_body()), {})
 
