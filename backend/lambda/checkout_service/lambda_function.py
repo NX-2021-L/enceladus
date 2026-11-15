@@ -314,11 +314,16 @@ COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hif
 # ENC-FTR-041: Component registry enforcement
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 # ENC-TSK-S83 / ENC-PLN-107: fail-closed component use. One flag, three values:
-# off (today's fail-open), observe (log would-reject, never reject; the deployed
-# default), enforce (reject component ids absent from the registry). Anything
-# else reads as observe. Plain env var: no AppConfig read, so the value is the
-# same whether or not AppConfig is reachable.
-COMPONENT_REGISTRY_ENFORCEMENT = os.environ.get("COMPONENT_REGISTRY_ENFORCEMENT", "observe")
+# off (fail-open), observe (log would-reject, never reject), enforce (reject
+# component ids absent from the registry; the deployed default since ENC-TSK-S85).
+# Anything else reads as observe. Plain env var: no AppConfig read, so the value
+# is the same whether or not AppConfig is reachable.
+COMPONENT_REGISTRY_ENFORCEMENT = os.environ.get("COMPONENT_REGISTRY_ENFORCEMENT", "enforce")
+# ENC-TSK-S85 / ENC-PLN-107 grandfather epoch: in enforce mode, a task created
+# before this instant (or with no usable created_at) behaves as observe: logged,
+# never rejected. Tasks created at or after it are rejected with
+# COMPONENT_NOT_REGISTERED. ISO-8601 UTC.
+COMPONENT_ENFORCEMENT_EPOCH = os.environ.get("COMPONENT_ENFORCEMENT_EPOCH", "2026-11-15T06:00:00Z")
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 COORDINATION_API_BASE = os.environ.get(
     "COORDINATION_API_BASE", "https://enceladus.jreese.net/api/v1/coordination"
@@ -1835,7 +1840,7 @@ def _handle_checkout(
     if pre_status != 200:
         return _error(pre_status, pre_task.get("error", f"Task not found: {task_id}"))
 
-    pre_components = pre_task.get("components") or []
+    pre_components = _task_components(pre_task)
 
     # F42: Opacity model gate (ENC-FTR-076 §7) — runs BEFORE transition_type
     # strictness so OPAQUE components cannot leak existence via 400 mismatch errors.
@@ -1864,7 +1869,8 @@ def _handle_checkout(
                 )
         # ENC-TSK-S83: component ids absent from the registry (observe logs, enforce rejects).
         unknown_err = _enforce_registered_components(
-            pre_unknown, "checkout.task", task_id, provider
+            pre_unknown, "checkout.task", task_id, provider,
+            created_at=pre_task.get("created_at"),
         )
         if unknown_err:
             return unknown_err
@@ -3370,8 +3376,49 @@ def _component_registry_mode() -> str:
     return mode if mode in ("off", "observe", "enforce") else "observe"
 
 
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime; None if unusable."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _task_is_grandfathered(created_at: Any) -> bool:
+    """ENC-TSK-S85: True when created_at is missing/unparseable or earlier than the epoch."""
+    created = _parse_iso_utc(created_at)
+    epoch = _parse_iso_utc(COMPONENT_ENFORCEMENT_EPOCH)
+    if created is None or epoch is None:
+        return True
+    return created < epoch
+
+
+def _task_components(task: Any) -> list:
+    """ENC-TSK-S85: task components as a list; tolerates legacy JSON-string storage."""
+    raw = (task or {}).get("components") if isinstance(task, dict) else None
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = [raw.strip()] if raw.strip() else []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    return [c for c in raw if c]
+
+
 def _enforce_registered_components(
-    unknown_ids: list, op: str, task_id: str, caller: str
+    unknown_ids: list, op: str, task_id: str, caller: str,
+    created_at: Any = None,
 ) -> Optional[dict]:
     """ENC-TSK-S83: apply the fail-closed mode to component ids absent from the registry.
 
@@ -3387,6 +3434,13 @@ def _enforce_registered_components(
             logger.warning(
                 "[COMPONENT-ENFORCE] mode=observe would_reject=true op=%s task=%s "
                 "component=%s caller=%s", op, task_id, cid, caller,
+            )
+        return None
+    if _task_is_grandfathered(created_at):
+        for cid in unknown_ids:
+            logger.warning(
+                "[COMPONENT-ENFORCE] mode=enforce grandfathered=true would_reject=true "
+                "op=%s task=%s component=%s caller=%s", op, task_id, cid, caller,
             )
         return None
     ids = [str(c) for c in unknown_ids]
@@ -3692,7 +3746,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     # If task has no components and this is an agent-initiated request, block the advance.
     # Human operators via the PWA UI (user_initiated=true) bypass this check to allow
     # closing legacy tasks that pre-date the component registry.
-    components = task.get("components") or []
+    components = _task_components(task)
     component_required_policies: set[str] = set()
     is_user_initiated = bool(body.get("user_initiated", False))
     if not components and not is_user_initiated:
@@ -3724,7 +3778,8 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         lifecycle_map = _get_components_lifecycle(components, unknown_out=adv_unknown)
         # ENC-TSK-S83: component ids absent from the registry (observe logs, enforce rejects).
         unknown_err = _enforce_registered_components(
-            adv_unknown, "checkout.advance", task_id, provider or session_id
+            adv_unknown, "checkout.advance", task_id, provider or session_id,
+            created_at=task.get("created_at"),
         )
         if unknown_err:
             return unknown_err
