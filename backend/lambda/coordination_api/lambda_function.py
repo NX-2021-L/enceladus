@@ -9493,6 +9493,35 @@ def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
     return True
 
 
+def _require_component_decider(claims: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """ENC-TSK-S82 / ENC-ISS-805: component-registry decider guard.
+
+    Returns None when the caller may decide, else a 403 COMPONENT_DECIDER_REQUIRED
+    response. Mirrors the escalation decider guard (ENC-ISS-501): the caller must be
+    an interactive human Cognito ID-token principal (_is_human_cognito_principal) AND
+    appear on the Console-only approver allowlist. _is_cognito_session is a fail-open
+    blocklist, so internal-key, managed-token and machine Cognito principals (for
+    example terminal-agent@enceladus.internal) are all refused here. Fail-closed.
+    """
+    if _is_human_cognito_principal(claims) and _is_allowlisted_escalation_decider(claims):
+        return None
+    logger.warning(
+        "component decider guard refused: principal not a human allowlisted decider "
+        "(auth_mode=%r, token_use=%r, email=%r)",
+        (claims or {}).get("auth_mode"), (claims or {}).get("token_use"),
+        (claims or {}).get("email"),
+    )
+    return _error(
+        403,
+        (
+            "Component registry mutations require an interactive human Cognito ID "
+            "token for an identity on the approver allowlist. Internal-key, "
+            "managed-token and machine principals are structurally rejected."
+        ),
+        code="COMPONENT_DECIDER_REQUIRED",
+    )
+
+
 def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a DynamoDB low-level item dict to plain Python."""
     ds = TypeDeserializer()
@@ -9607,8 +9636,12 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
 def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/components — create a new component.
 
-    transition_type defaults to code for non-Cognito callers.
+    ENC-TSK-S82 / ENC-ISS-805: io-only (human allowlisted decider). Agents propose via
+    /components/propose; they never create a component directly.
     """
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
     try:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
@@ -10117,11 +10150,9 @@ def _handle_components_approve(
             503,
             "component.approve is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Approving components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -10287,11 +10318,9 @@ def _handle_components_reject(
             503,
             "component.reject is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Rejecting components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -13403,7 +13432,8 @@ def _handle_components_advance(
             **details,
         )
 
-    is_io = _is_cognito_session(claims)
+    # ENC-TSK-S82 / ENC-ISS-805: the io-unconditional branch needs a human allowlisted decider.
+    is_io = _require_component_decider(claims) is None
 
     # Authority matrix — agents are restricted to a fixed target subset.
     if not is_io and target_status not in _COMPONENT_AGENT_PERMITTED_TARGETS:
@@ -13681,11 +13711,9 @@ def _handle_components_deprecate(
             503,
             "component.deprecate is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Deprecating components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -13806,11 +13834,9 @@ def _handle_components_restore(
             503,
             "component.restore is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Restoring components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     component = _get_component_record(component_id)
     if not component:
@@ -13915,11 +13941,9 @@ def _handle_components_revert(
             503,
             "component.revert is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Reverting components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -14026,6 +14050,19 @@ def _handle_components_update(
 
     if not body:
         return _component_validation_error(400, "No fields to update", component_id=component_id)
+
+    # ENC-TSK-S82 / ENC-ISS-805: governed fields are io-only (human allowlisted
+    # decider). The checkout-service-assistant key keeps its server-to-server
+    # allowance for the two transition-type fields only.
+    _decider_denied = None
+    _gov_fields = {"lifecycle_status", "status", "project_id", "component_id"}
+    if _gov_fields & set(body.keys()):
+        _decider_denied = _require_component_decider(claims)
+    elif not (_is_assistant_request(event) and set(body.keys()) & {"transition_type", "required_transition_type"}):
+        if {"transition_type", "required_transition_type"} & set(body.keys()):
+            _decider_denied = _require_component_decider(claims)
+    if _decider_denied:
+        return _decider_denied
 
     # Auth guard: transition_type changes require Cognito or assistant key
     if "transition_type" in body:
@@ -14256,8 +14293,9 @@ def _handle_components_delete(
     component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
     """DELETE /api/v1/coordination/components/{id} — delete a component (Cognito only)."""
-    if not _is_cognito_session(claims):
-        return _error(403, "Deleting components requires Cognito authentication (PWA session only).")
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
     ddb = _get_ddb()
     try:
         ddb.delete_item(

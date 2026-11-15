@@ -15,6 +15,13 @@ assert _SPEC and _SPEC.loader
 sys.modules[_SPEC.name] = coordination_lambda
 _SPEC.loader.exec_module(coordination_lambda)
 
+# ENC-TSK-S82: these tests exercise handler behavior behind the decider guard with
+# legacy Cognito-shaped claims; the guard itself is covered by test_component_decider_guard.py.
+_real_require_component_decider = coordination_lambda._require_component_decider
+coordination_lambda._require_component_decider = lambda claims: (
+    None if coordination_lambda._is_cognito_session(claims) else _real_require_component_decider(claims)
+)
+
 
 class CoordinationComponentErrorContextTests(unittest.TestCase):
     def test_component_create_invalid_transition_type_includes_strictness_rank(self):
@@ -29,7 +36,7 @@ class CoordinationComponentErrorContextTests(unittest.TestCase):
                     }
                 )
             },
-            {"auth_mode": "internal-key"},
+            {"auth_mode": "cognito"},
         )
         body = json.loads(response["body"])
 
