@@ -34,6 +34,13 @@ assert _SPEC and _SPEC.loader
 sys.modules[_SPEC.name] = coordination_lambda
 _SPEC.loader.exec_module(coordination_lambda)
 
+# ENC-TSK-S82: these tests exercise handler behavior behind the decider guard with
+# legacy Cognito-shaped claims; the guard itself is covered by test_component_decider_guard.py.
+_real_require_component_decider = coordination_lambda._require_component_decider
+coordination_lambda._require_component_decider = lambda claims: (
+    None if coordination_lambda._is_cognito_session(claims) else _real_require_component_decider(claims)
+)
+
 
 COGNITO_CLAIMS = {
     "auth_mode": "cognito",
@@ -81,7 +88,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         """AC-8(a): absent field returns 400 with field=required_transition_type."""
         resp = coordination_lambda._handle_components_create(
             _event(dict(self._base_body)),
-            INTERNAL_CLAIMS,
+            COGNITO_CLAIMS,
         )
         self.assertEqual(resp["statusCode"], 400)
         body = json.loads(resp["body"])
@@ -99,7 +106,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         body["required_transition_type"] = "definitely-not-a-real-type"
         resp = coordination_lambda._handle_components_create(
             _event(body),
-            INTERNAL_CLAIMS,
+            COGNITO_CLAIMS,
         )
         self.assertEqual(resp["statusCode"], 400)
         envelope = json.loads(resp["body"])["error_envelope"]
@@ -116,7 +123,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_create(
                 _event(body),
-                INTERNAL_CLAIMS,
+                COGNITO_CLAIMS,
             )
         self.assertEqual(resp["statusCode"], 201)
         # The item passed to put_item should carry required_transition_type.
@@ -134,7 +141,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         body["required_transition_type"] = "   "
         resp = coordination_lambda._handle_components_create(
             _event(body),
-            INTERNAL_CLAIMS,
+            COGNITO_CLAIMS,
         )
         self.assertEqual(resp["statusCode"], 400)
         self.assertEqual(

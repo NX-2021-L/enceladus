@@ -253,7 +253,7 @@ ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallbac
 # ENC-FTR-061
 ENABLE_HANDOFF_PRIMITIVE = _appconfig_flag("enable_handoff_primitive", env_fallback="ENABLE_HANDOFF_PRIMITIVE")
 # ENC-FTR-076 / ENC-TSK-E08
-ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL", default=True)
 # ENC-FTR-121 / ENC-TSK-J68: Escalations — human-gated mutation override surface
 # (DOC-5B888FCA43B8). Default ON: the request/read surface is inert unless
 # called and carries no privileged write path (the applier is io-approval-gated).
@@ -11129,6 +11129,14 @@ async def _tracker_extend_lesson(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _component_get(args: dict) -> list[TextContent]:
+    """Read a component, or a cprop- proposal's status (ENC-TSK-S82 AC7)."""
+    cid = str(args.get("component_id") or "").strip()
+    if not cid:
+        return _result_text({"error": "Field 'component_id' is required."})
+    return _result_text(_coordination_api_request("GET", f"/components/{urllib.parse.quote(cid, safe='')}"))
+
+
 async def _component_propose(args: dict) -> list[TextContent]:
     """Propose a new component record (ENC-FTR-076 / ENC-TSK-E08).
 
@@ -11143,7 +11151,6 @@ async def _component_propose(args: dict) -> list[TextContent]:
         return _result_text({"error": governance_error})
 
     payload: Dict[str, Any] = {
-        "component_id": args.get("component_id", ""),
         "display_name": args.get("display_name", ""),
         "project_id": args.get("project_id", ""),
         "source_paths": args.get("source_paths", []),
@@ -11155,6 +11162,16 @@ async def _component_propose(args: dict) -> list[TextContent]:
         payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
     if args.get("category"):
         payload["category"] = args["category"]
+    # ENC-TSK-S82: the proposer only suggests an id; the server returns a cprop- proposal ref
+    # and the approver mints the real component id. component_id stays a legacy alias.
+    suggested = args.get("suggested_component_id") or args.get("component_id")
+    if suggested:
+        payload["suggested_component_id"] = suggested
+        payload["component_id"] = suggested
+    for _cap in ("required_iam_actions", "required_env_secrets", "required_apigw_routes",
+                 "required_cfn_resources", "required_lambda_env_vars", "deploy_targets"):
+        if args.get(_cap):
+            payload[_cap] = args[_cap]
     # ENC-TSK-Q24 (ENC-ISS-797): v3 component-address fields were accepted by
     # this tool's args but silently dropped before reaching coordination_api
     # -- forward them (and their rationale) whenever the caller supplies them.
@@ -11488,6 +11505,7 @@ _TOOL_HANDLERS = {
     "document_create_note": _document_create_note,
     # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
     "component_propose": _component_propose,
+    "component_get": _component_get,
     # ENC-FTR-076 v2 / ENC-TSK-F40: state machine + edge + lifecycle actions
     "component_advance": _component_advance,
     "component_revert": _component_revert,
