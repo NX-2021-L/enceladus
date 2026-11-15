@@ -19,9 +19,9 @@ describe('generic coverage registry', () => {
     expect([...DEFAULT_ON_ACTIONS].sort()).toEqual(live.sort())
   })
 
-  it('covers all 86 live actions (82 flags-off + 4 escalation); palette lists each without a bespoke route', async () => {
+  it('covers all 94 live actions (90 flags-off + 4 escalation); palette lists each without a bespoke route', async () => {
     const reg = await loadActionRegistry()
-    expect(reg.contracts).toHaveLength(86)
+    expect(reg.contracts).toHaveLength(94)
     for (const a of DEFAULT_ON_ACTIONS) expect(reg.get(a)).toBeDefined()
     expect(reg.contracts.every((c) => c.inputSchema)).toBe(true)
     const names = new Set(ACTION_COMMANDS.map((c) => c.name))

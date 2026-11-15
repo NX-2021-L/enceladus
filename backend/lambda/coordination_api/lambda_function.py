@@ -475,7 +475,8 @@ ENABLE_MCP_GOVERNANCE_PROMPT = _appconfig_flag("enable_mcp_governance_prompt", e
 ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
 # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry.
 # Gates POST /api/v1/coordination/components/propose + component.propose MCP action.
-ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
+# ENC-TSK-S82: resolves true when unset or when AppConfig is unreachable; an explicit false still disables.
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL", default=True)
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
@@ -9493,6 +9494,35 @@ def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
     return True
 
 
+def _require_component_decider(claims: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """ENC-TSK-S82 / ENC-ISS-805: component-registry decider guard.
+
+    Returns None when the caller may decide, else a 403 COMPONENT_DECIDER_REQUIRED
+    response. Mirrors the escalation decider guard (ENC-ISS-501): the caller must be
+    an interactive human Cognito ID-token principal (_is_human_cognito_principal) AND
+    appear on the Console-only approver allowlist. _is_cognito_session is a fail-open
+    blocklist, so internal-key, managed-token and machine Cognito principals (for
+    example terminal-agent@enceladus.internal) are all refused here. Fail-closed.
+    """
+    if _is_human_cognito_principal(claims) and _is_allowlisted_escalation_decider(claims):
+        return None
+    logger.warning(
+        "component decider guard refused: principal not a human allowlisted decider "
+        "(auth_mode=%r, token_use=%r, email=%r)",
+        (claims or {}).get("auth_mode"), (claims or {}).get("token_use"),
+        (claims or {}).get("email"),
+    )
+    return _error(
+        403,
+        (
+            "Component registry mutations require an interactive human Cognito ID "
+            "token for an identity on the approver allowlist. Internal-key, "
+            "managed-token and machine principals are structurally rejected."
+        ),
+        code="COMPONENT_DECIDER_REQUIRED",
+    )
+
+
 def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a DynamoDB low-level item dict to plain Python."""
     ds = TypeDeserializer()
@@ -9518,6 +9548,11 @@ def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
     project_id_filter = (params.get("project_id") or "").strip()
     category_filter = (params.get("category") or "").strip()
     status_filter = (params.get("status") or "").strip()
+    kind_filter = (params.get("kind") or "").strip().lower()
+    proposal_status_filter = (params.get("proposal_status") or "").strip().lower()
+    if kind_filter == "proposal":
+        # status filters the component 'status' attribute; for proposals it is proposal_status.
+        status_filter = ""
 
     try:
         if project_id_filter:
@@ -9575,11 +9610,66 @@ def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 kwargs["ExclusiveStartKey"] = last
 
-        items = [_component_record_with_v3_compat(item) for item in items]
+        if kind_filter == "proposal":
+            want = proposal_status_filter or "pending"
+            proposals = [
+                _proposal_view(i) for i in items
+                if i.get("record_kind") == "proposal" and (i.get("proposal_status") or "pending") == want
+            ]
+            return _response(200, {"success": True, "proposals": proposals, "count": len(proposals)})
+        items = [
+            _component_record_with_v3_compat(item) for item in items
+            if item.get("record_kind") != "proposal"
+        ]
         return _response(200, {"success": True, "components": items, "count": len(items)})
     except Exception as exc:
         logger.exception("components_list failed")
         return _error(500, f"Failed to list components: {exc}")
+
+
+def _component_edges_view(component_id: str, project_id: str) -> List[Dict[str, Any]]:
+    """Forward DESIGNS/IMPLEMENTS/DEPLOYS edges of a component with lock state (ENC-TSK-S82 AC6).
+
+    Reads the relationship rows `_handle_components_add_edge` writes (tracker table, key
+    project_id + record_id prefix `rel#<component>#`): a key query, never a scan. Best-effort:
+    a read failure returns [] so the component read itself still succeeds.
+    """
+    if not project_id:
+        return []
+    rel_to_edge = {rel: et for et, (rel, _inv) in _COMPONENT_EDGE_REL_NAMES.items()}
+    try:
+        resp = _get_ddb().query(
+            TableName=TRACKER_TABLE,
+            KeyConditionExpression="project_id = :p AND begins_with(record_id, :pre)",
+            ExpressionAttributeValues={
+                ":p": {"S": project_id},
+                ":pre": {"S": f"rel#{component_id}#"},
+            },
+            Limit=100,
+        )
+    except Exception:
+        logger.warning("components_get edge query failed for %s", component_id)
+        return []
+    edges: List[Dict[str, Any]] = []
+    for raw in resp.get("Items", []):
+        row = _ddb_to_py(raw)
+        if row.get("is_inverse") or row.get("source_id") != component_id:
+            continue
+        edge_type = row.get("edge_type") or rel_to_edge.get(str(row.get("relationship_type") or ""))
+        if edge_type not in _COMPONENT_EDGE_TYPES:
+            continue
+        task_id = str(row.get("target_id") or "")
+        locked, details = _edge_is_locked(edge_type, _get_task_record(task_id))
+        edges.append(
+            {
+                "edge_type": edge_type,
+                "task_id": task_id,
+                "created_at": row.get("created_at"),
+                "locked": locked,
+                "lock_trigger": details.get("lock_trigger"),
+            }
+        )
+    return edges
 
 
 def _handle_components_get(component_id: str) -> Dict[str, Any]:
@@ -9595,10 +9685,22 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
             return _error(404, f"Component '{component_id}' not found")
         # F42: Opacity model (ENC-FTR-076 §7) — OPAQUE_STATUSES are indistinguishable
         # from non-existent components; existence must not be disclosed.
-        ls = _ddb_to_py(item).get("lifecycle_status", "")
+        py_item = _ddb_to_py(item)
+        # ENC-TSK-S82: proposals (archived once decided) return their own view and
+        # are exempt from the component opacity rule.
+        if py_item.get("record_kind") == "proposal":
+            return _response(200, {"success": True, "proposal": _proposal_view(py_item)})
+        ls = py_item.get("lifecycle_status", "")
         if ls in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
             return _error(404, f"Component '{component_id}' not found")
-        return _response(200, {"success": True, "component": _component_record_with_v3_compat(_ddb_to_py(item))})
+        return _response(
+            200,
+            {
+                "success": True,
+                "component": _component_record_with_v3_compat(py_item),
+                "edges": _component_edges_view(component_id, str(py_item.get("project_id") or "")),
+            },
+        )
     except Exception as exc:
         logger.exception("components_get failed")
         return _error(500, f"Failed to get component: {exc}")
@@ -9607,8 +9709,12 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
 def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/components — create a new component.
 
-    transition_type defaults to code for non-Cognito callers.
+    ENC-TSK-S82 / ENC-ISS-805: io-only (human allowlisted decider). Agents propose via
+    /components/propose; they never create a component directly.
     """
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
     try:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
@@ -9802,6 +9908,80 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         return _error(500, f"Failed to create component: {exc}")
 
 
+_COMPONENT_PROPOSAL_REF_PREFIX = "cprop-"
+_COMPONENT_ID_RE = re.compile(r"^comp-[a-z0-9][a-z0-9-]*$")
+
+
+def _mint_component_proposal_ref() -> str:
+    """Server-minted proposal reference: 'cprop-' plus 10 lowercase hex characters."""
+    return _COMPONENT_PROPOSAL_REF_PREFIX + uuid.uuid4().hex[:10]
+
+
+def _is_component_proposal_ref(ref: str) -> bool:
+    return str(ref or "").startswith(_COMPONENT_PROPOSAL_REF_PREFIX)
+
+
+def _proposal_view(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Public view of a proposal record. approved_component_id / rejection_reason appear only once set."""
+    view = {
+        "proposal_ref": item.get("component_id"),
+        "record_kind": "proposal",
+        "proposal_status": item.get("proposal_status") or "pending",
+        "suggested_component_id": item.get("suggested_component_id"),
+        "version": int(item.get("version") or 1),
+        "display_name": item.get("component_name"),
+        "project_id": item.get("project_id"),
+        "description": item.get("description"),
+        "source_paths": item.get("source_paths") or [],
+        "requested_minimum_transition_type": item.get("requested_minimum_transition_type"),
+        "proposing_agent_session_id": item.get("proposing_agent_session_id"),
+        "proposed_at": item.get("proposed_at"),
+        "lifecycle_status": item.get("lifecycle_status"),
+    }
+    for key in (
+        "component_address", "component_repo_dir", "component_address_class", "component_class",
+        *_COMPONENT_CAPABILITY_FIELDS,
+    ):
+        if key in item:
+            view[key] = item[key]
+    status = view["proposal_status"]
+    if status == "approved" and item.get("approved_component_id"):
+        view["approved_component_id"] = item["approved_component_id"]
+    if status == "rejected" and item.get("rejection_reason"):
+        view["rejection_reason"] = item["rejection_reason"]
+    if status in ("approved", "rejected"):
+        view["decided_by"] = item.get("decided_by")
+        view["decided_at"] = item.get("decided_at")
+    return view
+
+
+def _proposal_expected_version(event: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """Read the optimistic-lock version from If-Match or body expected_version.
+
+    Returns (version, None) or (None, error_response): 428 when absent, 400 when not an integer.
+    """
+    raw = _gate_header(event, "If-Match") or str(
+        body.get("expected_version") if body.get("expected_version") is not None else ""
+    ).strip()
+    if not raw:
+        return None, _error(
+            428,
+            "If-Match header or expected_version is required to decide a component proposal.",
+            reason="precondition_required",
+        )
+    cleaned = raw
+    if cleaned.upper().startswith("W/"):
+        cleaned = cleaned[2:]
+    cleaned = cleaned.strip().strip('"')
+    try:
+        return int(cleaned), None
+    except (TypeError, ValueError):
+        return None, _error(
+            400, f"expected version must be an integer (got {raw!r})",
+            field="expected_version", expected_type="integer",
+        )
+
+
 def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/components/propose — agent-initiated component proposal.
 
@@ -9833,18 +10013,21 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
     except json.JSONDecodeError:
         return _component_validation_error(400, "Invalid JSON body", expected_type="object")
 
-    component_id = (body.get("component_id") or "").strip()
-    if not component_id:
-        return _component_validation_error(
-            400, "component_id is required", field="component_id", expected_type="string",
-        )
-    if not component_id.startswith("comp-"):
+    # ENC-TSK-S82 slice 2: the proposer never chooses a component ID. The server
+    # mints a proposal ref; any ID the proposer sends is advisory only and is
+    # decided (and checked for uniqueness) by the human at approval.
+    suggested_component_id = (
+        body.get("suggested_component_id") or body.get("component_id") or ""
+    ).strip()
+    if suggested_component_id and not suggested_component_id.startswith("comp-"):
         return _component_validation_error(
             400,
-            f"component_id must start with 'comp-' prefix (got {component_id!r})",
-            field="component_id", expected_type="string",
-            example_fix={"component_id": "comp-" + re.sub(r"[^a-z0-9]+", "-", component_id.lower()).strip("-")},
+            f"suggested_component_id must start with 'comp-' prefix (got {suggested_component_id!r})",
+            field="suggested_component_id", expected_type="string",
+            example_fix={"suggested_component_id": "comp-" + re.sub(r"[^a-z0-9]+", "-", suggested_component_id.lower()).strip("-")},
         )
+    proposal_ref = _mint_component_proposal_ref()
+    component_id = proposal_ref
 
     display_name = (body.get("display_name") or "").strip()
     if not display_name:
@@ -9911,7 +10094,10 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     component_item: Dict[str, Any] = {
-        "component_id": component_id,
+        "component_id": proposal_ref,
+        "record_kind": "proposal",
+        "proposal_status": "pending",
+        "version": 1,
         "component_name": display_name,
         "project_id": project_id,
         "category": (body.get("category") or "proposed").strip().lower() or "proposed",
@@ -9931,6 +10117,8 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         "proposed_at": now,
         **hardening_fields,
     }
+    if suggested_component_id:
+        component_item["suggested_component_id"] = suggested_component_id
 
     # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability declarations at proposal
     # time. Optional; the continuous auditor and pre-merge guard use these
@@ -10006,21 +10194,30 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         return _error(500, f"Failed to propose component: {exc}")
 
     _publish_component_proposed_event(
-        component_id=component_id,
+        proposal_ref=proposal_ref,
         project_id=project_id,
         proposing_agent_session_id=proposing_agent_session_id,
         requested_minimum_transition_type=requested_type,
     )
+    # ENC-TSK-S82 AC8: one best-effort push per new proposal over the existing notify path.
+    try:
+        notify_v2.handle_component_proposal_push(
+            sys.modules[__name__], proposal_ref, project_id, suggested_component_id or ""
+        )
+    except Exception:  # noqa: BLE001 -- notification never fails the proposal
+        logger.warning("component proposal push failed for %s", proposal_ref)
 
     return _response(
         201,
         {
             "success": True,
-            "component_id": component_id,
+            "proposal_ref": proposal_ref,
+            "proposal_status": "pending",
+            "suggested_component_id": suggested_component_id or None,
+            "version": 1,
             "lifecycle_status": "proposed",
             "proposing_agent_session_id": proposing_agent_session_id,
             "requested_minimum_transition_type": requested_type,
-            "component": component_item,
         },
     )
 
@@ -10034,7 +10231,7 @@ COMPONENT_PROPOSAL_PWA_DEEP_LINK = os.environ.get(
 
 def _publish_component_proposed_event(
     *,
-    component_id: str,
+    proposal_ref: str,
     project_id: str,
     proposing_agent_session_id: str,
     requested_minimum_transition_type: str,
@@ -10049,7 +10246,7 @@ def _publish_component_proposed_event(
         return
     payload = {
         "event_type": "component.proposed",
-        "component_id": component_id,
+        "proposal_ref": proposal_ref,
         "project_id": project_id,
         "proposing_agent_session_id": proposing_agent_session_id,
         "requested_minimum_transition_type": requested_minimum_transition_type,
@@ -10062,11 +10259,11 @@ def _publish_component_proposed_event(
         )
         sns.publish(
             TopicArn=COMPONENT_EVENTS_TOPIC_ARN,
-            Subject=f"Component proposed: {component_id}",
+            Subject=f"Component proposed: {proposal_ref}",
             Message=json.dumps(payload),
         )
     except Exception as exc:
-        logger.warning("component.propose SNS publish failed for %s: %s", component_id, exc)
+        logger.warning("component.propose SNS publish failed for %s: %s", proposal_ref, exc)
 
 
 def _publish_component_lifecycle_event(event_type: str, payload: dict) -> None:
@@ -10102,6 +10299,249 @@ def _resolve_decider_identity(claims: Dict[str, Any]) -> str:
     )
 
 
+_PROPOSAL_ONLY_FIELDS = (
+    "record_kind", "proposal_status", "suggested_component_id", "version",
+    "decided_by", "decided_at", "approved_component_id", "rejection_reason",
+)
+
+
+def _read_component_proposal(ddb: Any, proposal_ref: str) -> Optional[Dict[str, Any]]:
+    item = ddb.get_item(
+        TableName=COMPONENTS_TABLE,
+        Key={"component_id": {"S": proposal_ref}},
+        ConsistentRead=True,
+    ).get("Item")
+    if not item:
+        return None
+    py = _ddb_to_py(item)
+    return py if py.get("record_kind") == "proposal" else None
+
+
+def _proposal_stale_response(proposal: Dict[str, Any], expected: int) -> Dict[str, Any]:
+    return _error(
+        412,
+        "Proposal changed or is no longer pending; re-read it and retry.",
+        reason="proposal_changed",
+        expected_version=expected,
+        proposal=_proposal_view(proposal),
+    )
+
+
+def _approve_component_proposal(
+    proposal_ref: str,
+    event: Dict[str, Any],
+    body: Dict[str, Any],
+    approved_by: str,
+    now: str,
+    *,
+    override_type: str,
+    override_required_type: str,
+    alarm_arn: Optional[str],
+) -> Dict[str, Any]:
+    """Approve a cprop- proposal: mint the component and archive the proposal in ONE transaction.
+
+    ENC-TSK-S82 slice 2. The human chooses the component ID (override or the proposer's
+    suggestion). Version mismatch or non-pending proposal -> 412; ID taken -> 409.
+    """
+    expected, err = _proposal_expected_version(event, body)
+    if err:
+        return err
+
+    ddb = _get_ddb()
+    try:
+        proposal = _read_component_proposal(ddb, proposal_ref)
+    except Exception as exc:
+        logger.exception("components_approve proposal read failed")
+        return _error(500, f"Failed to read proposal: {exc}")
+    if not proposal:
+        return _error(404, f"Proposal '{proposal_ref}' not found")
+    if proposal.get("proposal_status") != "pending" or int(proposal.get("version") or 1) != expected:
+        return _proposal_stale_response(proposal, expected)
+
+    chosen = str(body.get("component_id") or "").strip() or str(proposal.get("suggested_component_id") or "").strip()
+    if not chosen:
+        return _component_validation_error(
+            400,
+            "component_id is required at approval: the proposal carries no suggested_component_id.",
+            field="component_id", expected_type="string",
+            example_fix={"component_id": "comp-<name>"},
+        )
+    if not _COMPONENT_ID_RE.match(chosen):
+        return _component_validation_error(
+            400,
+            f"component_id {chosen!r} must match ^comp-[a-z0-9][a-z0-9-]*$",
+            field="component_id", expected_type="string",
+        )
+
+    requested = str(proposal.get("requested_minimum_transition_type") or "code")
+    required_type = override_required_type or requested
+    component_item = {k: v for k, v in proposal.items() if k not in _PROPOSAL_ONLY_FIELDS}
+    component_item.update(
+        {
+            "component_id": chosen,
+            "lifecycle_status": "approved",
+            "transition_type": override_type or required_type,
+            "required_transition_type": required_type,
+            "approved_by": approved_by,
+            "approved_at": now,
+            "proposal_ref": proposal_ref,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    if alarm_arn is not None:
+        component_item["alarm_arn"] = alarm_arn
+
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": COMPONENTS_TABLE,
+                        "Item": _py_to_ddb(component_item),
+                        "ConditionExpression": "attribute_not_exists(component_id)",
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": COMPONENTS_TABLE,
+                        "Key": {"component_id": {"S": proposal_ref}},
+                        "UpdateExpression": (
+                            "SET proposal_status = :approved, approved_component_id = :cid, "
+                            "lifecycle_status = :archived, #v = #v + :one, "
+                            "decided_by = :by, decided_at = :now, updated_at = :now"
+                        ),
+                        "ConditionExpression": "proposal_status = :pending AND #v = :expected",
+                        "ExpressionAttributeNames": {"#v": "version"},
+                        "ExpressionAttributeValues": {
+                            ":approved": {"S": "approved"},
+                            ":pending": {"S": "pending"},
+                            ":archived": {"S": "archived"},
+                            ":cid": {"S": chosen},
+                            ":by": {"S": approved_by},
+                            ":now": {"S": now},
+                            ":one": {"N": "1"},
+                            ":expected": {"N": str(expected)},
+                        },
+                    }
+                },
+            ]
+        )
+    except ddb.exceptions.TransactionCanceledException as exc:
+        reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
+        codes = [(r or {}).get("Code") for r in reasons]
+        proposal_failed = len(codes) > 1 and codes[1] == "ConditionalCheckFailed"
+        id_taken = bool(codes) and codes[0] == "ConditionalCheckFailed"
+        if proposal_failed or not id_taken:
+            current = _read_component_proposal(ddb, proposal_ref) or proposal
+            return _proposal_stale_response(current, expected)
+        return _error(
+            409,
+            f"Component ID '{chosen}' is already taken; choose a different component_id.",
+            reason="component_id_taken",
+            component_id=chosen,
+        )
+    except Exception as exc:
+        logger.exception("components_approve proposal transaction failed")
+        return _error(500, f"Failed to approve proposal: {exc}")
+
+    _publish_component_lifecycle_event(
+        "component.approved",
+        {
+            "event_type": "component.approved",
+            "component_id": chosen,
+            "proposal_ref": proposal_ref,
+            "project_id": component_item.get("project_id", ""),
+            "approved_by_session_id": approved_by,
+            "approved_at": now,
+        },
+    )
+    return _response(
+        200,
+        {
+            "success": True,
+            "proposal_ref": proposal_ref,
+            "proposal_status": "approved",
+            "approved_component_id": chosen,
+            "component_id": chosen,
+            "lifecycle_status": "approved",
+            "approved_by": approved_by,
+            "approved_at": now,
+            "alarm_arn": alarm_arn,
+            "version": expected + 1,
+            "component": component_item,
+        },
+    )
+
+
+def _reject_component_proposal(
+    proposal_ref: str,
+    event: Dict[str, Any],
+    body: Dict[str, Any],
+    rejection_reason: str,
+    rejected_by: str,
+    now: str,
+) -> Dict[str, Any]:
+    """Reject a cprop- proposal. No component is ever written."""
+    expected, err = _proposal_expected_version(event, body)
+    if err:
+        return err
+    ddb = _get_ddb()
+    try:
+        proposal = _read_component_proposal(ddb, proposal_ref)
+    except Exception as exc:
+        logger.exception("components_reject proposal read failed")
+        return _error(500, f"Failed to read proposal: {exc}")
+    if not proposal:
+        return _error(404, f"Proposal '{proposal_ref}' not found")
+    if proposal.get("proposal_status") != "pending" or int(proposal.get("version") or 1) != expected:
+        return _proposal_stale_response(proposal, expected)
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": proposal_ref}},
+            UpdateExpression=(
+                "SET proposal_status = :rejected, rejection_reason = :reason, "
+                "lifecycle_status = :archived, #v = #v + :one, "
+                "decided_by = :by, decided_at = :now, updated_at = :now"
+            ),
+            ConditionExpression="proposal_status = :pending AND #v = :expected",
+            ExpressionAttributeNames={"#v": "version"},
+            ExpressionAttributeValues={
+                ":rejected": {"S": "rejected"},
+                ":pending": {"S": "pending"},
+                ":archived": {"S": "archived"},
+                ":reason": {"S": rejection_reason},
+                ":by": {"S": rejected_by},
+                ":now": {"S": now},
+                ":one": {"N": "1"},
+                ":expected": {"N": str(expected)},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        current = _read_component_proposal(ddb, proposal_ref) or proposal
+        return _proposal_stale_response(current, expected)
+    except Exception as exc:
+        logger.exception("components_reject proposal update failed")
+        return _error(500, f"Failed to reject proposal: {exc}")
+    updated = _ddb_to_py(resp.get("Attributes", {}))
+    return _response(
+        200,
+        {
+            "success": True,
+            "proposal_ref": proposal_ref,
+            "proposal_status": "rejected",
+            "lifecycle_status": "archived",
+            "rejected_by": rejected_by,
+            "rejected_at": now,
+            "rejection_reason": rejection_reason,
+            "version": expected + 1,
+            "proposal": _proposal_view(updated),
+        },
+    )
+
+
 def _handle_components_approve(
     component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -10117,11 +10557,9 @@ def _handle_components_approve(
             503,
             "component.approve is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Approving components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -10189,6 +10627,14 @@ def _handle_components_approve(
 
     approved_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    if _is_component_proposal_ref(component_id):
+        return _approve_component_proposal(
+            component_id, event, body, approved_by, now,
+            override_type=override_type,
+            override_required_type=override_required_type,
+            alarm_arn=alarm_arn,
+        )
 
     # ENC-FTR-076 v2: approve now writes lifecycle_status='approved' (the §3.1
     # state-inventory value), not the legacy 'active'. The opacity model
@@ -10287,11 +10733,9 @@ def _handle_components_reject(
             503,
             "component.reject is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Rejecting components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -10312,6 +10756,9 @@ def _handle_components_reject(
 
     rejected_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    if _is_component_proposal_ref(component_id):
+        return _reject_component_proposal(component_id, event, body, rejection_reason, rejected_by, now)
 
     ddb = _get_ddb()
     try:
@@ -13403,7 +13850,8 @@ def _handle_components_advance(
             **details,
         )
 
-    is_io = _is_cognito_session(claims)
+    # ENC-TSK-S82 / ENC-ISS-805: the io-unconditional branch needs a human allowlisted decider.
+    is_io = _require_component_decider(claims) is None
 
     # Authority matrix — agents are restricted to a fixed target subset.
     if not is_io and target_status not in _COMPONENT_AGENT_PERMITTED_TARGETS:
@@ -13681,11 +14129,9 @@ def _handle_components_deprecate(
             503,
             "component.deprecate is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Deprecating components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -13806,11 +14252,9 @@ def _handle_components_restore(
             503,
             "component.restore is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Restoring components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     component = _get_component_record(component_id)
     if not component:
@@ -13915,11 +14359,9 @@ def _handle_components_revert(
             503,
             "component.revert is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
         )
-    if not _is_cognito_session(claims):
-        return _error(
-            403,
-            "Reverting components requires Cognito authentication (PWA session only).",
-        )
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -14026,6 +14468,19 @@ def _handle_components_update(
 
     if not body:
         return _component_validation_error(400, "No fields to update", component_id=component_id)
+
+    # ENC-TSK-S82 / ENC-ISS-805: governed fields are io-only (human allowlisted
+    # decider). The checkout-service-assistant key keeps its server-to-server
+    # allowance for the two transition-type fields only.
+    _decider_denied = None
+    _gov_fields = {"lifecycle_status", "status", "project_id", "component_id"}
+    if _gov_fields & set(body.keys()):
+        _decider_denied = _require_component_decider(claims)
+    elif not (_is_assistant_request(event) and set(body.keys()) & {"transition_type", "required_transition_type"}):
+        if {"transition_type", "required_transition_type"} & set(body.keys()):
+            _decider_denied = _require_component_decider(claims)
+    if _decider_denied:
+        return _decider_denied
 
     # Auth guard: transition_type changes require Cognito or assistant key
     if "transition_type" in body:
@@ -14256,8 +14711,9 @@ def _handle_components_delete(
     component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
     """DELETE /api/v1/coordination/components/{id} — delete a component (Cognito only)."""
-    if not _is_cognito_session(claims):
-        return _error(403, "Deleting components requires Cognito authentication (PWA session only).")
+    denied = _require_component_decider(claims)
+    if denied:
+        return denied
     ddb = _get_ddb()
     try:
         ddb.delete_item(

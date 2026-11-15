@@ -83,7 +83,7 @@ class ComponentProposeTests(unittest.TestCase):
         self.assertIn("comp-", body.get("message", "") + json.dumps(body))
 
     def test_missing_required_fields_returns_400(self):
-        for field in ("component_id", "display_name", "project_id", "requested_minimum_transition_type"):
+        for field in ("display_name", "project_id", "requested_minimum_transition_type"):
             b = _valid_body()
             b.pop(field)
             resp = coordination_lambda._handle_components_propose(self._event(b), {})
@@ -137,7 +137,11 @@ class ComponentProposeTests(unittest.TestCase):
 
         self.assertEqual(resp["statusCode"], 201)
         body = json.loads(resp["body"])
-        self.assertEqual(body["component_id"], "comp-test-proposal")
+        # ENC-TSK-S82: the server mints a proposal ref; component_id is never returned.
+        self.assertNotIn("component_id", body)
+        proposal_ref = body["proposal_ref"]
+        self.assertRegex(proposal_ref, r"^cprop-[0-9a-f]{10}$")
+        self.assertEqual(body["suggested_component_id"], "comp-test-proposal")
         self.assertEqual(body["lifecycle_status"], "proposed")
         self.assertEqual(body["proposing_agent_session_id"], "agent-session-abc123")
 
@@ -150,13 +154,15 @@ class ComponentProposeTests(unittest.TestCase):
         # Item 0: component Put on component-registry
         self.assertIn("component-registry", items[0]["Put"]["TableName"])
         comp_item = items[0]["Put"]["Item"]
-        self.assertEqual(comp_item["component_id"]["S"], "comp-test-proposal")
+        self.assertEqual(comp_item["component_id"]["S"], proposal_ref)
+        self.assertEqual(comp_item["suggested_component_id"]["S"], "comp-test-proposal")
+        self.assertEqual(comp_item["record_kind"]["S"], "proposal")
         self.assertEqual(comp_item["lifecycle_status"]["S"], "proposed")
 
         # Item 1: forward rel# Put on devops-project-tracker
         forward = items[1]["Put"]["Item"]
         self.assertEqual(forward["relationship_type"]["S"], "component-proposed-by")
-        self.assertEqual(forward["source_id"]["S"], "comp-test-proposal")
+        self.assertEqual(forward["source_id"]["S"], proposal_ref)
         self.assertEqual(forward["target_id"]["S"], "agent-session-abc123")
         self.assertFalse(forward["is_inverse"]["BOOL"])
 
@@ -164,7 +170,7 @@ class ComponentProposeTests(unittest.TestCase):
         inverse = items[2]["Put"]["Item"]
         self.assertEqual(inverse["relationship_type"]["S"], "proposes-component")
         self.assertEqual(inverse["source_id"]["S"], "agent-session-abc123")
-        self.assertEqual(inverse["target_id"]["S"], "comp-test-proposal")
+        self.assertEqual(inverse["target_id"]["S"], proposal_ref)
         self.assertTrue(inverse["is_inverse"]["BOOL"])
 
 

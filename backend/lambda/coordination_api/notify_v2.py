@@ -540,6 +540,76 @@ def _notify_push_anomaly(issue_id: str, project_id: str, service: str, impact: A
     return sent
 
 
+def _component_proposal_render(proposal_ref: str, project_id: str, suggested: str, level: int) -> Dict[str, Any]:
+    """Notify v2 `component_proposal` payload (ENC-TSK-S82). Generic carries the ref only."""
+    body = proposal_ref if level == 0 else " ".join(
+        f"{project_id}: {suggested or 'no suggested id'} ({proposal_ref})".split())[:200]
+    return {"web_push": 8030, "notification": {
+        "title": "Component proposal" if level == 0 else "Component proposed",
+        "body": body,
+        "navigate": f"{APP_BASE_URL.rstrip('/')}/component-registry/proposals/{proposal_ref}",
+    }}
+
+
+def _notify_push_component_proposal(proposal_ref: str, project_id: str, suggested: str) -> int:
+    """One push per approver device for a NEW component proposal (type `component_proposal`).
+
+    Same per-device prefs gate as escalations/anomalies (prefs.types.component_proposal.enabled,
+    absent == disabled). Uses only the existing approver allowlist and push-subscription rows: no
+    new infrastructure. Returns accepted count."""
+    kind = "component_proposal"
+    ddb, sent = d._get_ddb(), 0
+    for email in sorted(d._load_escalation_approver_allowlist()):
+        try:
+            devices = ddb.query(
+                TableName=PUSH_SUBSCRIPTIONS_TABLE, KeyConditionExpression="pk = :pk",
+                ExpressionAttributeValues={":pk": {"S": _notify_pk(email)}}).get("Items", [])
+        except Exception as exc:  # noqa: BLE001
+            d.logger.warning("component proposal push prepare failed approver-hash=%s: %s",
+                           hashlib.sha256(email.encode()).hexdigest()[:8], exc)
+            continue
+        sent_endpoints: set = set()
+        for item in devices:
+            try:
+                ehash = (item.get("endpoint_hash") or {}).get("S")
+                if ehash and ehash in sent_endpoints:
+                    continue
+                prefs = _notify_prefs_from_item(item)
+                cfg = prefs["types"].get(kind)
+                if not cfg or not cfg.get("enabled"):
+                    continue
+                level = 1 if (cfg.get("detail") or prefs["detail"]) == "detailed" else 0
+                status = _notify_send_raw(item, _component_proposal_render(proposal_ref, project_id, suggested, level), proposal_ref)
+                if status in (404, 410):
+                    ddb.delete_item(TableName=PUSH_SUBSCRIPTIONS_TABLE, Key={"pk": item["pk"], "sk": item["sk"]})
+                elif 200 <= status < 300:
+                    sent += 1
+                    if ehash:
+                        sent_endpoints.add(ehash)
+                    try:
+                        _notify_mark_sent(item)
+                    except Exception as exc:  # noqa: BLE001
+                        d.logger.warning("component proposal push last_sent_at update failed: %s", exc)
+                else:
+                    d.logger.warning("component proposal push rejected status=%s", status)
+            except Exception as exc:  # noqa: BLE001 -- one device never stops the rest
+                d.logger.warning("component proposal push send failed: %s", exc)
+    return sent
+
+
+def handle_component_proposal_push(host: Any, proposal_ref: str, project_id: str, suggested: str) -> int:
+    """In-process entry from POST /components/propose. Never raises; 0 when web push is unavailable."""
+    global d
+    d = host
+    try:
+        if d._webpush is None:
+            return 0
+        return _notify_push_component_proposal(proposal_ref, project_id, suggested)
+    except Exception as exc:  # noqa: BLE001
+        d.logger.error("component proposal push failed: %s", exc)
+        return 0
+
+
 def handle_anomaly_push(host: Any, event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/notifications/anomaly -- service-to-service (internal key) only.
 

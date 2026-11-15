@@ -58,6 +58,9 @@ surfaces:
     "component.deprecate":
       handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
+    "component.get":
+      handler: "POST /api/v1/coordination/mcp"
+      note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
     "component.propose":
       handler: "POST /api/v1/coordination/mcp"
       note: "generated form over actions.schemas (DVP-TSK-895); bespoke route, if any, keeps precedence"
