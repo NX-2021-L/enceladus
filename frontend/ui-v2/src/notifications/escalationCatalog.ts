@@ -25,9 +25,19 @@ for (const k of KINDS) {
   }
 }
 
+/** ENC-TSK-S84: an agent proposed a component; io decides in the registry (deep link /component-registry/proposals/$ref). */
+const COMPONENT_PROPOSAL_TYPE: NotifyType = {
+  group: 'components',
+  label: 'Component proposal',
+  desc: 'An agent proposed a component for your approval',
+  title: 'Component proposal',
+  generic: 'A component proposal is waiting in Enceladus',
+  detailed: '{project_id}: {summary}',
+}
+
 export const escalationCatalog: NotifyCatalog = {
-  groups: [{ id: 'escalations', label: 'Escalations' }, { id: ANOMALY_GROUP_ID, label: 'Anomalies' }],
-  types: { ...types, [ANOMALY_TYPE_ID]: anomalyNotifyType },
+  groups: [{ id: 'escalations', label: 'Escalations' }, { id: ANOMALY_GROUP_ID, label: 'Anomalies' }, { id: 'components', label: 'Components' }],
+  types: { ...types, [ANOMALY_TYPE_ID]: anomalyNotifyType, component_proposal: COMPONENT_PROPOSAL_TYPE },
   levels: { generic: 'Generic', detailed: 'Detailed', hint: 'Detailed shows the project, kind and summary on the lock screen.' },
   extraFields: [
     {
