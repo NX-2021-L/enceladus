@@ -34,7 +34,7 @@ export const NAV_ITEMS: NavItemInput[] = [
   // ENC-TSK-Q84: shared @io-kit/settings entry (Notifications + Passkeys sections live on /settings).
   settingsNavItem({ capabilities: [], placement: 'secondary' }) as NavItemInput,
   // Former PlaceholderRoute stubs: planned, with an owner, no route until built.
-  { id: 'component-registry', label: 'Component registry', route: '/component-registry', placement: 'secondary', ...PLANNED },
+  { id: 'component-registry', label: 'Component registry', route: '/component-registry', placement: 'secondary' },
   { id: 'deployments', label: 'Deployment manager', route: '/deployments', placement: 'secondary', ...PLANNED },
   { id: 'access-tokens', label: 'Access tokens', route: '/access-tokens', placement: 'secondary', ...PLANNED },
   { id: 'terminal-sessions', label: 'Terminal sessions', route: '/terminal-sessions', placement: 'secondary', ...PLANNED },
