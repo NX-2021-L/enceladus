@@ -142,6 +142,15 @@ routes:
     handlers:
       - "GET /api/v1/coordination/components"
       - "GET /api/v1/coordination/components/{id}"
+      - "GET /api/v1/coordination/components/{id}/{action}"
+      - "POST /api/v1/coordination/components"
+    auth: "session"
+    surface: "enceladus"
+  - path: "/component-registry/proposals/$ref"
+    component: "frontend/ui-v2/src/routes/ProposalReviewRoute.tsx"
+    handlers:
+      - "GET /api/v1/coordination/components"
+      - "GET /api/v1/coordination/components/{ref}"
       - "POST /api/v1/coordination/components"
     auth: "session"
     surface: "enceladus"
@@ -150,6 +159,7 @@ routes:
     handlers:
       - "GET /api/v1/coordination/components"
       - "GET /api/v1/coordination/components/{id}"
+      - "GET /api/v1/coordination/components/{id}/{action}"
       - "POST /api/v1/coordination/components"
     auth: "session"
     surface: "enceladus"

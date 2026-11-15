@@ -19,6 +19,7 @@ import {
   type RegistrySegment, type SortField,
 } from './componentRegistry'
 import { RequiresIoQueue } from './RequiresIoQueue'
+import { ComponentActions, EdgeList, LifecycleTrack, RegisterComponent } from './ComponentActions'
 import './componentRegistry.css'
 
 const PAGE = 25
@@ -83,7 +84,8 @@ export function ComponentRegistryRoute() {
       <PageHeader
         title="Component registry"
         count={query.isPending ? undefined : rows.length}
-        description="The governed components every task is checked out against. Read only."
+        description="The governed components every task is checked out against."
+        actions={<RegisterComponent />}
       />
       {query.isError && (
         <Alert type="error" header="Could not load the component registry">
@@ -170,9 +172,10 @@ export function ComponentDetailRoute() {
       <div className="ev2-reg__detailhead">
         <span className="ev2-reg__id">{c.component_id}</span>
         <CopyIdButton id={c.component_id} />
-        <LifecyclePill value={c.lifecycle_status} />
-        {!isGoverned(c.lifecycle_status) && c.lifecycle_status && <span className="ev2-reg__stored">not a governed status</span>}
       </div>
+      <LifecycleTrack status={c.lifecycle_status} />
+      <ComponentActions c={c} />
+      <EdgeList edges={c.edges} />
       <section className="ev2-reg__section">
         <h2 className="ev2-reg__h2">Floor ladder</h2>
         <ol className="ev2-reg__ladder">

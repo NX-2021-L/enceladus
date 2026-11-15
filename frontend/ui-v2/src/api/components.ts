@@ -41,6 +41,17 @@ export interface RegistryComponent {
   deprecated_reason?: string
   restored_at?: string
   restored_by?: string
+  edges?: ComponentEdge[]
+}
+
+/** A typed edge from the component to a task (S82 may return these on GET). Shape read defensively. */
+export interface ComponentEdge {
+  edge_type?: string
+  relationship_type?: string
+  target_id?: string
+  target?: string
+  locked?: boolean
+  lock_reason?: string
 }
 
 export class ComponentsFetchError extends Error {
@@ -105,11 +116,30 @@ export type ProposalPayload =
   | { verdict: 'approve'; component_id: string; required_transition_type: ComponentFloor }
   | { verdict: 'reject'; rejection_reason: string }
 
+/** The S82 proposal view uses proposal_ref/display_name and a list for source_paths; map it onto ComponentProposal. */
+export function toProposal(raw: Record<string, unknown>): ComponentProposal {
+  const sp = raw.source_paths
+  return {
+    ...(raw as unknown as ComponentProposal),
+    component_id: String(raw.proposal_ref ?? raw.component_id ?? ''),
+    component_name: String(raw.display_name ?? raw.component_name ?? ''),
+    source_paths: Array.isArray(sp) ? Object.fromEntries(sp.map((v, i) => [String(i), String(v)])) : (sp as Record<string, string> | undefined),
+    version: Number(raw.version ?? 1),
+  }
+}
+
 const PROPOSALS_URL = `${API_BASE}/coordination/components?kind=proposal&proposal_status=pending`
 
 export async function listPendingProposals(init?: { signal?: AbortSignal }): Promise<ComponentProposal[]> {
-  const body = await getJson<{ components?: ComponentProposal[] }>(PROPOSALS_URL, init)
-  return body.components ?? []
+  const body = await getJson<{ proposals?: Record<string, unknown>[]; components?: Record<string, unknown>[] }>(PROPOSALS_URL, init)
+  return (body.proposals ?? body.components ?? []).map(toProposal)
+}
+
+/** One proposal by ref (GET /components/{ref} returns { proposal } for a cprop- ref). */
+export async function getProposal(ref: string, init?: { signal?: AbortSignal }): Promise<ComponentProposal> {
+  const body = await getJson<{ proposal?: Record<string, unknown> }>(`${API_BASE}/coordination/components/${encodeURIComponent(ref)}`, init)
+  if (!body.proposal) throw new ComponentsFetchError(404, `Proposal not found: ${ref}`)
+  return toProposal(body.proposal)
 }
 
 /** POST a decision with If-Match bound to the proposal version. 412 carries the refreshed proposal when the API sends one. */
@@ -135,12 +165,13 @@ export async function decideProposal(
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (!res.ok) {
     const message = typeof json.error === 'string' ? json.error : typeof json.message === 'string' ? json.message : `Request failed (${res.status})`
-    const fresh = (json.proposal ?? json.current ?? json.component) as ComponentProposal | undefined
+    const rawFresh = (json.proposal ?? json.current) as Record<string, unknown> | undefined
+    const fresh = rawFresh ? toProposal(rawFresh) : undefined
     throw new ApprovalDecisionError<ComponentProposal>(res.status, message, res.status === 412 ? fresh : undefined)
   }
-  const c = (json.component ?? json) as Record<string, unknown>
+  const c = ((typeof json.component === 'object' ? json.component : null) ?? json) as Record<string, unknown>
   return {
-    component_id: (json.approved_component_id ?? c.approved_component_id ?? c.component_id) as string | undefined,
+    component_id: (json.approved_component_id ?? c.approved_component_id ?? json.component_id ?? c.component_id) as string | undefined,
     proposal_status: (json.proposal_status ?? c.proposal_status) as string | undefined,
   }
 }
@@ -150,4 +181,52 @@ export const componentProposalAdapter: ApprovalAdapter<ComponentProposal, Propos
   key: (i) => i.component_id,
   version: (i) => i.version,
   decide: (item, verdict, payload) => decideProposal(item, verdict, payload),
+}
+
+/* ---- Lifecycle actions and registration (ENC-TSK-S84 slice 2) ------------------------------------------------ */
+
+export type LifecycleAction = 'advance' | 'revert' | 'deprecate' | 'restore'
+export const MIN_REVERT_REASON = 10
+
+async function postJson(url: string, body: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(url, {
+    method: 'POST', credentials: 'include', cache: 'no-store',
+    headers: { accept: 'application/json', 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+    body: JSON.stringify(body),
+  })
+  if (res.status === 401) throw new SessionExpiredError()
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
+  if (!res.ok) {
+    const message = typeof json.error === 'string' ? json.error : typeof json.message === 'string' ? json.message : `Request failed (${res.status})`
+    throw new ComponentsFetchError(res.status, message)
+  }
+  return json
+}
+
+/** Body keys per the S82 handlers: advance {target_status}, revert {reverted_reason}, deprecate {reason?}, restore {}. */
+export function lifecycleBody(action: LifecycleAction, arg?: string): Record<string, string> {
+  if (action === 'advance') return { target_status: arg ?? '' }
+  if (action === 'revert') return { reverted_reason: (arg ?? '').trim() }
+  if (action === 'deprecate') return arg?.trim() ? { reason: arg.trim() } : {}
+  return {}
+}
+
+export function runLifecycleAction(id: string, action: LifecycleAction, arg?: string) {
+  return postJson(`${API_BASE}/coordination/components/${encodeURIComponent(id)}/${action}`, lifecycleBody(action, arg))
+}
+
+export interface RegisterInput {
+  component_name: string
+  project_id: string
+  category: string
+  required_transition_type: ComponentFloor
+  description: string
+  component_id?: string
+}
+
+export function registerComponent(input: RegisterInput) {
+  const body: Record<string, string> = { ...input }
+  if (!body.component_id?.trim()) delete body.component_id
+  if (!body.description?.trim()) delete body.description
+  return postJson(`${API_BASE}/coordination/components`, body)
 }

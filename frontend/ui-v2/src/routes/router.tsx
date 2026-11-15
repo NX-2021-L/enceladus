@@ -149,6 +149,11 @@ const componentRegistryRoute = createRoute({
   path: '/component-registry',
   component: lazyRouteComponent(() => import('./ComponentRegistryRoute'), 'ComponentRegistryRoute'),
 })
+const proposalReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/component-registry/proposals/$ref',
+  component: lazyRouteComponent(() => import('./ProposalReviewRoute'), 'ProposalReviewRoute'),
+})
 const componentDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/component-registry/$componentId',
@@ -246,6 +251,7 @@ const routeTree = rootRoute.addChildren([
   escalationsRoute,
   escalationDeepRoute,
   componentRegistryRoute,
+  proposalReviewRoute,
   componentDetailRoute,
   settingsRoute,
   notificationSettingsRedirectRoute,

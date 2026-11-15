@@ -78,3 +78,34 @@ export function sortRows(rows: RegistryComponent[], field: SortField, descending
     return av < bv ? -dir : av > bv ? dir : a.component_id.localeCompare(b.component_id)
   })
 }
+
+/** Main track of the lifecycle; code-red, deprecated and archived are off-track states. */
+export const LIFECYCLE_TRACK = ['proposed', 'approved', 'designed', 'development', 'production'] as const
+export const OFF_TRACK = ['code-red', 'deprecated', 'archived'] as const
+
+/** Permitted next statuses (mirrors the server transition table, DOC-546B896390EA 3.2). The server stays authoritative. */
+export const TRANSITIONS: Record<string, string[]> = {
+  proposed: ['approved'],
+  approved: ['designed'],
+  designed: ['development'],
+  development: ['production'],
+  production: ['code-red', 'deprecated'],
+  'code-red': ['production', 'deprecated'],
+  deprecated: ['production'],
+}
+
+export interface ActionPlan { advance: string | undefined; revert: boolean; deprecate: boolean; restore: boolean }
+
+/** Which actions the detail page offers. Advance is the next permitted forward status; Restore applies to deprecated. */
+export function actionPlan(status: string | undefined): ActionPlan {
+  const s = status ?? ''
+  const next = TRANSITIONS[s] ?? []
+  const forward = (LIFECYCLE_TRACK as readonly string[]).indexOf(s)
+  const advance = next.find((t) => (LIFECYCLE_TRACK as readonly string[]).indexOf(t) > forward) ?? (s === 'code-red' ? 'production' : undefined)
+  return {
+    advance: s === 'deprecated' ? undefined : advance,
+    revert: isGoverned(s) && s !== 'archived' && s !== 'proposed',
+    deprecate: next.includes('deprecated'),
+    restore: s === 'deprecated',
+  }
+}
