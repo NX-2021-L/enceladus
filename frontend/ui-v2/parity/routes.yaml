@@ -137,6 +137,20 @@ routes:
       - "GET /api/v1/projects"
     auth: "session"
     surface: "enceladus"
+  - path: "/component-registry"
+    component: "frontend/ui-v2/src/routes/ComponentRegistryRoute.tsx"
+    handlers:
+      - "GET /api/v1/coordination/components"
+      - "GET /api/v1/coordination/components/{id}"
+    auth: "session"
+    surface: "enceladus"
+  - path: "/component-registry/$componentId"
+    component: "frontend/ui-v2/src/routes/ComponentRegistryRoute.tsx"
+    handlers:
+      - "GET /api/v1/coordination/components"
+      - "GET /api/v1/coordination/components/{id}"
+    auth: "session"
+    surface: "enceladus"
   - path: "/settings"
     component: "frontend/ui-v2/src/routes/SettingsRoute.tsx"
     handlers:
@@ -157,11 +171,6 @@ routes:
     handlers:
       - "GET /api/v1/coordination/agents/sessions"
       - "GET /api/v1/coordination/agents/types"
-    auth: "session"
-    surface: "enceladus"
-  - path: "/component-registry"
-    component: "frontend/ui-v2/src/routes/PlaceholderRoute.tsx"
-    handlers: []
     auth: "session"
     surface: "enceladus"
   - path: "/deployments"
