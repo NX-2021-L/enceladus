@@ -44,14 +44,13 @@ export interface RegistryComponent {
   edges?: ComponentEdge[]
 }
 
-/** A typed edge from the component to a task (S82 may return these on GET). Shape read defensively. */
+/** A forward edge from the component to a task. S82 _component_edges_view returns { edge_type, task_id, created_at, locked, lock_trigger } as a sibling of `component` in GET /components/{id}. */
 export interface ComponentEdge {
   edge_type?: string
-  relationship_type?: string
-  target_id?: string
-  target?: string
+  task_id?: string
+  created_at?: string
   locked?: boolean
-  lock_reason?: string
+  lock_trigger?: string | null
 }
 
 export class ComponentsFetchError extends Error {
@@ -81,12 +80,12 @@ export async function listComponents(init?: { signal?: AbortSignal }): Promise<R
 }
 
 export async function getComponent(id: string, init?: { signal?: AbortSignal }): Promise<RegistryComponent> {
-  const body = await getJson<{ component?: RegistryComponent }>(
+  const body = await getJson<{ component?: RegistryComponent; edges?: ComponentEdge[] }>(
     `${API_BASE}/coordination/components/${encodeURIComponent(id)}`,
     init,
   )
   if (!body.component) throw new ComponentsFetchError(404, `Component not found: ${id}`)
-  return body.component
+  return body.edges ? { ...body.component, edges: body.edges } : body.component
 }
 
 /* ---- Proposals (ENC-TSK-S84; contract ENC-TSK-S82 slice 2) ---------------------------------------------------- */

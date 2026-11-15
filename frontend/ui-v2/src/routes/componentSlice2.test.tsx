@@ -8,10 +8,18 @@ vi.mock('../auth/useCan', () => ({ useCanExecute: () => true }))
 import { ProposalReviewRoute } from './ProposalReviewRoute'
 import { ComponentDetailRoute } from './ComponentRegistryRoute'
 import { actionPlan } from './componentRegistry'
-import { decideProposal, lifecycleBody, toProposal } from '../api/components'
+import { decideProposal, getComponent, lifecycleBody, toProposal } from '../api/components'
 
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } })
 const VIEW = { proposal_ref: 'cprop-0123456789', display_name: 'Widget', suggested_component_id: 'comp-widget', project_id: 'devops', category: 'lambda', version: 2, proposal_status: 'pending', source_paths: ['a/b'] }
+
+describe('component read merges sibling edges', () => {
+  it('GET /components/{id} returns edges beside component (S82); getComponent attaches them', async () => {
+    const edges = [{ edge_type: 'DEPLOYS', task_id: 'ENC-TSK-1', created_at: 't', locked: false, lock_trigger: null }]
+    vi.stubGlobal('fetch', vi.fn(async () => json({ success: true, component: { component_id: 'comp-a' }, edges })))
+    expect((await getComponent('comp-a')).edges).toEqual(edges)
+  })
+})
 
 describe('proposal adapter keys', () => {
   it('maps the S82 view', () => {
@@ -66,7 +74,7 @@ describe('routes', () => {
     expect(host!.textContent).toContain('suggestion, not yet minted')
   })
   it('detail shows the track, edges and actions', async () => {
-    const c = { component_id: 'comp-a', component_name: 'A', project_id: 'p', category: 'lambda', lifecycle_status: 'approved', edges: [{ edge_type: 'DEPLOYS', target_id: 'ENC-TSK-1', locked: true }] }
+    const c = { component_id: 'comp-a', component_name: 'A', project_id: 'p', category: 'lambda', lifecycle_status: 'approved', edges: [{ edge_type: 'DEPLOYS', task_id: 'ENC-TSK-1', locked: true, lock_trigger: 'deploy_success' }] }
     vi.stubGlobal('fetch', vi.fn(async () => json({ success: true, component: c })))
     await mount('/component-registry/comp-a', '/component-registry/$componentId', () => <ComponentDetailRoute />)
     expect(host!.querySelector('.ev2-track__step[data-state="current"]')?.textContent).toBe('approved')

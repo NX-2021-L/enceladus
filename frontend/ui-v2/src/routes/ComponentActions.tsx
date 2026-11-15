@@ -43,11 +43,11 @@ export function EdgeList({ edges }: { edges: ComponentEdge[] | undefined }) {
       <h2 className="ev2-reg__h2">Edges</h2>
       <ul className="ev2-edges">
         {edges.map((e, i) => {
-          const type = e.edge_type ?? e.relationship_type ?? 'edge'
+          const type = e.edge_type ?? 'edge'
           return (
-            <li key={`${type}-${e.target_id ?? e.target ?? i}`} className="ev2-edges__row">
-              <span className="ev2-edges__type">{type}</span> <code>{e.target_id ?? e.target ?? 'unknown'}</code>
-              {e.locked !== undefined && <span className="ev2-edges__lock" data-locked={e.locked ? 'true' : 'false'}>{e.locked ? 'locked' : 'unlocked'}{e.lock_reason ? `: ${e.lock_reason}` : ''}</span>}
+            <li key={`${type}-${e.task_id ?? i}`} className="ev2-edges__row">
+              <span className="ev2-edges__type">{type}</span> <code>{e.task_id ?? 'unknown'}</code>
+              {e.locked !== undefined && <span className="ev2-edges__lock" data-locked={e.locked ? 'true' : 'false'}>{e.locked ? 'locked' : 'unlocked'}{e.lock_trigger ? `: ${e.lock_trigger}` : ''}</span>}
             </li>
           )
         })}
