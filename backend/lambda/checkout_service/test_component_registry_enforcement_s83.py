@@ -24,6 +24,8 @@ sys.modules[_SPEC.name] = cl
 _SPEC.loader.exec_module(cl)
 
 LOG_PREFIX = "[COMPONENT-ENFORCE] mode=observe would_reject=true"
+CREATED = "2026-11-15T06:00:00Z"  # at the epoch: not grandfathered
+PRE_EPOCH = "2026-11-15T05:59:59Z"
 
 
 def _ddb(items):
@@ -55,15 +57,17 @@ class ModeResolutionTests(unittest.TestCase):
             with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", raw):
                 self.assertEqual(cl._component_registry_mode(), want, raw)
 
-    def test_deployed_default_is_observe(self):
+    def test_deployed_default_is_enforce(self):
         self.assertEqual(os.environ.get("COMPONENT_REGISTRY_ENFORCEMENT"), None)
-        self.assertEqual(cl.COMPONENT_REGISTRY_ENFORCEMENT, "observe")
+        self.assertEqual(cl.COMPONENT_REGISTRY_ENFORCEMENT, "enforce")
+        self.assertEqual(cl.COMPONENT_ENFORCEMENT_EPOCH, "2026-11-15T06:00:00Z")
 
 
 class CheckoutTaskTests(unittest.TestCase):
     def _run(self, mode, components, registry):
         task = {"task_id": "ENC-TSK-TEST", "status": "open",
-                "transition_type": "github_pr_deploy", "components": components}
+                "transition_type": "github_pr_deploy", "components": components,
+                "created_at": CREATED}
         body = {"active_agent_session_id": "test-agent-session"}
         with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", mode), \
              mock.patch.object(cl, "_get_task", return_value=(200, task)), \
@@ -123,7 +127,8 @@ class AdvanceTests(unittest.TestCase):
     def _run(self, mode, components, registry):
         task = {"record_id": "ENC-TSK-TEST", "components": components,
                 "transition_type": "github_pr_deploy", "status": "in-progress",
-                "active_agent_session": True, "active_agent_session_id": "sess-abc"}
+                "active_agent_session": True, "active_agent_session_id": "sess-abc",
+                "created_at": CREATED}
         body = {"target_status": "coding-complete", "provider": "test-agent",
                 "transition_evidence": {}, "governance_hash": "h"}
         with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", mode), \
@@ -164,7 +169,8 @@ class AdvanceTests(unittest.TestCase):
     def test_transient_ddb_error_is_not_unknown(self):
         task = {"record_id": "ENC-TSK-TEST", "components": ["comp-x"],
                 "transition_type": "github_pr_deploy", "status": "in-progress",
-                "active_agent_session": True, "active_agent_session_id": "sess-abc"}
+                "active_agent_session": True, "active_agent_session_id": "sess-abc",
+                "created_at": CREATED}
         with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", "enforce"), \
              mock.patch.object(cl, "_get_task", return_value=(200, task)), \
              mock.patch.object(cl._ddb, "get_item", side_effect=RuntimeError("throttled")):
@@ -176,6 +182,93 @@ class AdvanceTests(unittest.TestCase):
                 resp = None
         if resp is not None:
             self.assertNotIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+
+class EpochTests(unittest.TestCase):
+    def _checkout(self, created_at, components, registry=None, mode="enforce"):
+        task = {"task_id": "ENC-TSK-TEST", "status": "open",
+                "transition_type": "github_pr_deploy", "components": components}
+        if created_at is not None:
+            task["created_at"] = created_at
+        with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", mode), \
+             mock.patch.object(cl, "_get_task", return_value=(200, task)), \
+             mock.patch.object(cl._ddb, "get_item", side_effect=_ddb(registry or {})):
+            with self.assertLogs(cl.logger, level="WARNING") as lg:
+                try:
+                    resp = cl._handle_checkout(
+                        "enceladus", "ENC-TSK-TEST",
+                        {"active_agent_session_id": "test-agent-session"})
+                except Exception:
+                    resp = None
+                cl.logger.warning("sentinel")
+        return resp, "\n".join(lg.output)
+
+    def test_pre_epoch_unknown_passes_and_logs(self):
+        resp, logs = self._checkout(PRE_EPOCH, ["comp-ghost"])
+        self.assertIn("[COMPONENT-ENFORCE] mode=enforce grandfathered=true", logs)
+        self.assertIn("component=comp-ghost", logs)
+        if resp is not None:
+            self.assertNotIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+    def test_missing_created_at_is_grandfathered(self):
+        resp, logs = self._checkout(None, ["comp-ghost"])
+        self.assertIn("grandfathered=true", logs)
+        if resp is not None:
+            self.assertNotIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+    def test_post_epoch_unknown_rejected_at_checkout(self):
+        resp, logs = self._checkout("2026-11-16T00:00:00Z", ["comp-ghost"])
+        self.assertEqual(resp["statusCode"], 400)
+        self.assertIn("COMPONENT_NOT_REGISTERED", resp["body"])
+        self.assertNotIn("grandfathered", logs)
+
+    def test_post_epoch_unknown_rejected_at_advance(self):
+        task = {"record_id": "ENC-TSK-TEST", "components": ["comp-ghost"],
+                "transition_type": "github_pr_deploy", "status": "in-progress",
+                "active_agent_session": True, "active_agent_session_id": "sess-abc",
+                "created_at": "2026-11-16T00:00:00Z"}
+        with mock.patch.object(cl, "COMPONENT_REGISTRY_ENFORCEMENT", "enforce"), \
+             mock.patch.object(cl, "_get_task", return_value=(200, task)), \
+             mock.patch.object(cl._ddb, "get_item", side_effect=_ddb({})):
+            resp = cl._handle_advance("enceladus", "ENC-TSK-TEST", {
+                "target_status": "coding-complete", "provider": "test-agent",
+                "transition_evidence": {}, "governance_hash": "h"})
+        self.assertEqual(resp["statusCode"], 400)
+        self.assertIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+    def test_registered_component_passes_post_epoch(self):
+        resp, logs = self._checkout(CREATED, ["comp-ok"], {"comp-ok": {}})
+        self.assertNotIn("[COMPONENT-ENFORCE]", logs)
+        if resp is not None:
+            self.assertNotIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+    def test_json_string_components_parsed(self):
+        self.assertEqual(cl._task_components({"components": '["comp-x", "comp-y"]'}),
+                         ["comp-x", "comp-y"])
+        self.assertEqual(cl._task_components({"components": "comp-x"}), ["comp-x"])
+        self.assertEqual(cl._task_components({"components": ["comp-x"]}), ["comp-x"])
+        self.assertEqual(cl._task_components({}), [])
+        resp, _ = self._checkout(CREATED, '["comp-ghost"]')
+        self.assertEqual(resp["statusCode"], 400)
+        self.assertIn("comp-ghost", resp["body"])
+        self.assertNotIn('"["', resp["body"])
+
+    def test_epoch_override_moves_the_boundary(self):
+        with mock.patch.object(cl, "COMPONENT_ENFORCEMENT_EPOCH", "2027-01-01T00:00:00Z"):
+            resp, logs = self._checkout("2026-12-01T00:00:00Z", ["comp-ghost"])
+        self.assertIn("grandfathered=true", logs)
+        if resp is not None:
+            self.assertNotIn("COMPONENT_NOT_REGISTERED", resp["body"])
+
+    def test_env_overrides_read_at_import(self):
+        env = {"COMPONENT_REGISTRY_ENFORCEMENT": "observe",
+               "COMPONENT_ENFORCEMENT_EPOCH": "2030-01-01T00:00:00Z"}
+        with mock.patch.dict(os.environ, env):
+            spec = importlib.util.spec_from_file_location("cl_env_s85", _SPEC.origin)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        self.assertEqual(mod.COMPONENT_REGISTRY_ENFORCEMENT, "observe")
+        self.assertEqual(mod.COMPONENT_ENFORCEMENT_EPOCH, "2030-01-01T00:00:00Z")
 
 
 if __name__ == "__main__":
