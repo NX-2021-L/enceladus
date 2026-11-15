@@ -610,7 +610,8 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
     ),
     "component_propose": _governed(
         {
-            "component_id": _str("Proposed component id.", backend=True),
+            "suggested_component_id": _str("Advisory component id; the approver chooses the real one."),
+            "component_id": _str("Deprecated alias of suggested_component_id (advisory only)."),
             "display_name": _str("Human-readable component name.", backend=True),
             "project_id": _str("Owning project id.", backend=True),
             "source_paths": _arr("Repository paths the component owns.", backend=True),
@@ -624,7 +625,17 @@ ACTION_INPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "component_class": _str("Component class."),
             "requested_required_transition_type": _str("Required transition type requested."),
             "required_transition_type_rationale": _str("Rationale for the required transition type."),
+            "required_iam_actions": _arr("IAM actions the component requires."),
+            "required_env_secrets": _arr("Environment secrets the component requires."),
+            "required_apigw_routes": _arr("API Gateway routes the component requires."),
+            "required_cfn_resources": _arr("CloudFormation resources the component requires."),
+            "required_lambda_env_vars": _arr("Lambda environment variables the component requires."),
+            "deploy_targets": _arr("Deploy targets of the component."),
         },
+    ),
+    "component_get": _schema(
+        {"component_id": _str("Component id (comp-...) or proposal ref (cprop-...). A proposal returns its status; the minted component id appears only after approval.")},
+        ["component_id"],
     ),
     "component_advance": _governed(
         {

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.1.0",
   "surface": "enceladus",
-  "generatedAt": "2026-11-04T07:34:53Z",
+  "generatedAt": "2026-11-15T04:19:27Z",
   "actions": [
     {
       "name": "actions.schemas",
@@ -642,7 +642,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {
@@ -682,7 +681,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {
@@ -717,8 +715,31 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
+    },
+    {
+      "name": "component.get",
+      "title": "Get component or proposal",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "description": "Component id (comp-...) or proposal ref (cprop-...). A proposal returns its status; the minted component id appears only after approval."
+          }
+        },
+        "required": [
+          "component_id"
+        ]
+      },
+      "outputSchema": null,
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "requiresGovernanceHash": false,
+      "via": "search"
     },
     {
       "name": "component.propose",
@@ -730,10 +751,13 @@
             "type": "string",
             "description": "Current governance hash; obtain from governance.hash (search)."
           },
+          "suggested_component_id": {
+            "type": "string",
+            "description": "Advisory component id; the approver chooses the real one."
+          },
           "component_id": {
             "type": "string",
-            "description": "Proposed component id.",
-            "x-io-required-by": "backend"
+            "description": "Deprecated alias of suggested_component_id (advisory only)."
           },
           "display_name": {
             "type": "string",
@@ -794,6 +818,48 @@
           "required_transition_type_rationale": {
             "type": "string",
             "description": "Rationale for the required transition type."
+          },
+          "required_iam_actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "IAM actions the component requires."
+          },
+          "required_env_secrets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Environment secrets the component requires."
+          },
+          "required_apigw_routes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "API Gateway routes the component requires."
+          },
+          "required_cfn_resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CloudFormation resources the component requires."
+          },
+          "required_lambda_env_vars": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lambda environment variables the component requires."
+          },
+          "deploy_targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Deploy targets of the component."
           }
         },
         "required": [
@@ -808,7 +874,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {
@@ -849,7 +914,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {
@@ -880,7 +944,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {
@@ -916,7 +979,6 @@
       },
       "requiresGovernanceHash": true,
       "via": "execute",
-      "flag": "enable_component_proposal",
       "dryRun": true
     },
     {

@@ -346,35 +346,36 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         "document_create_note", "Create note document", CREATE, gov=True, output=_minted("document_id"),
     )
 
-    # ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
-    if flags.enable_component_proposal:
-        flag = "enable_component_proposal"
-        execute_actions["component.propose"] = _entry(
-            "component_propose", "Propose component", CREATE, gov=True, flag=flag,
-        )
-        # ENC-FTR-076 v2 / ENC-TSK-F40 (DOC-546B896390EA §9): state machine + edge
-        # + lifecycle actions. All 6 require governance hash (governed mutations).
-        # Authority enforcement (io-only vs agent-permitted) is server-side in
-        # coordination_api handlers — the MCP surface forwards the request along
-        # with the caller's Cognito claims so the Lambda can gate per action.
-        execute_actions["component.advance"] = _entry(
-            "component_advance", "Advance component lifecycle", TRANSITION, gov=True, flag=flag,
-        )
-        execute_actions["component.revert"] = _entry(
-            "component_revert", "Revert component", OVERWRITE, gov=True, flag=flag,
-        )
-        execute_actions["component.deprecate"] = _entry(
-            "component_deprecate", "Deprecate component", SET, gov=True, flag=flag,
-        )
-        execute_actions["component.restore"] = _entry(
-            "component_restore", "Restore component", TRANSITION, gov=True, flag=flag,
-        )
-        execute_actions["component.add_edge"] = _entry(
-            "component_add_edge", "Add component edge", ADDITIVE_ONCE, gov=True, flag=flag,
-        )
-        execute_actions["component.remove_edge"] = _entry(
-            "component_remove_edge", "Remove component edge", SET, gov=True, flag=flag,
-        )
+    # ENC-FTR-076 / ENC-TSK-E08, ENC-TSK-S82: component actions register unconditionally; the
+    # coordination_api decides (ENABLE_COMPONENT_PROPOSAL, human decider guard).
+    execute_actions["component.propose"] = _entry(
+        "component_propose", "Propose component", CREATE, gov=True,
+    )
+    # ENC-FTR-076 v2 / ENC-TSK-F40 (DOC-546B896390EA §9): state machine + edge
+    # + lifecycle actions. All 6 require governance hash (governed mutations).
+    # Authority enforcement (io-only vs agent-permitted) is server-side in
+    # coordination_api handlers — the MCP surface forwards the request along
+    # with the caller's Cognito claims so the Lambda can gate per action.
+    execute_actions["component.advance"] = _entry(
+        "component_advance", "Advance component lifecycle", TRANSITION, gov=True,
+    )
+    execute_actions["component.revert"] = _entry(
+        "component_revert", "Revert component", OVERWRITE, gov=True,
+    )
+    execute_actions["component.deprecate"] = _entry(
+        "component_deprecate", "Deprecate component", SET, gov=True,
+    )
+    execute_actions["component.restore"] = _entry(
+        "component_restore", "Restore component", TRANSITION, gov=True,
+    )
+    execute_actions["component.add_edge"] = _entry(
+        "component_add_edge", "Add component edge", ADDITIVE_ONCE, gov=True,
+    )
+    execute_actions["component.remove_edge"] = _entry(
+        "component_remove_edge", "Remove component edge", SET, gov=True,
+    )
+    # ENC-TSK-S82 AC7: proposal/component read (a cprop- ref returns proposal status).
+    search_actions["component.get"] = _entry("component_get", "Get component or proposal", READ)
 
     # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
     search_actions["plan.objectives_status"] = _entry("plan_objectives_status", "Get plan objectives status", READ)

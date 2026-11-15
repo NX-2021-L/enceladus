@@ -475,7 +475,8 @@ ENABLE_MCP_GOVERNANCE_PROMPT = _appconfig_flag("enable_mcp_governance_prompt", e
 ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
 # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry.
 # Gates POST /api/v1/coordination/components/propose + component.propose MCP action.
-ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
+# ENC-TSK-S82: resolves true when unset or when AppConfig is unreachable; an explicit false still disables.
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL", default=True)
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
@@ -9626,6 +9627,51 @@ def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(500, f"Failed to list components: {exc}")
 
 
+def _component_edges_view(component_id: str, project_id: str) -> List[Dict[str, Any]]:
+    """Forward DESIGNS/IMPLEMENTS/DEPLOYS edges of a component with lock state (ENC-TSK-S82 AC6).
+
+    Reads the relationship rows `_handle_components_add_edge` writes (tracker table, key
+    project_id + record_id prefix `rel#<component>#`): a key query, never a scan. Best-effort:
+    a read failure returns [] so the component read itself still succeeds.
+    """
+    if not project_id:
+        return []
+    rel_to_edge = {rel: et for et, (rel, _inv) in _COMPONENT_EDGE_REL_NAMES.items()}
+    try:
+        resp = _get_ddb().query(
+            TableName=TRACKER_TABLE,
+            KeyConditionExpression="project_id = :p AND begins_with(record_id, :pre)",
+            ExpressionAttributeValues={
+                ":p": {"S": project_id},
+                ":pre": {"S": f"rel#{component_id}#"},
+            },
+            Limit=100,
+        )
+    except Exception:
+        logger.warning("components_get edge query failed for %s", component_id)
+        return []
+    edges: List[Dict[str, Any]] = []
+    for raw in resp.get("Items", []):
+        row = _ddb_to_py(raw)
+        if row.get("is_inverse") or row.get("source_id") != component_id:
+            continue
+        edge_type = row.get("edge_type") or rel_to_edge.get(str(row.get("relationship_type") or ""))
+        if edge_type not in _COMPONENT_EDGE_TYPES:
+            continue
+        task_id = str(row.get("target_id") or "")
+        locked, details = _edge_is_locked(edge_type, _get_task_record(task_id))
+        edges.append(
+            {
+                "edge_type": edge_type,
+                "task_id": task_id,
+                "created_at": row.get("created_at"),
+                "locked": locked,
+                "lock_trigger": details.get("lock_trigger"),
+            }
+        )
+    return edges
+
+
 def _handle_components_get(component_id: str) -> Dict[str, Any]:
     """GET /api/v1/coordination/components/{id} — fetch single component."""
     ddb = _get_ddb()
@@ -9647,7 +9693,14 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
         ls = py_item.get("lifecycle_status", "")
         if ls in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
             return _error(404, f"Component '{component_id}' not found")
-        return _response(200, {"success": True, "component": _component_record_with_v3_compat(py_item)})
+        return _response(
+            200,
+            {
+                "success": True,
+                "component": _component_record_with_v3_compat(py_item),
+                "edges": _component_edges_view(component_id, str(py_item.get("project_id") or "")),
+            },
+        )
     except Exception as exc:
         logger.exception("components_get failed")
         return _error(500, f"Failed to get component: {exc}")
@@ -10141,11 +10194,18 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         return _error(500, f"Failed to propose component: {exc}")
 
     _publish_component_proposed_event(
-        component_id=component_id,
+        proposal_ref=proposal_ref,
         project_id=project_id,
         proposing_agent_session_id=proposing_agent_session_id,
         requested_minimum_transition_type=requested_type,
     )
+    # ENC-TSK-S82 AC8: one best-effort push per new proposal over the existing notify path.
+    try:
+        notify_v2.handle_component_proposal_push(
+            sys.modules[__name__], proposal_ref, project_id, suggested_component_id or ""
+        )
+    except Exception:  # noqa: BLE001 -- notification never fails the proposal
+        logger.warning("component proposal push failed for %s", proposal_ref)
 
     return _response(
         201,
@@ -10171,7 +10231,7 @@ COMPONENT_PROPOSAL_PWA_DEEP_LINK = os.environ.get(
 
 def _publish_component_proposed_event(
     *,
-    component_id: str,
+    proposal_ref: str,
     project_id: str,
     proposing_agent_session_id: str,
     requested_minimum_transition_type: str,
@@ -10186,7 +10246,7 @@ def _publish_component_proposed_event(
         return
     payload = {
         "event_type": "component.proposed",
-        "component_id": component_id,
+        "proposal_ref": proposal_ref,
         "project_id": project_id,
         "proposing_agent_session_id": proposing_agent_session_id,
         "requested_minimum_transition_type": requested_minimum_transition_type,
@@ -10199,11 +10259,11 @@ def _publish_component_proposed_event(
         )
         sns.publish(
             TopicArn=COMPONENT_EVENTS_TOPIC_ARN,
-            Subject=f"Component proposed: {component_id}",
+            Subject=f"Component proposed: {proposal_ref}",
             Message=json.dumps(payload),
         )
     except Exception as exc:
-        logger.warning("component.propose SNS publish failed for %s: %s", component_id, exc)
+        logger.warning("component.propose SNS publish failed for %s: %s", proposal_ref, exc)
 
 
 def _publish_component_lifecycle_event(event_type: str, payload: dict) -> None:
@@ -10402,6 +10462,7 @@ def _approve_component_proposal(
             "success": True,
             "proposal_ref": proposal_ref,
             "proposal_status": "approved",
+            "approved_component_id": chosen,
             "component_id": chosen,
             "lifecycle_status": "approved",
             "approved_by": approved_by,
