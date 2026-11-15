@@ -1,0 +1,31 @@
+/* Component registry read surface (ENC-TSK-S81). Tokens only. */
+.ev2-reg__search {
+  width: 100%; max-width: 420px; min-height: 44px; box-sizing: border-box; margin-bottom: 12px;
+  padding: 0 12px; background: var(--surface-sunken); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font-size: var(--text-row);
+}
+.ev2-reg__segments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.ev2-reg__seg {
+  min-height: 44px; padding: 0 14px; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: var(--text-row);
+}
+.ev2-reg__seg[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+.ev2-reg__segcount { font-family: var(--font-mono, monospace); color: var(--text-dim); margin-left: 4px; }
+.ev2-reg__comp { display: flex; flex-direction: column; gap: 2px; }
+.ev2-reg__id { font-family: var(--font-mono, monospace); font-size: var(--text-row); color: var(--accent); }
+.ev2-reg__name { color: var(--text); }
+.ev2-reg__none, .ev2-reg__stored { color: var(--text-dim); font-size: var(--text-xs); }
+.ev2-reg__floor { display: inline-flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.ev2-reg__more { margin-top: 12px; }
+.ev2-reg__more button, .ev2-reg__back { min-height: 44px; display: inline-flex; align-items: center; }
+.ev2-reg__detailhead { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+.ev2-reg__section { margin-bottom: 20px; }
+.ev2-reg__h2 { font-size: var(--text-sm); color: var(--text-dim); margin: 0 0 8px; }
+.ev2-reg__ladder { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; }
+.ev2-reg__rung { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); }
+.ev2-reg__rung[aria-current='true'] { border-color: var(--accent); color: var(--accent); }
+.ev2-reg__rank { font-family: var(--font-mono, monospace); margin-right: 4px; }
+.ev2-reg__desc { color: var(--text); line-height: 1.5; margin: 0; }
+@media (max-width: 42.99rem) {
+  .ev2-reg__search { max-width: none; }
+}
