@@ -54,7 +54,7 @@ describe('registry render', () => {
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } })
 
   it('lists rows from the API with segment counts and unknown lifecycle verbatim', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => json({ success: true, components: FIX, count: FIX.length })))
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => json({ success: true, components: String(u).includes('kind=proposal') ? [] : FIX, count: FIX.length })))
     await mount('/component-registry', () => <ComponentRegistryRoute />)
     expect(host!.querySelectorAll('tbody tr')).toHaveLength(4)
     expect(host!.textContent).toContain('stored as github_pr_deploy')

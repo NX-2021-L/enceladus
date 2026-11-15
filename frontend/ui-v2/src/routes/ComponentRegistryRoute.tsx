@@ -18,6 +18,7 @@ import {
   FLOOR_LADDER, floorView, inSegment, isGoverned, matchesText, registryRows, segmentCounts, sortRows,
   type RegistrySegment, type SortField,
 } from './componentRegistry'
+import { RequiresIoQueue } from './RequiresIoQueue'
 import './componentRegistry.css'
 
 const PAGE = 25
@@ -89,6 +90,7 @@ export function ComponentRegistryRoute() {
           {query.error instanceof Error ? query.error.message : 'Unknown error'}
         </Alert>
       )}
+      <RequiresIoQueue />
       <input
         className="ev2-reg__search" type="search" value={q} aria-label="Search components"
         placeholder="Search by name, ID or project"

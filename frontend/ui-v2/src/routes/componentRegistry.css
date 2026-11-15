@@ -29,3 +29,12 @@
 @media (max-width: 42.99rem) {
   .ev2-reg__search { max-width: none; }
 }
+
+/* ENC-TSK-S84: Requires io queue */
+.ev2-queue{margin:0 0 20px;display:flex;flex-direction:column;gap:10px}
+.ev2-queue__bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ev2-queue__sug{font-size:11.5px;opacity:.75}
+.ev2-queue__paths{font-family:var(--font-mono,monospace);font-size:12px;overflow-wrap:anywhere}
+.ev2-queue__item{display:flex;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border,rgba(61,155,168,.25))}
+.ev2-queue__input{width:100%;box-sizing:border-box;padding:6px 8px;font:inherit;font-family:var(--font-mono,monospace);background:var(--surface-sunken,#0D1220);color:var(--text,#EEF2F7);border:1px solid var(--tint-teal-25,rgba(61,155,168,.25));border-radius:6px}
+.ev2-queue__err{color:var(--danger,#C85060);font-size:12px}

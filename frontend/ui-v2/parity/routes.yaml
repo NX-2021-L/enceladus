@@ -142,6 +142,7 @@ routes:
     handlers:
       - "GET /api/v1/coordination/components"
       - "GET /api/v1/coordination/components/{id}"
+      - "POST /api/v1/coordination/components"
     auth: "session"
     surface: "enceladus"
   - path: "/component-registry/$componentId"
@@ -149,6 +150,7 @@ routes:
     handlers:
       - "GET /api/v1/coordination/components"
       - "GET /api/v1/coordination/components/{id}"
+      - "POST /api/v1/coordination/components"
     auth: "session"
     surface: "enceladus"
   - path: "/settings"
