@@ -132,6 +132,34 @@ class ProposalContractTests(unittest.TestCase):
         self.assertIn("proposal_status = :pending", upd["Update"]["ConditionExpression"])
         self.assertEqual(_body(resp)["component_id"], "comp-chosen")
 
+    def test_propose_meta_sentinels_validate_against_suggestion(self):
+        d = _ddb()
+        body = {
+            "suggested_component_id": "comp-umb", "display_name": "Umb", "project_id": "enceladus",
+            "requested_minimum_transition_type": "documentation",
+            "component_address": "meta:comp-umb", "component_repo_dir": "meta:comp-umb",
+            "component_address_class": "meta", "component_class": "meta",
+            "proposing_agent_session_id": "ENC-SES-X",
+        }
+        with mock.patch.object(L, "_get_ddb", return_value=d):
+            resp = L._handle_components_propose(_event(body), {})
+            self.assertEqual(resp["statusCode"], 201, resp["body"])
+            put = d.transact_write_items.call_args.kwargs["TransactItems"][0]["Put"]["Item"]
+            self.assertEqual(put["component_address"]["S"], "meta:comp-umb")
+            bad = dict(body, component_address="meta:comp-other")
+            self.assertEqual(L._handle_components_propose(_event(bad), {})["statusCode"], 422)
+
+    def test_approve_meta_rewrites_sentinels_with_and_without_override(self):
+        for body, want in (({}, "comp-thing"), ({"component_id": "comp-chosen"}, "comp-chosen")):
+            d = _ddb(_proposal_item(
+                component_address_class="meta", component_class="meta",
+                component_address="meta:comp-thing", component_repo_dir="meta:comp-thing"))
+            resp = self._approve(d, body)
+            self.assertEqual(resp["statusCode"], 200, resp["body"])
+            item = d.transact_write_items.call_args.kwargs["TransactItems"][0]["Put"]["Item"]
+            self.assertEqual(item["component_address"]["S"], f"meta:{want}")
+            self.assertEqual(item["component_repo_dir"]["S"], f"meta:{want}")
+
     def test_approve_defaults_to_suggestion_and_requested_type(self):
         d = _ddb(_proposal_item())
         resp = self._approve(d, {})

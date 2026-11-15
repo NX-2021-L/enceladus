@@ -10085,7 +10085,8 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
 
     hardening_error, hardening_fields = _validate_component_hardening_fields(
         {**body, "required_transition_type": requested_type},
-        component_id,
+        # ENC-TSK-S88: meta sentinels validate against the suggested ID, not the cprop- ref.
+        suggested_component_id or component_id,
         require_all=True,
     )
     if hardening_error:
@@ -10389,6 +10390,10 @@ def _approve_component_proposal(
             "updated_at": now,
         }
     )
+    if str(component_item.get("component_address_class") or "").lower() == "meta":
+        # ENC-TSK-S88: meta sentinels always track the minted component_id (also on io override).
+        component_item["component_address"] = f"meta:{chosen}"
+        component_item["component_repo_dir"] = f"meta:{chosen}"
     if alarm_arn is not None:
         component_item["alarm_arn"] = alarm_arn
 
