@@ -313,6 +313,12 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
 # ENC-FTR-041: Component registry enforcement
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
+# ENC-TSK-S83 / ENC-PLN-107: fail-closed component use. One flag, three values:
+# off (today's fail-open), observe (log would-reject, never reject; the deployed
+# default), enforce (reject component ids absent from the registry). Anything
+# else reads as observe. Plain env var: no AppConfig read, so the value is the
+# same whether or not AppConfig is reachable.
+COMPONENT_REGISTRY_ENFORCEMENT = os.environ.get("COMPONENT_REGISTRY_ENFORCEMENT", "observe")
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 COORDINATION_API_BASE = os.environ.get(
     "COORDINATION_API_BASE", "https://enceladus.jreese.net/api/v1/coordination"
@@ -1834,7 +1840,8 @@ def _handle_checkout(
     # F42: Opacity model gate (ENC-FTR-076 §7) — runs BEFORE transition_type
     # strictness so OPAQUE components cannot leak existence via 400 mismatch errors.
     if pre_components:
-        lifecycle_map = _get_components_lifecycle(pre_components)
+        pre_unknown: list = []
+        lifecycle_map = _get_components_lifecycle(pre_components, unknown_out=pre_unknown)
         for cid in pre_components:
             entry = lifecycle_map.get(str(cid))
             if not entry:
@@ -1855,6 +1862,12 @@ def _handle_checkout(
                         "lifecycle_status": ls,
                     },
                 )
+        # ENC-TSK-S83: component ids absent from the registry (observe logs, enforce rejects).
+        unknown_err = _enforce_registered_components(
+            pre_unknown, "checkout.task", task_id, provider
+        )
+        if unknown_err:
+            return unknown_err
 
     if pre_components:
         pre_transition_type = (pre_task.get("transition_type") or "github_pr_deploy").strip().lower()
@@ -3351,7 +3364,52 @@ def _get_component_required_transition_types(component_ids: list) -> set[str]:
     return policies
 
 
-def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
+def _component_registry_mode() -> str:
+    """ENC-TSK-S83: resolve COMPONENT_REGISTRY_ENFORCEMENT to off|observe|enforce."""
+    mode = str(COMPONENT_REGISTRY_ENFORCEMENT or "").strip().lower()
+    return mode if mode in ("off", "observe", "enforce") else "observe"
+
+
+def _enforce_registered_components(
+    unknown_ids: list, op: str, task_id: str, caller: str
+) -> Optional[dict]:
+    """ENC-TSK-S83: apply the fail-closed mode to component ids absent from the registry.
+
+    ``unknown_ids`` holds only ids the registry confirmed absent (a transient
+    DynamoDB error is never reported as unknown). off: no-op. observe: one log
+    line per id, never rejects. enforce: COMPONENT_NOT_REGISTERED (400).
+    """
+    mode = _component_registry_mode()
+    if mode == "off" or not unknown_ids:
+        return None
+    if mode == "observe":
+        for cid in unknown_ids:
+            logger.warning(
+                "[COMPONENT-ENFORCE] mode=observe would_reject=true op=%s task=%s "
+                "component=%s caller=%s", op, task_id, cid, caller,
+            )
+        return None
+    ids = [str(c) for c in unknown_ids]
+    return _error(
+        400,
+        (
+            f"Component(s) {ids} are not registered. Propose each with "
+            f"component.propose; io approves it in the registry UI. "
+            f"Then retry {op}."
+        ),
+        code="COMPONENT_NOT_REGISTERED",
+        details={
+            "component_ids": ids,
+            "task_id": task_id,
+            "op": op,
+            "guidance": "Use component.propose; io approves in the registry UI.",
+        },
+    )
+
+
+def _get_components_lifecycle(
+    component_ids: list, unknown_out: Optional[list] = None
+) -> Dict[str, Dict[str, str]]:
     """Fetch per-component lifecycle metadata for the FTR-076 / E10 gate.
 
     Returns a dict keyed by component_id with sub-dicts containing
@@ -3376,6 +3434,8 @@ def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
                 logger.warning(
                     "[FTR-076] Component '%s' not found in registry; skipping lifecycle gate", cid
                 )
+                if unknown_out is not None:
+                    unknown_out.append(str(cid))
                 continue
             ls = item.get("lifecycle_status", {}).get("S", "active")
             entry: Dict[str, str] = {"lifecycle_status": ls}
@@ -3660,7 +3720,14 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     # the same DynamoDB transaction in coordination_api E09); if observed,
     # we treat it as `active` and log a warning for ops visibility.
     if components and not is_user_initiated:
-        lifecycle_map = _get_components_lifecycle(components)
+        adv_unknown: list = []
+        lifecycle_map = _get_components_lifecycle(components, unknown_out=adv_unknown)
+        # ENC-TSK-S83: component ids absent from the registry (observe logs, enforce rejects).
+        unknown_err = _enforce_registered_components(
+            adv_unknown, "checkout.advance", task_id, provider or session_id
+        )
+        if unknown_err:
+            return unknown_err
         proposed_ids: list = []
         rejected_entries: list = []
         for cid in components:

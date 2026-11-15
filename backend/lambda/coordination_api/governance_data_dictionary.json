@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-04.21",
-  "updated_at": "2026-11-05T00:40:00Z",
-  "last_change_summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document.",
+  "version": "2026-11-14.1",
+  "updated_at": "2026-11-14T12:00:00Z",
+  "last_change_summary": "ENC-TSK-S83 (ENC-PLN-107): fail-closed component use, observe mode. checkout_service reads env COMPONENT_REGISTRY_ENFORCEMENT (off|observe|enforce; anything else reads as observe; deployed default observe; plain env var, no AppConfig read, so it resolves identically whether AppConfig is reachable or not). For component ids absent from component-registry at checkout.task and checkout.advance: observe logs one '[COMPONENT-ENFORCE] mode=observe would_reject=true op= task= component= caller=' line and continues; enforce returns 400 COMPONENT_NOT_REGISTERED naming the id and pointing to component.propose; off keeps today's fail-open. Registered components keep lifecycle semantics. tracker_mutation is not enforced: TrackerMutationRole cannot read component-registry and this slice adds no IAM. No new persistent resource.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3789,6 +3789,10 @@
         "advance_failure_gate": {
           "type": "string",
           "definition": "Task field recording which gate the consecutive failures occurred at."
+        },
+        "registry_enforcement_mode": {
+          "type": "rule",
+          "definition": "ENC-TSK-S83: env COMPONENT_REGISTRY_ENFORCEMENT = off|observe|enforce (default observe; unrecognised value reads as observe; no AppConfig, no CFN change). Applies to component ids absent from component-registry at checkout.task pre-validation and the checkout.advance lifecycle gate (agent-initiated advances; user_initiated PWA advances bypass as before). observe: log '[COMPONENT-ENFORCE] mode=observe would_reject=true op=<checkout.task|checkout.advance> task=<id> component=<cid> caller=<provider>' and continue. enforce: 400 code COMPONENT_NOT_REGISTERED naming the id, direct the caller to component.propose (io approves in the registry UI). off: unchanged fail-open. Transient registry read errors are never treated as unregistered. tracker_mutation tracker.create/tracker.set are not enforced (its role has no component-registry read)."
         }
       }
     },
@@ -11487,6 +11491,11 @@
       "version": "2026-11-04.21",
       "date": "2026-11-04",
       "summary": "ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document."
+    },
+    {
+      "version": "2026-11-14.1",
+      "date": "2026-11-14",
+      "summary": "ENC-TSK-S83 (ENC-PLN-107): fail-closed component use, observe mode. checkout_service reads env COMPONENT_REGISTRY_ENFORCEMENT (off|observe|enforce; anything else reads as observe; deployed default observe; plain env var, no AppConfig read, so it resolves identically whether AppConfig is reachable or not). For component ids absent from component-registry at checkout.task and checkout.advance: observe logs one '[COMPONENT-ENFORCE] mode=observe would_reject=true op= task= component= caller=' line and continues; enforce returns 400 COMPONENT_NOT_REGISTERED naming the id and pointing to component.propose; off keeps today's fail-open. Registered components keep lifecycle semantics. tracker_mutation is not enforced: TrackerMutationRole cannot read component-registry and this slice adds no IAM. No new persistent resource."
     }
   ]
 }
