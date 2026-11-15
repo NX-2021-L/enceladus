@@ -96,10 +96,10 @@ class ComponentProposeSnsTests(unittest.TestCase):
             kwargs["TopicArn"],
             "arn:aws:sns:us-west-2:111122223333:enceladus-component-registry-events",
         )
-        self.assertIn("comp-test-sns", kwargs["Subject"])
+        self.assertRegex(kwargs["Subject"], r"cprop-[0-9a-f]{10}")
         payload = json.loads(kwargs["Message"])
         self.assertEqual(payload["event_type"], "component.proposed")
-        self.assertEqual(payload["component_id"], "comp-test-sns")
+        self.assertRegex(payload["component_id"], r"^cprop-[0-9a-f]{10}$")  # ENC-TSK-S82: proposal ref
         self.assertEqual(payload["project_id"], "enceladus")
         self.assertEqual(payload["proposing_agent_session_id"], "agent-session-sns-1")
         self.assertEqual(payload["requested_minimum_transition_type"], "external_deploy")
