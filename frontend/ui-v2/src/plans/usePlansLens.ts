@@ -78,7 +78,13 @@ export interface PlansLens {
   stale: boolean
   /** True until the corpus has something to draw. The plan-scope read does not block the first paint. */
   loading: boolean
+  /**
+   * FATAL only: the corpus could not be read, so there is nothing to draw. A failed plan-scope read is NOT fatal and
+   * is reported separately -- the page keeps its wave structure and loses only the time scale.
+   */
   error: string | null
+  /** The time scale could not be read. Structure still draws; bars and rings are missing. */
+  timeScaleError: string | null
   /** The plan-scope tree walk hit a bound and the time scale may be incomplete. */
   truncated: boolean
   refresh: () => void
@@ -126,7 +132,11 @@ export function usePlansLens(): PlansLens {
     asOf: corpus.lastSeededAt ?? null,
     stale: Boolean(corpus.staleNotice),
     loading: corpus.status === 'seeding' && rows.length === 0,
-    error: corpus.error ? String(corpus.error) : scopeError,
+    // Deliberately NOT merged with scopeError: PlansPage treats `error` as fatal and replaces the whole page with
+    // "Plans could not be loaded". Losing the time scale must not cost io the structure, which comes from the corpus
+    // and is still perfectly good. Found on gamma, where /feed/plan-scope 404'd and blanked a page showing 60 plans.
+    error: corpus.error ? String(corpus.error) : null,
+    timeScaleError: scopeError,
     truncated,
     refresh: () => {
       void corpus.refresh()
