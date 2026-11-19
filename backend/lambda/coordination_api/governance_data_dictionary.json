@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.09",
-  "updated_at": "2026-11-19T09:20:00Z",
-  "last_change_summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable.",
+  "version": "2026-11-19.10",
+  "updated_at": "2026-11-19T18:40:00Z",
+  "last_change_summary": "ENC-TSK-T10 (ENC-ISS-916): POST /api/v1/deploy/submit accepts an optional boolean record_only. The endpoint is the deploy REQUEST intake, but _deploy.yml's 'Record deploy -> DPL' job uses it to record a deploy that has ALREADY completed. Until now such a submission was stored with status 'pending' and, when the project's deploy state is ACTIVE, sent an SQS {trigger: deploy_request} message that woke deploy_orchestrator, which attempted a second independent deployment from the legacy source-archive path -- a production-overwrite exposure that only failed on a source_dir name mismatch. With record_only true the row is stored with the terminal status 'recorded' instead of 'pending' and NO SQS trigger is sent on any path, whatever the deploy state. The terminal status matters independently: _handle_state_set re-triggers on every request# row whose status is 'pending' when a project is flipped to ACTIVE, so a suppressed-but-pending row would remain a deferred trigger. Coercion is strict and fails closed (only True, 'true' or '1'), so a malformed flag falls back to the ordinary request path rather than silently swallowing a deployment. Submissions without the flag are unchanged.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1721,6 +1721,11 @@
           "type": "string",
           "definition": "Optional S3 key for a pre-built Lambda artifact zip (ENC-TSK-E29 / ENC-TSK-E20 AC-6). Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). When present, deploy_intake validates the arch tag matches the target environment inferred from project_id.",
           "usage_guidance": "Pass when the deployment uses a pre-built artifact from the split-artifact build pipeline (build-lambda-artifacts.yml). deploy_intake validates the S3 key format and arch tag. The key is persisted to the DDB request record for audit. MCP server deploy_submit tool accepts and forwards this field."
+        },
+        "record_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "ENC-ISS-916. Marks the submission as RETROSPECTIVE telemetry for a deploy that already completed, not a request to deploy. When true the row is stored with status 'recorded' rather than 'pending' and no SQS trigger is sent on any path, regardless of the project's deploy state. Strict, fail-closed coercion: only boolean True or the strings 'true'/'1'."
         }
       }
     },
@@ -2517,6 +2522,14 @@
         "release_notes_guidance": {
           "type": "string",
           "definition": "Governance instruction text directing the submitting agent to create a release notes document via documents_put before the deploy completes. Included when release_notes_required=true."
+        },
+        "record_only": {
+          "type": "boolean",
+          "description": "ENC-ISS-916. Echoes whether the submission was accepted as record-only telemetry."
+        },
+        "status": {
+          "type": "string",
+          "description": "ENC-ISS-916. The stored row's status: 'recorded' for a record_only submission, otherwise 'pending'."
         }
       }
     },
@@ -11738,6 +11751,11 @@
       "version": "2026-11-19.09",
       "date": "2026-11-19",
       "summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable."
+    },
+    {
+      "version": "2026-11-19.10",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-T10 (ENC-ISS-916): POST /api/v1/deploy/submit accepts an optional boolean record_only. The endpoint is the deploy REQUEST intake, but _deploy.yml's 'Record deploy -> DPL' job uses it to record a deploy that has ALREADY completed. Until now such a submission was stored with status 'pending' and, when the project's deploy state is ACTIVE, sent an SQS {trigger: deploy_request} message that woke deploy_orchestrator, which attempted a second independent deployment from the legacy source-archive path -- a production-overwrite exposure that only failed on a source_dir name mismatch. With record_only true the row is stored with the terminal status 'recorded' instead of 'pending' and NO SQS trigger is sent on any path, whatever the deploy state. The terminal status matters independently: _handle_state_set re-triggers on every request# row whose status is 'pending' when a project is flipped to ACTIVE, so a suppressed-but-pending row would remain a deferred trigger. Coercion is strict and fails closed (only True, 'true' or '1'), so a malformed flag falls back to the ordinary request path rather than silently swallowing a deployment. Submissions without the flag are unchanged."
     }
   ]
 }

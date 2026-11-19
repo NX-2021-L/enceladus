@@ -1539,6 +1539,13 @@ jobs:
               "pr_owner": "NX-2021-L",
               "pr_repo": "enceladus",
               "submitted_by": "gha-deploy-pipeline",
+              # ENC-ISS-916 / ENC-TSK-T10: this job RECORDS a deploy that already
+              # finished. Without this flag deploy_intake stores the row as
+              # "pending" and, with the project ACTIVE, wakes deploy_orchestrator,
+              # which then attempts a SECOND independent deployment from the
+              # legacy source-archive path. record_only stores the row with a
+              # terminal status and sends no trigger on any path.
+              "record_only": True,
               "non_ui_config": {
                   "service_group": "lambda",
                   "target_arn": f"arn:aws:lambda:us-west-2:356364570033:function:devops-tracker-mutation-api{'-gamma' if 'gamma' in env else ''}",
