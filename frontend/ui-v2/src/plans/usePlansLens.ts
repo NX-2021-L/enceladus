@@ -138,8 +138,20 @@ export function usePlansLens(): PlansLens {
     error: corpus.error ? String(corpus.error) : null,
     timeScaleError: scopeError,
     truncated,
+    /**
+     * AUTHORITATIVE: `{ seed: true }` is what forces a full re-seed. Without it the kit's sync() takes the
+     * heal-only branch whenever the stored seed is younger than seedMaxAgeMs, which W2.5 set to 24 hours --
+     * `doSeed = o.seed === true || !(fresh && haveCursors)`. A plain refresh() therefore issues /feed/delta and
+     * never /feed/corpus, and a delta only returns rows whose version_seq moved.
+     *
+     * That matters here more than anywhere else in the app: W2.1 widened the corpus ROW SHAPE, and a row whose
+     * record has not changed since never comes down again. On gamma this left plans sitting at their pre-W2.1
+     * fields -- no objectives_set, no parent, no wave -- so every card read "0 tree tasks in 0 waves" and the
+     * page's own refresh control could not repair it. CorpusRefreshButton already passes the flag for its
+     * authoritative mode; this one did not.
+     */
     refresh: () => {
-      void corpus.refresh()
+      void corpus.refresh({ seed: true })
     },
   }
 }

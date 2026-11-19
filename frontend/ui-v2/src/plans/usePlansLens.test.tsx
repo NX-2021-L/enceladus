@@ -149,6 +149,19 @@ describe('usePlansLens (ENC-TSK-S98-0C)', () => {
     expect(seen!.error).toBe('corpus unreachable')
   })
 
+  /**
+   * The refresh control must be AUTHORITATIVE. Without `{ seed: true }` the kit takes its heal-only branch while
+   * the stored seed is younger than seedMaxAgeMs (24h, W2.5), so it issues /feed/delta and never /feed/corpus --
+   * and a delta only returns rows whose version_seq moved. W2.1 widened the row SHAPE, so a plan whose record has
+   * not changed since keeps its pre-W2.1 fields and resolves to "0 tree tasks in 0 waves" forever. Observed on
+   * gamma, where the page's own refresh could not repair it.
+   */
+  it('refresh forces a full re-seed, not a delta heal', async () => {
+    await mount()
+    seen!.refresh()
+    expect(corpusState.refresh).toHaveBeenCalledWith({ seed: true })
+  })
+
   it('reports corpus freshness, not a manual-refresh stamp (section 5.8)', async () => {
     await mount()
     expect(seen!.asOf).toBe('2026-11-19T00:00:00Z')

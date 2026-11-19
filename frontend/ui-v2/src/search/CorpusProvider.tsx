@@ -33,7 +33,11 @@ const HEAL = { intervalMs: 60_000 } as const
  * is opened, because the documents-table scan (doc_since) is gated separately in corpusSource (P101-R15) and only
  * a full seed otherwise refreshes them. Tracker rows do NOT go stale -- they heal on the 60 s delta above.
  *
- * refresh() still forces a full seed, so CorpusRefreshButton remains the escape hatch.
+ * refresh({ seed: true }) forces a full seed, so CorpusRefreshButton's authoritative mode remains the escape
+ * hatch. Note the flag: a bare refresh() does NOT re-seed while the stored seed is younger than this constant --
+ * the kit's sync() computes `doSeed = o.seed === true || !(fresh && haveCursors)` and takes the delta-only branch.
+ * Any caller that needs the current row SHAPE, not just current values, must pass it; a delta returns only rows
+ * whose version_seq moved, so a widened row never reaches a record that has not changed since.
  */
 const SEED_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
