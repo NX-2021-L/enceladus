@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.01",
-  "updated_at": "2026-11-19T01:05:00Z",
-  "last_change_summary": "ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): the Bedrock agent action group is now a READ-ONLY tracker surface. Its three write handlers fail closed and name the governed path: PUT /tracker/{recordId}/status was an FSM bypass (any status, no transition matrix, no ownership, no expected-prior condition); POST /tracker/create minted a 3-digit random record id and put_item'd it unconditionally, so a collision silently overwrote a live governed record in full (data loss); POST /tracker/{recordId}/log appended history ungoverned. All three mislabelled their writes write_kind=governed. Not routed through tracker_mutation because the lambda has no tracker API base or internal key and the endpoint had zero invocations in 30 days. New entity bedrock_agent_actions.lambda records the boundary; feed_query.delta's write-site list is corrected because bedrock is no longer a write site at all.",
+  "version": "2026-11-19.02",
+  "updated_at": "2026-11-19T03:05:00Z",
+  "last_change_summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful.",
   "owners": [
     "enceladus-platform"
   ],
@@ -546,6 +546,30 @@
           ],
           "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
           "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
+        },
+        "first_checked_out_at": {
+          "type": "string",
+          "format": "ISO 8601 UTC",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-PLN-108 W1.1 (ENC-TSK-S96-0A) / DOC-B8285D689DAC section 1: server-stamped on the FIRST agent-session checkout of this task and immutable thereafter, via 'first_checked_out_at = if_not_exists(first_checked_out_at, :now)' inside the checkout UpdateItem in tracker_mutation, spliced before the 'ADD checkout_count' clause (ENC-TSK-P49 ordering). Holds the instant work first began, which is what the Plans timeline lens uses to start a task's bar. Absent when checkout_count is 0, and absent for the human-override borrow path and the coordination SSM dispatch, neither of which performs a checkout; in those cases the lens falls back to the first in-progress time in history if one exists and otherwise draws no bar start.",
+          "stamp_trigger": "tracker_mutation checkout UpdateExpression on every successful checkout.task, for task records only. if_not_exists makes a re-checkout a no-op for this field, so the value records the first checkout and never the latest.",
+          "usage_guidance": "Read-only for all external callers. Never supply in POST/PATCH bodies: tracker_mutation rejects both with HTTP 400 RESERVED_FIELD (_W11_SERVER_STAMPED_TIMESTAMPS). The checkout write allocates no version_seq of its own, but checkout_service always follows it with the status PATCH to in-progress, which does, so the stamp reaches GET /api/v1/feed/delta within the same checkout."
+        },
+        "closed_at": {
+          "type": "string",
+          "format": "ISO 8601 UTC",
+          "required": false,
+          "writable_by": [
+            "server",
+            "io-approved escalation"
+          ],
+          "definition": "ENC-PLN-108 W1.1 (ENC-TSK-S96-0A) / DOC-B8285D689DAC section 1: server-stamped at the transition time whenever a write sets status to closed, and OVERWRITTEN when a re-entered task closes again; closed_count records how many times a task has closed, so this field holds the most recent close. Written by SIX writers (ruling D-24): the five tracker_mutation close sites -- generic PATCH behind checkout.advance, legacy PWA close, escalation direct_state_override, arc-walker code_only close, human-override advance -- all of which go through the one helper _closed_at_set_parts, plus coordination_api _set_tracker_status in BOTH of its copies (lambda_function.py and tracker_ops.py). NOT written by bedrock_agent_actions, which refuses every tracker write (ENC-ISS-909, ENC-ISS-911, ENC-TSK-T04).",
+          "stamp_trigger": "_closed_at_set_parts, appended inside SET and before any ADD clause (ENC-TSK-P49), at each close site that lands status=closed on a task record.",
+          "escalation_route": "Deliberately ABSENT from tracker_mutation's _RESERVED_OVERRIDE_PATHS, so an io-approved direct_state_override MAY supply closed_at through field_values for a task whose close time the backfill could not establish from history (ruling D-21). The applier therefore stamps closed_at only when field_values is silent about it: assigning it from both the close helper and the override loop would name one document path twice, which DynamoDB rejects and _render_update_expression raises in-process (ENC-ISS-759). See DOC-B8285D689DAC section 2.",
+          "usage_guidance": "Read-only for ordinary callers. Never supply in POST/PATCH bodies: tracker_mutation rejects both with HTTP 400 RESERVED_FIELD (_W11_SERVER_STAMPED_TIMESTAMPS). The only client-supplied route is an io-approved escalation's field_values, per escalation_route above. Absent when the task has never closed, and absent on the backfill path when history carries no recognisable close note, where ruling D-21 forbids guessing -- that case is recorded by the separate closed_at_unknown waiver marker instead of a silent null."
         }
       }
     },
@@ -10296,7 +10320,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): the Bedrock agent action group is now a READ-ONLY tracker surface. Its three write handlers fail closed and name the governed path: PUT /tracker/{recordId}/status was an FSM bypass (any status, no transition matrix, no ownership, no expected-prior condition); POST /tracker/create minted a 3-digit random record id and put_item'd it unconditionally, so a collision silently overwrote a live governed record in full (data loss); POST /tracker/{recordId}/log appended history ungoverned. All three mislabelled their writes write_kind=governed. Not routed through tracker_mutation because the lambda has no tracker API base or internal key and the endpoint had zero invocations in 30 days. New entity bedrock_agent_actions.lambda records the boundary; feed_query.delta's write-site list is corrected because bedrock is no longer a write site at all.",
+  "change_summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11535,6 +11559,11 @@
       "version": "2026-11-19.01",
       "date": "2026-11-19",
       "summary": "ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): the Bedrock agent action group is now a READ-ONLY tracker surface. Its three write handlers fail closed and name the governed path: PUT /tracker/{recordId}/status was an FSM bypass (any status, no transition matrix, no ownership, no expected-prior condition); POST /tracker/create minted a 3-digit random record id and put_item'd it unconditionally, so a collision silently overwrote a live governed record in full (data loss); POST /tracker/{recordId}/log appended history ungoverned. All three mislabelled their writes write_kind=governed. Not routed through tracker_mutation because the lambda has no tracker API base or internal key and the endpoint had zero invocations in 30 days. New entity bedrock_agent_actions.lambda records the boundary; feed_query.delta's write-site list is corrected because bedrock is no longer a write site at all."
+    },
+    {
+      "version": "2026-11-19.02",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful."
     }
   ]
 }
