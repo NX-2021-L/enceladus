@@ -39,7 +39,13 @@ class _FakeDdb:
         self.put_calls.append(kwargs)
 
 
-def test_handle_tracker_create_requires_acceptance_criteria_for_task():
+# ENC-TSK-T04 (ENC-ISS-911): POST /tracker/create no longer writes. It used to mint a
+# record id from three digits of a random UUID and then put_item it unconditionally, so
+# a collision silently overwrote a live governed record. The two tests that used to
+# assert its acceptance_criteria validation and storage now assert the refusal: there is
+# no create behaviour left to validate, and record-id allocation belongs to the server.
+# Full fail-closed coverage lives in test_tracker_write_fail_closed_t04.py.
+def test_handle_tracker_create_is_refused_without_touching_dynamodb():
     with patch.object(bedrock_lambda, "_get_ddb") as mock_get_ddb:
         result = bedrock_lambda._handle_tracker_create(
             {
@@ -50,11 +56,15 @@ def test_handle_tracker_create_requires_acceptance_criteria_for_task():
         )
 
     assert "error" in result
-    assert "acceptance_criteria" in result["error"]
+    assert "Refused" in result["error"]
+    assert result["refused_operation"] == "tracker.create"
+    assert "tracker.create" in result["governed_path"]
+    assert result["governance_reference"] == "ENC-ISS-911"
     mock_get_ddb.assert_not_called()
 
 
-def test_handle_tracker_create_stores_acceptance_criteria():
+def test_handle_tracker_create_refuses_even_with_valid_acceptance_criteria():
+    """A well-formed request is refused too -- the path is closed, not validated."""
     fake_ddb = _FakeDdb()
     with patch.object(bedrock_lambda, "_get_ddb", return_value=fake_ddb):
         result = bedrock_lambda._handle_tracker_create(
@@ -66,12 +76,10 @@ def test_handle_tracker_create_stores_acceptance_criteria():
             }
         )
 
-    assert result.get("success") is True
-    assert fake_ddb.put_calls
-    item = fake_ddb.put_calls[0]["Item"]
-    assert "acceptance_criteria" in item
-    criteria = [entry["S"] for entry in item["acceptance_criteria"]["L"]]
-    assert criteria == ["first", "second"]
+    assert result.get("success") is None
+    assert "Refused" in result["error"]
+    assert not fake_ddb.put_calls, "a refused create must not write"
+    assert "item_id" not in result, "a refused create must not mint an id"
 
 
 def test_check_document_policy_denies_local_path():
