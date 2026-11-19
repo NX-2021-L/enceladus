@@ -77,6 +77,12 @@ export function mapCorpusItem(item: FeedCorpusItem): IndexRow | null {
       title,
       updated_at: item.updated_at ?? undefined,
       created_at: str(pick('created_at')),
+      // ENC-TSK-S97-0A (ENC-PLN-108 W2.1): the Plans lens attributes. objectives_set (plans, stored order), parent
+      // and wave (tasks). Each is undefined when the row lacks it, so older rows and non-plan rows map as before.
+      // first_checked_out_at / closed_at are deliberately not mapped: D-26 keeps them off the corpus entirely.
+      objectives_set: list(pick('objectives_set')),
+      parent: str(pick('parent')),
+      wave: str(pick('wave')),
     },
     updatedAt: item.updated_at ?? null,
     version,
