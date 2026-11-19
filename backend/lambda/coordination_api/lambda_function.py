@@ -63,7 +63,11 @@ except Exception:  # noqa: BLE001
     _webpush = None  # type: ignore[assignment]
 import notify_v2  # ENC-TSK-Q83: notify v2 routes + sender (no import of this module)
 # ENC-TSK-S94 (ENC-ISS-908): the one sequencing rule for this lambda's status writes.
-from version_seq_ops import closed_count_add_parts, sequenced_write_parts
+from version_seq_ops import (
+    closed_at_set_parts,
+    closed_count_add_parts,
+    sequenced_write_parts,
+)
 
 try:
     from mcp_client import CoordinationMcpClient
@@ -2226,11 +2230,17 @@ def _set_tracker_status(
     # assignment) and MUST precede the ADD clause (ENC-TSK-P49). The
     # ConditionExpression and the CCFX-to-False contract below are untouched.
     _vseq_expr, _vseq_vals = sequenced_write_parts(ddb, TRACKER_TABLE)
+    # ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): a close through this writer
+    # also dates itself. Same predicate as the closed_count ADD below, so the
+    # date and the count cannot disagree; spliced inside SET and before that ADD
+    # (ENC-TSK-P49). Unlike the sequencing fragment this one is a plain
+    # assignment, so it survives every rung of version_seq_ops' import ladder.
+    _ca_expr, _ca_vals = closed_at_set_parts(record_type, new_status, now)
     _cc_expr, _cc_vals = closed_count_add_parts(record_type, new_status)
     _update_expr = (
         "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
         "sync_version = if_not_exists(sync_version, :zero) + :one"
-        + _vseq_expr + _cc_expr
+        + _vseq_expr + _ca_expr + _cc_expr
     )
     _attr_values = {
         ":new_status": _serialize(new_status),
@@ -2241,6 +2251,7 @@ def _set_tracker_status(
         ":one": _serialize(1),
     }
     _attr_values.update(_vseq_vals)
+    _attr_values.update(_ca_vals)
     _attr_values.update(_cc_vals)
     try:
         ddb.update_item(

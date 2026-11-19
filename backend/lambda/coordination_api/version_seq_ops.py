@@ -112,3 +112,41 @@ def closed_count_add_parts(
     if str(new_status or "").strip().lower() != "closed":
         return "", {}
     return " ADD closed_count :vsq_cc_one", {":vsq_cc_one": {"N": "1"}}
+
+
+_CLOSED_AT_VALUE_KEY = ":vsq_ca"
+
+
+def closed_at_set_parts(
+    record_type: str, new_status: str, now: str
+) -> Tuple[str, Dict[str, Dict[str, str]]]:
+    """Return the ``SET`` fragment that dates a task close, or ``("", {})``.
+
+    ENC-TSK-S96-0B (ENC-PLN-108 W1.2) / DOC-B8285D689DAC section 1. ``closed_at``
+    holds the transition time of the MOST RECENT close; ``closed_count`` already
+    records how many times a task has closed. The predicate is deliberately the
+    same one :func:`closed_count_add_parts` applies, so the date and the count
+    can never disagree about whether a close happened: both are driven by
+    ``record_type`` and ``new_status`` alone, and other record types get nothing
+    because the field is defined on ``tracker.task``.
+
+    The fragment begins with ``", "`` and belongs INSIDE the ``SET`` clause,
+    BEFORE any ``ADD`` -- a ``SET`` assignment after ``" ADD ..."`` is invalid
+    UpdateExpression syntax (ENC-TSK-P49).
+
+    Note what this function does NOT touch: the sequencing rule. ``closed_at`` is
+    a plain assignment of a caller-supplied instant, with no dependency on
+    ``_rule`` or on which rung of the import ladder above is live. It therefore
+    behaves identically whether the pinned layer carries the shared rule, only
+    the primitives, or neither -- which is what ENC-TSK-S96-0B's third acceptance
+    criterion asks to be shown. A stamp that silently vanished when the layer
+    degraded would be worse than no stamp, because the gap would look like a task
+    that never closed.
+    """
+    if str(record_type or "").strip().lower() != "task":
+        return "", {}
+    if str(new_status or "").strip().lower() != "closed":
+        return "", {}
+    return ", closed_at = %s" % _CLOSED_AT_VALUE_KEY, {
+        _CLOSED_AT_VALUE_KEY: {"S": now},
+    }
