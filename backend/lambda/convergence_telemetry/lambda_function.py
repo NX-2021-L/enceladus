@@ -270,6 +270,18 @@ def _collect_records(event: Any) -> List[Dict[str, Any]]:
 PROJECTION_ONLY_ATTRS = frozenset({
     "projection_status", "projected_version_seq", "t_projected", "feed_published_version_seq",
     "write_kind",  # ENC-TSK-S47-0B: marker writers flip it to "marker"; governed writes set "governed"
+    # ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the W1 backfill dates roughly 7,878
+    # historical records with first_checked_out_at / closed_at / closed_at_unknown
+    # as MARKER writes (write_kind="marker", no version_seq). Without these three
+    # names the backfill's diff is not a subset of this set, so every one of those
+    # records would be re-indexed, re-audited and re-counted in a single burst.
+    # Listing them is safe because no GOVERNED path ever writes them alone: a real
+    # close also moves status, updated_at, last_update_note, sync_version and
+    # history, and a real checkout also moves checkout_state and checked_out_by, so
+    # a genuine lifecycle write never becomes a subset of this set. The backfill
+    # must therefore touch these attributes and write_kind ONLY -- if it also bumps
+    # updated_at the guard stops matching and the burst returns (ENC-TSK-S96-0D).
+    "first_checked_out_at", "closed_at", "closed_at_unknown",
 })
 
 
