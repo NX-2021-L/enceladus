@@ -944,6 +944,17 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         if record_type == "task":
             add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
+            # ENC-TSK-S96-0A (W1.1): stamp closed_at, but ONLY when field_values is
+            # silent about it. closed_at stays out of _RESERVED_OVERRIDE_PATHS on
+            # purpose, so an io-approved escalation can supply the close time of a
+            # task the backfill could not date (ruling D-21). Stamping it
+            # unconditionally would name closed_at twice in one expression and
+            # _render_update_expression would raise (ENC-ISS-759), breaking exactly
+            # the route D-21 relies on. See DOC-B8285D689DAC section 2.
+            if "closed_at" not in clean_field_values:
+                _cl_expr, _cl_vals = _closed_at_set_parts(now)
+                assignments.append(("closed_at", _cl_expr.lstrip(", ")))
+                values.update(_cl_vals)
 
     update_expression = _render_update_expression(
         assignments, add_clauses, set_suffix=_esc_vseq_expr)
@@ -1189,6 +1200,21 @@ _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature
 # direct PATCH or create attempt is rejected with HTTP 400 RESERVED_FIELD.
 # Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
 _F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
+
+# ENC-TSK-S96-0A (ENC-PLN-108 W1.1) / DOC-B8285D689DAC section 1: server-stamped
+# lifecycle TIMESTAMPS on task records. first_checked_out_at is written once, by
+# if_not_exists in the checkout UpdateItem; closed_at is written by the six close
+# writers through _closed_at_set_parts. Neither is writable by an agent, io or
+# coordination caller, so a direct create or tracker.set attempt is rejected with
+# HTTP 400 RESERVED_FIELD -- the same posture as the F41 counters, kept in its own
+# set because these are stamps rather than counters and the refusal must not claim
+# they are "incremented".
+#
+# This does NOT close the escalation route: closed_at stays deliberately absent
+# from _RESERVED_OVERRIDE_PATHS so an io-approved direct_state_override may still
+# supply the close time of a task the backfill could not date (ruling D-21). That
+# path runs through _apply_direct_state_override, not through this guard.
+_W11_SERVER_STAMPED_TIMESTAMPS = frozenset({"first_checked_out_at", "closed_at"})
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1496,6 +1522,44 @@ def _sequencing_parts_or_governed() -> Tuple[str, Dict[str, Dict[str, str]]]:
             "[ENC-ISS-908] version_seq allocation failed; the write will be "
             "governed but UNSEQUENCED")
         return ", write_kind = :vsq_wkind", {":vsq_wkind": {"S": "governed"}}
+
+
+_CLOSED_AT_VALUE_KEY = ":cl_at"
+
+
+def _closed_at_set_parts(now: str) -> Tuple[str, Dict[str, Dict[str, str]]]:
+    """ENC-TSK-S96-0A (ENC-PLN-108 W1.1) -- the single closed_at stamping rule.
+
+    Returns ``(set_fragment, values)`` where ``set_fragment`` is APPENDABLE: it
+    begins with ``", "`` and is meant to be concatenated onto an existing ``SET``
+    clause. ``closed_at`` holds the transition time of the MOST RECENT close;
+    ``closed_count`` already records how many times a task has closed
+    (DOC-B8285D689DAC section 1).
+
+    Caller contract -- the same three rules the sequencing fragment carries, for
+    the same reasons:
+
+      1. Append INSIDE the ``SET`` clause and BEFORE any ``ADD`` clause. A ``SET``
+         assignment placed after ``" ADD ..."`` is invalid UpdateExpression syntax
+         (ENC-TSK-P49, where every governed task close failed on that ordering).
+      2. Call it only when the write actually lands ``status = closed`` on a
+         ``task``. The field is defined on ``tracker.task``; other record types
+         close without it, exactly as they carry no ``closed_count``.
+      3. Do NOT call it when the caller's own payload already assigns
+         ``closed_at``. DynamoDB rejects an expression naming one document path
+         twice, and ``_render_update_expression`` raises the same defect in-process
+         (ENC-ISS-759).
+
+    Rule 3 is not hypothetical. ``closed_at`` is deliberately absent from
+    ``_RESERVED_OVERRIDE_PATHS``, so an io-approved escalation may supply it
+    through ``field_values`` for a task whose close time the backfill could not
+    establish -- the route ruling D-21 depends on. The escalation applier therefore
+    stamps only when ``field_values`` is silent, which keeps D-21's route open and
+    keeps the overlap guard meaningful (DOC-B8285D689DAC section 2).
+    """
+    return ", closed_at = %s" % _CLOSED_AT_VALUE_KEY, {
+        _CLOSED_AT_VALUE_KEY: {"S": now},
+    }
 
 
 def _get_events():
@@ -3289,6 +3353,7 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
         extra_set = ""
         extra_vals: Dict[str, Any] = {}
         add_clause = ""
+        _aw_closed_at_pending = False
         if target == "closed" and transition_type == "code_only":
             if not re.match(r"^[0-9a-f]{40}$", commit_sha):
                 summary["halted_reason"] = "gate_fail:missing_commit_sha"
@@ -3309,6 +3374,11 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             extra_vals[":coe"] = {"M": {
                 "commit_sha": _ser_s(commit_sha), "github_verified": {"BOOL": True},
             }}
+            # ENC-TSK-S96-0A (W1.1): the walker's code_only close is a close, so it
+            # stamps closed_at. It rides extra_set, which is spliced inside SET and
+            # before add_clause (ENC-TSK-P49). now2 is minted just below and is the
+            # same instant the status transition records.
+            _aw_closed_at_pending = True
             add_clause = " ADD closed_count :one"
         else:
             derivation = (
@@ -3318,6 +3388,10 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
 
         # (4) Idempotent conditional write: advance iff status == expected_prior (§8 idempotency).
         now2 = _now_z()
+        if _aw_closed_at_pending:
+            _aw_cl_expr, _aw_cl_vals = _closed_at_set_parts(now2)
+            extra_set += _aw_cl_expr
+            extra_vals.update(_aw_cl_vals)
         hentry = _arc_walk_history_entry(now2, current, target, gate_class, derivation, pinned_matrix)
         note = f"[ARC-WALKER] auto-advanced {current} -> {target} (system:arc-walker)"
         ws_av = {"M": {
@@ -4580,6 +4654,21 @@ def _handle_create_record(
     # exclusively by the tracker lifecycle handler. Guard runs early so client
     # attempts to seed these fields fail fast with HTTP 400 RESERVED_FIELD
     # rather than being silently dropped after the project-prefix lookup.
+    for _w11_field in _W11_SERVER_STAMPED_TIMESTAMPS:
+        if _w11_field in body:
+            return _error(
+                400,
+                (
+                    f"Field '{_w11_field}' is server-stamped and must not be "
+                    f"supplied at create time. first_checked_out_at is stamped on "
+                    f"the first checkout and closed_at on each close."
+                ),
+                code="RESERVED_FIELD",
+                field=_w11_field,
+                reason="server_side_only",
+                rule_citation="ENC-TSK-S96-0A / DOC-B8285D689DAC section 1",
+            )
+
     for _f41_field in _F41_RESERVED_COUNTER_FIELDS:
         if _f41_field in body:
             return _error(
@@ -6000,6 +6089,12 @@ def _apply_user_initiated_advance(
     # so a PWA-initiated close was invisible to the feed delta. Splice the sequencing
     # fragment inside SET and BEFORE the closed_count ADD (ENC-TSK-P49); it stamps
     # write_kind in place of the local ":wk" assignment removed above.
+    # ENC-TSK-S96-0A (W1.1): stamp closed_at on a task close, inside SET and
+    # before the closed_count ADD (ENC-TSK-P49).
+    _ui_cl_vals: Dict[str, Dict[str, str]] = {}
+    if new_lower == "closed" and record_type == "task":
+        _ui_cl_expr, _ui_cl_vals = _closed_at_set_parts(now)
+        ui_update_expr += _ui_cl_expr
     _ui_vseq_expr, _ui_vseq_vals = _sequencing_parts_or_governed()
     ui_update_expr += _ui_vseq_expr
     if new_lower == "closed":
@@ -6011,6 +6106,7 @@ def _apply_user_initiated_advance(
         ":hentry": {"L": hentry_list}, ":empty": {"L": []},
     }
     ui_attr_values.update(_ui_vseq_vals)
+    ui_attr_values.update(_ui_cl_vals)
     if latch_nf:
         ui_attr_values[":optout"] = {"BOOL": True}
     try:
@@ -6266,6 +6362,21 @@ def _handle_update_field(
     # fields are incremented atomically by the same UpdateExpression that
     # performs the triggering state transition (checkout / close) below — they
     # are never writable by clients and must never be accepted via tracker.set.
+    if field in _W11_SERVER_STAMPED_TIMESTAMPS:
+        return _error(
+            400,
+            (
+                f"Field '{field}' is server-stamped by the tracker lifecycle "
+                f"handler and is not writable via tracker.set / tracker.create. "
+                f"first_checked_out_at is stamped once on the first checkout; "
+                f"closed_at is stamped on each close."
+            ),
+            code="RESERVED_FIELD",
+            field=field,
+            reason="server_side_only",
+            rule_citation="ENC-TSK-S96-0A / DOC-B8285D689DAC section 1",
+        )
+
     if field in _F41_RESERVED_COUNTER_FIELDS:
         return _error(
             400,
@@ -7038,6 +7149,14 @@ def _handle_update_field(
                 "history = list_append(if_not_exists(history, :empty), :hentry)"
             )
             if record_type == "task":
+                # ENC-TSK-S96-0A (ENC-PLN-108 W1.1): stamp first_checked_out_at on
+                # the FIRST checkout only. if_not_exists makes the write idempotent,
+                # so a re-checkout leaves the original instant untouched, which is
+                # what the lens needs to start a task's bar. The assignment sits
+                # INSIDE SET and BEFORE the ADD below (ENC-TSK-P49).
+                checkout_update_expr += (
+                    ", first_checked_out_at = if_not_exists(first_checked_out_at, :now)"
+                )
                 checkout_update_expr += " ADD checkout_count :one"
             try:
                 ddb.update_item(
@@ -7229,6 +7348,17 @@ def _handle_update_field(
     # spliced BEFORE any ADD clause — SET assignments appended after
     # " ADD closed_count :one" are invalid UpdateExpression syntax (ENC-TSK-P49:
     # every governed task close failed on exactly that ordering).
+    # ENC-TSK-S96-0A (ENC-PLN-108 W1.1): stamp closed_at when this PATCH is the
+    # write that lands a task at closed. Inside SET, before the ADD (ENC-TSK-P49).
+    _patch_is_task_close = (
+        field == "status" and record_type == "task"
+        and str(value).strip().lower() == "closed"
+    )
+    _patch_cl_vals: Dict[str, Dict[str, str]] = {}
+    if _patch_is_task_close:
+        _patch_cl_expr, _patch_cl_vals = _closed_at_set_parts(now)
+        update_expr += _patch_cl_expr
+
     vseq_expr, vseq_vals = _version_seq_update_parts()
     update_expr += vseq_expr
 
@@ -7238,7 +7368,7 @@ def _handle_update_field(
     # commit as a single atomic DynamoDB operation. ADD treats a missing
     # attribute as 0, which preserves pre-FTR-076-v2 records and keeps the
     # fail-closed DESIGNS gate semantic (closed_count>=1 required).
-    if field == "status" and record_type == "task" and str(value).strip().lower() == "closed":
+    if _patch_is_task_close:
         update_expr += " ADD closed_count :one"
 
     attr_values = {
@@ -7251,6 +7381,7 @@ def _handle_update_field(
         attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
     attr_values.update(vseq_vals)
+    attr_values.update(_patch_cl_vals)
 
     # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
     # (not just the pre-check above) against a write that landed in between —
@@ -7426,6 +7557,12 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
             # write re-surfaces in the feed-delta projection (version-seq-index
             # GSI) — same idiom as _handle_log (M79) and the generic PATCH path.
             # The vseq clause MUST stay inside SET, spliced BEFORE any ADD clause.
+            # ENC-TSK-S96-0A (W1.1): stamp closed_at on this legacy PWA close too,
+            # inside SET and before the ADD (ENC-TSK-P49).
+            _pwa_cl_vals: Dict[str, Dict[str, str]] = {}
+            if record_type == "task" and closed_status == "closed":
+                _pwa_cl_expr, _pwa_cl_vals = _closed_at_set_parts(now)
+                pwa_close_update_expr += _pwa_cl_expr
             _vseq_expr, _vseq_vals = _version_seq_update_parts()
             pwa_close_update_expr += _vseq_expr
             if record_type == "task" and closed_status == "closed":
@@ -7437,6 +7574,7 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 ":expected": {"N": str(current_version)},
             }
             _pwa_close_vals.update(_vseq_vals)
+            _pwa_close_vals.update(_pwa_cl_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=pwa_close_update_expr,
