@@ -30,7 +30,7 @@ export interface ResolvedWave {
   series: string | null
   /** Null when the wave is labelled (labels are opaque) or has no token in its title. */
   number: number | null
-  /** The wave's display label: its `wave_label`, else `<series><number>`, else its parent's id. */
+  /** The wave's display label: its `wave`, else `<series><number>`, else its parent's id. */
   label: string
   parent_id: string | null
   /** The step that created the wave. Members that joined by another step are in `placements`. */
@@ -202,7 +202,7 @@ export function resolveWaves(plan: ResolverPlan, rows: readonly ResolverRow[]): 
     const token = parseWaveToken(row.title)
     if (token?.subordinal) subordinals.set(id, token.subordinal)
     const kids = children.get(id) ?? []
-    const label = row.wave_label ? row.wave_label : null
+    const label = row.wave ? row.wave : null
 
     // Step 1: a labelled objective belongs to the wave of its label; with children it is that wave's parent.
     if (label !== null) {

@@ -18,7 +18,7 @@ export interface LensRow {
   /** The only source of membership below an objective (DOC-F3E7C341EB27 section 4.2). */
   parent?: string | null
   /** Authoritative wave when set (ruling D-20). Opaque: never parsed, compared byte for byte. */
-  wave_label?: string | null
+  wave?: string | null
   /** Plan rows only, in order. */
   objectives_set?: readonly string[] | null
 }
@@ -27,7 +27,7 @@ export interface LensRow {
  * What the resolver reads of a row (DOC-F3E7C341EB27 section 1). `subtask_ids` is deliberately not part of the contract:
  * it disagrees with `parent` in production (F5), so admitting it would make membership ambiguous.
  */
-export type ResolverRow = Pick<LensRow, 'item_id' | 'record_type' | 'title' | 'parent' | 'wave_label' | 'status' | 'created_at'>
+export type ResolverRow = Pick<LensRow, 'item_id' | 'record_type' | 'title' | 'parent' | 'wave' | 'status' | 'created_at'>
 
 /** The plan a resolution is for: its ordered objectives. A full plan LensRow satisfies this. */
 export interface ResolverPlan {

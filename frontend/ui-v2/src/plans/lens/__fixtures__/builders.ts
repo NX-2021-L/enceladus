@@ -27,7 +27,7 @@ export interface GoldenFixture {
   name: string
   /** Section 5.4 shape(s) pinned. */
   shape: string
-  /** F11 only: no production record carried a wave_label on 2026-11-19 (spec section 2). */
+  /** F11 only: no production record carried a wave on 2026-11-19 (spec section 2). */
   synthetic: boolean
   objectives: string[]
   rows: FixtureRow[]

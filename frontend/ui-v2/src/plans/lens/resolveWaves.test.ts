@@ -98,7 +98,7 @@ describe('golden fixtures F1 to F11 (DOC-F3E7C341EB27 section 7)', () => {
       const base = run(f)
       const memberIds = new Set(f.expected.waves.flatMap((w) => w.members).filter((m) => !f.expected.byTitle.includes(m) && !f.expected.byLabel.includes(m)))
       const poisoned = f.rows.map((row): FixtureRow =>
-        memberIds.has(row.item_id) ? { ...row, title: 'W9 V9 wave 9 [Wave 9]', wave_label: 'POISON', subtask_ids: ['ENC-TSK-NOWHERE'] } : { ...row, subtask_ids: undefined },
+        memberIds.has(row.item_id) ? { ...row, title: 'W9 V9 wave 9 [Wave 9]', wave: 'POISON', subtask_ids: ['ENC-TSK-NOWHERE'] } : { ...row, subtask_ids: undefined },
       )
       const r = run(f, poisoned)
       expect(shape(r)).toEqual(shape(base))
@@ -226,7 +226,7 @@ describe('the assertions that matter, one per fixture trap', () => {
   })
 
   it('F11: removing the labels returns F6-style title placement, proving the label was what decided', () => {
-    const rows = F11.rows.map((row): FixtureRow => ({ ...row, wave_label: null }))
+    const rows = F11.rows.map((row): FixtureRow => ({ ...row, wave: null }))
     const r = run(F11, rows)
     expect(r.waves.map((w) => w.label)).toEqual(['W1', 'W2', 'W3'])
     expect(r.unassigned).toEqual(['ENC-TSK-S88'])
@@ -371,7 +371,7 @@ describe('resolveWaves: behaviours the fixtures do not reach', () => {
   })
 
   it('a labelled wave among numbered ones forces objective order', () => {
-    const rows = [task('A', 'W3'), task('B', 'x', { wave_label: 'Spike' }), task('C', 'W1')]
+    const rows = [task('A', 'W3'), task('B', 'x', { wave: 'Spike' }), task('C', 'W1')]
     expect(resolveWaves(plan('A', 'B', 'C'), rows).waves.map((w) => w.label)).toEqual(['W3', 'Spike', 'W1'])
   })
 
@@ -390,7 +390,7 @@ describe('resolveWaves: behaviours the fixtures do not reach', () => {
   })
 
   it('a labelled objective with children is that wave\'s parent, and its descendants are members by parent', () => {
-    const rows = [task('P', 'whatever', { wave_label: 'Alpha' }), ...kids('P', [['P1', 'x']]), task('Q', 'W9', { wave_label: 'Alpha' })]
+    const rows = [task('P', 'whatever', { wave: 'Alpha' }), ...kids('P', [['P1', 'x']]), task('Q', 'W9', { wave: 'Alpha' })]
     const r = resolveWaves(plan('P', 'Q'), rows)
     expect(r.waves).toHaveLength(1)
     expect(r.waves[0]).toMatchObject({ label: 'Alpha', parent_id: 'P', placement: 'label', members: ['P1', 'Q'] })
@@ -398,13 +398,13 @@ describe('resolveWaves: behaviours the fixtures do not reach', () => {
   })
 
   it('labels are byte-equal opaque strings: W1 and w1 and "W1 " are three waves', () => {
-    const rows = [task('A', 'x', { wave_label: 'W1' }), task('B', 'x', { wave_label: 'w1' }), task('C', 'x', { wave_label: 'W1 ' })]
+    const rows = [task('A', 'x', { wave: 'W1' }), task('B', 'x', { wave: 'w1' }), task('C', 'x', { wave: 'W1 ' })]
     expect(resolveWaves(plan('A', 'B', 'C'), rows).waves.map((w) => w.label)).toEqual(['W1', 'w1', 'W1 '])
   })
 
   it('non-task objectives are chips whatever they carry, and are never placed', () => {
     const rows: FixtureRow[] = [
-      { item_id: 'F', record_type: 'feature', title: 'W1 a feature', wave_label: 'W1' },
+      { item_id: 'F', record_type: 'feature', title: 'W1 a feature', wave: 'W1' },
       { item_id: 'I', record_type: 'issue', title: 'an issue' },
       task('T', 'W1 x'),
     ]
