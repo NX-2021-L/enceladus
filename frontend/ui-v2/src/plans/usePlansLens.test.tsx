@@ -129,11 +129,24 @@ describe('usePlansLens (ENC-TSK-S98-0C)', () => {
     expect(planScope).toHaveBeenCalledTimes(1)
   })
 
-  it('a failed plan-scope read leaves the page usable: structure stands, the error is reported', async () => {
-    planScope.mockRejectedValue(new Error('plan scope exploded'))
+  /**
+   * Found on gamma: /feed/plan-scope 404'd (its API Gateway route had not been deployed there) and the page replaced
+   * 60 plans with "Plans could not be loaded". PlansPage treats `error` as fatal, so the time-scale failure must
+   * never travel in it.
+   */
+  it('a failed plan-scope read loses the time scale, NOT the page', async () => {
+    planScope.mockRejectedValue(new Error('Failed to read plan scope (404)'))
     await mount()
     expect(seen!.rows).toHaveLength(2)
-    expect(seen!.error).toBe('plan scope exploded')
+    // Structure is intact and the page is not in its fatal state.
+    expect(seen!.error).toBeNull()
+    expect(seen!.timeScaleError).toBe('Failed to read plan scope (404)')
+  })
+
+  it('a corpus failure IS fatal: there is nothing to draw', async () => {
+    corpusState = { ...corpusState, rows: [], error: 'corpus unreachable' }
+    await mount()
+    expect(seen!.error).toBe('corpus unreachable')
   })
 
   it('reports corpus freshness, not a manual-refresh stamp (section 5.8)', async () => {
