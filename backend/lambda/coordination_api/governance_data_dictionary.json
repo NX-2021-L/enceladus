@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.03",
-  "updated_at": "2026-11-19T07:35:00Z",
-  "last_change_summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder.",
+  "version": "2026-11-19.04",
+  "updated_at": "2026-11-19T07:55:00Z",
+  "last_change_summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -10320,7 +10320,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder.",
+  "change_summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11569,6 +11569,11 @@
       "version": "2026-11-19.03",
       "date": "2026-11-19",
       "summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder."
+    },
+    {
+      "version": "2026-11-19.04",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed."
     }
   ]
 }
