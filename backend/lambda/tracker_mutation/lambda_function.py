@@ -11240,6 +11240,176 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-S96-0D (ENC-PLN-108 W1.4, ruling D-21): the lifecycle-stamp backfill route.
+#
+#   POST /api/v1/tracker/{project}/task/{id}/lifecycle-backfill
+#
+# This is the ONE governed route through which historical tasks are dated. It is a
+# MARKER write: write_kind = "marker", no version_seq, and set-if-absent. Three
+# properties make the roughly 7,878 writes invisible to the stream consumers, and
+# each is load-bearing:
+#
+#   1. It touches first_checked_out_at, closed_at, closed_at_unknown and write_kind
+#      ONLY. W1.3 (ENC-TSK-S96-0C) added exactly those three names to
+#      PROJECTION_ONLY_ATTRS in opensearch_indexer, governance_audit and
+#      convergence_telemetry, whose guard is a SUBSET test on the stream diff. The
+#      moment this route also bumped updated_at, sync_version, history or
+#      last_update_note, the diff would stop being a subset and every record would
+#      re-enter those three pipelines in one burst. So it must not, and
+#      _LBF_MARKER_ATTRS below is the single list a test holds both sides to.
+#   2. It allocates no version_seq (so it never enters the feed delta) and it does
+#      NOT use the sequencing fragment, which resets write_kind to "governed" and
+#      would defeat the feed_publisher / graph_sync / appsync event-source filters.
+#   3. It is set-if-absent (if_not_exists): a value already on the record -- a live
+#      stamp from W1.1/W1.2, or a time io established through an escalation -- is
+#      never replaced.
+#
+# How the W1.1 client guard stays intact. The W1.1 server-stamped-timestamp guard still
+# rejects first_checked_out_at and closed_at with RESERVED_FIELD at create and at
+# PATCH, untouched. This route is a different, server-side stamping path, and it is
+# not a hole in that guard because it ACCEPTS NO TIMESTAMP FROM THE CLIENT AT ALL:
+# the request names a record, the Lambda reads that record's own history and runs
+# lifecycle_backfill itself, and a body that names any of the three attributes is
+# refused with the same RESERVED_FIELD. A caller can therefore ask for a record to
+# be dated; it cannot choose the date.
+#
+# Auth: internal API key only (a human Cognito session is refused -- io's route for
+# fixing one record's date is an escalation), and when a scope map is configured the
+# key must also carry tracker:backfill.
+# ---------------------------------------------------------------------------
+try:
+    import lifecycle_backfill as _lifecycle_backfill
+except ImportError:  # pragma: no cover - packaging guard; the route then answers 503
+    _lifecycle_backfill = None
+
+# The ONLY attributes the marker write may touch, besides write_kind. Mirrors
+# PROJECTION_ONLY_ATTRS of the three W1.3 consumers (verified by test).
+_LBF_MARKER_ATTRS = ("first_checked_out_at", "closed_at", "closed_at_unknown")
+_LBF_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_LBF_ALLOWED_BODY_KEYS = frozenset({
+    "backfill_run_id", "dry_run", "write_source", "governance_hash", "correlation_id",
+})
+
+
+def _lbf_marker_write_parts(to_set: Dict[str, Any], run_id: str, now: str):
+    """(UpdateExpression, ExpressionAttributeValues) for the marker write.
+
+    Contains write_kind and the attributes in ``to_set`` and nothing else -- no
+    updated_at, sync_version, history, last_update_note, version_seq or feed_scope --
+    and no ADD clause. Every attribute is if_not_exists.
+    """
+    assigns = ["write_kind = :lbf_wk"]
+    values: Dict[str, Any] = {":lbf_wk": {"S": "marker"}}
+    # One loop, one spelling: every stamp is if_not_exists, so a value already on the record
+    # (a live W1.1/W1.2 stamp, or a time io set through an escalation) is never replaced.
+    for attr, token in (("first_checked_out_at", ":lbf_fco"), ("closed_at", ":lbf_cat"),
+                        ("closed_at_unknown", ":lbf_cau")):
+        if attr not in to_set:
+            continue
+        assigns.append(f"{attr} = if_not_exists({attr}, {token})")
+        if attr == "closed_at_unknown":
+            values[token] = _ser_value(
+                _lifecycle_backfill.marker_value(to_set[attr], run_id, now))
+        else:
+            values[token] = {"S": to_set[attr]}
+    return "SET " + ", ".join(assigns), values
+
+
+def _handle_lifecycle_backfill(project_id: str, record_type: str, record_id: str,
+                               body: Dict, claims: Optional[Dict]) -> Dict:
+    if _lifecycle_backfill is None:
+        return _error(503, "lifecycle_backfill module is not packaged with this Lambda.")
+    if (claims or {}).get("auth_mode") != "internal-key":
+        return _error(403, "The lifecycle backfill route accepts an internal API key only.",
+                      code="PERMISSION_DENIED")
+    if record_type != "task":
+        return _error(400, "The lifecycle backfill applies to tasks only.", field="record_type")
+    if not isinstance(body, dict):
+        return _error(400, "Invalid JSON body.")
+    for attr in _LBF_MARKER_ATTRS:
+        if attr in body:
+            return _error(
+                400,
+                f"'{attr}' is derived by the server from the record's own history and must not be "
+                f"supplied. A close time io establishes later goes through an escalation (ruling D-21).",
+                code="RESERVED_FIELD", field=attr, reason="server_side_only",
+                rule_citation="ENC-TSK-S96-0D / DOC-5E1E205FA664 ruling D-21",
+            )
+    unknown_keys = sorted(set(body) - _LBF_ALLOWED_BODY_KEYS)
+    if unknown_keys:
+        return _error(400, f"Unsupported body field(s): {unknown_keys}.", field=unknown_keys[0])
+    run_id = str(body.get("backfill_run_id") or "").strip()
+    if not _LBF_RUN_ID_RE.match(run_id):
+        return _error(400, "backfill_run_id is required (1-64 chars of [A-Za-z0-9._:-]).",
+                      field="backfill_run_id")
+    dry_run = body.get("dry_run") is True
+
+    try:
+        raw = _get_record_raw(project_id, record_type, record_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ERROR] lifecycle-backfill read failed for %s: %s", record_id, exc)
+        return _error(500, "Database read failed. Please try again.")
+    if raw is None:
+        return _error(404, f"Record not found: {record_id}")
+    record = _deser_item(raw)
+    plan = _lifecycle_backfill.plan_lifecycle_stamps(record)
+    to_set = plan["set"]
+    now = _now_z()
+    result: Dict[str, Any] = {
+        "success": True, "record_id": record_id, "backfill_run_id": run_id,
+        "write_kind": "marker", "version_seq_allocated": False,
+        "checkout_class": plan["checkout_class"], "close_class": plan["close_class"],
+        "flags": plan["flags"], "attributes_set": sorted(to_set),
+    }
+    for k in ("close_writer", "unknown_reason", "unknown_detail"):
+        if k in plan:
+            result[k] = plan[k]
+    for k, v in to_set.items():
+        if k != "closed_at_unknown":
+            result[k] = v
+
+    if not to_set:
+        result["outcome"] = "noop"
+        return _response(200, result)
+    if dry_run:
+        result["outcome"] = "dry_run"
+        return _response(200, result)
+
+    expr, values = _lbf_marker_write_parts(to_set, run_id, now)
+    # Optimistic guard: the derivation above is only valid for the record as read.
+    # Marker writes bump neither updated_at nor sync_version, so those two (plus
+    # status) are exactly what a concurrent GOVERNED write would have moved. On a
+    # mismatch nothing is written and the caller retries against the new record.
+    cond = ["attribute_exists(record_id)", "#lbf_st = :lbf_seen_st"]
+    names = {"#lbf_st": "status"}
+    values[":lbf_seen_st"] = raw.get("status") or {"S": ""}
+    for attr, token in (("updated_at", ":lbf_seen_upd"), ("sync_version", ":lbf_seen_sv")):
+        if raw.get(attr) is not None:
+            cond.append(f"{attr} = {token}")
+            values[token] = raw[attr]
+        else:
+            cond.append(f"attribute_not_exists({attr})")
+    try:
+        _get_ddb().update_item(
+            TableName=DYNAMODB_TABLE,
+            Key=_build_key(project_id, record_type, record_id),
+            UpdateExpression=expr,
+            ConditionExpression=" AND ".join(cond),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if _is_conditional_check_failed(exc):
+            return _error(409, "The record changed while it was being read; nothing was written. Retry.",
+                          code="RECORD_CHANGED", retryable=True)
+        logger.error("[ERROR] lifecycle-backfill write failed for %s: %s", record_id, exc)
+        return _error(500, "Database write failed.")
+    logger.info("[SUCCESS] lifecycle-backfill %s run=%s set=%s", record_id, run_id, sorted(to_set))
+    result["outcome"] = "written"
+    return _response(200, result)
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
@@ -11260,7 +11430,7 @@ _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend|lifecycle-backfill)$"
 )
 # ENC-TSK-Q10 / ENC-ISS-791: reserved project segment. GET /_/{type}/{id} asks the
 # server to derive the owning project from the record id (projects table), so a
@@ -11844,10 +12014,12 @@ def _lambda_handler_inner(event: Dict, context: Any) -> Dict:
         record_id = m_sub.group("id")
         sub = m_sub.group("sub")
 
-        claims, auth_err = _authenticate(
-            event,
-            ["tracker:read"] if method == "GET" else ["tracker:write"],
-        )
+        # ENC-TSK-S96-0D: the lifecycle backfill additionally needs tracker:backfill
+        # when an internal-key scope map is configured.
+        _sub_scopes = ["tracker:read"] if method == "GET" else ["tracker:write"]
+        if sub == "lifecycle-backfill":
+            _sub_scopes = ["tracker:write", "tracker:backfill"]
+        claims, auth_err = _authenticate(event, _sub_scopes)
         if auth_err:
             return auth_err
 
@@ -11871,6 +12043,8 @@ def _lambda_handler_inner(event: Dict, context: Any) -> Dict:
             return _handle_release(project_id, record_type, record_id, body, event=event)
         elif sub == "acceptance-evidence" and method == "POST":
             return _handle_acceptance_evidence(project_id, record_type, record_id, body)
+        elif sub == "lifecycle-backfill" and method == "POST":
+            return _handle_lifecycle_backfill(project_id, record_type, record_id, body, claims)
         else:
             return _error(405, f"Method {method} not allowed on /{sub}.")
 
@@ -11968,6 +12142,7 @@ def _wa_tool_for(method: str, path: str) -> Tuple[str, str, str]:
             ("log", "POST"): "tracker.log", ("checkout", "POST"): "checkout.task",
             ("checkout", "DELETE"): "checkout.release",
             ("acceptance-evidence", "POST"): "tracker.set_acceptance_evidence",
+            ("lifecycle-backfill", "POST"): "tracker.lifecycle_backfill",
         }.get((sub, method), f"tracker.{sub}")
         return tool, m.group("project"), m.group("id")
     m = _RE_RECORD.match(path)

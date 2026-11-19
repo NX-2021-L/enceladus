@@ -408,6 +408,40 @@ def normalize_str_list(value: Any, record_id: str = "", field: str = "") -> List
     return []
 
 
+def lens_attrs(
+    record_type: str,
+    record_id: str,
+    record: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """ENC-TSK-S97-0A (ENC-PLN-108 W2.1, DOC-5E1E205FA664 section 5.3, rulings D-26/D-27/D-28).
+
+    The corpus attributes the Plans page reads offline. Exactly three, each omitted when empty:
+
+      objectives_set  PLAN rows only, in the plan's STORED order (never sorted or de-duplicated here).
+      parent          TASK rows only: the resolver's precedence step 2 derives wave membership from parent pointers.
+      wave            TASK rows only: the optional wave field (W1.6); absent on every record until it is written.
+
+    created_at, first_checked_out_at and closed_at are deliberately NOT here (D-26). Measured against the live
+    corpus those three are about 89 percent of the widening's cost (about 793 KiB of 927 KiB); they reach the
+    Plans page through ENC-TSK-T05's plan-scoped read instead. Do not add them; test_corpus asserts their absence.
+
+    The corpus builder and the /feed/delta builder both call this, so the two stay attribute-identical.
+    """
+    out: Dict[str, Any] = {}
+    if record_type == "plan":
+        objectives = normalize_str_list(record.get("objectives_set"), record_id, "objectives_set")
+        if objectives:
+            out["objectives_set"] = objectives
+    elif record_type == "task":
+        parent = record.get("parent")
+        if isinstance(parent, str) and parent.strip():
+            out["parent"] = parent.strip()
+        wave = record.get("wave")
+        if isinstance(wave, str) and wave.strip():
+            out["wave"] = wave.strip()
+    return out
+
+
 def build_tracker_entries_from_records(
     tasks: Sequence[Mapping[str, Any]],
     issues: Sequence[Mapping[str, Any]],
@@ -440,6 +474,8 @@ def build_tracker_entries_from_records(
             checkout_state = record.get("checkout_state")
             if checkout_state:
                 attrs["checkout_state"] = checkout_state
+            # ENC-TSK-S97-0A: objectives_set (plans), parent and wave (tasks). Nothing else.
+            attrs.update(lens_attrs(record_type, record_id, record))
             entries.append(
                 build_tracker_entry(
                     record_type,

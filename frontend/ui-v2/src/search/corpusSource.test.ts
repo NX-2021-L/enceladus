@@ -49,6 +49,29 @@ describe('mapCorpusItem', () => {
     })
     expect(row.version).toBe('1')
   })
+  it('carries objectives_set (in stored order), parent and wave into IndexRow.fields (ENC-TSK-S97-0A)', () => {
+    const plan = mapCorpusItem(
+      item({ record_id: 'ENC-PLN-1', record_type: 'plan', record_key: 'tracker:enceladus:ENC-PLN-1', attrs: { status: 'started', objectives_set: ['ENC-TSK-3', 'ENC-TSK-1', 'ENC-TSK-2'] } }),
+    )!
+    expect(plan.fields.objectives_set).toEqual(['ENC-TSK-3', 'ENC-TSK-1', 'ENC-TSK-2'])
+    const task = mapCorpusItem(item({ record_id: 'ENC-TSK-9', attrs: { status: 'open', parent: 'ENC-TSK-8', wave: 'W2.1' } }))!
+    expect(task.fields.parent).toBe('ENC-TSK-8')
+    expect(task.fields.wave).toBe('W2.1')
+  })
+  it('maps a row lacking the lens attributes cleanly, and never invents the D-26 timestamps', () => {
+    const row = mapCorpusItem(item({ record_id: 'ENC-TSK-5', attrs: { status: 'open', priority: 'P2' } }))!
+    expect(row.fields.status).toBe('open')
+    expect(row.fields.objectives_set).toBeUndefined()
+    expect(row.fields.parent).toBeUndefined()
+    expect(row.fields.wave).toBeUndefined()
+    expect(row.fields.created_at).toBeUndefined()
+    expect(row.fields).not.toHaveProperty('first_checked_out_at')
+    expect(row.fields).not.toHaveProperty('closed_at')
+    const emptyPlan = mapCorpusItem(item({ record_id: 'ENC-PLN-2', record_type: 'plan', attrs: { objectives_set: [], parent: '', wave: '' } }))!
+    expect(emptyPlan.fields.objectives_set).toBeUndefined()
+    expect(emptyPlan.fields.parent).toBeUndefined()
+    expect(emptyPlan.fields.wave).toBeUndefined()
+  })
   it('drops the document counter sentinel and unknown types', () => {
     expect(mapCorpusItem(item({ record_id: '__COUNTER__VERSION_SEQ__', record_type: 'document' }))).toBeNull()
     expect(mapCorpusItem(item({ record_id: 'X-1', record_type: 'session' }))).toBeNull()

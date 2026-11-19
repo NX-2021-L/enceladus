@@ -1073,6 +1073,8 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         # ENC-TSK-P60: component chips ride the corpus; lenient reader coerces
         # the string-typed anomaly instead of hiding it (ENC-ISS-714).
         "components": _ddb_str_list_lenient(item, "components"),
+        # ENC-TSK-S97-0A (ENC-PLN-108 W2.1): optional wave field (W1.6, ENC-TSK-S96-0F); None until a task carries it.
+        "wave": _ddb_str(item, "wave") or None,
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -2057,6 +2059,8 @@ def _delta_corpus_entry(raw_item: Dict[str, Any], project_id: str) -> Optional[D
         attrs["components"] = components
     if transformed.get("checkout_state"):
         attrs["checkout_state"] = transformed["checkout_state"]
+    # ENC-TSK-S97-0A: same three lens attributes as the corpus builder (shared helper, no drift).
+    attrs.update(feed_corpus.lens_attrs(record_type, str(item_id), transformed))
     return feed_corpus.build_tracker_entry(
         record_type,
         str(item_id),

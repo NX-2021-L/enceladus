@@ -65,6 +65,12 @@ STAMP_HELPERS = {
     "_sequencing_parts_or_governed",        # tracker_mutation: fail-open wrapper (3 close sites)
     "sequenced_write_parts",                # coordination_api/version_seq_ops.py
     "_sequenced_write_parts",               # bedrock_agent_actions
+    # ENC-TSK-S96-0D (ENC-PLN-108 W1.4): the lifecycle backfill is a deliberate MARKER writer (class
+    # (a) above): its UpdateExpression always assigns write_kind = "marker" (never "governed"), so the
+    # event-source filters drop its MODIFY events -- that is the point. Covered by
+    # tracker_mutation/test_lifecycle_backfill_s96_0d.py, which asserts the rendered expression
+    # assigns write_kind exactly once, to "marker", beside only the three stamp attributes.
+    "_lbf_marker_write_parts",              # tracker_mutation: lifecycle backfill marker write
 }
 
 # (path relative to backend/lambda, enclosing function) -> reason. Keep one line per entry.
