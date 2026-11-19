@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.04",
-  "updated_at": "2026-11-19T07:55:00Z",
-  "last_change_summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed.",
+  "version": "2026-11-19.05",
+  "updated_at": "2026-11-19T08:40:00Z",
+  "last_change_summary": "ENC-TSK-S97-0A (ENC-PLN-108 W2.1): feed/corpus and feed/delta rows carry exactly three new optional attrs -- objectives_set on plan rows in the plan's stored order, parent on task rows that have one, and wave on task rows that carry it -- each omitted when empty. Rulings D-26, D-27 and D-28 govern what is NOT added: created_at, first_checked_out_at and closed_at stay off every corpus and delta row, because measured against the live corpus those three are 89 percent of the widening's cost (about 793 KiB of 927 KiB) while parent is 11 percent (104 KiB, 2.2 percent of the corpus). Those three reach the Plans page through ENC-TSK-T05's plan-scoped read instead. parent is on the row because the wave resolver's precedence step 2 computes membership from parent pointers, so without it most production plans cannot group offline. Implementation note recorded because the task description was wrong about it: corpus and delta do NOT share one attrs builder -- corpus rows come from build_tracker_entries_from_records in corpus.py, delta rows from _delta_corpus_entry in feed_query/lambda_function.py -- so both now call one shared corpus.lens_attrs and cannot drift.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3902,7 +3902,7 @@
         },
         "attrs": {
           "type": "object",
-          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents; tracker records when present — always arrays), document_subtype, subtypepattern; ENC-TSK-P60 adds components (tasks — always an array; string-typed anomalies are coerced to one-element lists and logged with the record id, ENC-ISS-714) and checkout_state (tasks/plans when present). Delta entries carry the same attrs for parity."
+          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents; tracker records when present — always arrays), document_subtype, subtypepattern; ENC-TSK-P60 adds components (tasks — always an array; string-typed anomalies are coerced to one-element lists and logged with the record id, ENC-ISS-714) and checkout_state (tasks/plans when present). Delta entries carry the same attrs for parity. ENC-TSK-S97-0A (ENC-PLN-108 W2.1, DOC-5E1E205FA664 section 5.3, rulings D-26/D-27/D-28) adds exactly three optional keys, each omitted when empty: objectives_set (plan rows), parent (task rows) and wave (task rows). created_at, first_checked_out_at and closed_at are deliberately ABSENT from corpus and delta rows per ruling D-26; they reach the Plans page through ENC-TSK-T05's plan-scoped read. Both the corpus and delta builders obtain these three from one shared helper, corpus.lens_attrs, so the two paths cannot drift."
         },
         "version_seq": {
           "type": "integer",
@@ -3911,6 +3911,28 @@
         "document_counter_exclusion": {
           "type": "string",
           "definition": "ENC-TSK-Q34 (AC-5): the DOCUMENTS_TABLE counter sentinel (document_id __COUNTER__VERSION_SEQ__, or any row with record_type counter) is excluded from corpus items, total_matches and facets."
+        },
+        "attrs.objectives_set": {
+          "type": "array",
+          "item_type": "string",
+          "source_field": "objectives_set",
+          "required": false,
+          "definition": "Plan rows only. The plan's objective record IDs in the order stored on the plan -- never sorted, never de-duplicated, because the wave resolver's ordering depends on authored order. Omitted when empty. Stored order holds only for plans written as a DynamoDB list, which is how tracker_mutation writes them; a legacy string-set plan would read back sorted.",
+          "usage_guidance": "Read it as given. Do not sort or de-duplicate. Absence means the plan has no objectives, not that the field was dropped."
+        },
+        "attrs.parent": {
+          "type": "string",
+          "source_field": "parent",
+          "required": false,
+          "definition": "Task rows only. The task's parent record ID, omitted when the task has none (about 4,270 of 8,130 task rows carry one). On the row by ruling D-28 at a measured 2.2 percent of the corpus, because the Plans wave resolver's precedence step 2 computes wave membership from parent pointers; without it the majority of production plans cannot group offline.",
+          "usage_guidance": "The offline branch of the Plans page depends on this field. Removing it breaks hierarchical wave grouping with no request to fall back on."
+        },
+        "attrs.wave": {
+          "type": "string",
+          "source_field": "wave",
+          "required": false,
+          "definition": "Task rows only. The optional short wave label a task carries, added to tracker.task by ENC-TSK-S96-0F (ENC-PLN-108 W1.6) under ruling D-20. Omitted when absent, which is every record until W1.6 is deployed and plan authoring begins writing it. Carried through as a string without interpretation.",
+          "usage_guidance": "Highest-precedence input to the wave resolver: a task carrying wave is placed by label, never by title grammar or position."
         }
       }
     },
@@ -3950,6 +3972,11 @@
           "definition": "ENC-TSK-S94 (ENC-ISS-908): monotonic sequence allocated from the single counter item (project_id __feed__, record_id counter#version_seq) and stamped on a record by the same UpdateItem as the write it sequences. It is the cursor this endpoint queries (feed_scope = global AND version_seq > :since on version-seq-index), and a write without it is invisible to the pull path.",
           "invariant": "MONOTONE CURSOR, NOT A COUNTER, AND NOT GAPLESS. Allocation is its own UpdateItem and runs BEFORE the caller's write, which at several sites is conditional, so a ConditionalCheckFailed (or any failed write after a successful allocation) burns a number and leaves a permanent gap in the sequence. Gaps are harmless to a 'version_seq > :cursor' Query and to the client's 25-sequence-unit heal re-read. No consumer may derive a count, a total, a rate or a write-volume metric from version_seq, and no consumer may assume consecutive values.",
           "write_sites": "Stamped by: tracker_mutation _stamp_version_seq_on_create_item (create), _version_seq_update_parts (generic PATCH _handle_update_field, worklog _handle_log, PWA _handle_pwa_action) and _sequencing_parts_or_governed (the escalation direct_state_override applier, the arc-walker close and the human-override advance -- fail-open, ENC-TSK-S94); coordination_api version_seq_ops.sequenced_write_parts (_set_tracker_status, both copies); and, until ENC-TSK-T04, bedrock_agent_actions _handle_tracker_status -- that surface now REFUSES every tracker write (ENC-ISS-909 / ENC-ISS-911), so it is no longer a write site at all. Marker writes (write_kind = marker) deliberately allocate none and are dropped by the stream event-source filters."
+        },
+        "attrs_parity": {
+          "type": "object",
+          "definition": "Delta items carry the same attrs as corpus items, including the three added by ENC-TSK-S97-0A -- objectives_set, parent and wave -- assembled by _delta_corpus_entry in feed_query/lambda_function.py through the shared corpus.lens_attrs helper. created_at, first_checked_out_at and closed_at are deliberately absent here too, per ruling D-26. This is a separate amendment from the S94 note on the stamped lifecycle fields (ruling D-4), which concerns the tracker record rather than the feed row.",
+          "usage_guidance": "A client applying a delta must see the same row shape it got from the corpus seed; any attr added to one builder must be added to the other through lens_attrs."
         }
       }
     },
@@ -10320,7 +10347,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed.",
+  "change_summary": "ENC-TSK-S97-0A (ENC-PLN-108 W2.1): feed/corpus and feed/delta rows carry exactly three new optional attrs -- objectives_set on plan rows in the plan's stored order, parent on task rows that have one, and wave on task rows that carry it -- each omitted when empty. Rulings D-26, D-27 and D-28 govern what is NOT added: created_at, first_checked_out_at and closed_at stay off every corpus and delta row, because measured against the live corpus those three are 89 percent of the widening's cost (about 793 KiB of 927 KiB) while parent is 11 percent (104 KiB, 2.2 percent of the corpus). Those three reach the Plans page through ENC-TSK-T05's plan-scoped read instead. parent is on the row because the wave resolver's precedence step 2 computes membership from parent pointers, so without it most production plans cannot group offline. Implementation note recorded because the task description was wrong about it: corpus and delta do NOT share one attrs builder -- corpus rows come from build_tracker_entries_from_records in corpus.py, delta rows from _delta_corpus_entry in feed_query/lambda_function.py -- so both now call one shared corpus.lens_attrs and cannot drift.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11574,6 +11601,11 @@
       "version": "2026-11-19.04",
       "date": "2026-11-19",
       "summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed."
+    },
+    {
+      "version": "2026-11-19.05",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S97-0A (ENC-PLN-108 W2.1): feed/corpus and feed/delta rows carry exactly three new optional attrs -- objectives_set on plan rows in the plan's stored order, parent on task rows that have one, and wave on task rows that carry it -- each omitted when empty. Rulings D-26, D-27 and D-28 govern what is NOT added: created_at, first_checked_out_at and closed_at stay off every corpus and delta row, because measured against the live corpus those three are 89 percent of the widening's cost (about 793 KiB of 927 KiB) while parent is 11 percent (104 KiB, 2.2 percent of the corpus). Those three reach the Plans page through ENC-TSK-T05's plan-scoped read instead. parent is on the row because the wave resolver's precedence step 2 computes membership from parent pointers, so without it most production plans cannot group offline. Implementation note recorded because the task description was wrong about it: corpus and delta do NOT share one attrs builder -- corpus rows come from build_tracker_entries_from_records in corpus.py, delta rows from _delta_corpus_entry in feed_query/lambda_function.py -- so both now call one shared corpus.lens_attrs and cannot drift."
     }
   ]
 }
