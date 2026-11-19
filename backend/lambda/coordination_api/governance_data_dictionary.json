@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.08",
-  "updated_at": "2026-11-19T09:10:00Z",
-  "last_change_summary": "ENC-TSK-S96-0F (ENC-PLN-108 W1.6, ruling D-20): tracker.task gains the optional AUTHORED string field wave. tracker.create and tracker.set accept it on task records and reject it on every other record type with HTTP 400; the value is trimmed, limited to 64 characters, and may not contain control characters. It is a plain string carried through without interpretation, and three merged consumers depend on that: feed_query lens_attrs() emits it as the corpus attribute wave, appsync_feed_publisher emits it as the live-event field recordWave, and the ui-v2 Plans wave resolver reads it as its highest-precedence input. It is deliberately NOT in _W11_SERVER_STAMPED_TIMESTAMPS, _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS: unlike first_checked_out_at and closed_at it is written by the plan-authoring caller, not stamped by the server.",
+  "version": "2026-11-19.09",
+  "updated_at": "2026-11-19T09:20:00Z",
+  "last_change_summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable.",
   "owners": [
     "enceladus-platform"
   ],
@@ -10397,9 +10397,69 @@
           "definition": "No DynamoDB write against TRACKER_TABLE may exist in backend/lambda/bedrock_agent_actions/lambda_function.py. Fenced by test_tracker_write_fail_closed_t04.py, which scans the module for update_item/put_item/delete_item/transact_write_items near a TRACKER_TABLE reference, tokenises the source to assert write_kind is never assigned in code, and asserts that no `uuid.uuid4().int` record-id minting reappears."
         }
       }
+    },
+    "feed_query.plan_scope": {
+      "description": "ENC-TSK-T05 (ENC-PLN-108 W2.6, DOC-5E1E205FA664 section 5.3, rulings D-9 / D-26 / D-27 / D-28): GET /api/v1/feed/plan-scope is the Plans page's plan-scoped read, called once per Plans page open and by no other route. It returns the newest 20 plans and the task rows of their trees. Every row is produced by corpus.build_tracker_entries_from_records (the corpus builder, which calls build_tracker_entry) at corpus.LENS_SCOPE_PLAN, so a row from this route and a row from /feed/corpus are the same shape: one row contract, two scopes, no second builder to keep in sync. The two scopes differ only in which optional attrs are present; see attrs.created_at. Handler: _handle_plan_scope in feed_query/lambda_function.py; pure selection and tree logic in feed_query/plan_scope.py. Reads: plans through project-type-index (project_id AND record_type = plan), the task to parent map from the warm corpus cache or one corpus-style tracker load, and a concurrent BatchGetItem of only the tree's task keys.",
+      "fields": {
+        "endpoint": {
+          "type": "string",
+          "definition": "GET /api/v1/feed/plan-scope -- JWT-gated (401 unauthenticated) OR X-Coordination-Internal-Key for service callers, exactly as /feed/corpus (the check runs in lambda_handler before routing). Query param: project_id (comma-separated, case-insensitive, the corpus's own filter). Without it every active project is read, as the corpus does. No limit, cursor or sort parameters: the page is fixed by decision D-9. Requires API Gateway route RouteFeedPlanScope (03-api.yaml)."
+        },
+        "scope": {
+          "type": "string",
+          "definition": "Always 'plan' in the response body: the lens scope the rows were built at (corpus.LENS_SCOPE_PLAN). Rows at the corpus and delta scope are LENS_SCOPE_CORPUS and are what /feed/corpus and /feed/delta emit."
+        },
+        "items": {
+          "type": "array",
+          "definition": "Plan rows first, newest first, then task rows in task-id order. Each is a corpus row: record_id, record_type, project_id, title, updated_at, source, record_key, attrs, and version_seq when the record has one. attrs are exactly the corpus attrs for the same record plus the three plan-scope timestamps.",
+          "usage_guidance": "Merge by record_key. A row here overlays the corpus row of the same record; it never replaces rows the corpus has and never introduces a row shape the corpus lacks."
+        },
+        "attrs.created_at": {
+          "type": "string",
+          "source_field": "created_at",
+          "required": false,
+          "definition": "Plan and task rows, plan scope ONLY, omitted when the record has none. ISO-8601 UTC. Present on this route and deliberately absent from every /feed/corpus and /feed/delta row (ruling D-26): about 89 percent of the corpus widening's cost against the live corpus. It is affordable here because this response is bounded to 20 plans and their trees.",
+          "usage_guidance": "Do not copy this onto the corpus. The Plans page orders plans by it (selectPlans, rule R5) and places the first bar of a task on the time scale with it when first_checked_out_at is absent."
+        },
+        "attrs.first_checked_out_at": {
+          "type": "string",
+          "source_field": "first_checked_out_at",
+          "required": false,
+          "definition": "Task rows, plan scope ONLY, omitted when the task has none. The instant of the task's first checkout, stamped once by tracker_mutation (ENC-TSK-S96-0A) and immutable. Read from the raw item by the plan-scope overlay, not by _transform_task_from_ddb, so the legacy feed is unchanged. Absent from corpus and delta rows per ruling D-26.",
+          "usage_guidance": "Starts a task's bar on the Plans time scale. Absent for tasks never checked out and for historical tasks the W1 backfill could not date."
+        },
+        "attrs.closed_at": {
+          "type": "string",
+          "source_field": "closed_at",
+          "required": false,
+          "definition": "Task rows, plan scope ONLY, omitted when the task has none. The instant of the task's most recent close (ENC-TSK-S96-0A; the W1 backfill dates historical tasks). Read from the raw item by the plan-scope overlay. Absent from corpus and delta rows per ruling D-26. closed_at_unknown is not carried: a task with no closed_at draws as any row without stamps.",
+          "usage_guidance": "Ends a task's bar on the Plans time scale."
+        },
+        "ordering": {
+          "type": "string",
+          "definition": "Plans are chosen and ordered exactly as the Plans lens does (selectPlans, rule R5): created_at descending; a plan with no parseable created_at sorts after every dated plan; ties, including between undated plans, break on the plan id descending with digit runs compared as numbers. updated_at is never a fallback. Twenty is a bound, not a promise: fewer plans give fewer rows."
+        },
+        "tree": {
+          "type": "string",
+          "definition": "A plan's tree is its objectives_set tasks (stored order) plus every task reachable from them by parent pointer, at most three levels below each objective (the resolver's MAX_DESCENDANT_DEPTH). Only task rows are tree members, as in the lens: objectives and descendants that are issues, features or lessons are never returned. subtask_ids is never read because it disagrees with parent in production. A parent cycle terminates. The union over all plans is capped at 3000 task rows (plan_scope.MAX_PLAN_TREE_TASKS); hitting the cap sets truncated=true.",
+          "usage_guidance": "Task membership is taken from the corpus population (closed tasks older than 365 days are out), which is the population the Plans page resolves waves against."
+        },
+        "truncated": {
+          "type": "boolean",
+          "definition": "True when the 3000-task ceiling cut the walk short. The depth bound is a design limit and never sets it."
+        },
+        "counts": {
+          "type": "object",
+          "definition": "total_plans (plans matching the project filter, shown or not), plan_count, task_count, page_size (20), generated_at, version ('1.0')."
+        },
+        "d26_lifecycle_timestamps": {
+          "type": "string",
+          "definition": "This route carries created_at, first_checked_out_at and closed_at; feed_query.corpus and feed_query.delta deliberately do not (ruling D-26). That is not an inconsistency: D-26 removed them from the 12,562-row corpus seed to keep its widening small, and placed them here, on a 20-plan response, where they are needed. The two live in one helper, corpus.lens_attrs(record_type, record_id, record, scope), whose scope defaults to the corpus scope, so no caller gets the timestamps without asking for the plan scope. test_corpus.py and test_lambda_function.py assert their absence from corpus and delta rows; test_plan_scope_t05.py asserts their presence here."
+        }
+      }
     }
   },
-  "change_summary": "ENC-TSK-S96-0F (ENC-PLN-108 W1.6, ruling D-20): tracker.task gains the optional AUTHORED string field wave. tracker.create and tracker.set accept it on task records and reject it on every other record type with HTTP 400; the value is trimmed, limited to 64 characters, and may not contain control characters. It is a plain string carried through without interpretation, and three merged consumers depend on that: feed_query lens_attrs() emits it as the corpus attribute wave, appsync_feed_publisher emits it as the live-event field recordWave, and the ui-v2 Plans wave resolver reads it as its highest-precedence input. It is deliberately NOT in _W11_SERVER_STAMPED_TIMESTAMPS, _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS: unlike first_checked_out_at and closed_at it is written by the plan-authoring caller, not stamped by the server.",
+  "change_summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11673,6 +11733,11 @@
       "version": "2026-11-19.08",
       "date": "2026-11-19",
       "summary": "ENC-TSK-S96-0F (ENC-PLN-108 W1.6, ruling D-20): tracker.task gains the optional AUTHORED string field wave. tracker.create and tracker.set accept it on task records and reject it on every other record type with HTTP 400; the value is trimmed, limited to 64 characters, and may not contain control characters. It is a plain string carried through without interpretation, and three merged consumers depend on that: feed_query lens_attrs() emits it as the corpus attribute wave, appsync_feed_publisher emits it as the live-event field recordWave, and the ui-v2 Plans wave resolver reads it as its highest-precedence input. It is deliberately NOT in _W11_SERVER_STAMPED_TIMESTAMPS, _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS: unlike first_checked_out_at and closed_at it is written by the plan-authoring caller, not stamped by the server."
+    },
+    {
+      "version": "2026-11-19.09",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable."
     }
   ]
 }

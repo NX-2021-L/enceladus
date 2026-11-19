@@ -6,6 +6,7 @@ Routes (via API Gateway proxy):
     GET     /api/v1/feed
     GET     /api/v1/feed/corpus
     GET     /api/v1/feed/delta
+    GET     /api/v1/feed/plan-scope
     POST    /api/v1/feed/refresh
     POST    /api/v1/feed/subscriptions
     GET     /api/v1/feed/subscriptions/{subscriptionId}
@@ -41,7 +42,7 @@ import os
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import urllib.request
 
 import boto3
@@ -51,6 +52,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 import corpus as feed_corpus
 import delta as feed_delta
 import feed_page
+import plan_scope as feed_plan_scope
 
 try:
     import jwt
@@ -1748,7 +1750,9 @@ _MAX_BATCH_GET_WORKERS = 24
 
 
 def _fetch_and_transform_batch(
-    batch: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+    batch: List[Dict[str, Dict[str, str]]],
+    cutoff: dt.datetime,
+    overlay: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
 ) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
@@ -1757,7 +1761,11 @@ def _fetch_and_transform_batch(
     List[Dict[str, Any]],
     List[str],
 ]:
-    """BatchGetItem + ``_TRANSFORM`` for a single <=100-key chunk."""
+    """BatchGetItem + ``_TRANSFORM`` for a single <=100-key chunk.
+
+    `overlay(raw_item, transformed)` (ENC-TSK-T05) lets the plan-scoped read copy attributes the shared transforms
+    deliberately do not carry. Absent, behaviour is exactly as before.
+    """
     ddb = _get_ddb()
     tasks: List[Dict[str, Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -1797,6 +1805,8 @@ def _fetch_and_transform_batch(
                         closed_ids.append(item_id)
                     continue
                 transformed = _TRANSFORM[record_type](raw_item, pid)
+                if overlay is not None:
+                    overlay(raw_item, transformed)
             except Exception as rec_exc:  # noqa: BLE001
                 logger.error(
                     "feed_query hydrate: skipping record_type=%s item_id=%s project=%s: %s",
@@ -1824,7 +1834,9 @@ def _fetch_and_transform_batch(
 
 
 def _hydrate_records_via_batch_get(
-    changed_keys: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+    changed_keys: List[Dict[str, Dict[str, str]]],
+    cutoff: dt.datetime,
+    overlay: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
 ) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
@@ -1854,9 +1866,13 @@ def _hydrate_records_via_batch_get(
     batches = [changed_keys[i : i + 100] for i in range(0, len(changed_keys), 100)]
     max_workers = min(_MAX_BATCH_GET_WORKERS, len(batches))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        batch_results = list(
-            pool.map(lambda batch: _fetch_and_transform_batch(batch, cutoff), batches)
-        )
+        # The overlay is passed only when asked for, so every pre-T05 caller keeps its exact call shape.
+        if overlay is None:
+            batch_results = list(pool.map(lambda batch: _fetch_and_transform_batch(batch, cutoff), batches))
+        else:
+            batch_results = list(
+                pool.map(lambda batch: _fetch_and_transform_batch(batch, cutoff, overlay), batches)
+            )
 
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
@@ -2150,6 +2166,178 @@ def _handle_delta(qs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Plan-scoped read (ENC-TSK-T05, ENC-PLN-108 W2.6, DOC-5E1E205FA664 section 5.3, rulings D-9 / D-26 / D-27 / D-28)
+# ---------------------------------------------------------------------------
+
+_task_parent_cache: Optional[Dict[str, Tuple[str, str]]] = None
+_task_parent_cache_at: float = 0.0
+
+
+def _plan_scope_overlay(raw_item: Dict[str, Any], transformed: Dict[str, Any]) -> None:
+    """Copy what the shared transforms deliberately do not carry, for the plan scope only.
+
+    first_checked_out_at and closed_at are read here, from the raw item, rather than added to _transform_task_from_ddb:
+    that transform also feeds GET /api/v1/feed and /feed/tasks.json, whose bytes must not change. version_seq is what
+    the corpus loader stamps (ENC-TSK-Q34) so a plan-scope row has the same fields as a corpus row.
+    """
+    for key in ("first_checked_out_at", "closed_at"):
+        value = _ddb_str(raw_item, key)
+        if value:
+            transformed[key] = value
+    version_seq = _ddb_int(raw_item, "version_seq")
+    if version_seq > 0:
+        transformed["version_seq"] = version_seq
+
+
+def _query_project_plan_records(pid: str, cutoff: dt.datetime) -> List[Dict[str, Any]]:
+    """Every plan of ONE project, through project-type-index (key condition project_id AND record_type = plan)."""
+    ddb = _get_ddb()
+    plans: List[Dict[str, Any]] = []
+    try:
+        for page in ddb.get_paginator("query").paginate(
+            TableName=DYNAMODB_TABLE,
+            IndexName="project-type-index",
+            KeyConditionExpression="project_id = :pid AND record_type = :rt",
+            ExpressionAttributeValues={":pid": {"S": pid}, ":rt": {"S": "plan"}},
+        ):
+            for raw_item in page.get("Items", []):
+                # Per-record isolation, as in the corpus loader: one malformed plan must not sink the page.
+                try:
+                    if _is_stale_closed(raw_item, cutoff):
+                        continue
+                    transformed = _transform_plan_from_ddb(raw_item, pid)
+                    _plan_scope_overlay(raw_item, transformed)
+                except Exception as rec_exc:  # noqa: BLE001
+                    logger.error(
+                        "feed_query plan-scope: skipping plan item_id=%s project=%s: %s",
+                        _ddb_str(raw_item, "item_id") or "?",
+                        pid,
+                        rec_exc,
+                    )
+                    continue
+                plans.append(transformed)
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("DynamoDB plan query failed for project %s: %s", pid, exc)
+    return plans
+
+
+def _query_plan_records(project_ids: List[str], cutoff: dt.datetime) -> List[Dict[str, Any]]:
+    if not project_ids:
+        return []
+    max_workers = min(_MAX_PROJECT_FANOUT_WORKERS, len(project_ids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(lambda pid: _query_project_plan_records(pid, cutoff), project_ids))
+    return [plan for plans in results for plan in plans]
+
+
+def _get_task_parent_index() -> Dict[str, Tuple[str, str]]:
+    """task_id -> (project_id, parent or "") for every task the corpus holds: the only input the tree walk needs.
+
+    Parent pointers cannot be queried (the tracker table has no GSI on parent), so the walk needs the task->parent
+    map. It is taken from the corpus cache when that is warm (those rows carry parent since ENC-TSK-S97-0A, so this
+    is free), otherwise from one corpus-style tracker load kept in a small compact cache of its own for the same TTL.
+    Either way it is the same population the corpus serves (closed tasks older than CLOSED_ITEM_MAX_AGE_DAYS are out),
+    which is what the Plans page resolves waves against.
+    """
+    global _task_parent_cache, _task_parent_cache_at
+    now = time.time()
+    if _corpus_cache_entries is not None and now - _corpus_cache_at < _CORPUS_CACHE_TTL:
+        return {
+            str(entry.get("record_id")): (
+                str(entry.get("project_id") or ""),
+                str((entry.get("attrs") or {}).get("parent") or ""),
+            )
+            for entry in _corpus_cache_entries
+            if entry.get("source") == "tracker" and entry.get("record_type") == "task" and entry.get("record_id")
+        }
+    if _task_parent_cache is not None and now - _task_parent_cache_at < _CORPUS_CACHE_TTL:
+        return _task_parent_cache
+    tasks = _query_corpus_tracker_records()[0]
+    index = {
+        str(task.get("task_id")): (
+            str(task.get("project_id") or ""),
+            str(task.get("parent") or "").strip(),
+        )
+        for task in tasks
+        if task.get("task_id")
+    }
+    _task_parent_cache = index
+    _task_parent_cache_at = now
+    return index
+
+
+def _handle_plan_scope(qs: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/feed/plan-scope[?project_id=a,b] -- the newest 20 plans and the task rows of their trees.
+
+    ONE row contract, two scopes: every row is produced by corpus.build_tracker_entries_from_records, the builder the
+    corpus uses, at the plan lens scope. A row here is a corpus row plus created_at / first_checked_out_at / closed_at
+    (ruling D-26 keeps those three off the corpus). Project scoping and auth are /feed/corpus's: the JWT (or internal
+    key) is enforced in lambda_handler before routing, and every active project is readable unless narrowed by the
+    same case-insensitive project_id list the corpus accepts.
+    """
+    wanted = set(feed_corpus.parse_corpus_query(qs or {})["project_id"])
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+    try:
+        project_ids = [
+            p["project_id"]
+            for p in _get_active_projects()
+            if p.get("project_id") and (not wanted or p["project_id"].lower() in wanted)
+        ]
+        all_plans = _query_plan_records(project_ids, cutoff)
+        plans = feed_plan_scope.newest_plans(all_plans, feed_plan_scope.PLAN_PAGE_SIZE)
+        parent_index = _get_task_parent_index()
+        task_ids, truncated = feed_plan_scope.collect_tree_task_ids(plans, parent_index)
+        keys = [
+            {"project_id": {"S": parent_index[task_id][0]}, "record_id": {"S": f"task#{task_id}"}}
+            for task_id in task_ids
+            if parent_index[task_id][0]
+        ]
+        tasks = _hydrate_records_via_batch_get(keys, cutoff, _plan_scope_overlay)[0] if keys else []
+        entries = feed_corpus.build_tracker_entries_from_records(
+            tasks, [], [], [], list(plans), lens_scope=feed_corpus.LENS_SCOPE_PLAN
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed plan-scope query failed: %s", exc)
+        return _error(500, "Failed to query feed plan scope. Please try again.")
+
+    # Plans first in the order selected (newest first), then the task rows in task-id order.
+    plan_rank = {str(plan.get("plan_id")): index for index, plan in enumerate(plans)}
+    plan_entries = sorted(
+        (e for e in entries if e["record_type"] == "plan"), key=lambda e: plan_rank.get(e["record_id"], 0)
+    )
+    task_entries = [e for e in entries if e["record_type"] == "task"]
+    body = {
+        "success": True,
+        "generated_at": _now_z(),
+        "version": "1.0",
+        "scope": feed_corpus.LENS_SCOPE_PLAN,
+        "page_size": feed_plan_scope.PLAN_PAGE_SIZE,
+        "total_plans": len(all_plans),
+        "plan_count": len(plan_entries),
+        "task_count": len(task_entries),
+        "truncated": truncated,
+        "items": plan_entries + task_entries,
+    }
+    logger.info(
+        "[INFO] feed plan-scope projects=%d total_plans=%d plans=%d tasks=%d truncated=%s",
+        len(project_ids),
+        len(all_plans),
+        len(plan_entries),
+        len(task_entries),
+        truncated,
+    )
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
 def _handle_corpus(qs: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/feed/corpus — cursor-paginated multi-table feed corpus (ENC-TSK-L23)."""
     query = feed_corpus.parse_corpus_query(qs or {})
@@ -2268,6 +2456,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     if method == "GET" and re.search(r"/api/v1/feed/delta/?$", path):
         return _handle_delta(event.get("queryStringParameters") or {})
+
+    # ENC-TSK-T05: the Plans page's one plan-scoped read, called once per page open and by no other route.
+    if method == "GET" and re.search(r"/api/v1/feed/plan-scope/?$", path):
+        return _handle_plan_scope(event.get("queryStringParameters") or {})
 
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")
