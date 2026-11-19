@@ -87,7 +87,22 @@ jobs:
       matrix:
         # ENC-TSK-Q20: legacy x86 build target retired -- arm64-py312 only.
         arch_tag: [arm64-py312]
-        include: ${{ fromJson(needs.setup-matrix.outputs.matrix).include }}
+        # ENC-TSK-T03 (ENC-ISS-910): consume the 'functions' output that
+        # setup-matrix actually declares, as a real `function` dimension.
+        # This line previously read `needs.setup-matrix.outputs.matrix` and
+        # called `.include` on it. setup-matrix declares no `matrix` output --
+        # only `functions` (see its outputs: block) -- so fromJson received an
+        # empty string, strategy evaluation failed, GitHub created ZERO build
+        # jobs, and the run concluded failure with no job reporting failure.
+        # upload-artifacts then skipped because `needs: [build]` was never
+        # satisfied, not because of its own condition. Every step below already
+        # dereferences matrix.function.* , so `function` is the intended name:
+        # the ENC-ISS-402 fix moved the producer to a bare array and updated
+        # those references but left this declaration on the old {include: [...]}
+        # shape -- the very shape the parse step's comment warns against.
+        # Every main push since 2026-11-04 built nothing as a result, so no
+        # main SHA was deployable (_deploy.yml can only deploy a pre-built SHA).
+        function: ${{ fromJson(needs.setup-matrix.outputs.functions) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
