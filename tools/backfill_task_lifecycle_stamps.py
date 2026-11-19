@@ -184,6 +184,9 @@ def summarise(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "writes_planned": 0,
         "write_ids": [],
         "unprovable_checkout_ids": [],
+        # D-31 audit sets, enumerated by id because a count cannot be checked:
+        "count_zero_with_checkout_note_ids": [],   # stamped from history despite checkout_count 0
+        "note_present_but_unstamped_ids": [],      # the ONLY exception to the restated criterion 17
     }
     for rec in records:
         plan = lb.plan_lifecycle_stamps(rec)
@@ -212,6 +215,10 @@ def summarise(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
                 _inc(r["proven_by_writer"], plan["close_writer"])
         for f in plan["flags"]:
             _inc(r["flags"], f)
+            if f == "checkout_note_but_count_zero":
+                r["count_zero_with_checkout_note_ids"].append(str(rec.get("record_id")))
+            elif f == "first_checkout_timestamp_unparsable":
+                r["note_present_but_unstamped_ids"].append(str(rec.get("record_id")))
         if plan["set"]:
             r["writes_planned"] += 1
             r["write_ids"].append(str(rec.get("record_id")))
@@ -221,16 +228,30 @@ def summarise(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 def criterion_17(report: Dict[str, Any]) -> Dict[str, Any]:
     """Would criterion 17's equality hold if every planned write landed?
 
-    "the tasks without first_checked_out_at are exactly the tasks with checkout_count of 0".
-    After the run a task lacks the stamp iff it is never-checked-out OR checked-out-unprovable;
-    the equality therefore holds iff there are no unprovable checked-out tasks and no task has a
-    checkout note while its count says zero.
+    RESTATED by io's ruling D-31 (2026-11-19, "history wins"). The original form --
+    "the tasks without first_checked_out_at are exactly the tasks with checkout_count
+    of 0" -- was not testable against real history, because checkout_count arrived with
+    ENC-TSK-F41 and was never backfilled: the first gamma dry run found 782 tasks with a
+    recognisable checkout note and a zero count. The equality now reads:
+
+        the tasks without first_checked_out_at are exactly the tasks whose history
+        carries no recognisable first-checkout note.
+
+    Under D-31 a task is stamped whenever history proves a first checkout, so the only
+    way a task can carry a note and still lack the stamp is an unparsable timestamp on
+    that note. That set is the exception, and it is enumerated by id rather than counted,
+    so it can never be absorbed silently.
     """
-    unprovable = report["first_checked_out_at"]["unprovable"]
-    note_but_zero = report["flags"].get("checkout_note_but_count_zero", 0)
-    return {"holds": unprovable == 0 and note_but_zero == 0,
-            "checked_out_without_stamp": unprovable,
-            "count_zero_with_checkout_note": note_but_zero}
+    unparsable = report["flags"].get("first_checkout_timestamp_unparsable", 0)
+    return {
+        "holds": unparsable == 0,
+        "basis": "D-31 history-wins restatement",
+        "note_present_but_unstamped": unparsable,
+        "note_present_but_unstamped_ids": list(report["note_present_but_unstamped_ids"]),
+        # Audit figures, not exceptions: these ARE stamped under D-31.
+        "count_zero_but_stamped_from_history": report["flags"].get("checkout_note_but_count_zero", 0),
+        "count_positive_without_note": report["flags"].get("checkout_count_positive_but_no_checkout_note", 0),
+    }
 
 
 def render_report(report: Dict[str, Any], *, header: str = "DRY RUN") -> str:
@@ -244,13 +265,14 @@ def render_report(report: Dict[str, Any], *, header: str = "DRY RUN") -> str:
         f"Tasks scanned: {report['tasks_scanned']}",
         f"  checked out (checkout_count >= 1):        {report['checked_out']}",
         f"  never checked out (checkout_count = 0):   {report['never_checked_out']}",
-        f"  tasks with checkout_count = 0:            {report['checkout_count_zero']}  (no first_checked_out_at is written)",
+        f"  tasks with checkout_count = 0:            {report['checkout_count_zero']}  (stamped anyway when history proves it, D-31)",
         "",
         "first_checked_out_at",
         f"  to stamp (first checkout note proven):    {f['to_stamp']}",
         f"  already set (left as is):                 {f['already_set']}",
         f"  checked out but NOT provable (no stamp):  {f['unprovable']}",
-        f"  never checked out (no stamp, by design):  {f['never_checked_out_no_stamp']}",
+        f"  no checkout note in history (no stamp):   {f['never_checked_out_no_stamp']}",
+        f"  stamped from history despite count 0:     {report['flags'].get('checkout_note_but_count_zero', 0)}  (D-31)",
         "",
         f"Closed tasks: {report['closed_tasks']}",
         "                                   checked-out   never-checked-out   total",
@@ -275,9 +297,11 @@ def render_report(report: Dict[str, Any], *, header: str = "DRY RUN") -> str:
     c17 = criterion_17(report)
     lines += [
         "",
-        f"Criterion 17 equality after the run: {'HOLDS' if c17['holds'] else 'DOES NOT HOLD'} "
-        f"(checked-out tasks left without a stamp: {c17['checked_out_without_stamp']}; "
-        f"count-zero tasks with a checkout note: {c17['count_zero_with_checkout_note']})",
+        f"Criterion 17 equality after the run ({c17['basis']}): "
+        f"{'HOLDS' if c17['holds'] else 'DOES NOT HOLD'} "
+        f"(tasks with a checkout note left unstamped: {c17['note_present_but_unstamped']})",
+        f"  stamped from history despite checkout_count 0: {c17['count_zero_but_stamped_from_history']} (D-31; audit, not an exception)",
+        f"  positive count with no checkout note:          {c17['count_positive_without_note']} (left unstamped, D-21)",
         f"Writes planned: {report['writes_planned']} marker writes (write_kind=marker, no version_seq, set-if-absent)",
     ]
     return "\n".join(lines)
