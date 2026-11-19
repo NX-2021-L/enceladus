@@ -1216,6 +1216,35 @@ _F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
 # path runs through _apply_direct_state_override, not through this guard.
 _W11_SERVER_STAMPED_TIMESTAMPS = frozenset({"first_checked_out_at", "closed_at"})
 
+# ENC-TSK-S96-0F (ENC-PLN-108 W1.6) / DOC-5E1E205FA664 ruling D-20 and sections 5.3,
+# 5.4: the optional `wave` label on task records. It is AUTHORED -- the opposite of the
+# W1.1 stamps above -- so it must NOT appear in the W1.1 stamp set directly above,
+# _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS. It is a plain string that
+# is carried through without interpretation: feed_query lens_attrs() emits it as the
+# corpus attribute `wave`, appsync_feed_publisher as the live-event field recordWave,
+# and the ui-v2 Plans wave resolver reads it as its highest-precedence input. Making it
+# anything but an optional string breaks all three.
+#
+# Rule: valid on task records only; a str, trimmed; at most _WAVE_MAX_LENGTH characters
+# after trimming; no control characters (a label, not prose). Empty / whitespace-only
+# means "no wave": omitted at create, stored as "" by tracker.set (an explicit clear --
+# inert, because every consumer omits an empty value).
+_WAVE_MAX_LENGTH = 64
+
+
+def _normalize_wave(raw: Any) -> Tuple[str, str]:
+    """Return (trimmed_wave, error_message); error_message is "" when the value is valid."""
+    if raw is None:
+        return "", ""
+    if not isinstance(raw, str):
+        return "", f"wave must be a string, got {type(raw).__name__}."
+    wave = raw.strip()
+    if len(wave) > _WAVE_MAX_LENGTH:
+        return "", f"wave must be at most {_WAVE_MAX_LENGTH} characters after trimming; got {len(wave)}."
+    if wave and not wave.isprintable():
+        return "", "wave must not contain control characters or line breaks."
+    return wave, ""
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -3577,6 +3606,9 @@ _LIST_COMPACT_FIELDS = (
     "last_update_note", "update", "components", "transition_type",
     # lineage / relationships (ids only)
     "parent", "parent_task_id", "is_child", "subtask_ids", "primary_task",
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): the authored plan-wave label -- a short, usually
+    # absent string. Listed so a wave a plan author just wrote is visible when listing tasks.
+    "wave",
     "related_task_ids", "related_issue_ids", "related_feature_ids",
     # checkout / liveness
     "checkout_state", "checked_out_by", "checked_out_at",
@@ -4740,6 +4772,27 @@ def _handle_create_record(
             record_type=record_type,
             governed_rules=["Hierarchical sub-task IDs are only supported for task records."],
         )
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): the optional wave label. Task-only, same posture as is_child
+    # directly above and transition_type below: HTTP 400 through _tracker_create_validation_error.
+    # Rejected on any other record type whenever the key is present with a non-null value,
+    # even an empty one, so a mis-routed create fails loudly rather than being dropped.
+    wave = ""
+    if body.get("wave") is not None:
+        if record_type != "task":
+            return _tracker_create_validation_error(
+                f"wave is only valid for task records, not {record_type}.",
+                record_type=record_type,
+                governed_rules=["wave is an optional plan-wave label and is only meaningful on tasks (ENC-TSK-S96-0F)."],
+            )
+        wave, _wave_err = _normalize_wave(body.get("wave"))
+        if _wave_err:
+            return _tracker_create_validation_error(
+                _wave_err,
+                record_type=record_type,
+                governed_rules=[
+                    f"wave is an optional string of at most {_WAVE_MAX_LENGTH} characters with no control characters (ENC-TSK-S96-0F)."
+                ],
+            )
     if is_child and parent_task_id and "-TSK-" not in parent_task_id.upper():
         return _tracker_create_validation_error(
             f"parent_task_id must reference a task ID (contains -TSK-). Got: '{parent_task_id}'.",
@@ -5052,6 +5105,9 @@ def _handle_create_record(
         # sealed values (no_code, code_only) can actually take effect.
         if transition_type:
             item["transition_type"] = _ser_s(transition_type)
+        # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): authored wave label; omitted when empty.
+        if wave:
+            item["wave"] = _ser_s(wave)
         # ENC-TSK-F76 / ENC-ISS-289: persist components at create time so agent
         # checkouts don't require a follow-up tracker.set to satisfy the
         # ENC-FTR-041 component-enforcement check at the first advance gate.
@@ -5186,6 +5242,8 @@ def _handle_create_record(
     # The ID-Service path (flag ON) has no inline counter: record + audit (+ marker) only.
     def _s28_receipt_for(nid: str) -> Dict[str, Any]:
         rec: Dict[str, Any] = {"success": True, "record_id": nid, "created_at": now}
+        if wave:  # ENC-TSK-S96-0F: echo the stored (trimmed) label; absent when none was set
+            rec["wave"] = wave
         if category_warning:
             rec["warning"] = category_warning
         if record_type == "issue" and location_context_warnings:
@@ -7115,6 +7173,30 @@ def _handle_update_field(
                 record_type=record_type,
                 expected_type="string",
                 expected_format="task ID containing -TSK-",
+            )
+
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): wave is task-only (same posture as primary_task above:
+    # HTTP 400 through _tracker_field_validation_error). `value` is normalised to the trimmed
+    # string here, so the generic write below stores it and the response echoes it.
+    if field == "wave":
+        if record_type != "task":
+            return _tracker_field_validation_error(
+                f"wave is only valid on task records, not {record_type}.",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format="short plan-wave label on a task",
+            )
+        value, _wave_err = _normalize_wave(value)
+        if _wave_err:
+            return _tracker_field_validation_error(
+                _wave_err,
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format=f"string of at most {_WAVE_MAX_LENGTH} characters, no control characters; empty clears",
             )
 
     now = _now_z()
