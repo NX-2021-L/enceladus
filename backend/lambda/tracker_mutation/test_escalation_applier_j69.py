@@ -82,6 +82,12 @@ class _FakeDdb:
         self._fail_first_update = fail_first_update
         self._fail_target_update = fail_target_update
         self.exceptions = mock.MagicMock()
+        # ENC-TSK-S94 (ENC-ISS-908): the applier now allocates a version_seq, so the
+        # escalated close reaches GET /api/v1/feed/delta. That allocation is its own
+        # UpdateItem on the version_seq counter; this fake answers it and keeps it out
+        # of target_updates() and out of the forced-failure paths, which exist to
+        # exercise the escalation and target writes.
+        self._next_version_seq = 9000
 
     def get_item(self, TableName=None, Key=None, **kwargs):
         record_id = (Key or {}).get("record_id", {}).get("S", "")
@@ -93,7 +99,11 @@ class _FakeDdb:
 
     def update_item(self, **kwargs):
         record_id = kwargs.get("Key", {}).get("record_id", {}).get("S", "")
-        if self._fail_first_update and not self.updates:
+        if record_id.startswith("counter#"):  # ENC-TSK-S94 version_seq allocation
+            self.updates.append(kwargs)
+            self._next_version_seq += 1
+            return {"Attributes": {"next_num": {"N": str(self._next_version_seq)}}}
+        if self._fail_first_update and not self.record_updates:
             self.updates.append(kwargs)
             raise _ccfe()
         if self._fail_target_update and not record_id.startswith("escalation#"):
@@ -106,8 +116,14 @@ class _FakeDdb:
         return [u for u in self.updates
                 if u["Key"]["record_id"]["S"].startswith("escalation#")]
 
-    def target_updates(self):
+    @property
+    def record_updates(self):
+        """Every update_item that is not the version_seq counter allocation."""
         return [u for u in self.updates
+                if not u["Key"]["record_id"]["S"].startswith("counter#")]
+
+    def target_updates(self):
+        return [u for u in self.record_updates
                 if not u["Key"]["record_id"]["S"].startswith("escalation#")]
 
 

@@ -75,6 +75,20 @@ except ImportError:
         _VERSION_SEQ_AVAILABLE = True
     except ImportError:
         _VERSION_SEQ_AVAILABLE = False
+# ENC-TSK-S94 (ENC-ISS-908): the sequencing rule itself, imported separately from the
+# three primitives above because the PINNED layer (SharedLayerArn default
+# enceladus-shared:15, infrastructure/cloudformation/02-compute.yaml) does not carry it
+# yet -- at that pin this resolves to the bundled version_seq_util copy, and to the layer
+# once a later version is published. Unguarded imports of a symbol a pinned layer lacks
+# are what produced the :7 and :10 Runtime.ImportModuleError incidents recorded on that
+# parameter, so every hop is guarded and the last one degrades instead of bricking.
+try:
+    from enceladus_shared.version_seq import sequenced_governed_write_clause
+except ImportError:
+    try:
+        from version_seq_util import sequenced_governed_write_clause
+    except ImportError:
+        sequenced_governed_write_clause = None
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -771,10 +785,14 @@ _RESERVED_OVERRIDE_PATHS = {
     "status", "updated_at", "last_update_note", "sync_version",
     "history", "escalation_provenance", "escalated_closure", "closed_count",
     "write_kind",  # ENC-TSK-S47-0B: stamped by the applier; field_values may not set it
+    # ENC-TSK-S94 (ENC-ISS-908): stamped by the sequencing rule on the same
+    # UpdateItem; a field_values entry naming one of these would collide with that
+    # fragment and DynamoDB would reject the write.
+    "version_seq", "feed_scope", "t_ack", "projection_status",
 }
 
 
-def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
+def _render_update_expression(ordered_assignments, add_clauses=None, set_suffix="") -> str:
     """Render a SET (+ optional ADD) UpdateExpression from an ordered list of
     (top_level_path, expression_snippet) pairs, one snippet per DISTINCT
     top-level attribute path.
@@ -793,7 +811,22 @@ def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
                 f"duplicate top-level path in UpdateExpression: {path!r}")
         seen.add(path)
         set_clauses.append(expr)
-    expression = "SET " + ", ".join(set_clauses)
+    # ENC-TSK-S94: set_suffix carries the appendable SET fragment produced by the
+    # sequencing rule (", version_seq = :vseq, feed_scope = :fscope, write_kind = ...").
+    # Its top-level paths join the SAME overlap check, so a call site that also
+    # assigns one of them fails here rather than at the live UpdateItem (ENC-ISS-759),
+    # and it is spliced before any ADD clause (ENC-TSK-P49).
+    suffix = str(set_suffix or "")
+    for assignment in suffix.split(","):
+        assignment = assignment.strip()
+        if not assignment:
+            continue
+        path = assignment.split("=", 1)[0].strip()
+        if path in seen:
+            raise ValueError(
+                f"duplicate top-level path in UpdateExpression: {path!r}")
+        seen.add(path)
+    expression = "SET " + ", ".join(set_clauses) + suffix
     if add_clauses:
         expression += " ADD " + ", ".join(add_clauses)
     return expression
@@ -878,9 +911,17 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
         ("escalation_provenance",
          "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
-        ("write_kind", "write_kind = :wk"),  # ENC-TSK-S47-0B
     ]
-    values[":wk"] = {"S": "governed"}
+    # ENC-TSK-S94 (ENC-ISS-908): this applier landed status=closed and added
+    # closed_count but allocated no version_seq, so an escalated close never
+    # appeared in GET /api/v1/feed/delta (a Query on version-seq-index) and a
+    # client that missed the push event could not heal it until the record's next
+    # sequenced write. The sequencing fragment also stamps write_kind, which is why
+    # the local ("write_kind", "write_kind = :wk") assignment is gone from the list
+    # above -- two assignments to one path are rejected by DynamoDB and now also by
+    # _render_update_expression's overlap check.
+    _esc_vseq_expr, _esc_vseq_vals = _sequencing_parts_or_governed()
+    values.update(_esc_vseq_vals)
 
     for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
@@ -904,7 +945,8 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
             add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
 
-    update_expression = _render_update_expression(assignments, add_clauses)
+    update_expression = _render_update_expression(
+        assignments, add_clauses, set_suffix=_esc_vseq_expr)
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -1395,8 +1437,19 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
         # ENC-TSK-S47-0B: even without version_seq the write MUST clear a sticky write_kind=marker,
         # or the stream filter drops this governed MODIFY.
         return ", write_kind = :wa_wkind", {":wa_wkind": {"S": "governed"}}
+    # ENC-TSK-S94: allocation stays HERE -- it is this module's long-standing seam
+    # (the suites monkeypatch allocate_version_seq to count calls) and the number is
+    # recorded on the write-attribution context below. Only the composition of
+    # version_seq + feed_scope + write_kind is shared, through
+    # sequenced_governed_write_clause; this function then adds tracker_mutation's own
+    # attribution (S26-0A) and ack/projection markers (S28-0E) on top.
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
-    expr, vals = version_seq_update_clause(seq)
+    if sequenced_governed_write_clause is not None:
+        expr, vals = sequenced_governed_write_clause(seq)
+    else:  # pragma: no cover - only when neither layer nor bundle carries the rule
+        expr, vals = version_seq_update_clause(seq)
+        expr += ", write_kind = :vsq_wkind"
+        vals = {**vals, ":vsq_wkind": {"S": "governed"}}
     if _WA:
         _WA["version_seq"] = seq
     cid, wtool = _WA.get("correlation_id"), _WA.get("write_tool")
@@ -1410,11 +1463,39 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
             vals[":wa_tool"] = {"S": wtool}
     if expr:  # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
         vals = dict(vals)
-        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat, write_kind = :wa_wkind"
+        # ENC-TSK-S94: write_kind is stamped by the sequencing rule above. Assigning
+        # it again here would name one document path twice and DynamoDB would reject
+        # the whole UpdateExpression ("Two document paths overlap").
+        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat"
         vals[":wa_tack"] = {"N": str(_wa_ack_now())}
         vals[":wa_pstat"] = {"S": "pending"}
-        vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return expr, vals
+
+
+def _sequencing_parts_or_governed() -> Tuple[str, Dict[str, Dict[str, str]]]:
+    """_version_seq_update_parts(), but fail-open (ENC-TSK-S94 / ENC-ISS-908).
+
+    Used by the three close sites this task sequenced: the escalation
+    direct_state_override, the arc-walker code_only close and the human-override
+    advance. Allocating a version_seq is a SEPARATE UpdateItem on the version_seq
+    counter, and none of those three sites performs it inside the try/except that
+    guards its own write -- the arc-walker in particular would let a counter
+    ClientError escape its walk loop. A close must not fail because its sequence
+    number could not be allocated, so on failure this returns a fragment that still
+    stamps write_kind (keeping the DynamoDB-stream filters happy) and leaves the
+    write unsequenced, exactly as it was before this task.
+
+    The generic PATCH and the PWA legacy close keep calling
+    _version_seq_update_parts directly: an allocation failure surfacing as a failed
+    write is their long-standing contract and is not changed here.
+    """
+    try:
+        return _version_seq_update_parts()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ENC-ISS-908] version_seq allocation failed; the write will be "
+            "governed but UNSEQUENCED")
+        return ", write_kind = :vsq_wkind", {":vsq_wkind": {"S": "governed"}}
 
 
 def _get_events():
@@ -3244,20 +3325,26 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             "dispatch_id": _ser_s(""), "coordination_request_id": _ser_s(""),
             "timestamp": _ser_s(now2),
         }}
+        # ENC-TSK-S94 (ENC-ISS-908): the walker's advances -- the code_only close
+        # among them -- allocated no version_seq, so they never reached the feed
+        # delta. The fragment must sit INSIDE SET and BEFORE add_clause (ENC-TSK-P49:
+        # a SET assignment after " ADD ..." is a ValidationException), and it stamps
+        # write_kind in place of the local ":wk" assignment removed here.
+        _aw_vseq_expr, _aw_vseq_vals = _sequencing_parts_or_governed()
         update_expr = (
-            "SET write_kind = :wk, #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "SET #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "history = list_append(if_not_exists(history, :empty), :hentry)"
-            + extra_set + add_clause
+            + extra_set + _aw_vseq_expr + add_clause
         )
         attr_vals = {
             ":next": _ser_s(target), ":now": _ser_s(now2), ":note": _ser_s(note), ":wsrc": ws_av,
             ":zero": {"N": "0"}, ":one": {"N": "1"},
             ":hentry": {"L": [hentry]}, ":empty": {"L": []},
             ":expected": _ser_s(current),
-            ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
         }
         attr_vals.update(extra_vals)
+        attr_vals.update(_aw_vseq_vals)
         try:
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
@@ -5902,13 +5989,19 @@ def _apply_user_initiated_advance(
     # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
     # gate observes the counter the instant the transition commits.
     ui_update_expr = (
-        "SET write_kind = :wk, #fld = :val, updated_at = :now, last_update_note = :note, "
+        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
         "transition_evidence = :te, "
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
         "history = list_append(if_not_exists(history, :empty), :hentry)"
     )
     if latch_nf:
         ui_update_expr += ", auto_walk_opt_out = :optout"
+    # ENC-TSK-S94 (ENC-ISS-908): the human-override advance allocated no version_seq,
+    # so a PWA-initiated close was invisible to the feed delta. Splice the sequencing
+    # fragment inside SET and BEFORE the closed_count ADD (ENC-TSK-P49); it stamps
+    # write_kind in place of the local ":wk" assignment removed above.
+    _ui_vseq_expr, _ui_vseq_vals = _sequencing_parts_or_governed()
+    ui_update_expr += _ui_vseq_expr
     if new_lower == "closed":
         ui_update_expr += " ADD closed_count :one"
     ui_attr_values = {
@@ -5916,8 +6009,8 @@ def _apply_user_initiated_advance(
         ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
         ":zero": {"N": "0"}, ":one": {"N": "1"},
         ":hentry": {"L": hentry_list}, ":empty": {"L": []},
-        ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
     }
+    ui_attr_values.update(_ui_vseq_vals)
     if latch_nf:
         ui_attr_values[":optout"] = {"BOOL": True}
     try:

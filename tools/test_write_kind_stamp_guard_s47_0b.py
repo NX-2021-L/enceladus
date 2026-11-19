@@ -53,6 +53,18 @@ STAMP_HELPERS = {
     "_document_version_seq_update_parts",   # document_api: "write_kind = :wa_wkind"
     "_stamp_version_seq_on_create_item",    # tracker_mutation: item["write_kind"] = governed
     "_stamp_governed_transact_updates",     # tracker_mutation: stamps shared-layer built Update entries
+    # ENC-TSK-S94 (ENC-ISS-908): the sequencing rule's appendable SET fragment always
+    # assigns write_kind, in every fallback branch, so a site that splices it must NOT
+    # assign write_kind itself (DynamoDB rejects an expression naming one document path
+    # twice). These three are how each lambda reaches that fragment; the guarantee is
+    # covered by their own suites -- tracker_mutation/test_close_sequencing_s94.py and
+    # coordination_api/test_version_seq_ops_s94.py both assert exactly one
+    # "write_kind =" per rendered expression, including on allocation failure.
+    "sequenced_governed_write_clause",      # enceladus_shared.version_seq: the rule itself
+    "sequenced_governed_write_parts",       # enceladus_shared.version_seq: allocate + compose
+    "_sequencing_parts_or_governed",        # tracker_mutation: fail-open wrapper (3 close sites)
+    "sequenced_write_parts",                # coordination_api/version_seq_ops.py
+    "_sequenced_write_parts",               # bedrock_agent_actions
 }
 
 # (path relative to backend/lambda, enclosing function) -> reason. Keep one line per entry.

@@ -114,8 +114,13 @@ class WriteAuditTests(unittest.TestCase):
             tm._stamp_version_seq_on_create_item(item)
             self.assertEqual(item["write_kind"], {"S": "governed"})
             expr, vals = tm._version_seq_update_parts()
-            self.assertIn("write_kind = :wa_wkind", expr)
-            self.assertEqual(vals[":wa_wkind"], {"S": "governed"})
+            # ENC-TSK-S94 (ENC-ISS-908): write_kind is now stamped by the shared
+            # sequencing rule (sequenced_governed_write_clause), so the placeholder
+            # is :vsq_wkind rather than this module's old :wa_wkind. The guarantee
+            # under test is unchanged -- exactly one write_kind=governed assignment.
+            self.assertIn("write_kind = :vsq_wkind", expr)
+            self.assertEqual(vals[":vsq_wkind"], {"S": "governed"})
+            self.assertEqual(1, expr.count("write_kind ="), expr)
             tm._WA.clear()
 
 

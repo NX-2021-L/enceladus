@@ -70,6 +70,68 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
+
+# --- ENC-TSK-S94 (ENC-ISS-908): the one sequencing rule, reached defensively ---
+# _handle_tracker_status wrote status with a plain UpdateItem that allocated no
+# version_seq, so the write never appeared in the Query on version-seq-index behind
+# GET /api/v1/feed/delta and a client that missed the push event could not heal it.
+# SharedLayerArn is a PINNED default (enceladus-shared:15, 02-compute.yaml) that does
+# not carry sequenced_governed_write_parts yet, and an unguarded import of a symbol a
+# pinned layer lacks is what produced the :7 and :10 Runtime.ImportModuleError
+# incidents recorded on that parameter -- so prefer the rule, else compose it from the
+# primitives layer :15 does carry, else degrade instead of bricking at module load.
+_SEQUENCING_SOURCE = "unavailable"
+try:
+    from enceladus_shared.version_seq import (
+        sequenced_governed_write_parts as _vsq_rule,
+    )
+
+    _SEQUENCING_SOURCE = "shared_layer_rule"
+except ImportError:
+    try:
+        from enceladus_shared.version_seq import (
+            allocate_version_seq as _vsq_allocate,
+            version_seq_update_clause as _vsq_clause,
+        )
+
+        def _vsq_rule(ddb, table_name):
+            seq = _vsq_allocate(ddb, table_name)
+            expr, values = _vsq_clause(seq)
+            values = dict(values)
+            values[":vsq_wkind"] = {"S": "governed"}
+            return expr + ", write_kind = :vsq_wkind", values, seq
+
+        _SEQUENCING_SOURCE = "shared_layer_primitives"
+    except ImportError:
+        _vsq_rule = None
+
+
+def _sequenced_write_parts(ddb, table_name) -> Tuple[str, Dict[str, Any]]:
+    """Appendable SET fragment + values that sequence a governed write.
+
+    Always begins with ", " and always assigns write_kind, so the caller must not
+    assign write_kind itself. Append it inside SET and BEFORE any ADD clause -- a
+    SET assignment after " ADD ..." is invalid UpdateExpression syntax (ENC-TSK-P49).
+
+    version_seq is a MONOTONE CURSOR, not a counter: allocation is its own
+    UpdateItem, so a failed write burns a number and leaves a gap. Gaps are
+    harmless to a "version_seq > :cursor" Query; never derive a count from it.
+    Allocation failure fails OPEN -- the status write still lands, unsequenced.
+    """
+    if _vsq_rule is None:
+        logger.warning(
+            "[ENC-ISS-908] no version_seq rule reachable (%s); status write will be "
+            "governed but UNSEQUENCED", _SEQUENCING_SOURCE)
+        return ", write_kind = :vsq_wkind", {":vsq_wkind": {"S": "governed"}}
+    try:
+        expr, values, _seq = _vsq_rule(ddb, table_name)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ENC-ISS-908] version_seq allocation failed (%s); status write will be "
+            "governed but UNSEQUENCED", _SEQUENCING_SOURCE)
+        return ", write_kind = :vsq_wkind", {":vsq_wkind": {"S": "governed"}}
+    return expr, values
+
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
@@ -645,37 +707,55 @@ def _handle_tracker_status(parameters: List[Dict], body: Dict) -> Dict[str, Any]
 
     project_id = record.get("project_id", "")
     sk = record.get("record_id", "")
+    record_type = str(record.get("record_type") or "")
 
     ddb = _get_ddb()
     now = _now_z()
     history_entry = {
         "M": {
             "timestamp": _ser_s(now),
+            # ENC-TSK-S94: quote the status so the mart's extract_transitions
+            # ("Status changed to '<status>'") and the MCP server's parse_transition
+            # recognise this writer's note instead of skipping it.
             "status": _ser_s(new_status),
-            "description": _ser_s(f"Status changed to {new_status} by bedrock agent"),
+            "description": _ser_s(
+                f"Status changed to '{new_status}' by bedrock agent"),
         }
     }
 
     ws = _build_write_source()
+    # ENC-TSK-S94 (ENC-ISS-908): sequence the write and count a task close. The SET
+    # fragment also stamps write_kind (replacing the local ":wk" assignment) and MUST
+    # precede the ADD clause (ENC-TSK-P49). closed_count is the gate evidence for
+    # component.advance approved -> designed (ENC-FTR-076) and this writer never
+    # added it; only tasks carry the attribute.
+    _vseq_expr, _vseq_vals = _sequenced_write_parts(ddb, TRACKER_TABLE)
+    _update_expr = (
+        "SET #st = :status, updated_at = :now, write_source = :ws, "
+        "history = list_append(if_not_exists(history, :empty), :entry)"
+        + _vseq_expr
+    )
+    _attr_values = {
+        ":status": _ser_s(new_status),
+        ":now": _ser_s(now),
+        ":ws": _ser_value(ws),
+        ":entry": {"L": [history_entry]},
+        ":empty": {"L": []},
+    }
+    _attr_values.update(_vseq_vals)
+    if (record_type.strip().lower() == "task"
+            and str(new_status).strip().lower() == "closed"):
+        _update_expr += " ADD closed_count :vsq_cc_one"
+        _attr_values[":vsq_cc_one"] = {"N": "1"}
     ddb.update_item(
         TableName=TRACKER_TABLE,
         Key={
             "project_id": _ser_s(project_id),
             "record_id": _ser_s(sk),
         },
-        UpdateExpression=(
-            "SET write_kind = :wk, #st = :status, updated_at = :now, write_source = :ws, "
-            "history = list_append(if_not_exists(history, :empty), :entry)"
-        ),
+        UpdateExpression=_update_expr,
         ExpressionAttributeNames={"#st": "status"},
-        ExpressionAttributeValues={
-            ":wk": {"S": "governed"},
-            ":status": _ser_s(new_status),
-            ":now": _ser_s(now),
-            ":ws": _ser_value(ws),
-            ":entry": {"L": [history_entry]},
-            ":empty": {"L": []},
-        },
+        ExpressionAttributeValues=_attr_values,
     )
 
     return {"success": True, "record_id": record_id, "status": new_status}
