@@ -93,6 +93,19 @@ const projectsRoute = createRoute({
   path: '/projects',
   component: lazyRouteComponent(() => import('./ProjectsRoute'), 'ProjectsRoute'),
 })
+/**
+ * ENC-TSK-S98-0C (ENC-PLN-108 W3.3), DOC-5E1E205FA664 section 5.9: the Plans timeline. Declared like /projects, with
+ * `?project=` validated the way /docs does it so a filtered view is a shareable URL.
+ */
+const plansRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/plans',
+  validateSearch: (raw: Record<string, unknown>) => ({
+    project: typeof raw.project === 'string' ? raw.project : '',
+  }),
+  component: lazyRouteComponent(() => import('./PlansRoute'), 'PlansRoute'),
+})
+
 const docsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/docs',
@@ -243,6 +256,7 @@ const routeTree = rootRoute.addChildren([
   recipeDetailRoute,
   feedRoute,
   projectsRoute,
+  plansRoute,
   docsRoute,
   governanceRoute,
   changelogRoute,

@@ -31,15 +31,27 @@ export interface PlansPageProps {
   onRefresh?: () => void
   /** Where manual toggles are remembered; the device's own store when omitted. */
   overrideStore?: WaveOverrideStore
+  /**
+   * ENC-TSK-S98-0C (W3.3): the project filter, controlled. When omitted the page keeps its own state, which is what
+   * the W3.2 tests and fixtures use; the /plans route passes it so the selection is mirrored in `?project=`.
+   */
+  project?: string
+  onProjectChange?: (project: string) => void
 }
 
 const ALL_PROJECTS = { label: 'All projects', value: '' }
 
-export function PlansPage({ corpus, now, asOf = null, stale = false, loading = false, error = null, onRefresh, overrideStore }: PlansPageProps) {
+export function PlansPage({ corpus, now, asOf = null, stale = false, loading = false, error = null, onRefresh, overrideStore, project: projectProp, onProjectChange }: PlansPageProps) {
   const store = overrideStore ?? getDeviceWaveOverrideStore()
   const overrides = useWaveOverrides(store)
-  const [project, setProject] = useState('')
+  const [ownProject, setOwnProject] = useState('')
   const [count, setCount] = useState(PLAN_PAGE_SIZE)
+  // Controlled when the route supplies it, uncontrolled otherwise.
+  const project = projectProp ?? ownProject
+  const setProject = (next: string) => {
+    if (projectProp === undefined) setOwnProject(next)
+    onProjectChange?.(next)
+  }
 
   // No hand-written memoisation: the React Compiler memoises these (AC-16).
   const projects = [...new Set(corpus.filter((r) => r.record_type.toLowerCase() === 'plan' && r.project_id).map((r) => r.project_id as string))].sort()
