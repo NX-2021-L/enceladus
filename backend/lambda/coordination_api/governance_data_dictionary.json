@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-19.02",
-  "updated_at": "2026-11-19T03:05:00Z",
-  "last_change_summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful.",
+  "version": "2026-11-19.03",
+  "updated_at": "2026-11-19T07:35:00Z",
+  "last_change_summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder.",
   "owners": [
     "enceladus-platform"
   ],
@@ -567,7 +567,7 @@
             "io-approved escalation"
           ],
           "definition": "ENC-PLN-108 W1.1 (ENC-TSK-S96-0A) / DOC-B8285D689DAC section 1: server-stamped at the transition time whenever a write sets status to closed, and OVERWRITTEN when a re-entered task closes again; closed_count records how many times a task has closed, so this field holds the most recent close. Written by SIX writers (ruling D-24): the five tracker_mutation close sites -- generic PATCH behind checkout.advance, legacy PWA close, escalation direct_state_override, arc-walker code_only close, human-override advance -- all of which go through the one helper _closed_at_set_parts, plus coordination_api _set_tracker_status in BOTH of its copies (lambda_function.py and tracker_ops.py). NOT written by bedrock_agent_actions, which refuses every tracker write (ENC-ISS-909, ENC-ISS-911, ENC-TSK-T04).",
-          "stamp_trigger": "_closed_at_set_parts, appended inside SET and before any ADD clause (ENC-TSK-P49), at each close site that lands status=closed on a task record.",
+          "stamp_trigger": "tracker_mutation: _closed_at_set_parts, appended inside SET and before any ADD clause (ENC-TSK-P49), at each of the five close sites that land status=closed on a task. coordination_api: closed_at_set_parts in version_seq_ops, spliced the same way in BOTH _set_tracker_status copies (lambda_function.py and tracker_ops.py), under the same predicate as the closed_count ADD so the date and the count cannot disagree. The coordination_api half is independent of the version_seq sequencing rule, so it holds on every rung of that module's guarded import ladder, including the degraded rung that stamps write_kind alone.",
           "escalation_route": "Deliberately ABSENT from tracker_mutation's _RESERVED_OVERRIDE_PATHS, so an io-approved direct_state_override MAY supply closed_at through field_values for a task whose close time the backfill could not establish from history (ruling D-21). The applier therefore stamps closed_at only when field_values is silent about it: assigning it from both the close helper and the override loop would name one document path twice, which DynamoDB rejects and _render_update_expression raises in-process (ENC-ISS-759). See DOC-B8285D689DAC section 2.",
           "usage_guidance": "Read-only for ordinary callers. Never supply in POST/PATCH bodies: tracker_mutation rejects both with HTTP 400 RESERVED_FIELD (_W11_SERVER_STAMPED_TIMESTAMPS). The only client-supplied route is an io-approved escalation's field_values, per escalation_route above. Absent when the task has never closed, and absent on the backfill path when history carries no recognisable close note, where ruling D-21 forbids guessing -- that case is recorded by the separate closed_at_unknown waiver marker instead of a silent null."
         }
@@ -10320,7 +10320,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful.",
+  "change_summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11564,6 +11564,11 @@
       "version": "2026-11-19.02",
       "date": "2026-11-19",
       "summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful."
+    },
+    {
+      "version": "2026-11-19.03",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder."
     }
   ]
 }
