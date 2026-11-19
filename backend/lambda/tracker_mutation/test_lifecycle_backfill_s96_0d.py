@@ -352,10 +352,26 @@ class CheckoutCountTests(unittest.TestCase):
         rec = task([]); del rec["checkout_count"]
         self.assertFalse(lb.plan_lifecycle_stamps(rec)["checked_out"])
 
-    def test_count_zero_with_a_checkout_note_is_flagged_not_stamped(self):
+    def test_count_zero_with_a_checkout_note_is_stamped_and_still_flagged(self):
+        """io ruling D-31 (2026-11-19): history wins; checkout_count is corroboration.
+
+        This test previously asserted the opposite -- that a zero count suppressed the
+        stamp. The first gamma dry run found 782 real tasks in exactly this shape,
+        because checkout_count arrived with ENC-TSK-F41 and was never backfilled, so a
+        zero count on a pre-F41 record is an ABSENT counter rather than a claim that no
+        checkout happened. Suppressing the stamp discarded proof the extractor held.
+        The disagreement is still flagged, so the audit trail survives the ruling.
+        """
         p = lb.plan_lifecycle_stamps(task([h(CHECKOUT)], checkout_count=0))
-        self.assertNotIn("first_checked_out_at", p["set"])
+        self.assertIn("first_checked_out_at", p["set"])
+        self.assertEqual("stamped", p["checkout_class"])
         self.assertIn("checkout_note_but_count_zero", p["flags"])
+
+    def test_count_zero_with_no_checkout_note_is_still_unstamped(self):
+        """D-31 widens what counts as proof; it does not weaken D-21's no-guessing rule."""
+        p = lb.plan_lifecycle_stamps(task([h("something else")], checkout_count=0))
+        self.assertNotIn("first_checked_out_at", p["set"])
+        self.assertEqual("never_checked_out", p["checkout_class"])
 
     def test_positive_count_without_a_note_is_unprovable_and_flagged(self):
         p = lb.plan_lifecycle_stamps(task([h("x")], checkout_count=2))
@@ -645,9 +661,24 @@ class OperatorScript(unittest.TestCase):
             self.assertIn(needle, text)
 
     def test_criterion_17_is_reported_honestly(self):
-        self.assertFalse(script.criterion_17(script.summarise(_pop()))["holds"])
-        clean = [t for t in _pop() if t["record_id"] in ("task#A1", "task#B1", "task#D1")]
-        self.assertTrue(script.criterion_17(script.summarise(clean))["holds"])
+        """Under io's ruling D-31 the equality is restated, so what breaks it changed.
+
+        It used to break on a zero checkout_count beside a checkout note -- the shape of
+        782 real gamma tasks -- which D-31 now stamps from history. The only remaining
+        way to hold a checkout note and no stamp is an UNPARSABLE timestamp on that note,
+        so that is what must flip 'holds' to false. The baseline population now holds.
+        """
+        base = script.summarise(_pop())
+        self.assertTrue(script.criterion_17(base)["holds"])
+        # The 782-shaped task is present in _pop (task#C2) and is now stamped, recorded
+        # as an audit figure rather than an exception.
+        self.assertEqual(1, script.criterion_17(base)["count_zero_but_stamped_from_history"])
+
+        broken = _pop() + [task([h(CHECKOUT, "not-a-timestamp")], record_id="task#E1")]
+        c17 = script.criterion_17(script.summarise(broken))
+        self.assertFalse(c17["holds"])
+        self.assertEqual(1, c17["note_present_but_unstamped"])
+        self.assertEqual(["task#E1"], c17["note_present_but_unstamped_ids"])
 
     def test_pagination_walks_every_page_and_strips_the_sk_prefix(self):
         client = FakeClient(_pop(), page=4)

@@ -307,23 +307,30 @@ def plan_lifecycle_stamps(record: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
     # ---- first_checked_out_at --------------------------------------------
+    # io ruling 2026-11-19 (D-31, "history wins"): HISTORY decides whether a task was
+    # ever checked out; checkout_count is corroboration, never a gate. The first gamma
+    # dry run found 782 tasks carrying a recognisable checkout note while their
+    # checkout_count was 0, because the counter arrived with ENC-TSK-F41 and was never
+    # backfilled -- on a pre-F41 record a zero count is an ABSENT counter, not a claim
+    # that no checkout happened. Gating on it discarded proof the extractor already
+    # held. Ruling D-21 still binds in full: nothing is guessed, and a task whose
+    # history proves no first checkout is still left unstamped.
     note_ts, note_idx, note_state = first_checkout(record)
     if record.get("first_checked_out_at"):
         out["checkout_class"] = "already_set"
-    elif never_checked_out:
-        out["checkout_class"] = "never_checked_out"
-        if note_state != "none":
-            # The count says never, history says once. The contract (DOC-B8285D689DAC
-            # section 1; criterion 17) is that checkout_count of 0 means no stamp, so
-            # none is written -- but the disagreement is reported, not hidden.
-            out["flags"].append("checkout_note_but_count_zero")
     elif note_state == "found":
         out["checkout_class"] = "stamped"
         out["set"]["first_checked_out_at"] = note_ts
         out["first_checked_out_at_index"] = note_idx
+        if never_checked_out:
+            # Stamped from history, and the disagreement with the counter is still
+            # reported rather than hidden -- it is the audit trail for D-31.
+            out["flags"].append("checkout_note_but_count_zero")
     elif note_state == "unparsable_timestamp":
         out["checkout_class"] = "checked_out_unprovable"
         out["flags"].append("first_checkout_timestamp_unparsable")
+    elif never_checked_out:
+        out["checkout_class"] = "never_checked_out"
     else:
         out["checkout_class"] = "checked_out_unprovable"
         out["flags"].append("checkout_count_positive_but_no_checkout_note")
