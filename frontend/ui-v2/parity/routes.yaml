@@ -76,6 +76,15 @@ routes:
       - "POST /api/v1/projects"
     auth: "session"
     surface: "enceladus"
+  - path: "/plans"
+    component: "frontend/ui-v2/src/routes/PlansRoute.tsx"
+    handlers:
+      - "GET /api/v1/feed/corpus"
+      - "GET /api/v1/feed/delta"
+      - "GET /api/v1/feed/plan-scope"
+      - "GET /api/v1/projects"
+    auth: "session"
+    surface: "enceladus"
   - path: "/docs"
     component: "frontend/ui-v2/src/routes/DocsRoute.tsx"
     handlers:

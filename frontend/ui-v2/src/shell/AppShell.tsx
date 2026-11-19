@@ -24,6 +24,8 @@ const FILL_ROUTES = ['/feed', '/docs']
 
 const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
+  // ENC-TSK-S98-0C (ENC-PLN-108 W3.3, R1): Plans sits between Projects and Feed.
+  { type: 'link' as const, text: 'Plans', href: '/plans' },
   { type: 'link' as const, text: 'Feed', href: '/feed' },
   { type: 'link' as const, text: 'Docs', href: '/docs' },
   { type: 'link' as const, text: 'Skill Library', href: '/skills' },
