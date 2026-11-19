@@ -121,6 +121,12 @@
     background: var(--tint-void-60);
     border: none;
     padding: 0;
+    /* ENC-ISS-918: the scrim never scrolls, so it refuses the gesture outright
+     * rather than letting it chain through to the page scroller behind it.
+     * AppShell renders the scrim only while the drawer is open, so this needs
+     * no --nav-open qualifier. */
+    overscroll-behavior: contain;
+    touch-action: none;
   }
 }
 
@@ -180,6 +186,34 @@
 .ev2-shell__nav > .ev2-sn {
   min-height: 100%;
   border-right: 0;
+}
+
+/* ENC-ISS-918 (io, from gamma on a phone: "when i scroll on the page the page
+ * scrolls behind the menu frozen").
+ *
+ * Mechanism, measured on the live gamma build: .ev2-shell__nav already carried
+ * overscroll-behavior:contain, but with the menu list shorter than the drawer
+ * it was NOT a scroll container (scrollHeight === clientHeight), so containment
+ * never applied and the gesture chained straight out to the page scroller
+ * behind the drawer. overflow-y:scroll makes it a scroll container
+ * unconditionally, so contain finally has something to hold.
+ *
+ * Two things this deliberately does NOT do, each pinned by a test that caught
+ * the mistake:
+ *   - it does not lock .ev2-al__content, the element that was scrolling: below
+ *     960px .io-search__controls is position:sticky against it, and overflow
+ *     there breaks the sticky edge (searchControls.contract.test.ts);
+ *   - it does not set touch-action:none on .ev2-al__nav, which would stop the
+ *     drawer scrolling its own list when that list is taller than the viewport.
+ *
+ * It sits in its own mobile block AFTER the base .ev2-shell__nav rule above so
+ * that rule stays the first `.ev2-shell__nav {` match for the one-scroll-owner
+ * contract in layoutContract.test.tsx. */
+@media (max-width: 48rem) {
+  .ev2-shell--nav-open .ev2-shell__nav {
+    overflow-y: scroll;
+    overscroll-behavior: contain;
+  }
 }
 @media (min-width: 48.0625rem) {
   .ev2-shell .ev2-al__nav:not(.ev2-al__nav--collapsed) {
