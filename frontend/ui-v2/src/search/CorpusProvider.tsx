@@ -24,6 +24,19 @@ const source = createEnceladusCorpusSource(undefined, docsDeltaWanted)
  */
 const HEAL = { intervalMs: 60_000 } as const
 
+/**
+ * ENC-TSK-S97-0E (ENC-PLN-108 W2.5, ruling D-23 and criterion 24): a device does ONE full corpus seed a day and
+ * rides deltas in between. useCorpusIndex defaults seedMaxAgeMs to 0, which means every cold load re-seeds the
+ * whole corpus; at the measured 12,562 rows / 4.58 MiB that is the single largest cost of opening the app.
+ *
+ * Known and accepted cost (D-23): document rows can be up to a day stale in the header search launcher until Docs
+ * is opened, because the documents-table scan (doc_since) is gated separately in corpusSource (P101-R15) and only
+ * a full seed otherwise refreshes them. Tracker rows do NOT go stale -- they heal on the 60 s delta above.
+ *
+ * refresh() still forces a full seed, so CorpusRefreshButton remains the escape hatch.
+ */
+const SEED_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
 const EMPTY: CorpusIndex = {
   rows: [],
   status: 'seeding',
@@ -56,11 +69,18 @@ export function useDocsDeltaWhileMounted(): void {
   }, [heal])
 }
 
+export { SEED_MAX_AGE_MS }
+
 export function CorpusProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void restorePersistedQueryClient(queryClient)
     return attachQueryClientPersist(queryClient)
   }, [])
-  const index = useCorpusIndex(source, { store: getEnceladusCorpusStore(), budget: CORPUS_BUDGET, heal: HEAL })
+  const index = useCorpusIndex(source, {
+    store: getEnceladusCorpusStore(),
+    budget: CORPUS_BUDGET,
+    heal: HEAL,
+    seedMaxAgeMs: SEED_MAX_AGE_MS,
+  })
   return <CorpusContext.Provider value={index}>{children}</CorpusContext.Provider>
 }
