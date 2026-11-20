@@ -214,6 +214,40 @@
     overflow-y: scroll;
     overscroll-behavior: contain;
   }
+
+  /* ENC-TSK-T16 W7-F2: ENC-ISS-918 was not the whole of it, and io logged the same symptom again from prod on a
+   * phone -- the app bar painted across the middle of the open drawer, hiding one row.
+   *
+   * Measured on the live gamma build with the drawer open: .ev2-al__nav is position:fixed at z-index 4, the scrim is
+   * fixed at z-index 3, the document itself is NOT scrollable (scrollHeight === innerHeight) -- and .ev2-al__content
+   * is STILL a live scroller. ISS-918 stopped the gesture CHAINING out of the drawer; it never stopped the page
+   * behind from being scrollable in its own right, so a scroll already in motion when the drawer opens, or any input
+   * reaching that scroller directly, still moves the page while the drawer stays pinned. That is io's sentence
+   * almost word for word: "the page scrolls behind the menu frozen".
+   *
+   * Locking .ev2-al__content was deliberately avoided by ISS-918 because below 960px .io-search__controls is
+   * position:sticky against it and overflow there breaks the sticky edge (searchControls.contract.test.ts). That
+   * reasoning is about the DEFAULT state; it does not apply while a full-screen drawer covers the page, so the lock
+   * is scoped to the open drawer and the sticky edge is untouched in every other state. */
+  .ev2-shell--nav-open .ev2-al__content {
+    overflow: hidden;
+  }
+
+  /* The app bar is position:static while the drawer and scrim are position:fixed, so the two are anchored to
+   * different things. On iOS a visual-viewport transition (toolbar collapse, rubber-band) offsets one and not the
+   * other, and the bar drifts across the fixed drawer -- the screenshot io sent. Chrome on the desktop cannot
+   * reproduce a visual-viewport offset, so this is hardening against the class rather than a proven repro: while the
+   * drawer is open the bar is anchored the same way it is, above it, and the two cannot drift apart. Scoped to
+   * --nav-open, so ordinary scrolling keeps the bar in flow exactly as before. */
+  .ev2-shell--nav-open .ev2-shell__bar {
+    /* io-inset-exempt top right left bottom: the bar wrapper already carries `.io-safe-top`, which owns the top
+     * inset as padding, and a full-bleed bar paints under the notch by design exactly as the scrim does. It is
+     * anchored to the top edge only; `bottom` is auto, so it touches no bottom inset. */
+    position: fixed;
+    inset: var(--space-0) var(--space-0) auto var(--space-0);
+    z-index: 5;
+    background: var(--surface-raised);
+  }
 }
 @media (min-width: 48.0625rem) {
   .ev2-shell .ev2-al__nav:not(.ev2-al__nav--collapsed) {

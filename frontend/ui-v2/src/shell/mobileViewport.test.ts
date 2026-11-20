@@ -503,10 +503,44 @@ describe('mobile nav drawer scroll lock (ENC-ISS-918)', () => {
    * (searchControls.contract.test.ts). Pin it here too so the reason survives
    * next to the fix.
    */
-  it('never locks .ev2-al__content, whose sticky descendants depend on it', () => {
-    expect(mobileBlock).not.toMatch(
-      /\.ev2-shell--nav-open\s+\.ev2-al__content\s*\{[^}]*overflow/,
+  /**
+   * ENC-TSK-T16 W7-F2 narrowed this. It used to forbid locking .ev2-al__content at all, because below 960px
+   * .io-search__controls is position:sticky against it and overflow there breaks the sticky edge. That reasoning is
+   * about the DEFAULT state and does not survive contact with the open drawer: ISS-918 stopped the gesture CHAINING
+   * out of the drawer but left .ev2-al__content a live scroller, so the page behind the menu still moved -- which is
+   * what io reported again from prod, on a build that already carried the ISS-918 fix.
+   *
+   * So the contract is now about WHEN, not whether. Unqualified, the lock is still forbidden. Scoped to --nav-open
+   * it is required, and it is safe on both counts: the sticky edge is under a full-screen drawer and a scrim, and a
+   * toggled overflow preserves scrollTop (measured on the live gamma build: 200 before, during and after).
+   */
+  it('locks .ev2-al__content only while the drawer is open', () => {
+    expect(mobileBlock).toMatch(
+      /\.ev2-shell--nav-open\s+\.ev2-al__content\s*\{[^}]*overflow:\s*hidden/,
     )
+    // The unqualified form would break the sticky edge on every route, at every moment. Every rule that locks the
+    // content scroller must name the open drawer in its selector.
+    const locks = [...mobileBlock.matchAll(/([^{}]+)\{([^}]*overflow:\s*hidden[^}]*)\}/g)]
+      .filter(([, selector]) => /\.ev2-al__content\s*$/.test(selector as string))
+      .map(([, selector]) => (selector as string).trim())
+    expect(locks.length).toBeGreaterThan(0)
+    for (const selector of locks) expect(selector).toContain('--nav-open')
+  })
+
+  /**
+   * The app bar is position:static while the drawer and scrim are position:fixed, so an iOS visual-viewport
+   * transition can drift them apart and put the bar across the drawer -- io's screenshot. While the drawer is open
+   * the bar must be anchored the same way the drawer is, and above it.
+   */
+  it('anchors the app bar above the drawer while the drawer is open', () => {
+    const rule = /\.ev2-shell--nav-open\s+\.ev2-shell__bar\s*\{([^}]*)\}/.exec(mobileBlock)
+    expect(rule).not.toBeNull()
+    const body = rule![1] as string
+    expect(body).toMatch(/position:\s*fixed/)
+    const z = /z-index:\s*(\d+)/.exec(body)
+    expect(z).not.toBeNull()
+    // Above the drawer (4) and the scrim (3), or the bar would be the thing that gets covered.
+    expect(Number(z![1])).toBeGreaterThan(4)
   })
 
   /**

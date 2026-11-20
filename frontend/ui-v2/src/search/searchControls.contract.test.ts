@@ -108,10 +108,21 @@ describe('frozen controls: sticky to the page scroller below 960px', () => {
     expect(narrow).not.toMatch(/\.ev2-al__content\[data-ev2-fill\]\s*\{\s*overflow: hidden;/)
     const ancestors = /\.(ev2-al__content|ev2-shell__main|ev2-fill|io-split|io-split__own|io-split__primary|feed-route|docs-route)(?![\w-])/
     const breaker = /(^|[;\s])(overflow(-x|-y)?|contain|content-visibility|transform|filter|perspective|clip-path)\s*:/
+    // ENC-TSK-T16 W7-F2: a rule scoped to the OPEN NAV DRAWER is not part of this contract. The sticky edge only has
+    // to survive states the user can actually see it in, and while the drawer is open the controls sit under a
+    // full-screen drawer (z-index 4) and its scrim (z-index 3). Locking the page scroller there is what finally
+    // stops the page moving behind the menu -- ENC-ISS-918 contained the gesture CHAINING out of the drawer but
+    // left .ev2-al__content a live scroller, and io reported the symptom again from prod on a build that already
+    // carried that fix. Narrowing this to the visible states is the point; widening it back would restore the bug.
+    let checked = 0
     for (const [, selector, body] of narrow.matchAll(/([^{}@]+)\{([^{}]*)\}/g)) {
       if (!ancestors.test(selector ?? '')) continue
+      if (/--nav-open/.test(selector ?? '')) continue
+      checked++
       expect(body, selector?.trim()).not.toMatch(breaker)
     }
+    // The exemption must not be able to empty the contract.
+    expect(checked).toBeGreaterThan(0)
   })
 })
 
