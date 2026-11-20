@@ -39,8 +39,18 @@ const list = (v: unknown): readonly string[] | null => {
 /**
  * One corpus `IndexRow` as the lens reads it.
  *
- * `created_at` is read here too, even though the corpus does not carry it at corpus scope (D-26): if a future scope
- * ever does, the row simply arrives complete and the overlay below becomes a no-op rather than a conflict.
+ * All THREE lifecycle timestamps are read here, even though no corpus or delta row carries them at corpus scope
+ * (ruling D-26). They are read because a LIVE row can: ENC-TSK-S97-0B (W2.2) puts recordCreatedAt,
+ * recordFirstCheckedOutAt and recordClosedAt on the /feed/updates event, and `@io-kit/search`'s mergeHeadline writes
+ * them into `IndexRow.fields` in snake_case. The seeded row has none of them; a row that has since received a live
+ * event has whichever ones its record carried.
+ *
+ * ENC-TSK-T22 (ENC-ISS-922): before this, only `created_at` was read, so `withTimes`'s fallback to the row's own
+ * value was dead code and the event fields W2.2 ships were delivered and then dropped. That is what stopped criterion
+ * 8 firing. ENC-TSK-T05's plan-scoped read runs ONCE per page open, so on an already-open page a task's FIRST
+ * checkout has no other route to the lens -- and `hot(w)` is defined on first_checked_out_at alone, so without it a
+ * freshly checked-out wave turns `active` (which `isCheckedOut` widens to cover) but never `hot`, and
+ * `expandedDefault` never opens it.
  */
 function toLensRow(row: { id: string; type?: string; title?: string | null; fields?: Record<string, unknown> }): PlansRow {
   const f = row.fields ?? {}
@@ -55,10 +65,18 @@ function toLensRow(row: { id: string; type?: string; title?: string | null; fiel
     wave: text(f.wave),
     objectives_set: list(f.objectives_set),
     created_at: text(f.created_at),
+    first_checked_out_at: text(f.first_checked_out_at),
+    closed_at: text(f.closed_at),
   }
 }
 
-/** Apply the plan-scope overlay without discarding anything the corpus already knew. */
+/**
+ * Apply the plan-scope overlay without discarding anything the corpus already knew.
+ *
+ * Precedence is deliberate and one way round: the plan-scope value WINS, because it is read straight from the record,
+ * while the corpus value is whatever the last live event happened to carry. With no entry in the map the row stands as
+ * it is -- which is now meaningful rather than a no-op, since the row may carry stamps from a live event (ENC-TSK-T22).
+ */
 function withTimes(row: PlansRow, times: PlanScopeTimes | undefined): PlansRow {
   if (!times) return row
   const created = times.created_at ?? row.created_at ?? null
