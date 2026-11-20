@@ -71,22 +71,97 @@ function toLensRow(row: { id: string; type?: string; title?: string | null; fiel
 }
 
 /**
- * Apply the plan-scope overlay without discarding anything the corpus already knew.
+ * ENC-TSK-T27 (ENC-ISS-925): the newer of two values for a stamp that only ever moves forward.
  *
- * Precedence is deliberate and one way round: the plan-scope value WINS, because it is read straight from the record,
- * while the corpus value is whatever the last live event happened to carry. With no entry in the map the row stands as
- * it is -- which is now meaningful rather than a no-op, since the row may carry stamps from a live event (ENC-TSK-T22).
+ * All three lifecycle stamps are monotonic by W1's design: `created_at` and `first_checked_out_at` are written once
+ * (`first_checked_out_at` through `if_not_exists`) and never change, and `closed_at` is only ever overwritten by a
+ * LATER close -- never cleared. They are ISO 8601 UTC with a fixed shape, so a lexicographic compare is a time
+ * compare. That makes "newest non-null wins" correct for all three and removes the question of source precedence.
  */
-function withTimes(row: PlansRow, times: PlanScopeTimes | undefined): PlansRow {
-  if (!times) return row
-  const created = times.created_at ?? row.created_at ?? null
-  const firstOut = times.first_checked_out_at ?? row.first_checked_out_at ?? null
-  const closed = times.closed_at ?? row.closed_at ?? null
-  if (created === row.created_at && firstOut === (row.first_checked_out_at ?? null) && closed === (row.closed_at ?? null)) {
+const newest = (a: string | null | undefined, b: string | null | undefined): string | null => {
+  const x = a ?? null
+  const y = b ?? null
+  if (x === null) return y
+  if (y === null) return x
+  return y > x ? y : x
+}
+
+/**
+ * Resolve each lifecycle stamp from the three places the page can learn it, newest non-null winning.
+ *
+ * The three: `times`, ENC-TSK-T05's plan-scoped read, made ONCE per page open; `row`, whatever the last live event
+ * left on the corpus row (ENC-TSK-S97-0B writes them, ENC-TSK-T22 made the lens read them); and `seen`, what this
+ * mount has already been told by either of the other two (ENC-TSK-T27).
+ *
+ * ENC-TSK-T27 (ENC-ISS-925) replaced T22's one-way "the plan-scope value WINS", and the change is deliberate rather
+ * than incidental. That rule is wrong for `closed_at`: the plan-scope read never happens again, so on a page left
+ * open, a re-entry and re-close would go on showing the FIRST close time for as long as the page stayed open. Taking
+ * the newest is correct because every one of these stamps only moves forward (see `newest`). For `created_at` and
+ * `first_checked_out_at` the two rules cannot genuinely disagree, since both are written once and every event
+ * carries the same value.
+ *
+ * `seen` is what makes the whole thing hold: see `rememberRowStamps`.
+ */
+function withTimes(row: PlansRow, times: PlanScopeTimes | undefined, seen: PlanScopeTimes | undefined): PlansRow {
+  if (!times && !seen) return row
+  const created = newest(newest(times?.created_at, seen?.created_at), row.created_at)
+  const firstOut = newest(newest(times?.first_checked_out_at, seen?.first_checked_out_at), row.first_checked_out_at)
+  const closed = newest(newest(times?.closed_at, seen?.closed_at), row.closed_at)
+  if (created === (row.created_at ?? null) && firstOut === (row.first_checked_out_at ?? null) && closed === (row.closed_at ?? null)) {
     return row
   }
   return { ...row, created_at: created, first_checked_out_at: firstOut, closed_at: closed }
 }
+
+/**
+ * ENC-TSK-T27 (ENC-ISS-925): remember any stamp a corpus row is carrying, so a later row cannot un-say it.
+ *
+ * This is the whole fix. A live `/feed/updates` event enriches the corpus row with the three stamps (ENC-TSK-S97-0B
+ * writes them, `mergeHeadline` lands them in `IndexRow.fields`, ENC-TSK-T22 made `toLensRow` read them), which is
+ * what lets a freshly checked-out wave turn hot and open. But ruling D-26 deliberately keeps those stamps OFF every
+ * corpus and delta row, so the NEXT 60-second heal delta replaces the enriched row with a bare one and the stamp is
+ * gone again -- measured on prod as a wave that expanded on the checkout and re-collapsed 29 seconds later, with
+ * nobody touching it. The stamp is a write-once fact, so losing it is never right, and the honest fix is to keep it
+ * rather than to put the timestamps back on the delta row, which D-26 and D-30's seed-size bar both forbid.
+ *
+ * The memory is MODULE-scoped, not a ref and not state, and that is forced rather than chosen. `react-hooks/refs`
+ * forbids reading a ref during render, and `react-hooks/set-state-in-effect` forbids the state version, so neither
+ * React-held option is available; a module value may be written from an effect and read during render, which is
+ * exactly the access pattern this needs. It is also the honest scope: these are immutable facts about records,
+ * identical for every component that asks, so there is nothing per-instance about them. It costs test isolation,
+ * which `__resetStampMemory` gives back.
+ *
+ * Monotonic: a field already held can only be replaced by a strictly newer value, so running it twice, or over rows
+ * it has already seen, changes nothing.
+ */
+const stampMemory = new Map<string, PlanScopeTimes>()
+
+/** Every stamp any corpus row has carried in this tab, newest per field. Read during render; written only below. */
+export const recallStamps = (id: string): PlanScopeTimes | undefined => stampMemory.get(id)
+
+/** Test seam. The memory is module-scoped on purpose (see `rememberRowStamps`), so tests must clear it themselves. */
+export const __resetStampMemory = (): void => {
+  stampMemory.clear()
+}
+
+function rememberRowStamps(rows: readonly { id: string; fields?: Record<string, unknown> }[]): void {
+  const seen = stampMemory
+  for (const row of rows) {
+    const f = row.fields
+    if (!f) continue
+    const created = text(f.created_at)
+    const firstOut = text(f.first_checked_out_at)
+    const closed = text(f.closed_at)
+    if (created === null && firstOut === null && closed === null) continue
+    const held = seen.get(row.id)
+    seen.set(row.id, {
+      created_at: newest(held?.created_at, created),
+      first_checked_out_at: newest(held?.first_checked_out_at, firstOut),
+      closed_at: newest(held?.closed_at, closed),
+    })
+  }
+}
+
 
 export interface PlansLens {
   /** Every row the page may draw, structure from the corpus and time from the plan-scoped read. */
@@ -141,13 +216,28 @@ export function usePlansLens(): PlansLens {
     return () => ac.abort()
   }, [])
 
+  /**
+   * ENC-TSK-T27 (ENC-ISS-925): remember every stamp a corpus row has ever carried.
+   *
+   * Keyed on `corpus.rows` alone, so it runs once per corpus change rather than once per render, and it writes a ref
+   * rather than state, so it triggers no render of its own -- the render that follows the live event already has the
+   * value on the row itself, and this only has to make it survive the NEXT one. Rows with no stamps, which is nearly
+   * all of them, cost three property reads and nothing else.
+   */
+  useEffect(() => {
+    const rows = corpus.rows
+    if (!rows || rows.length === 0) return
+    rememberRowStamps(rows as readonly { id: string; fields?: Record<string, unknown> }[])
+  }, [corpus.rows])
+
   // No useMemo: the React Compiler is active and memoizes this on [corpus.rows, times] (eslint AC-16).
   const rows: PlansRow[] = (() => {
     const out: PlansRow[] = []
     for (const row of corpus.rows ?? []) {
       const type = String((row as { type?: string }).type ?? '').toLowerCase()
       if (!LENS_TYPES.has(type)) continue
-      out.push(withTimes(toLensRow(row as never), times.get((row as { id: string }).id)))
+      const id = (row as { id: string }).id
+      out.push(withTimes(toLensRow(row as never), times.get(id), recallStamps(id)))
     }
     return out
   })()
