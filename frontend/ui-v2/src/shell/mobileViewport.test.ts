@@ -528,19 +528,25 @@ describe('mobile nav drawer scroll lock (ENC-ISS-918)', () => {
   })
 
   /**
-   * The app bar is position:static while the drawer and scrim are position:fixed, so an iOS visual-viewport
-   * transition can drift them apart and put the bar across the drawer -- io's screenshot. While the drawer is open
-   * the bar must be anchored the same way the drawer is, and above it.
+   * ENC-TSK-T19, correcting W7-F2's first attempt. The bar is raised above the drawer so a drawer whose top meets
+   * the bar cannot bury the Menu button that closes it.
+   *
+   * It must NOT be taken out of flow to do that. `position: fixed` here was the regression io caught on gamma: the
+   * page behind slid up by the bar's full height (content top 111 -> 0 at a 59px inset) and showed through between
+   * the bar and the drawer. Anything out-of-flow -- fixed or absolute -- reintroduces that jump, so the test names
+   * them rather than just asserting the current value.
    */
-  it('anchors the app bar above the drawer while the drawer is open', () => {
+  it('raises the app bar above the drawer without taking it out of flow', () => {
     const rule = /\.ev2-shell--nav-open\s+\.ev2-shell__bar\s*\{([^}]*)\}/.exec(mobileBlock)
     expect(rule).not.toBeNull()
     const body = rule![1] as string
-    expect(body).toMatch(/position:\s*fixed/)
+    expect(body).not.toMatch(/position:\s*(fixed|absolute)/)
     const z = /z-index:\s*(\d+)/.exec(body)
     expect(z).not.toBeNull()
     // Above the drawer (4) and the scrim (3), or the bar would be the thing that gets covered.
     expect(Number(z![1])).toBeGreaterThan(4)
+    // A z-index only applies to a positioned box, so the rule must still position it -- just in flow.
+    expect(body).toMatch(/position:\s*relative/)
   })
 
   /**
