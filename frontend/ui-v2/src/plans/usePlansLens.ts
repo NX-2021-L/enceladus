@@ -85,6 +85,12 @@ export interface PlansLens {
   error: string | null
   /** The time scale could not be read. Structure still draws; bars and rings are missing. */
   timeScaleError: string | null
+  /**
+   * The device cache could not be used, so this session is memory-only (@io-kit/search 1.1.3). NOT an error: rows
+   * still arrive over the network and every card draws. Surfaced only so a user whose warm start silently vanished
+   * can see why the first paint got slower, instead of the page looking broken for no stated reason.
+   */
+  storageFault: string | null
   /** The plan-scope tree walk hit a bound and the time scale may be incomplete. */
   truncated: boolean
   refresh: () => void
@@ -137,6 +143,7 @@ export function usePlansLens(): PlansLens {
     // and is still perfectly good. Found on gamma, where /feed/plan-scope 404'd and blanked a page showing 60 plans.
     error: corpus.error ? String(corpus.error) : null,
     timeScaleError: scopeError,
+    storageFault: corpus.storageFault ?? null,
     truncated,
     /**
      * AUTHORITATIVE: `{ seed: true }` is what forces a full re-seed. Without it the kit's sync() takes the

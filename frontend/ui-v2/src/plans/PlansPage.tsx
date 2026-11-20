@@ -30,6 +30,11 @@ export interface PlansPageProps {
   stale?: boolean
   loading?: boolean
   error?: string | null
+  /**
+   * ENC-TSK-T16 W7-F1: the device cache is unusable and this session is memory-only. Deliberately NOT `error` --
+   * every card still draws from the network. It is shown so a page that silently lost its warm start says so.
+   */
+  storageFault?: string | null
   onRefresh?: () => void
   /** Where manual toggles are remembered; the device's own store when omitted. */
   overrideStore?: WaveOverrideStore
@@ -43,7 +48,7 @@ export interface PlansPageProps {
 
 const ALL_PROJECTS = { label: 'All projects', value: '' }
 
-export function PlansPage({ corpus, now, asOf = null, stale = false, loading = false, error = null, onRefresh, overrideStore, project: projectProp, onProjectChange }: PlansPageProps) {
+export function PlansPage({ corpus, now, asOf = null, stale = false, loading = false, error = null, storageFault = null, onRefresh, overrideStore, project: projectProp, onProjectChange }: PlansPageProps) {
   const store = overrideStore ?? getDeviceWaveOverrideStore()
   const overrides = useWaveOverrides(store)
   const [ownProject, setOwnProject] = useState('')
@@ -162,6 +167,13 @@ export function PlansPage({ corpus, now, asOf = null, stale = false, loading = f
           Folded idle gap
         </li>
       </ul>
+
+      {storageFault ? (
+        <Alert type="warning" header="This device could not open its saved copy">
+          Plans are loading over the network instead, so the first paint is slower and nothing is kept for next time.
+          Everything on the page is current.
+        </Alert>
+      ) : null}
 
       {error ? (
         <Alert type="error" header="Plans could not be loaded">
