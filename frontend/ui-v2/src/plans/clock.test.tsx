@@ -1,4 +1,4 @@
-import { act } from 'react'
+import { act, useEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NOW_TICK_MS, useNowTick } from './clock'
@@ -13,10 +13,25 @@ import { NOW_TICK_MS, useNowTick } from './clock'
 
 let host: HTMLDivElement
 let root: Root
+/**
+ * The probe publishes through a stable outer box rather than reassigning an outer binding: the React Compiler lint
+ * rejects a component that writes to a variable declared outside it, and a box keeps every assertion below unchanged.
+ */
+/**
+ * The probe publishes through a module-level setter called from an effect, not by assigning an outer binding from the
+ * component body: react-hooks/immutability and the React Compiler lint both reject the latter. Every assertion below
+ * is unchanged -- `act()` flushes the effect, so the value is in place by the time the test reads it.
+ */
 let seen: number | null = null
+const publish = (v: number): void => {
+  seen = v
+}
 
 function Probe({ periodMs }: { periodMs?: number }) {
-  seen = useNowTick(periodMs)
+  const now = useNowTick(periodMs)
+  useEffect(() => {
+    publish(now)
+  }, [now])
   return null
 }
 
@@ -27,6 +42,7 @@ const render = async (periodMs?: number) => {
 }
 
 beforeEach(() => {
+  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
   vi.useFakeTimers()
   seen = null
   host = document.createElement('div')

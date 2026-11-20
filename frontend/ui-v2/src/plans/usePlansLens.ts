@@ -16,7 +16,7 @@
  * the page adds no polling of its own, because freshness is already owned by the corpus heal loop (section 5.8).
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useEnceladusCorpus } from '../search/CorpusProvider'
 import { fetchPlanScope, type PlanScopeTimes } from '../api/planScope'
 import type { PlansRow } from './planView'
@@ -123,7 +123,8 @@ export function usePlansLens(): PlansLens {
     return () => ac.abort()
   }, [])
 
-  const rows = useMemo(() => {
+  // No useMemo: the React Compiler is active and memoizes this on [corpus.rows, times] (eslint AC-16).
+  const rows: PlansRow[] = (() => {
     const out: PlansRow[] = []
     for (const row of corpus.rows ?? []) {
       const type = String((row as { type?: string }).type ?? '').toLowerCase()
@@ -131,7 +132,7 @@ export function usePlansLens(): PlansLens {
       out.push(withTimes(toLensRow(row as never), times.get((row as { id: string }).id)))
     }
     return out
-  }, [corpus.rows, times])
+  })()
 
   return {
     rows,

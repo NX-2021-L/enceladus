@@ -21,7 +21,7 @@
  * fact about a transition, not about state, so it has to be held here.
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { diff, snapshotPlan, type LensChange, type LensSnapshot, type SnapshotRow } from './lens/diff'
 import type { PlansRow } from './planView'
 
@@ -54,10 +54,9 @@ export interface UsePlanMotionArgs {
 }
 
 export function usePlanMotion({ plans, rows, now = Date.now, holdMs = COMPLETION_HOLD_MS }: UsePlanMotionArgs): PlanMotion {
-  const snapshot = useMemo<LensSnapshot>(
-    () => plans.map((p) => snapshotPlan(p, rows as readonly SnapshotRow[])),
-    [plans, rows],
-  )
+  // No useMemo: the React Compiler is active and memoizes this on [plans, rows] (eslint AC-16). The identity still
+  // has to be stable, because the effect below keys on it to decide what CHANGED -- motion.test.tsx covers that.
+  const snapshot: LensSnapshot = plans.map((p) => snapshotPlan(p, rows as readonly SnapshotRow[]))
 
   const previous = useRef<LensSnapshot | null>(null)
   const [changes, setChanges] = useState<readonly LensChange[]>([])
@@ -102,7 +101,7 @@ export function usePlanMotion({ plans, rows, now = Date.now, holdMs = COMPLETION
     return () => clearTimeout(t)
   }, [holds, now])
 
-  const heldOpen = useMemo<ReadonlySet<string>>(() => (holds.size === 0 ? EMPTY : new Set(holds.keys())), [holds])
+  const heldOpen: ReadonlySet<string> = holds.size === 0 ? EMPTY : new Set(holds.keys())
 
   return { heldOpen, changes }
 }
