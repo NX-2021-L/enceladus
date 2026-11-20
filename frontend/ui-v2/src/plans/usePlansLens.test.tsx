@@ -18,6 +18,7 @@ let corpusState: {
   lastSeededAt: string | null
   staleNotice: unknown
   error: unknown
+  storageFault?: string | null
   refresh: () => Promise<void>
 }
 
@@ -62,6 +63,7 @@ beforeEach(() => {
     lastSeededAt: '2026-11-19T00:00:00Z',
     staleNotice: null,
     error: null,
+    storageFault: null,
     refresh: vi.fn(async () => {}),
   }
   host = document.createElement('div')
@@ -160,6 +162,24 @@ describe('usePlansLens (ENC-TSK-S98-0C)', () => {
     await mount()
     seen!.refresh()
     expect(corpusState.refresh).toHaveBeenCalledWith({ seed: true })
+  })
+
+  /**
+   * ENC-TSK-T16 W7-F1. A corpus store that could not be opened used to hang the whole app silently; @io-kit/search
+   * 1.1.3 bounds it and reports storageFault instead. It must NOT travel in `error`, which PlansPage treats as
+   * fatal -- the rows still arrive over the network, so every card draws and only the warm start is lost.
+   */
+  it('passes a storage fault through without making the page fatal', async () => {
+    corpusState = { ...corpusState, storageFault: 'corpus storage read timed out after 5000ms' }
+    await mount()
+    expect(seen!.storageFault).toBe('corpus storage read timed out after 5000ms')
+    expect(seen!.error).toBeNull()
+    expect(seen!.rows).toHaveLength(2)
+  })
+
+  it('reports no storage fault when the device cache is healthy', async () => {
+    await mount()
+    expect(seen!.storageFault).toBeNull()
   })
 
   it('reports corpus freshness, not a manual-refresh stamp (section 5.8)', async () => {

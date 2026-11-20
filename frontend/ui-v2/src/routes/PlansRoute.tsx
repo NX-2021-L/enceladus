@@ -30,6 +30,7 @@ export function PlansRoute() {
       stale={lens.stale}
       loading={lens.loading}
       error={lens.error}
+      storageFault={lens.storageFault}
       onRefresh={lens.refresh}
       project={project ?? ''}
       onProjectChange={(next) => {

@@ -47,6 +47,7 @@ const EMPTY: CorpusIndex = {
   lastSeededAt: null,
   staleNotice: null,
   error: null,
+  storageFault: null,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- never read: the empty default only exists outside the provider (tests)
   store: undefined as any,
   refresh: async () => {},
