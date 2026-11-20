@@ -9,7 +9,7 @@ import type { TaskView } from './planView'
 
 export function TaskLane({ task }: { task: TaskView }) {
   return (
-    <div className="pl-row pl-task" title={task.tip}>
+    <div className="pl-row pl-task" title={task.tip} data-flip-key={task.id}>
       <div className="pl-lab">
         <RecordLink id={task.id} recordType="task" className="enc-id" />
         <span className="pl-ttl">{task.title}</span>
