@@ -30,7 +30,7 @@ vi.mock('../api/planScope', () => ({
   PlanScopeFetchError: class extends Error {},
 }))
 
-const { usePlansLens } = await import('./usePlansLens')
+const { usePlansLens, __resetStampMemory } = await import('./usePlansLens')
 
 const row = (id: string, type: string, fields: Record<string, unknown>) => ({ id, type, title: `${id} title`, fields })
 
@@ -66,6 +66,8 @@ async function mount() {
 
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  // ENC-TSK-T27: the stamp memory is module-scoped, so without this a stamp from one case would leak into the next.
+  __resetStampMemory()
   seen = null
   planScope.mockReset()
   planScope.mockResolvedValue({ times: new Map(), truncated: false, generatedAt: null, totalPlans: 0 })
@@ -232,7 +234,18 @@ describe('live lifecycle stamps from the corpus row (ENC-TSK-T22, ENC-ISS-922)',
     expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
   })
 
-  it('lets the plan-scope value win when both are present', async () => {
+  /**
+   * CHANGED by ENC-TSK-T27 (ENC-ISS-925), deliberately. This test used to assert "the plan-scope value wins when
+   * both are present". It now asserts the newest value wins, whichever source reported it.
+   *
+   * Why the old rule was wrong. The plan-scope request is made ONCE per page open (ENC-TSK-T05 AC-4), so on a page
+   * that stays open it is the source that goes stale, not the live row. `closed_at` is the one of the three that
+   * moves: a re-entry and re-close writes a LATER value, and under the old rule an open page would have gone on
+   * showing the FIRST close time for as long as it stayed open. For `created_at` and `first_checked_out_at` the two
+   * rules cannot actually disagree, because both fields are written once -- `first_checked_out_at` through
+   * `if_not_exists` -- so every event carries the same value and the differing fixture below is synthetic.
+   */
+  it('takes the newest value when the two sources disagree, whichever reported it', async () => {
     corpusState.rows = [...corpusState.rows, liveRow()]
     planScope.mockResolvedValue({
       times: new Map([['ENC-TSK-LIVE', { first_checked_out_at: '2026-11-20T01:00:00Z', closed_at: '2026-11-20T02:00:00Z' }]]),
@@ -242,8 +255,23 @@ describe('live lifecycle stamps from the corpus row (ENC-TSK-T22, ENC-ISS-922)',
     })
     await mount()
     const live = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
-    expect(live.first_checked_out_at).toBe('2026-11-20T01:00:00Z')
-    expect(live.closed_at).toBe('2026-11-20T02:00:00Z')
+    expect(live.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
+    expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
+  })
+
+  /** The complement: when plan-scope is the newer of the two, it wins. The rule is about recency, not about source. */
+  it('takes the plan-scope value when it is the newer of the two', async () => {
+    corpusState.rows = [...corpusState.rows, liveRow()]
+    planScope.mockResolvedValue({
+      times: new Map([['ENC-TSK-LIVE', { first_checked_out_at: '2026-11-20T06:00:00Z', closed_at: '2026-11-20T07:00:00Z' }]]),
+      truncated: false,
+      generatedAt: null,
+      totalPlans: 0,
+    })
+    await mount()
+    const live = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
+    expect(live.first_checked_out_at).toBe('2026-11-20T06:00:00Z')
+    expect(live.closed_at).toBe('2026-11-20T07:00:00Z')
   })
 
   it('falls back to the row value for a field the plan-scope entry omits', async () => {
@@ -260,5 +288,106 @@ describe('live lifecycle stamps from the corpus row (ENC-TSK-T22, ENC-ISS-922)',
     // The entry said nothing about these two, so the live row's own values must survive rather than be nulled.
     expect(live.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
     expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
+  })
+
+  /**
+   * ENC-TSK-T27 (ENC-ISS-925). The bug these pin shipped to production and was visible within half a minute: a wave
+   * that expanded on a live checkout re-collapsed 29 seconds later, with nobody touching it, because ruling D-26
+   * keeps the three lifecycle stamps OFF every corpus and delta row -- so the next 60-second heal delta replaced the
+   * live-enriched row with a bare one and the stamp the lens needs for hot(w) was simply gone.
+   *
+   * Asserted rather than left to observation for the reason the row-contract test gives: nothing fails loudly. The
+   * page keeps working and merely forgets that work had started.
+   */
+  describe('a stamp survives a delta that omits it (ENC-TSK-T27, ENC-ISS-925)', () => {
+    /** The bare row ruling D-26 actually sends on a heal delta: same id and version, no lifecycle timestamps. */
+    const strippedRow = () =>
+      row('ENC-TSK-LIVE', 'task', {
+        project_id: 'enceladus',
+        status: 'in-progress',
+        parent: 'ENC-PLN-1',
+        checkout_state: 'checked_out',
+      })
+
+    const rerenderWith = async (rows: unknown[]) => {
+      corpusState = { ...corpusState, rows }
+      await act(async () => {
+        root.render(<Probe />)
+      })
+    }
+
+    it('keeps first_checked_out_at when the next corpus row drops the field', async () => {
+      corpusState.rows = [...corpusState.rows, liveRow()]
+      await mount()
+      expect((seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!.first_checked_out_at).toBe(
+        '2026-11-20T03:39:52Z',
+      )
+
+      // The heal delta lands. On the old code the stamp vanished here and the wave collapsed.
+      await rerenderWith([corpusState.rows[0], corpusState.rows[1], strippedRow()])
+      const after = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
+      expect(after.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
+      expect(after.closed_at).toBe('2026-11-20T04:00:00Z')
+      // Structure still comes from the row that just arrived, not from the remembered stamps.
+      expect(after.checkout_state).toBe('checked_out')
+    })
+
+    it('moves closed_at forward when a task is re-closed, rather than pinning the first value seen', async () => {
+      corpusState.rows = [...corpusState.rows, liveRow()]
+      await mount()
+      expect((seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!.closed_at).toBe('2026-11-20T04:00:00Z')
+
+      const reclosed = row('ENC-TSK-LIVE', 'task', {
+        project_id: 'enceladus',
+        status: 'closed',
+        parent: 'ENC-PLN-1',
+        checkout_state: 'checked_in',
+        first_checked_out_at: '2026-11-20T03:39:52Z',
+        closed_at: '2026-11-20T09:00:00Z',
+      })
+      await rerenderWith([corpusState.rows[0], corpusState.rows[1], reclosed])
+      expect((seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!.closed_at).toBe('2026-11-20T09:00:00Z')
+    })
+
+    it('does not let an older stamp overwrite a newer one it already holds', async () => {
+      corpusState.rows = [...corpusState.rows, liveRow()]
+      await mount()
+      const older = row('ENC-TSK-LIVE', 'task', {
+        project_id: 'enceladus',
+        status: 'closed',
+        parent: 'ENC-PLN-1',
+        closed_at: '2026-11-19T00:00:00Z',
+      })
+      await rerenderWith([corpusState.rows[0], corpusState.rows[1], older])
+      expect((seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!.closed_at).toBe('2026-11-20T04:00:00Z')
+    })
+
+    /**
+     * The plan-scope request resolves asynchronously, so a live event can land a stamp first. Assigning the response
+     * straight into state would discard it -- the same loss by a different route.
+     */
+    it('merges the plan-scope response instead of replacing what a live event already contributed', async () => {
+      corpusState.rows = [...corpusState.rows, liveRow()]
+      planScope.mockResolvedValue({
+        times: new Map([['ENC-PLN-1', { created_at: '2026-11-01T00:00:00Z' }]]),
+        truncated: false,
+        generatedAt: null,
+        totalPlans: 1,
+      })
+      await mount()
+      const rows = seen!.rows as PlansRow[]
+      expect(rows.find((r) => r.item_id === 'ENC-PLN-1')!.created_at).toBe('2026-11-01T00:00:00Z')
+      // The response said nothing about ENC-TSK-LIVE; the event's stamps must still be there.
+      const live = rows.find((r) => r.item_id === 'ENC-TSK-LIVE')!
+      expect(live.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
+      expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
+    })
+
+    it('leaves a row that never carried a stamp with none, rather than inventing one', async () => {
+      await mount()
+      const task = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-A')!
+      expect(task.first_checked_out_at ?? null).toBeNull()
+      expect(task.closed_at ?? null).toBeNull()
+    })
   })
 })
