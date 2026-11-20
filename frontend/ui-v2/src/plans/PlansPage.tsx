@@ -15,6 +15,7 @@ import { PLAN_PAGE_SIZE, nextPlanCount, selectPlans } from './lens/selectPlans'
 import { PlanCard } from './PlanCard'
 import { buildPlanView, type PlansRow } from './planView'
 import { getDeviceWaveOverrideStore, useWaveOverrides, type WaveOverrideStore } from './waveOverrides'
+import { usePlanMotion } from './motion'
 import './plans.css'
 
 export interface PlansPageProps {
@@ -60,6 +61,10 @@ export function PlansPage({ corpus, now, asOf = null, stale = false, loading = f
 
   const selection = selectPlans(corpus, { project, count })
   const views = selection.plans.map((p) => buildPlanView(p, corpus, now))
+
+  // ENC-TSK-S99-0A (W4.1): the change set drives the motion. Only the completion hold (D-10) needs holding here;
+  // every other transition falls out of the lens state plus the transitions already in plans.css.
+  const motion = usePlanMotion({ plans: selection.plans, rows: corpus })
 
   // A manual toggle is discarded once its wave's state or hotness has changed (D-3). The store holds the rule; this is the
   // only place that tells it what the waves are now.
@@ -160,7 +165,7 @@ export function PlansPage({ corpus, now, asOf = null, stale = false, loading = f
         <div className="pl-list">
           {views.length === 0 ? <p className="pl-empty">No plans in this project.</p> : null}
           {views.map((v) => (
-            <PlanCard key={v.id} plan={v} overrides={overrides} onToggle={store.set} />
+            <PlanCard key={v.id} plan={v} overrides={overrides} onToggle={store.set} heldOpen={motion.heldOpen} />
           ))}
         </div>
       )}

@@ -1,3 +1,4 @@
+import { UNASSIGNED_KEY } from '../planView'
 import { describe, expect, it } from 'vitest'
 import { F6, F7, F10, task, type FixtureRow } from './__fixtures__'
 import {
@@ -9,8 +10,7 @@ import {
   type PlanSnapshot,
   type SnapshotRow,
   type TaskSnapshot,
-  type WaveSnapshot,
-} from './diff'
+  type WaveSnapshot, UNASSIGNED_WAVE_KEY } from './diff'
 
 const tk = (id: string, status: string | null = 'open', checkedOut = false): TaskSnapshot => ({ id, status, checkedOut })
 const wv = (key: string, members: string[], state: WaveSnapshot['state'] = 'todo', hot = false): WaveSnapshot => ({ key, state, hot, members })
@@ -158,8 +158,26 @@ describe('snapshotPlan feeding diff: a plan resolved from rows, then a change, t
   it('snapshots every wave with its state, hotness and members, and every task row of the plan', () => {
     const s = snap(F7)
     expect(s.id).toBe('FIN-PLN-009')
-    expect(s.waves.map((w) => [w.key, w.state, w.hot])).toEqual([['W0', 'todo', false], ['W1', 'todo', false], ['W2', 'todo', false], ['W3', 'todo', false]])
+    /**
+     * ENC-TSK-S99-0A: the Unassigned group is snapshotted as a wave too, after the resolved ones. The page draws it
+     * as a wave -- header, tally, collapse, done role -- so it must produce wave-state-change, wave-hot-change and
+     * reorder like any other, or the completion hold (D-10) could never fire for it. It is also the COMMON case:
+     * the gamma corpus is mostly plans whose objectives carry no wave label and no parent (ENC-TSK-T15).
+     */
+    const resolvedWaves = s.waves.filter((w) => w.key !== UNASSIGNED_WAVE_KEY)
+    expect(resolvedWaves.map((w) => [w.key, w.state, w.hot])).toEqual([['W0', 'todo', false], ['W1', 'todo', false], ['W2', 'todo', false], ['W3', 'todo', false]])
+    const unassignedWave = s.waves.find((w) => w.key === UNASSIGNED_WAVE_KEY)
+    if (F7.expected.unassigned.length > 0) {
+      expect(unassignedWave?.members).toEqual(F7.expected.unassigned)
+    } else {
+      expect(unassignedWave).toBeUndefined()
+    }
     expect(s.tasks.map((t) => t.id)).toEqual([...F7.expected.waves.flatMap((w) => w.members), ...F7.expected.unassigned])
+  })
+
+  /** The key is a literal in diff.ts to avoid a cycle with planView; if they ever drift the page stops animating Unassigned. */
+  it('the snapshot key for Unassigned is the key the page groups it under', () => {
+    expect(UNASSIGNED_WAVE_KEY).toBe(UNASSIGNED_KEY)
   })
 
   it('a checkout in a wave makes it active and hot, and says so', () => {

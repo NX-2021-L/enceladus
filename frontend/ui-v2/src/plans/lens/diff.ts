@@ -66,6 +66,18 @@ const isClosed = (status: string | null | undefined): boolean => (status ?? '').
 /** What `snapshotPlan` reads of a row: the resolver's fields plus the task facts of waveState. */
 export type SnapshotRow = ResolverRow & WaveTaskFacts
 
+/**
+ * The Unassigned group's wave key. It must equal `UNASSIGNED_KEY` in planView.ts, which is what the page keys the
+ * group with; diff.ts cannot import it without a cycle, so the two are pinned equal by a test.
+ *
+ * ENC-TSK-S99-0A: the Unassigned group is drawn as a wave -- its own header, tally, collapse and done role -- so it
+ * has to BEHAVE as one. Before this it was snapshotted only as loose tasks, so it never produced a
+ * wave-state-change, wave-hot-change or reorder, and the completion hold could never fire for it. That is not an
+ * edge case: the gamma corpus is mostly plans whose objectives carry no wave label and no parent (ENC-TSK-T15), so
+ * Unassigned is the common wave, not the rare one.
+ */
+export const UNASSIGNED_WAVE_KEY = 'unassigned'
+
 /** Resolves a plan and derives the per-wave state the page draws, as a snapshot to diff against the next one. */
 export function snapshotPlan(plan: Pick<LensRow, 'item_id' | 'objectives_set'>, rows: readonly SnapshotRow[]): PlanSnapshot {
   const resolved = resolveWaves(plan, rows)
@@ -77,6 +89,11 @@ export function snapshotPlan(plan: Pick<LensRow, 'item_id' | 'objectives_set'>, 
     const status = waveStatus({ parent: w.parent_id ? facts(w.parent_id) : null, members: w.members.map(facts) })
     return { key: w.key, state: status.state, hot: status.hot, members: w.members }
   })
+
+  if (resolved.unassigned.length > 0) {
+    const status = waveStatus({ parent: null, members: resolved.unassigned.map(facts) })
+    waves.push({ key: UNASSIGNED_WAVE_KEY, state: status.state, hot: status.hot, members: resolved.unassigned })
+  }
 
   const ids: string[] = []
   const seen = new Set<string>()

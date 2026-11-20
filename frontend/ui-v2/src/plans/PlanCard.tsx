@@ -8,12 +8,13 @@
  * A collapsed body stays in the document, as the canvas draws it, so W4 can animate its height; it is `inert` so its links
  * leave the tab order and the accessibility tree while it is closed.
  */
-import { Fragment } from 'react'
+import { Fragment, useRef } from 'react'
 import { RecordLink } from '../components/RecordLink'
 import { StatusPill } from '../components/StatusPill'
 import { Tag } from '../components/Pill'
 import { makeOverride, shown, type WaveOverride } from './lens/waveState'
 import type { PlanView } from './planView'
+import { useFlipRows } from './motion'
 import { TaskLane } from './TaskLane'
 import { TimeAxis } from './TimeAxis'
 import { WaveHeader } from './WaveHeader'
@@ -26,9 +27,34 @@ export interface PlanCardProps {
   plan: PlanView
   overrides: WaveOverrideMap
   onToggle: (waveKey: string, override: WaveOverride) => void
+  /**
+   * ENC-TSK-S99-0A (W4.1, ruling D-10): wave keys a completion hold is keeping open. A wave's last task closing
+   * makes it `done`, which would otherwise collapse it in the same frame its header turns to the done role -- so
+   * the finish io asked to see would never be visible. The header still renders the done role throughout; the hold
+   * only delays the collapse.
+   */
+  heldOpen?: ReadonlySet<string>
 }
 
-export function PlanCard({ plan, overrides, onToggle }: PlanCardProps) {
+/**
+ * The rows of one wave. It is its own component so FLIP can hold a ref and the previous row positions per wave --
+ * a hook cannot run inside the waves map (ENC-TSK-S99-0A).
+ */
+function WaveBody({ bodyId, open, tasks }: { bodyId: string; open: boolean; tasks: PlanView['waves'][number]['tasks'] }) {
+  const rows = useRef<HTMLDivElement | null>(null)
+  useFlipRows(rows, tasks.map((t) => t.id))
+  return (
+    <div className="pl-body" id={bodyId} data-open={open ? 'true' : 'false'} inert={!open}>
+      <div ref={rows}>
+        {tasks.map((task) => (
+          <TaskLane key={task.id} task={task} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export function PlanCard({ plan, overrides, onToggle, heldOpen }: PlanCardProps) {
   const { stats } = plan
   return (
     <section className="pl-card" id={plan.id} aria-label={plan.id}>
@@ -63,18 +89,12 @@ export function PlanCard({ plan, overrides, onToggle }: PlanCardProps) {
       <div className="pl-lanes">
         <TimeAxis axis={plan.axis} />
         {plan.waves.map((wave) => {
-          const open = shown(wave.facts, plan.status, overrides[wave.key])
+          const open = shown(wave.facts, plan.status, overrides[wave.key]) || (heldOpen?.has(wave.key) ?? false)
           const bodyId = bodyIdOf(wave.key)
           return (
             <Fragment key={wave.key}>
               <WaveHeader wave={wave} open={open} bodyId={bodyId} onToggle={() => onToggle(wave.key, makeOverride(wave.facts, !open))} />
-              <div className="pl-body" id={bodyId} data-open={open ? 'true' : 'false'} inert={!open}>
-                <div>
-                  {wave.tasks.map((task) => (
-                    <TaskLane key={task.id} task={task} />
-                  ))}
-                </div>
-              </div>
+              <WaveBody bodyId={bodyId} open={open} tasks={wave.tasks} />
             </Fragment>
           )
         })}
