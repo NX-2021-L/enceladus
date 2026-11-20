@@ -204,3 +204,61 @@ describe('usePlansLens (ENC-TSK-S98-0C)', () => {
     expect(seen!.stale).toBe(false)
   })
 })
+
+/**
+ * ENC-TSK-T22 (ENC-ISS-922). The seeded corpus row carries none of the three lifecycle timestamps -- ruling D-26 took
+ * them off it. A LIVE row can carry them: ENC-TSK-S97-0B puts recordCreatedAt, recordFirstCheckedOutAt and
+ * recordClosedAt on the /feed/updates event and the kit's mergeHeadline writes them into IndexRow.fields. Before this
+ * the adapter read only created_at, so those arrived and were dropped, and the plan-scoped read -- which runs ONCE per
+ * page open -- was the lens's only route to a stamp. That is what stopped criterion 8 firing on an open page.
+ */
+describe('live lifecycle stamps from the corpus row (ENC-TSK-T22, ENC-ISS-922)', () => {
+  const liveRow = () =>
+    row('ENC-TSK-LIVE', 'task', {
+      project_id: 'enceladus',
+      status: 'in-progress',
+      parent: 'ENC-PLN-1',
+      checkout_state: 'checked_out',
+      first_checked_out_at: '2026-11-20T03:39:52Z',
+      closed_at: '2026-11-20T04:00:00Z',
+    })
+
+  it('carries first_checked_out_at and closed_at through when the plan-scope map has no entry for the row', async () => {
+    corpusState.rows = [...corpusState.rows, liveRow()]
+    planScope.mockResolvedValue({ times: new Map(), truncated: false, generatedAt: null, totalPlans: 0 })
+    await mount()
+    const live = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
+    expect(live.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
+    expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
+  })
+
+  it('lets the plan-scope value win when both are present', async () => {
+    corpusState.rows = [...corpusState.rows, liveRow()]
+    planScope.mockResolvedValue({
+      times: new Map([['ENC-TSK-LIVE', { first_checked_out_at: '2026-11-20T01:00:00Z', closed_at: '2026-11-20T02:00:00Z' }]]),
+      truncated: false,
+      generatedAt: null,
+      totalPlans: 0,
+    })
+    await mount()
+    const live = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
+    expect(live.first_checked_out_at).toBe('2026-11-20T01:00:00Z')
+    expect(live.closed_at).toBe('2026-11-20T02:00:00Z')
+  })
+
+  it('falls back to the row value for a field the plan-scope entry omits', async () => {
+    corpusState.rows = [...corpusState.rows, liveRow()]
+    planScope.mockResolvedValue({
+      times: new Map([['ENC-TSK-LIVE', { created_at: '2026-11-18T00:00:00Z' }]]),
+      truncated: false,
+      generatedAt: null,
+      totalPlans: 0,
+    })
+    await mount()
+    const live = (seen!.rows as PlansRow[]).find((r) => r.item_id === 'ENC-TSK-LIVE')!
+    expect(live.created_at).toBe('2026-11-18T00:00:00Z')
+    // The entry said nothing about these two, so the live row's own values must survive rather than be nulled.
+    expect(live.first_checked_out_at).toBe('2026-11-20T03:39:52Z')
+    expect(live.closed_at).toBe('2026-11-20T04:00:00Z')
+  })
+})

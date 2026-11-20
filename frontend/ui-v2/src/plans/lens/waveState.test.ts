@@ -202,3 +202,43 @@ describe('shown: a manual override lasts until state or hotness next changes (de
     expect(makeOverride(done, false)).toEqual({ expanded: false, state: 'done', hot: false })
   })
 })
+
+/**
+ * ENC-TSK-T22 (ENC-ISS-922): criterion 8's missing conjunct, asserted on the lens rather than on the page.
+ *
+ * hot(w) is defined on co(t) ALONE -- section 5.5's pre-backfill fallback is stated for touched(w) only -- so a member
+ * known to be checked out but carrying no first_checked_out_at makes a wave `active` and NOT hot, and expandedDefault
+ * stays false. That is the whole of the defect: the stamp was reaching the client on the live event and being dropped
+ * before the lens saw it.
+ */
+describe('a member checked out with no stamp is active but not hot (ENC-TSK-T22)', () => {
+  const parent = { status: 'open' }
+
+  it('is active and NOT hot, so a started plan does not expand it', () => {
+    const w = { parent, members: [{ status: 'in-progress', checkout_state: 'checked_out' }] }
+    const st = waveStatus(w)
+    expect(st.touched).toBe(true)
+    expect(st.state).toBe('active')
+    expect(st.hot).toBe(false)
+    expect(expandedDefault(w, 'started')).toBe(false)
+  })
+
+  it('becomes hot once the stamp arrives, and a started plan expands it', () => {
+    const w = {
+      parent,
+      members: [{ status: 'in-progress', checkout_state: 'checked_out', first_checked_out_at: '2026-11-20T03:39:52Z' }],
+    }
+    const st = waveStatus(w)
+    expect(st.state).toBe('active')
+    expect(st.hot).toBe(true)
+    expect(expandedDefault(w, 'started')).toBe(true)
+    // R7 still holds: a drafted plan collapses everything however hot the wave is.
+    expect(expandedDefault(w, 'drafted')).toBe(false)
+  })
+
+  it('a stamped member that is terminal is not hot, so a finished wave does not reopen', () => {
+    const w = { parent, members: [{ status: 'closed', first_checked_out_at: '2026-11-20T03:39:52Z' }] }
+    expect(waveStatus(w).hot).toBe(false)
+    expect(expandedDefault(w, 'started')).toBe(false)
+  })
+})
