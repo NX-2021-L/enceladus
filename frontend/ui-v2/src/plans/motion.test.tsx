@@ -1,4 +1,4 @@
-import { act } from 'react'
+import { act, useEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COMPLETION_HOLD_MS, usePlanMotion, type PlanMotion } from './motion'
@@ -36,12 +36,28 @@ const DONE_ROWS: PlansRow[] = [
 
 let host: HTMLDivElement
 let root: Root
-let seen: PlanMotion | null = null
 let clock = 0
 const now = () => clock
 
+/**
+ * The probe publishes through a stable outer box rather than reassigning an outer binding: the React Compiler lint
+ * rejects a component that writes to a variable declared outside it, and a box keeps every assertion below unchanged.
+ */
+/**
+ * The probe publishes through a module-level setter called from an effect, not by assigning an outer binding from the
+ * component body: react-hooks/immutability and the React Compiler lint both reject the latter. Every assertion below
+ * is unchanged -- `act()` flushes the effect, so the value is in place by the time the test reads it.
+ */
+let seen: PlanMotion | null = null
+const publish = (v: PlanMotion): void => {
+  seen = v
+}
+
 function Probe({ rows }: { rows: readonly PlansRow[] }) {
-  seen = usePlanMotion({ plans: [PLAN], rows, now })
+  const motion = usePlanMotion({ plans: [PLAN], rows, now })
+  useEffect(() => {
+    publish(motion)
+  }, [motion])
   return null
 }
 
@@ -52,6 +68,7 @@ const render = async (rows: readonly PlansRow[]) => {
 }
 
 beforeEach(() => {
+  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
   vi.useFakeTimers()
   clock = 1_000_000
   seen = null
