@@ -239,14 +239,22 @@
    * reproduce a visual-viewport offset, so this is hardening against the class rather than a proven repro: while the
    * drawer is open the bar is anchored the same way it is, above it, and the two cannot drift apart. Scoped to
    * --nav-open, so ordinary scrolling keeps the bar in flow exactly as before. */
+  /* ENC-TSK-T19, correcting ENC-TSK-T16 W7-F2. The first version of this rule made the bar `position: fixed` while
+   * the drawer was open, to stop an iOS visual-viewport transition drifting it across the drawer. That was hardening
+   * against an unproven diagnosis, and it caused a real regression io saw immediately on gamma: `fixed` takes the bar
+   * OUT OF FLOW, so the page behind slid up by the bar's full height and showed through between the bar and the
+   * drawer, with the page heading clipped underneath it. Measured at 500px with a 59px top inset: content top 111
+   * with the drawer shut, 0 with it open -- a 111px jump, exactly the bar's height.
+   *
+   * `relative` keeps the bar in flow, so the layout is byte-for-byte what it is with the drawer shut, and still
+   * raises it above the drawer (4) and scrim (3). That stacking is the part worth keeping: the drawer's top is
+   * derived from the bar's height through separate inset arithmetic, and if those two ever meet, a drawer painting
+   * over the bar would bury the Menu button that closes it. It is deliberately NOT an attempt to solve
+   * viewport drift -- nothing here is anchored to the viewport, and the unproven theory is left unfixed rather than
+   * fixed badly. */
   .ev2-shell--nav-open .ev2-shell__bar {
-    /* io-inset-exempt top right left bottom: the bar wrapper already carries `.io-safe-top`, which owns the top
-     * inset as padding, and a full-bleed bar paints under the notch by design exactly as the scrim does. It is
-     * anchored to the top edge only; `bottom` is auto, so it touches no bottom inset. */
-    position: fixed;
-    inset: var(--space-0) var(--space-0) auto var(--space-0);
+    position: relative;
     z-index: 5;
-    background: var(--surface-raised);
   }
 }
 @media (min-width: 48.0625rem) {
