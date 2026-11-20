@@ -13,7 +13,8 @@ import { formatClockSecondsZone, toMs } from './format'
 import type { TimeInput } from './lens/layoutTime'
 import { PLAN_PAGE_SIZE, nextPlanCount, selectPlans } from './lens/selectPlans'
 import { PlanCard } from './PlanCard'
-import { buildPlanView, type PlansRow } from './planView'
+import type { PlansRow } from './planView'
+import { planViewsOf } from './planViews'
 import { getDeviceWaveOverrideStore, useWaveOverrides, type WaveOverrideStore } from './waveOverrides'
 import { usePlanMotion } from './motion'
 import './plans.css'
@@ -60,7 +61,9 @@ export function PlansPage({ corpus, now, asOf = null, stale = false, loading = f
   const selected = options.find((o) => o.value === project) ?? ALL_PROJECTS
 
   const selection = selectPlans(corpus, { project, count })
-  const views = selection.plans.map((p) => buildPlanView(p, corpus, now))
+  // ENC-TSK-S99-0B (W4.2): only the plans whose own rows changed are rebuilt. The corpus array gets a new identity
+  // on every heal, so this has to be keyed on content -- see planViews.ts for why the row `version` is not enough.
+  const views = planViewsOf(selection.plans, corpus, now)
 
   // ENC-TSK-S99-0A (W4.1): the change set drives the motion. Only the completion hold (D-10) needs holding here;
   // every other transition falls out of the lens state plus the transitions already in plans.css.
@@ -68,11 +71,16 @@ export function PlansPage({ corpus, now, asOf = null, stale = false, loading = f
 
   // A manual toggle is discarded once its wave's state or hotness has changed (D-3). The store holds the rule; this is the
   // only place that tells it what the waves are now.
+  //
+  // Keyed on the serialised wave states rather than on `views`, because `views` is a fresh array on every render even
+  // when every card in it was a cache hit (W4.2) -- and reconcile writes to device storage, which an idle page must
+  // not do once a minute for nothing (criterion 12).
+  const liveWaves = JSON.stringify(
+    Object.fromEntries(views.flatMap((v) => v.waves.map((w) => [w.key, { state: w.state, hot: w.hot }] as const))),
+  )
   useEffect(() => {
-    const live: Record<string, { state: 'todo' | 'active' | 'done'; hot: boolean }> = {}
-    for (const v of views) for (const w of v.waves) live[w.key] = { state: w.state, hot: w.hot }
-    store.reconcile(live)
-  }, [store, views])
+    store.reconcile(JSON.parse(liveWaves) as Record<string, { state: 'todo' | 'active' | 'done'; hot: boolean }>)
+  }, [store, liveWaves])
 
   const asOfMs = toMs(asOf)
 

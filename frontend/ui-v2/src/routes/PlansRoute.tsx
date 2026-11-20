@@ -12,16 +12,20 @@
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { PlansPage } from '../plans/PlansPage'
 import { usePlansLens } from '../plans/usePlansLens'
+import { useNowTick } from '../plans/clock'
 
 export function PlansRoute() {
   const { project } = useSearch({ from: '/plans' }) as { project: string }
   const navigate = useNavigate()
   const lens = usePlansLens()
+  // ENC-TSK-S99-0B (W4.2): the now edge moves on a sixty second tick. Arithmetic only -- it issues no request, which
+  // is what keeps an idle page down to the application's own heal deltas (criterion 12).
+  const now = useNowTick()
 
   return (
     <PlansPage
       corpus={lens.rows}
-      now={Date.now()}
+      now={now}
       asOf={lens.asOf}
       stale={lens.stale}
       loading={lens.loading}
