@@ -2,8 +2,8 @@
   "files": [
     {
       "path": "tools/elr/README.md",
-      "sha256": "bdfc919beabd7ca8b55d7e531405d33e48eb8e6d5c8a632c87d34ca976385fe6",
-      "size_bytes": 4678
+      "sha256": "9e49022b209e196209ab7025f5e461ef1f39a677ebe5d4c87e01ceae1f502176",
+      "size_bytes": 6794
     },
     {
       "path": "tools/elr/elr",
@@ -46,6 +46,11 @@
       "size_bytes": 1080
     },
     {
+      "path": "tools/elr/elr_lib/client_timing.py",
+      "sha256": "9f62369dea906f2f58f8f3c11f9016e0b140c186847edc3c2718b02c80eb5419",
+      "size_bytes": 8750
+    },
+    {
       "path": "tools/elr/elr_lib/config.py",
       "sha256": "5270b5607b2890e21df1ede447845e192bf2ea03a9e7e7dc14738ad7eedaaff3",
       "size_bytes": 14764
@@ -64,6 +69,11 @@
       "path": "tools/elr/elr_lib/identity.py",
       "sha256": "d29dedbdacb8c43515aa78739ef9d0e12ed2eed1fc6f5a9052c59e36715afe3d",
       "size_bytes": 28399
+    },
+    {
+      "path": "tools/elr/elr_lib/keepalive.py",
+      "sha256": "a0281be35a315dd6442f10313bd137297f24df26c619d37a6519c0cc9ad051c5",
+      "size_bytes": 8509
     },
     {
       "path": "tools/elr/elr_lib/manifest.py",
@@ -92,8 +102,8 @@
     },
     {
       "path": "tools/elr/elr_lib/transport.py",
-      "sha256": "505e2c1c6dc7df1c2695c1f31313e7bd3c2fc7d696786f9f7d9eefea15b68c6a",
-      "size_bytes": 17209
+      "sha256": "250b3bcd5a5c898172eb304061e5a18499e742ac306f91d8684daa56fbe9599c",
+      "size_bytes": 27165
     },
     {
       "path": "tools/elr/elr_lib/vendor/__init__.py",
@@ -132,8 +142,8 @@
     },
     {
       "path": "tools/elr/elr_sync.py",
-      "sha256": "eba6a7c7a8752180e88834089d5d316741bb5473e8c17c35a940b639826f894d",
-      "size_bytes": 35599
+      "sha256": "0c0d1b7000b44767d00b810b2f98b87becf2bdd3afcc30f35299cb730d13550b",
+      "size_bytes": 38289
     },
     {
       "path": "tools/elr/elr_validate.py",
@@ -141,7 +151,7 @@
       "size_bytes": 38573
     }
   ],
-  "generated_at": "2026-10-12T21:12:59-07:00",
+  "generated_at": "2026-11-04T17:39:09-08:00",
   "manifest_version": 1,
-  "source_ref": "865cb5ef5ace979f02b7b73f15587c217a47425e"
+  "source_ref": "ae9bbb8fcea2c681e4bd042dffae9357797f2261"
 }
