@@ -4,6 +4,7 @@ import { recordKeys } from '../api/queryOptions'
 import { getCacheEngine } from '../sync/cacheEngine'
 import { shouldAcceptVersion, versionSeqFromUpdatedAt } from '../sync/recordKey'
 import type { RecordType } from '../types/records'
+import { normalizeRecordBody } from './normalizeRecordBody'
 import { useRealtimeFeed } from './RealtimeFeedProvider'
 
 /**
@@ -25,7 +26,10 @@ export function useRecordRealtimeSync(
     const key = recordKeys.detail(recordType, projectId, recordId)
     return watchRecord(recordId, (event) => {
       if (event.action === 'removed' || !event.record) return
-      const body = event.record
+      // ENC-TSK-T30 (ENC-ISS-926): the event carries the raw stream image, not
+      // the detail API's shape, so normalize it before it replaces the cache.
+      const current = queryClient.getQueryData<{ updated_at?: string | null }>(key)
+      const body = normalizeRecordBody(recordType, recordId, event.record, current)
       // ENC-TSK-M51 (B67 AC-8 part 3 / AC-2): the server-authoritative full body
       // wins, monotonically. A per-record `/records/{recordId}` frame is only
       // merged when its version is at least the currently-cached one, so an
@@ -36,7 +40,6 @@ export function useRecordRealtimeSync(
       const incoming = versionSeqFromUpdatedAt(
         typeof body.updated_at === 'string' ? body.updated_at : '',
       )
-      const current = queryClient.getQueryData<{ updated_at?: string | null }>(key)
       const currentSeq = current ? versionSeqFromUpdatedAt(current.updated_at) : undefined
       if (!shouldAcceptVersion(currentSeq, incoming)) return
       queryClient.setQueryData(key, body)

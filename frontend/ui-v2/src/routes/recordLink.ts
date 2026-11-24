@@ -85,10 +85,12 @@ const TRACKER_TYPES: ReadonlySet<string> = new Set([
  * need the project registry to resolve the owning project slug.
  */
 export function resolveRecordTarget(
-  rawId: string,
+  rawId: string | null | undefined,
   projects: ProjectSummary[],
   recordTypeHint?: string,
 ): RecordTarget | null {
+  // ENC-TSK-T30 (ENC-ISS-926): a missing id is "not routable", never a throw.
+  if (typeof rawId !== 'string') return null
   const id = rawId.trim()
   if (!id) return null
   const upper = id.toUpperCase()
