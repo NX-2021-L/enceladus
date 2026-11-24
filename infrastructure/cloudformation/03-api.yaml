@@ -810,6 +810,15 @@ Resources:
       RouteKey: GET /api/v1/feed/delta
       Target: !Sub integrations/${FeedQueryIntegration}
 
+  # ENC-TSK-T05 (ENC-PLN-108 W2.6) -- the Plans page's plan-scoped read: the newest 20 plans and the task rows of
+  # their trees. JWT-gated by the feed_query handler, like corpus and delta.
+  RouteFeedPlanScope:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/plan-scope
+      Target: !Sub integrations/${FeedQueryIntegration}
+
   RouteFeedRefresh:
     Type: AWS::ApiGatewayV2::Route
     Properties:
