@@ -126,12 +126,5 @@ Resources:
             CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
             OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
-Outputs:
-  McpEdgeDistributionId:
-    Description: Gamma MCP CloudFront distribution id.
-    Value: !Ref McpEdgeDistribution
-    Export:
-      Name: !Sub "enceladus-mcp-edge${EnvironmentSuffix}-DistributionId"
-  McpEdgeDistributionDomainName:
-    Description: The distribution's *.cloudfront.net domain (the CNAME target of mcp-gamma.jreese.net).
-    Value: !GetAtt McpEdgeDistribution.DomainName
+# No Outputs section: CloudFormation refuses an IMPORT change set whose template adds outputs
+# ("As part of the import operation, you cannot modify or add [Outputs]"). Add outputs in a later update.
