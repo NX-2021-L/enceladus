@@ -470,6 +470,60 @@ INTERFACE_MODE = _normalize_interface_mode(
 logger = logging.getLogger(SERVER_NAME)
 
 # ---------------------------------------------------------------------------
+# io_kit_mcp_edge 0.3.0 selection (ENC-TSK-S57-C, activated for gamma only by ENC-TSK-S57-E).
+#
+# The zip carries two kit editions: io-kit-mcp-edge 0.1.3 at the zip root (the pinned
+# requirements.txt, what production runs) and 0.3.0 under <task root>/_kit030. A base URL in
+# _KIT030_BASES runs the 0.3.0 edge (PRM, OPTIONS and the bearer gate only; the sign-in service
+# owns /.well-known/oauth-authorization-server*, /register, /authorize, /callback and /token).
+# Gamma's base (https://mcp-gamma.jreese.net) is the only member (S57-E); production
+# (https://mcp.jreese.net) is never added without its own approved step. Gamma relies on CloudFront
+# routing those five paths to the sign-in service (S57-D): without it they reach the bearer gate. The decision is made from the environment only
+# (CUSTOM_DOMAIN, the value _get_server_base_url yields), because no event exists at import time,
+# and _KIT030_DIR must lead sys.path BEFORE the first `import io_kit_mcp_edge` in the process.
+# Every kit import goes through _get_kit_edge_api (below), which re-asserts the path first.
+# ---------------------------------------------------------------------------
+_KIT030_BASES: frozenset = frozenset({"https://mcp-gamma.jreese.net"})
+# Public Cognito app client ids of the sign-in service, per base (not secrets).
+_KIT030_SIGNIN_CLIENT_IDS: Dict[str, str] = {"https://mcp-gamma.jreese.net": "4r6e9pfkccv050akrcu2ihlen4"}
+_KIT030_DIR = os.path.join(
+    os.environ.get("LAMBDA_TASK_ROOT") or os.path.dirname(os.path.abspath(__file__)), "_kit030"
+)
+
+
+def _kit030_env_base() -> str:
+    """The server's own base URL from CUSTOM_DOMAIN, normalised exactly as _get_server_base_url does."""
+    custom = os.environ.get("CUSTOM_DOMAIN", "").strip().rstrip("/")
+    if custom and not custom.startswith("https://"):
+        custom = f"https://{custom}"
+    return custom
+
+
+def _kit030_selected() -> bool:
+    """True only when this server's own base URL is in the allow-list (always False while it is empty)."""
+    if not _KIT030_BASES:
+        return False
+    base = _kit030_env_base()
+    return bool(base) and base in _KIT030_BASES
+
+
+def _ensure_kit030_path() -> None:
+    """Idempotently put _kit030 first on sys.path when selected; a no-op for every other base."""
+    if _kit030_selected() and _KIT030_DIR not in sys.path[:1]:
+        sys.path.insert(0, _KIT030_DIR)
+
+
+def _kit030_extra_client_ids() -> List[str]:
+    """Sign-in client ids the legacy verifier also accepts in 0.3.0 mode; [] otherwise."""
+    if not _kit030_selected():
+        return []
+    cid = _KIT030_SIGNIN_CLIENT_IDS.get(_kit030_env_base())
+    return [cid] if cid else []
+
+
+_ensure_kit030_path()  # before any kit import; nothing above or below imports io_kit_mcp_edge at module load
+
+# ---------------------------------------------------------------------------
 # Dynamic MCP toolset context (ENC-TSK-826)
 # ---------------------------------------------------------------------------
 
@@ -11677,14 +11731,15 @@ def _verify_cognito_jwt(token: str) -> Dict[str, Any]:
 
     # Validate client_id for access tokens or aud for id tokens
     if COGNITO_CLIENT_ID_CODE:
+        accepted_clients = [COGNITO_CLIENT_ID_CODE, *_kit030_extra_client_ids()]  # extras only in 0.3.0 mode (S57-C)
         token_use = str(claims.get("token_use") or "").strip().lower()
         if token_use == "access":
             cid = str(claims.get("client_id") or "")
-            if not hmac.compare_digest(cid, COGNITO_CLIENT_ID_CODE):
+            if not any(hmac.compare_digest(cid, ok) for ok in accepted_clients):
                 raise ValueError("Token client_id mismatch")
         elif token_use == "id":
             aud = str(claims.get("aud") or "")
-            if not hmac.compare_digest(aud, COGNITO_CLIENT_ID_CODE):
+            if not any(hmac.compare_digest(aud, ok) for ok in accepted_clients):
                 raise ValueError("Token audience mismatch")
 
     return claims
@@ -12418,6 +12473,7 @@ def _get_kit_edge_api() -> Optional[Tuple[Any, Any]]:
         return _KIT_API
     if _KIT_IMPORT_FAILED:
         return None
+    _ensure_kit030_path()  # S57-C: no-op unless this base is allow-listed for the 0.3.0 edge
     try:
         from io_kit_mcp_edge import EdgeConfig, wrap
     except Exception as exc:  # ImportError, or a broken transitive dependency
@@ -12455,6 +12511,30 @@ def _kit_edge_config(edge_config_cls: Any, base: str) -> Any:
     )
 
 
+def _kit030_edge_config(edge_config_cls: Any, base: str) -> Any:
+    """EdgeConfig for the 0.3.0 edge (ENC-TSK-S57-C): explicit form, the sign-in service is the authorization
+    server. 0.3.0 rejects registration_facade / authorization_server / authorize_redirect, so none are passed."""
+    sign_in_client = _KIT030_SIGNIN_CLIENT_IDS.get(base)
+    if not sign_in_client:
+        raise ValueError(f"no sign-in client id configured for base {base}")
+    region = COGNITO_REGION or COGNITO_USER_POOL_ID.split("_", 1)[0]
+    issuer = f"https://cognito-idp.{region}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    client_ids = [sign_in_client]
+    if COGNITO_CLIENT_ID_CODE and COGNITO_CLIENT_ID_CODE != sign_in_client:
+        client_ids.append(COGNITO_CLIENT_ID_CODE)
+    return edge_config_cls(
+        base_url=base,
+        mount_path="/",
+        issuer=issuer,
+        client_id=sign_in_client,
+        client_ids=client_ids,
+        sign_in_service=base,
+        jwks_uri=f"{issuer}/.well-known/jwks.json",
+        scopes=["openid", "email", "profile"],
+        logger=logger,
+    )
+
+
 def _get_kit_edge(base: str) -> Optional[Tuple[Any, Any]]:
     """(EdgeConfig, wrapped handler) for this base URL, built once and cached; None on failure."""
     cached = _KIT_EDGES.get(base)
@@ -12465,7 +12545,7 @@ def _get_kit_edge(base: str) -> Optional[Tuple[Any, Any]]:
         return None
     edge_config_cls, wrap = api
     try:
-        config = _kit_edge_config(edge_config_cls, base)
+        config = (_kit030_edge_config if _kit030_selected() else _kit_edge_config)(edge_config_cls, base)
         edge = wrap(lambda event, context=None: asyncio.run(_handle_mcp_request(event)), config)
     except Exception as exc:
         logger.error("io_kit_mcp_edge config rejected for base=%s (%s: %s); using legacy gate",
@@ -12481,10 +12561,11 @@ def _handle_cognito_host_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]
     req_ctx = (event.get("requestContext") or {}).get("http", {})
     path = req_ctx.get("path", "")
     method = req_ctx.get("method", "GET").upper()
-    if path == "/authorize" and method == "GET":
-        return _handle_cognito_authorize(event)
-    if path == "/callback" and method == "GET":
-        return _handle_cognito_callback(event)
+    if not _kit030_selected():  # 0.3.0 mode (S57-C): the sign-in service owns /authorize and /callback
+        if path == "/authorize" and method == "GET":
+            return _handle_cognito_authorize(event)
+        if path == "/callback" and method == "GET":
+            return _handle_cognito_callback(event)
     if path == "/oauth/token" and method == "POST":
         return _handle_cognito_token(event)
     if path == "/oauth/register" and method == "POST":

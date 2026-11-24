@@ -1,0 +1,38 @@
+{
+  "profiles": {
+    "enceladus": {
+      "provider": "cognito",
+      "user_pool": "us-east-1_b2D0V3E1k",
+      "domain": "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com",
+      "claim": "cognito",
+      "sign_in_service": "self",
+      "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_b2D0V3E1k",
+      "jwks_uri": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_b2D0V3E1k/.well-known/jwks.json",
+      "dynamic_clients": true
+    }
+  },
+  "connectors": [
+    {
+      "name": "enceladus",
+      "display_name": "Enceladus v2",
+      "repository": "NX-2021-L/enceladus",
+      "path": "tools/enceladus-mcp-server",
+      "runtime": "python",
+      "url": "https://mcp.jreese.net",
+      "mount": "/",
+      "profile": "enceladus",
+      "client_ids": ["4nufml87gba9ht95g89rg46if7"]
+    },
+    {
+      "name": "enceladus-gamma",
+      "display_name": "enceladus-gamma",
+      "repository": "NX-2021-L/enceladus",
+      "path": "tools/enceladus-mcp-server",
+      "runtime": "python",
+      "url": "https://mcp-gamma.jreese.net",
+      "mount": "/",
+      "profile": "enceladus",
+      "client_ids": ["6q607dk3liirhtecgps7hifmlk"]
+    }
+  ]
+}

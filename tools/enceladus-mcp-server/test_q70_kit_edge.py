@@ -272,14 +272,17 @@ def test_edge_is_cached_per_base_url(server):
 
 
 def test_custom_domain_sets_the_base_behind_cloudfront(server, monkeypatch):
-    """enceladus-mcp-code sets CUSTOM_DOMAIN; the Function URL host is the origin, not the public name."""
-    monkeypatch.setenv("CUSTOM_DOMAIN", "mcp-gamma.jreese.net")
+    """enceladus-mcp-code sets CUSTOM_DOMAIN; the Function URL host is the origin, not the public name.
+
+    A base outside the 0.3.0 allow-list (gamma is in it since S57-E, and its 0.3.0 edge no longer serves /register) so this
+    keeps exercising the pinned 0.1.3 path."""
+    monkeypatch.setenv("CUSTOM_DOMAIN", "mcp-beta.jreese.net")
     res = _call(server, _event(path="/.well-known/oauth-protected-resource", method="GET",
                                host="abc123.lambda-url.us-west-2.on.aws"))
-    assert _json(res)["resource"] == "https://mcp-gamma.jreese.net"
+    assert _json(res)["resource"] == "https://mcp-beta.jreese.net"
     asm = _json(_call(server, _event(path="/.well-known/oauth-authorization-server", method="GET",
                                      host="abc123.lambda-url.us-west-2.on.aws")))
-    assert asm["registration_endpoint"] == "https://mcp-gamma.jreese.net/register"
+    assert asm["registration_endpoint"] == "https://mcp-beta.jreese.net/register"
 
 
 def test_each_host_serves_its_own_resource(server):
@@ -367,6 +370,9 @@ def test_function_requirements_pin_the_kit(function):
         pytest.skip(f"{path} not in this checkout")
     lines = [ln.strip() for ln in path.read_text().splitlines()]
     assert "io-kit-mcp-edge==0.1.3" in lines
+    # ENC-TSK-S57-C: requirements.txt keeps exactly this one pin; the dormant 0.3.0 edition is installed by the build
+    # workflows into _kit030 (see test_s57c_kit030_dormant.py), never through requirements.txt.
+    assert [ln for ln in lines if ln.startswith("io-kit-mcp-edge")] == ["io-kit-mcp-edge==0.1.3"]
 
 
 def test_mcp_code_build_job_mints_the_codeartifact_index_before_the_build_role():
