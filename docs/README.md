@@ -43,3 +43,4 @@ Goal-oriented directions for a reader who already has the basics.
 - [Build Lambda packages for the Linux runtime](how-to/build-lambda-packages-for-linux.md)
 - [Back up and restore Neo4j](how-to/back-up-and-restore-neo4j.md)
 - [Prove host v2 with Codex](how-to/prove-host-v2-with-codex.md)
+- [Deploy, ship and roll back the MCP sign-in service](how-to/deploy-and-roll-back-mcp-signin.md)
