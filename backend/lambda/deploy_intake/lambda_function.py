@@ -125,6 +125,29 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API_BASE = "https://api.github.com"
 
 VALID_CHANGE_TYPES = {"patch", "minor", "major"}
+
+# ENC-ISS-916 / ENC-TSK-T10: a record_only submission is RETROSPECTIVE telemetry --
+# it describes a deploy that already happened and must never cause another one.
+# Such a row is stored with this terminal status instead of "pending", because
+# _handle_state_set re-triggers on every request# row whose status is "pending"
+# when the project is flipped to ACTIVE; suppressing the immediate SQS send alone
+# would leave the row as a deferred trigger.
+RECORD_ONLY_STATUS = "recorded"
+
+
+def _coerce_record_only(value: Any) -> bool:
+    """True only for a real boolean True or the exact strings "true"/"1".
+
+    Deliberately strict: anything unrecognised is False, so a malformed flag
+    fails CLOSED into the ordinary (triggering) path that callers already get
+    today rather than silently suppressing a deployment someone wanted.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1"}
+    return False
+
 VALID_DEPLOYMENT_TYPES = {
     "github_public_static",
     "github_private_sst",
@@ -753,6 +776,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     pr_repo = body.get("pr_repo", "enceladus")
     # ENC-TSK-E29: Optional S3 artifact key for pre-built Lambda packages
     source_artifact_s3_key = (body.get("source_artifact_s3_key") or "").strip()
+    # ENC-ISS-916: retrospective telemetry, never a request to deploy.
+    record_only = _coerce_record_only(body.get("record_only"))
 
     # Validation
     if not project_id:
@@ -861,7 +886,7 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
         "record_id": {"S": f"request#{request_id}"},
         "request_id": {"S": request_id},
         "record_type": {"S": "request"},
-        "status": {"S": "pending"},
+        "status": {"S": RECORD_ONLY_STATUS if record_only else "pending"},
         "submitted_at": {"S": now},
         "submitted_by": {"S": submitted_by},
         "change_type": {"S": change_type},
@@ -883,6 +908,9 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
 
     ddb = _get_ddb()
     ddb.put_item(TableName=DEPLOY_TABLE, Item=item)
+    if record_only:
+        item["record_only"] = {"BOOL": True}
+
     logger.info(f"Wrote deployment request {request_id} for project {project_id}")
 
     # Version projection (ENC-FTR-033): read current version and compute next.
@@ -911,7 +939,14 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     # Send SQS trigger if ACTIVE
     message = "Deployment request queued."
     queued_paused = False
-    if deploy_state == "PAUSED":
+    if record_only:
+        # ENC-ISS-916: no SQS send on ANY path, whatever the project state. The
+        # row is telemetry for a deploy that already completed.
+        message = (
+            "Deploy recorded (record_only). No deployment was queued and no "
+            "trigger was sent."
+        )
+    elif deploy_state == "PAUSED":
         message = "Deployment request stored. Deployments are currently PAUSED."
         queued_paused = True
     elif SQS_QUEUE_URL:
@@ -932,6 +967,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
         "deployment_type": deployment_type,
         "project_state": deploy_state,
         "queued_paused": queued_paused,
+        "record_only": record_only,
+        "status": RECORD_ONLY_STATUS if record_only else "pending",
         "message": message,
         "pre_deploy_results": pre_deploy_results,
     }

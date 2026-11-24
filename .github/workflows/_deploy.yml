@@ -1433,16 +1433,29 @@ jobs:
           echo "governance_hash=${HASH}" >> "$GITHUB_OUTPUT"
           echo "Governance hash: ${HASH:-(fetch failed)}"
 
-      - name: Extract PR number for merge commit
+      - name: Extract PR number and merge time for the deployed commit
         id: pr_info
         env:
           GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
           HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          # Primary: GitHub API — find PR(s) associated with this merge commit
-          PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
-            --jq '.[0].number // empty' 2>/dev/null || true)
+          # Primary: GitHub API — the PR(s) associated with this merge commit.
+          # ENC-ISS-914: ONE call answers both questions, because .number and
+          # .merged_at sit on the same element. merged_at is resolved here so a
+          # DIRECT workflow_dispatch can still submit a DPL record: that path
+          # carries neither inputs.merged_at (only promote-merged-dispatch.yml
+          # passes it) nor github.event.head_commit (push events only), so
+          # before this both fallbacks were empty and the submit failed 400.
+          # Parsed with gh's own --jq rather than python json: a PR body can
+          # contain raw control characters, which python's strict json.loads
+          # rejects outright. That was verified against PR #1881, whose body
+          # breaks json.loads at char 1764 while --jq reads it cleanly.
+          PR_INFO=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
+            --jq 'if length > 0 then "\(.[0].number)\t\(.[0].merged_at // "")" else "\t" end' \
+            2>/dev/null || printf '\t')
+          PR_NUMBER=$(printf '%s' "$PR_INFO" | cut -f1)
+          PR_MERGED_AT=$(printf '%s' "$PR_INFO" | cut -f2)
 
           # Fallback: parse "(#NNN)" or "Merge pull request #NNN" from commit message
           if [ -z "$PR_NUMBER" ]; then
@@ -1451,7 +1464,9 @@ jobs:
           fi
 
           echo "pr_number=${PR_NUMBER:-0}" >> "$GITHUB_OUTPUT"
+          echo "merged_at=${PR_MERGED_AT}" >> "$GITHUB_OUTPUT"
           echo "PR number: ${PR_NUMBER:-(not found, using 0)}"
+          echo "PR merged_at: ${PR_MERGED_AT:-(not found)}"
 
       - name: Submit DPL deploy record
         id: submit
@@ -1467,7 +1482,12 @@ jobs:
           # promote path it is undefined, so prefer the caller-supplied
           # inputs.merged_at (the promote PR's real merge time, passed by
           # promote-merged-dispatch.yml) over head_commit.timestamp.
-          MERGED_AT: ${{ inputs.merged_at || github.event.head_commit.timestamp }}
+          # ENC-ISS-914: those two cover the relay dispatch and the gamma push,
+          # but NOT a direct manual dispatch, where both are empty and the DPL
+          # submit was rejected. steps.pr_info.outputs.merged_at fills exactly
+          # that gap and is ordered third, so neither existing path changes:
+          # inputs.merged_at still wins where it is supplied.
+          MERGED_AT: ${{ inputs.merged_at || steps.pr_info.outputs.merged_at || github.event.head_commit.timestamp }}
           # ENC-TSK-Q21 FR-10: only set on the v3-prod promote-dispatch path
           # (empty on the gamma push path -- the python below treats "" as
           # "not carried").
@@ -1475,9 +1495,23 @@ jobs:
           TRIGGER_EVENT: ${{ github.event_name }}
         run: |
           BODY=$(python3 - <<'PY'
-          import json, os
+          import json, os, sys
           pr_raw = os.environ.get('PR_NUMBER', '0')
           pr_id = int(pr_raw) if pr_raw.isdigit() else 0
+          merged_at = os.environ.get('MERGED_AT', '') or ''
+          # ENC-ISS-914: the API requires both (ENC-FTR-037) and answers a
+          # missing one with an opaque 400. Say which is missing, here, where
+          # the resolution that failed is still visible.
+          if not pr_id or not merged_at:
+              missing = []
+              if not pr_id:
+                  missing.append('pr_id (no pull request found for this commit)')
+              if not merged_at:
+                  missing.append('merged_at (not supplied as an input, not on the PR, no head_commit)')
+              print('DPL record cannot be submitted: ' + ', '.join(missing) +
+                    '. ENC-FTR-037 requires both. The deploy itself is unaffected.',
+                    file=sys.stderr)
+              sys.exit(2)
           sha = os.environ['COMMIT_SHA']
           env = os.environ['ENVIRONMENT']
           gamma_sha = os.environ.get('GAMMA_SHA', '') or ''
@@ -1501,10 +1535,17 @@ jobs:
               "summary": f"Gen2 Lambda deploy to {env} @ {sha[:7]} (PR #{pr_id})",
               "changes": changes,
               "pr_id": pr_id,
-              "merged_at": os.environ['MERGED_AT'],
+              "merged_at": merged_at,
               "pr_owner": "NX-2021-L",
               "pr_repo": "enceladus",
               "submitted_by": "gha-deploy-pipeline",
+              # ENC-ISS-916 / ENC-TSK-T10: this job RECORDS a deploy that already
+              # finished. Without this flag deploy_intake stores the row as
+              # "pending" and, with the project ACTIVE, wakes deploy_orchestrator,
+              # which then attempts a SECOND independent deployment from the
+              # legacy source-archive path. record_only stores the row with a
+              # terminal status and sends no trigger on any path.
+              "record_only": True,
               "non_ui_config": {
                   "service_group": "lambda",
                   "target_arn": f"arn:aws:lambda:us-west-2:356364570033:function:devops-tracker-mutation-api{'-gamma' if 'gamma' in env else ''}",

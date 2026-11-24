@@ -21,6 +21,10 @@ const PLANNED = { status: 'planned' as const, owner: 'io', plannedSince: '2026-1
 
 export const NAV_ITEMS: NavItemInput[] = [
   { id: 'projects', label: 'Projects', route: '/projects' },
+  // ENC-TSK-S98-0C (ENC-PLN-108 W3.3): kept in step with SIDEBAR_ITEMS in AppShell.tsx, which is what actually
+  // renders the drawer. Section 5.9 asks for one list to define the menu; until this registry replaces that array,
+  // reconciling it is the honest half-measure -- deleting it would silently drop the caps/permission wiring below.
+  { id: 'plans', label: 'Plans', route: '/plans' },
   { id: 'feed', label: 'Feed', route: '/feed' },
   { id: 'docs', label: 'Docs', route: '/docs' },
   { id: 'skills', label: 'Skill Library', route: '/skills' },

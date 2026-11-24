@@ -298,5 +298,91 @@ class DeployIntakeAuthTests(unittest.TestCase):
         self.assertEqual(body["ratio"], 1.25)
 
 
+
+class DeployIntakeRecordOnlyTests(unittest.TestCase):
+    """ENC-ISS-916 / ENC-TSK-T10.
+
+    _deploy.yml's 'Record deploy -> DPL' step POSTs retrospective telemetry to
+    the deploy REQUEST intake. With the project ACTIVE that stored a `pending`
+    row and woke deploy_orchestrator, which attempted a second, independent
+    deployment from months-old source archives. `record_only` marks such a
+    submission as a record of a deploy that already happened: no trigger on any
+    path, and a terminal status so the ACTIVE-flip sweep in _handle_state_set
+    cannot pick it up later either.
+    """
+
+    def setUp(self) -> None:
+        self._original_sqs_queue_url = deploy_intake.SQS_QUEUE_URL
+        deploy_intake.SQS_QUEUE_URL = "https://sqs.us-west-2.amazonaws.com/123/test.fifo"
+
+    def tearDown(self) -> None:
+        deploy_intake.SQS_QUEUE_URL = self._original_sqs_queue_url
+
+    @staticmethod
+    def _body(**extra) -> dict:
+        body = {
+            "project_id": "enceladus",
+            "change_type": "patch",
+            "deployment_type": "lambda_update",
+            "summary": "Gen2 Lambda deploy to v3-prod @ abc1234 (PR #1892)",
+            "changes": ["commit_sha: abc1234", "environment: v3-prod"],
+            "pr_id": 1892,
+            "merged_at": "2026-11-19T09:27:43Z",
+            "submitted_by": "gha-deploy-pipeline",
+            "non_ui_config": {
+                "service_group": "lambda",
+                "target_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-tracker-mutation-api",
+            },
+        }
+        body.update(extra)
+        return body
+
+    def _submit(self, body: dict):
+        """Run _handle_submit with GitHub, DynamoDB, S3 and SQS stubbed out."""
+        with patch.object(deploy_intake, "_validate_pr_merged", return_value=(True, "")), \
+             patch.object(deploy_intake, "_resolve_deploy_state", return_value=("ACTIVE", None)), \
+             patch.object(deploy_intake, "_content_store", side_effect=RuntimeError("no s3 in tests")), \
+             patch.object(deploy_intake, "_get_ddb") as mock_ddb, \
+             patch.object(deploy_intake, "_get_sqs") as mock_sqs:
+            mock_sqs.return_value.send_message.return_value = {"MessageId": "msg-1"}
+            resp = deploy_intake._handle_submit(_event(method="POST"), body)
+            item = mock_ddb.return_value.put_item.call_args.kwargs["Item"]
+            return resp, json.loads(resp["body"]), item, mock_sqs
+
+    def test_record_only_sends_no_trigger_and_is_not_pending(self) -> None:
+        resp, body, item, mock_sqs = self._submit(self._body(record_only=True))
+
+        self.assertEqual(resp["statusCode"], 200)
+        # The whole point: the orchestrator is never woken, even though ACTIVE.
+        mock_sqs.return_value.send_message.assert_not_called()
+        # And the row is not left as a deferred trigger for the ACTIVE-flip sweep,
+        # which filters request# rows on status == "pending".
+        self.assertEqual(item["status"]["S"], deploy_intake.RECORD_ONLY_STATUS)
+        self.assertNotEqual(item["status"]["S"], "pending")
+        self.assertTrue(item["record_only"]["BOOL"])
+        self.assertTrue(body["record_only"])
+        self.assertEqual(body["status"], deploy_intake.RECORD_ONLY_STATUS)
+
+    def test_without_record_only_an_active_project_still_triggers(self) -> None:
+        """The ordinary request path is unchanged -- this must stay a regression test."""
+        resp, body, item, mock_sqs = self._submit(self._body())
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_sqs.return_value.send_message.assert_called_once()
+        self.assertEqual(item["status"]["S"], "pending")
+        self.assertNotIn("record_only", item)
+        self.assertFalse(body["record_only"])
+        self.assertEqual(body["status"], "pending")
+
+    def test_record_only_coercion_fails_closed(self) -> None:
+        """Only an explicit boolean True or "true"/"1" suppresses the trigger."""
+        for value in (True, "true", "TRUE", " true ", "1"):
+            self.assertTrue(deploy_intake._coerce_record_only(value), value)
+        # Anything else falls back to the ordinary triggering path rather than
+        # silently swallowing a deployment someone meant to request.
+        for value in (None, False, "false", "0", "yes", "", 1, 0, [], {}, "record_only"):
+            self.assertFalse(deploy_intake._coerce_record_only(value), value)
+
+
 if __name__ == "__main__":
     unittest.main()

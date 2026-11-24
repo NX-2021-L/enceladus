@@ -188,6 +188,32 @@ class CompactDefaultTests(CompactListProjectionTests):
         self.assertEqual(ids, {"ENC-TSK-0001", "ENC-TSK-0002", "ENC-TSK-0003"})
 
 
+class CompactWaveFieldTests(CompactListProjectionTests):
+    """ENC-TSK-S96-0F (ENC-PLN-108 W1.6): the authored task `wave` label survives the
+    compact projection, so a wave just written by tracker.create / tracker.set is visible
+    when listing tasks. Absent when the task carries none."""
+
+    def test_wave_is_a_compact_field(self):
+        self.assertIn("wave", tm._LIST_COMPACT_FIELDS)
+
+    def test_wave_in_compact_list_row_when_set_and_absent_when_not(self):
+        self.seed(2)
+        self.real.update_item(
+            TableName=tm.DYNAMODB_TABLE,
+            Key={"project_id": {"S": PROJECT}, "record_id": {"S": "task#ENC-TSK-0001"}},
+            UpdateExpression="SET wave = :w", ExpressionAttributeValues={":w": {"S": "W1.6"}},
+        )
+        for params in ({"type": "task"}, {}):  # GSI branch and base-table branch
+            with self.subTest(branch="gsi" if params else "base"):
+                body = _body(self.list(**params))
+                self.assertEqual(body["projection"], "compact")
+                rows = {r["item_id"]: r for r in body["records"]}
+                self.assertEqual(rows["ENC-TSK-0001"]["wave"], "W1.6")
+                self.assertNotIn("wave", rows["ENC-TSK-0002"])
+                for heavy in HEAVY:
+                    self.assertNotIn(heavy, rows["ENC-TSK-0001"])
+
+
 class ExplicitFieldsTests(CompactListProjectionTests):
     def test_fields_exact(self):
         self.seed()

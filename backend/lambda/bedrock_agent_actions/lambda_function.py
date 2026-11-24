@@ -11,9 +11,9 @@ deployment systems, and GitHub repositories.
 Supported actions (mapped via apiPath + httpMethod):
     GET  /tracker/{recordId}          - Fetch a tracker record by ID
     GET  /tracker/list/{projectId}    - List tracker records for a project
-    POST /tracker/{recordId}/log      - Log a worklog entry on a record
-    PUT  /tracker/{recordId}/status   - Update record status
-    POST /tracker/create              - Create a new tracker record
+    POST /tracker/{recordId}/log      - REFUSED (ENC-TSK-T04); use MCP append_worklog
+    PUT  /tracker/{recordId}/status   - REFUSED (ENC-ISS-909); use MCP checkout.advance
+    POST /tracker/create              - REFUSED (ENC-ISS-911); use MCP tracker.create
     GET  /projects/{projectId}        - Get project metadata
     GET  /projects                    - List all projects
     GET  /documents/search            - Search documents by keyword
@@ -70,6 +70,55 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
+
+# --- ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): this surface does not write the tracker ---
+# Three handlers here wrote the tracker table directly, and none could enforce
+# governance:
+#   * PUT  /tracker/{recordId}/status applied ANY status with no transition matrix, no
+#     dictionary legality check, no checkout/SCI ownership and no expected-prior
+#     condition -- an FSM bypass (ENC-ISS-909).
+#   * POST /tracker/create            minted its own record id from three digits of a
+#     random UUID and wrote it with an UNCONDITIONAL put_item, so a collision silently
+#     OVERWROTE a live governed record in full (ENC-ISS-911, data loss).
+#   * POST /tracker/{recordId}/log    appended history ungoverned and unsequenced.
+# All three stamped write_kind=governed while bypassing governance, which also made the
+# DynamoDB-stream event-source filters carry writes that no gate had approved.
+#
+# They now FAIL CLOSED. Routing them through the tracker_mutation API -- where the
+# transition matrix and the checkout/SCI gates actually live -- would need a tracker API
+# base URL and an internal API key this lambda does not have (its only HTTP egress is
+# GitHub), i.e. a new secret plus CFN plumbing for an endpoint with ZERO invocations in
+# the 30 days before this change and no log events since 2026-08-26. Refusing removes
+# the hole outright, adds no dependency, secret, infrastructure or cost, and cannot be
+# subtly wrong the way a hand-rolled partial gate can. If the capability is ever wanted,
+# implement it through tracker_mutation with the plumbing that implies. The ENC-TSK-S94
+# sequencing helper that used to live here went with the writes it served.
+# Reads on this surface are deliberately unaffected.
+_GOVERNED_WRITE_PATHS = {
+    "status": "MCP checkout.advance (tracker_mutation owns the transition matrix)",
+    "create": "MCP tracker.create (the server allocates the record id)",
+    "log": "MCP checkout.append_worklog, or tracker.log for non-task records",
+}
+
+
+def _refuse_tracker_write(operation: str, issue: str) -> Dict[str, Any]:
+    """Refuse an ungoverned tracker write and name the governed path instead."""
+    governed_path = _GOVERNED_WRITE_PATHS[operation]
+    logger.warning(
+        "[%s] refused an ungoverned tracker %s write on the bedrock agent surface; "
+        "governed path: %s", issue, operation, governed_path)
+    return {
+        "error": (
+            f"Refused: this action cannot write the tracker. A tracker {operation} "
+            f"write must go through a governed path that enforces the lifecycle state "
+            f"machine, record-id allocation and write sequencing, none of which this "
+            f"surface can do. Use {governed_path}."
+        ),
+        "refused_operation": f"tracker.{operation}",
+        "governed_path": governed_path,
+        "governance_reference": issue,
+    }
+
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
@@ -126,15 +175,10 @@ def _now_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build_write_source(session_attributes: Optional[Dict] = None) -> Dict[str, Any]:
-    """Build write_source attribution for Bedrock agent mutations (ENC-TSK-955)."""
-    attrs = session_attributes or {}
-    return {
-        "channel": "bedrock_agent_action",
-        "agent_id": str(attrs.get("agentId") or attrs.get("agent_id") or ""),
-        "dispatch_id": str(attrs.get("dispatchId") or attrs.get("dispatch_id") or ""),
-        "timestamp": _now_z(),
-    }
+# ENC-TSK-T04: _build_write_source (ENC-TSK-955) existed only to attribute this
+# surface's tracker mutations. Those mutations are refused now (ENC-ISS-909,
+# ENC-ISS-911), so the helper is removed rather than left dead -- there is no
+# ungoverned write left for it to label.
 
 
 # ---------------------------------------------------------------------------
@@ -234,24 +278,8 @@ def _deser_item(item: Dict) -> Dict[str, Any]:
     return {k: _deser_val(v) for k, v in item.items()}
 
 
-def _normalize_string_list(value: Any) -> Optional[List[str]]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        source = [value]
-    elif isinstance(value, list):
-        source = value
-    else:
-        return None
-
-    out: List[str] = []
-    for entry in source:
-        if not isinstance(entry, str):
-            return None
-        stripped = entry.strip()
-        if stripped:
-            out.append(stripped)
-    return out
+# ENC-TSK-T04: _normalize_string_list normalised acceptance_criteria for the
+# refused POST /tracker/create handler and has no other caller; removed with it.
 
 
 def _default_document_storage_policy() -> Dict[str, Any]:
@@ -583,173 +611,41 @@ def _handle_tracker_list(parameters: List[Dict]) -> Dict[str, Any]:
 
 
 def _handle_tracker_log(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
-    """POST /tracker/{recordId}/log — Log a worklog entry."""
-    record_id = _get_param(parameters, "recordId")
-    description = body.get("description") or body.get("message", "")
+    """POST /tracker/{recordId}/log -- REFUSED (ENC-TSK-T04, ENC-ISS-909 family).
 
-    if not record_id or not description:
-        return {"error": "recordId and description required"}
-
-    # Find the record first
-    record = _handle_tracker_get(parameters)
-    if "error" in record:
-        return record
-
-    project_id = record.get("project_id", "")
-    sk = record.get("record_id", "")
-
-    ddb = _get_ddb()
-    now = _now_z()
-    history_entry = {
-        "M": {
-            "timestamp": _ser_s(now),
-            "status": _ser_s("worklog"),
-            "description": _ser_s(description[:500]),
-        }
-    }
-
-    ws = _build_write_source()
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key={
-            "project_id": _ser_s(project_id),
-            "record_id": _ser_s(sk),
-        },
-        UpdateExpression=(
-            "SET write_kind = :wk, updated_at = :now, write_source = :ws, "
-            "history = list_append(if_not_exists(history, :empty), :entry)"
-        ),
-        ExpressionAttributeValues={
-            ":wk": {"S": "governed"},
-            ":now": _ser_s(now),
-            ":ws": _ser_value(ws),
-            ":entry": {"L": [history_entry]},
-            ":empty": {"L": []},
-        },
-    )
-
-    return {"success": True, "record_id": record_id, "logged_at": now}
+    Previously appended a history entry with an ungoverned, unsequenced UpdateItem.
+    The mildest of this surface's three tracker writers -- append-only and unable to
+    destroy state -- but still unauthenticated, unsequenced and mislabelled
+    write_kind=governed, so it is refused with the rest. See _refuse_tracker_write.
+    """
+    _ = parameters, body
+    return _refuse_tracker_write("log", "ENC-ISS-909")
 
 
 def _handle_tracker_status(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
-    """PUT /tracker/{recordId}/status — Update record status."""
-    record_id = _get_param(parameters, "recordId")
-    new_status = body.get("status", "")
+    """PUT /tracker/{recordId}/status -- REFUSED (ENC-TSK-T04, ENC-ISS-909).
 
-    if not record_id or not new_status:
-        return {"error": "recordId and status required"}
-
-    record = _handle_tracker_get(parameters)
-    if "error" in record:
-        return record
-
-    project_id = record.get("project_id", "")
-    sk = record.get("record_id", "")
-
-    ddb = _get_ddb()
-    now = _now_z()
-    history_entry = {
-        "M": {
-            "timestamp": _ser_s(now),
-            "status": _ser_s(new_status),
-            "description": _ser_s(f"Status changed to {new_status} by bedrock agent"),
-        }
-    }
-
-    ws = _build_write_source()
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key={
-            "project_id": _ser_s(project_id),
-            "record_id": _ser_s(sk),
-        },
-        UpdateExpression=(
-            "SET write_kind = :wk, #st = :status, updated_at = :now, write_source = :ws, "
-            "history = list_append(if_not_exists(history, :empty), :entry)"
-        ),
-        ExpressionAttributeNames={"#st": "status"},
-        ExpressionAttributeValues={
-            ":wk": {"S": "governed"},
-            ":status": _ser_s(new_status),
-            ":now": _ser_s(now),
-            ":ws": _ser_value(ws),
-            ":entry": {"L": [history_entry]},
-            ":empty": {"L": []},
-        },
-    )
-
-    return {"success": True, "record_id": record_id, "status": new_status}
+    Previously applied whatever status the request body named, with no transition
+    matrix, no dictionary legality check, no checkout/SCI ownership check and no
+    expected-prior ConditionExpression: an FSM bypass that could regress a closed
+    record, skip an arc, or overwrite a concurrent governed advance last-writer-wins.
+    """
+    _ = parameters, body
+    return _refuse_tracker_write("status", "ENC-ISS-909")
 
 
 def _handle_tracker_create(body: Dict) -> Dict[str, Any]:
-    """POST /tracker/create — Create a new tracker record."""
-    project_id = body.get("project_id", "")
-    record_type = body.get("record_type", "task")
-    title = body.get("title", "")
-    priority = body.get("priority", "P2")
-    acceptance_criteria = _normalize_string_list(body.get("acceptance_criteria"))
+    """POST /tracker/create -- REFUSED (ENC-TSK-T04, ENC-ISS-911).
 
-    if not project_id or not title:
-        return {"error": "project_id and title required"}
-    if acceptance_criteria is None:
-        return {"error": "acceptance_criteria must be a string or list of strings"}
-    if record_type == "task" and not acceptance_criteria:
-        return {
-            "error": (
-                "Task creation requires acceptance_criteria with at least one "
-                "non-empty criterion"
-            )
-        }
-
-    # Generate next item_id — query for highest existing
-    ddb = _get_ddb()
-    type_code = {"task": "TSK", "feature": "FTR", "issue": "ISS"}.get(record_type, "TSK")
-
-    # Get project prefix
-    proj_resp = ddb.get_item(
-        TableName=PROJECTS_TABLE,
-        Key={"project_id": _ser_s(project_id)},
-    )
-    proj = _deser_item(proj_resp.get("Item", {}))
-    prefix = proj.get("prefix", project_id[:3].upper())
-
-    # For simplicity, use a UUID-based approach for the sequence
-    # (full auto-sequencing is handled by tracker.py in production)
-    item_id = f"{prefix}-{type_code}-{str(uuid.uuid4().int)[:3].zfill(3)}"
-
-    now = _now_z()
-    sk = f"{record_type}#{item_id}"
-
-    ws = _build_write_source()
-    item = {
-        "project_id": _ser_s(project_id),
-        "record_id": _ser_s(sk),
-        "record_type": _ser_s(record_type),
-        "item_id": _ser_s(item_id),
-        "title": _ser_s(title),
-        "status": _ser_s("open"),
-        "priority": _ser_s(priority),
-        "created_at": _ser_s(now),
-        "updated_at": _ser_s(now),
-        "sync_version": {"N": "1"},
-        "write_source": _ser_value(ws),
-        "write_kind": _ser_s("governed"),  # ENC-TSK-S47-0B
-        "history": {
-            "L": [{
-                "M": {
-                    "timestamp": _ser_s(now),
-                    "status": _ser_s("created"),
-                    "description": _ser_s(f"Created by bedrock agent: {title}"),
-                }
-            }]
-        },
-    }
-    if record_type == "task" and acceptance_criteria:
-        item["acceptance_criteria"] = {"L": [_ser_s(v) for v in acceptance_criteria]}
-
-    ddb.put_item(TableName=TRACKER_TABLE, Item=item)
-
-    return {"success": True, "item_id": item_id, "record_type": record_type}
+    Previously minted its own record id as prefix + type_code + three digits of a
+    random UUID -- a 1000-value space against a tracker already holding on the order
+    of a thousand records -- and then wrote it with an unconditional put_item. A
+    collision therefore did not fail, it replaced the colliding governed record in
+    full: status, history, acceptance_criteria, checkout state, version_seq, all of
+    it. Record-id allocation belongs to the server.
+    """
+    _ = body
+    return _refuse_tracker_write("create", "ENC-ISS-911")
 
 
 def _handle_project_get(parameters: List[Dict]) -> Dict[str, Any]:

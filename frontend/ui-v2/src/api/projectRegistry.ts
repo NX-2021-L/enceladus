@@ -38,9 +38,11 @@ const PREFIX_TO_TYPE: Record<string, RecordType> = {
 
 /** Infer record type and owning project from a raw id string (CommandPalette). */
 export function inferRecordNavigation(
-  raw: string,
+  raw: string | null | undefined,
   projects: ProjectSummary[],
 ): { type: RecordType; id: string; projectId: string | null } | null {
+  // ENC-TSK-T30 (ENC-ISS-926): a missing id resolves to nothing, never a throw.
+  if (typeof raw !== 'string') return null
   const id = raw.trim().toUpperCase()
   if (!id) return null
 

@@ -67,22 +67,21 @@ class TestValidateBranchName(unittest.TestCase):
         self.assertIsNotNone(err)
 
 
-class TestBuildWriteSource(unittest.TestCase):
-    def test_with_session_attributes(self):
-        ws = mod._build_write_source({"agentId": "agent-123", "dispatchId": "disp-456"})
-        self.assertEqual(ws["channel"], "bedrock_agent_action")
-        self.assertEqual(ws["agent_id"], "agent-123")
-        self.assertEqual(ws["dispatch_id"], "disp-456")
-        self.assertIn("timestamp", ws)
+class TestWriteSourceHelperIsGone(unittest.TestCase):
+    """ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): _build_write_source is removed.
 
-    def test_without_session_attributes(self):
-        ws = mod._build_write_source()
-        self.assertEqual(ws["channel"], "bedrock_agent_action")
-        self.assertEqual(ws["agent_id"], "")
+    It existed only to attribute this surface's tracker mutations (ENC-TSK-955), and
+    those are refused now, so it was deleted rather than left dead. This is a
+    regression fence: if write_source attribution comes back to this lambda, it means
+    an ungoverned tracker write came back with it. The three tests that exercised the
+    helper were removed with it -- there is nothing left to exercise.
+    """
 
-    def test_with_none(self):
-        ws = mod._build_write_source(None)
-        self.assertEqual(ws["channel"], "bedrock_agent_action")
+    def test_helper_removed(self):
+        self.assertFalse(
+            hasattr(mod, "_build_write_source"),
+            "_build_write_source reappeared; this surface must not attribute "
+            "tracker writes because it must not make them")
 
 
 class TestHandleGithubCreateBranch(unittest.TestCase):
@@ -230,32 +229,30 @@ class TestRollbackGithubState(unittest.TestCase):
         self.assertEqual(result["rollback"], "skipped")
 
 
-class TestWriteSourceOnMutations(unittest.TestCase):
-    """Verify write_source is included in DynamoDB mutations."""
+class TestNoTrackerMutations(unittest.TestCase):
+    """ENC-TSK-T04: this surface performs no tracker mutation to attribute.
+
+    Replaces TestWriteSourceOnMutations, which asserted that POST /tracker/create
+    stamped write_source onto its put_item. That put_item was the ENC-ISS-911 defect:
+    a self-minted 3-digit id written unconditionally, so a collision overwrote a live
+    governed record in full. The contract under test is now the opposite one.
+    """
 
     @patch.object(mod, "_get_ddb")
-    def test_tracker_create_includes_write_source(self, mock_ddb):
+    def test_tracker_create_writes_nothing(self, mock_ddb):
         mock_client = MagicMock()
         mock_ddb.return_value = mock_client
-        # Mock projects table
-        mock_client.get_item.return_value = {
-            "Item": {"project_id": {"S": "enceladus"}, "prefix": {"S": "ENC"}}
-        }
 
-        mod._handle_tracker_create({
+        result = mod._handle_tracker_create({
             "project_id": "enceladus",
             "record_type": "task",
             "title": "Test task",
             "acceptance_criteria": ["AC1"],
         })
 
-        put_call = mock_client.put_item.call_args
-        item = put_call[1]["Item"] if "Item" in (put_call[1] or {}) else put_call[0][0] if put_call[0] else {}
-        if not item and put_call[1]:
-            item = put_call[1].get("Item", {})
-        self.assertIn("write_source", item)
-        ws = item["write_source"]
-        self.assertEqual(ws["M"]["channel"]["S"], "bedrock_agent_action")
+        self.assertIn("Refused", result["error"])
+        mock_client.put_item.assert_not_called()
+        mock_client.update_item.assert_not_called()
 
 
 if __name__ == "__main__":

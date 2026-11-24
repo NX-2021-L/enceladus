@@ -408,13 +408,74 @@ def normalize_str_list(value: Any, record_id: str = "", field: str = "") -> List
     return []
 
 
+# ENC-TSK-T05 (ENC-PLN-108 W2.6): the two scopes one row contract serves. build_tracker_entry is the only row
+# builder; the scope decides only WHICH optional attributes are present, never the row's shape.
+LENS_SCOPE_CORPUS = "corpus"  # corpus rows and /feed/delta rows: no lifecycle timestamps (ruling D-26)
+LENS_SCOPE_PLAN = "plan"  # the plan-scoped read (/feed/plan-scope): the three lifecycle timestamps ride the row
+LENS_SCOPES = (LENS_SCOPE_CORPUS, LENS_SCOPE_PLAN)
+
+# Present at plan scope only. Never on a corpus or delta row (D-26): measured against the live corpus these three are
+# about 89 percent of the widening's cost (about 793 KiB of 927 KiB).
+LIFECYCLE_TIMESTAMP_ATTRS = ("created_at", "first_checked_out_at", "closed_at")
+
+
+def lens_attrs(
+    record_type: str,
+    record_id: str,
+    record: Mapping[str, Any],
+    scope: str = LENS_SCOPE_CORPUS,
+) -> Dict[str, Any]:
+    """ENC-TSK-S97-0A (ENC-PLN-108 W2.1, DOC-5E1E205FA664 section 5.3, rulings D-26/D-27/D-28), scoped by ENC-TSK-T05.
+
+    The attributes the Plans page reads. At the default CORPUS scope exactly three, each omitted when empty:
+
+      objectives_set  PLAN rows only, in the plan's STORED order (never sorted or de-duplicated here).
+      parent          TASK rows only: the resolver's precedence step 2 derives wave membership from parent pointers.
+      wave            TASK rows only: the optional wave field (W1.6); absent on every record until it is written.
+
+    created_at, first_checked_out_at and closed_at are NOT on a corpus or delta row (D-26): they are about 89 percent
+    of the widening's cost (about 793 KiB of 927 KiB). They reach the Plans page through the plan-scoped read
+    (ENC-TSK-T05), which asks for LENS_SCOPE_PLAN. At that scope the same three attributes above are present and, on
+    plan and task rows, each of the three timestamps is added when the record carries a non-empty value. One row
+    contract, two scopes: the scope selects which attributes are present, never a different row shape.
+
+    The corpus builder, the /feed/delta builder and the plan-scoped read all call this, so the paths cannot drift. The
+    default is the corpus scope on purpose: a caller that does not ask for the timestamps never gets them.
+    """
+    if scope not in LENS_SCOPES:
+        raise ValueError(f"unknown lens scope {scope!r}; expected one of {LENS_SCOPES}")
+    out: Dict[str, Any] = {}
+    if record_type == "plan":
+        objectives = normalize_str_list(record.get("objectives_set"), record_id, "objectives_set")
+        if objectives:
+            out["objectives_set"] = objectives
+    elif record_type == "task":
+        parent = record.get("parent")
+        if isinstance(parent, str) and parent.strip():
+            out["parent"] = parent.strip()
+        wave = record.get("wave")
+        if isinstance(wave, str) and wave.strip():
+            out["wave"] = wave.strip()
+    if scope == LENS_SCOPE_PLAN and record_type in ("plan", "task"):
+        for key in LIFECYCLE_TIMESTAMP_ATTRS:
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                out[key] = value.strip()
+    return out
+
+
 def build_tracker_entries_from_records(
     tasks: Sequence[Mapping[str, Any]],
     issues: Sequence[Mapping[str, Any]],
     features: Sequence[Mapping[str, Any]],
     lessons: Sequence[Mapping[str, Any]],
     plans: Sequence[Mapping[str, Any]],
+    lens_scope: str = LENS_SCOPE_CORPUS,
 ) -> List[Dict[str, Any]]:
+    """The one row builder for tracker records. `lens_scope` (ENC-TSK-T05) is the only thing that varies between the
+    corpus and the plan-scoped read: see lens_attrs. The default keeps every existing caller on the corpus scope."""
+    if lens_scope not in LENS_SCOPES:
+        raise ValueError(f"unknown lens scope {lens_scope!r}; expected one of {LENS_SCOPES}")
     entries: List[Dict[str, Any]] = []
 
     def append_many(records: Sequence[Mapping[str, Any]], record_type: str, id_key: str) -> None:
@@ -440,6 +501,8 @@ def build_tracker_entries_from_records(
             checkout_state = record.get("checkout_state")
             if checkout_state:
                 attrs["checkout_state"] = checkout_state
+            # ENC-TSK-S97-0A: objectives_set (plans), parent and wave (tasks). Nothing else.
+            attrs.update(lens_attrs(record_type, record_id, record, lens_scope))
             entries.append(
                 build_tracker_entry(
                     record_type,
