@@ -1,0 +1,9 @@
+[
+  {
+    "ResourceType": "AWS::CloudFront::Distribution",
+    "LogicalResourceId": "McpEdgeDistribution",
+    "ResourceIdentifier": {
+      "Id": "E2KVDHFSQ5G5VE"
+    }
+  }
+]

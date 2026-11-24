@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus MCP edge, GAMMA (ENC-TSK-S57-b / ENC-TSK-Q71). The CloudFront distribution E2KVDHFSQ5G5VE that serves
+  mcp-gamma.jreese.net, brought under CloudFormation by change-set IMPORT with zero diff: every property below is the
+  live value as read on 2026-11-24 (ETag EN1VRQENFRJN5), nothing added. Production (E3IRO1VSMFENCC) is NOT in this
+  template and must not be added to it. The sign-in behaviors and origin (S57-c) land as a later, separate update.
+
+# Import contract. The distribution was created out of band, so it is adopted, never created, by
+# .github/workflows/cfn-resource-import.yml (mode=import) with infrastructure/cloudformation/resource-import-mcp-edge-gamma.json.
+# Read docs/how-to/import-the-gamma-mcp-distribution.md before dispatching it.
+#
+# Where the stack lives: that workflow is pinned to us-west-2 and 07-ui-cdn.yaml also lives there; CloudFront is global so
+# the stack region does not change the distribution. The Lambda@Edge version and the ACM certificate are us-east-1 ARNs,
+# which CloudFront requires, and are plain strings here.
+#
+# Live properties deliberately NOT written, because the live value is "unset" and CloudFormation treats an omitted
+# property as unset (writing the empty string risks a spurious update against what the handler reads back):
+#   DefaultRootObject "", WebACLId "", ContinuousDeploymentPolicyId "", Logging (Enabled false, empty bucket),
+#   OriginPath "", OriginAccessControlId "", FieldLevelEncryptionId "", CustomHeaders (quantity 0),
+#   TrustedSigners / TrustedKeyGroups (disabled), FunctionAssociations (quantity 0), OriginGroups (0),
+#   CustomErrorResponses (0), GrpcConfig (disabled; not modeled by CloudFormation), CallerReference (create-time only;
+#   not modeled), Tags (none live; adding any would be a post-import update, not zero diff).
+# Do not "tidy" this file during the import: any change to a value below makes the first change-set after the import a
+# Modify rather than a no-op.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["-gamma"]
+    Description: This template is gamma only. Production's distribution is a different, untouched resource.
+  FunctionUrlOriginDomainName:
+    Type: String
+    Default: "fby2jguax4ymmqnfwj3t5whyei0zbhfx.lambda-url.us-west-2.on.aws"
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Description: Host only of the Function URL of enceladus-mcp-code-gamma alias live (default origin). Must equal the live origin for a zero-diff import.
+  ApiOriginDomainName:
+    Type: String
+    Default: "hi0dzmvqrc.execute-api.us-west-2.amazonaws.com"
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Description: Host only of the gamma HTTP API (devops-tracker-api-gamma) that the /api/* behavior proxies to.
+  AcmCertificateArn:
+    Type: String
+    Default: "arn:aws:acm:us-east-1:356364570033:certificate/2fe2e1cc-cc0f-4d24-94d7-dba31a9ac47e"
+    AllowedPattern: '^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[A-Za-z0-9-]+$'
+    Description: us-east-1 ACM certificate for mcp-gamma.jreese.net.
+  EdgeFunctionVersionArn:
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:356364570033:function:enceladus-mcp-edge-401-header:1"
+    AllowedPattern: '^arn:aws:lambda:us-east-1:[0-9]{12}:function:[A-Za-z0-9-_]+:[0-9]+$'
+    Description: Published VERSION (not $LATEST) of the Lambda@Edge origin-response function that adds the 401 header.
+
+Resources:
+  McpEdgeDistribution:
+    Type: AWS::CloudFront::Distribution
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: "MCP Streamable HTTP Gamma - mcp-gamma.jreese.net"
+        Aliases:
+          - mcp-gamma.jreese.net
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Staging: false
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        Origins:
+          - Id: api-gw-origin
+            DomainName: !Ref ApiOriginDomainName
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+            OriginShield:
+              Enabled: false
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+          - Id: enceladus-mcp-gamma-furl
+            DomainName: !Ref FunctionUrlOriginDomainName
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+            OriginShield:
+              Enabled: false
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: enceladus-mcp-gamma-furl
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+          CachedMethods: [HEAD, GET]
+          Compress: true
+          SmoothStreaming: false
+          # AWS managed: CachingDisabled / AllViewerExceptHostHeader.
+          CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+          OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          LambdaFunctionAssociations:
+            - EventType: origin-response
+              LambdaFunctionARN: !Ref EdgeFunctionVersionArn
+              IncludeBody: false
+        CacheBehaviors:
+          - PathPattern: "/api/*"
+            TargetOriginId: api-gw-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: false
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+# No Outputs section: CloudFormation refuses an IMPORT change set whose template adds outputs
+# ("As part of the import operation, you cannot modify or add [Outputs]"). Add outputs in a later update.
