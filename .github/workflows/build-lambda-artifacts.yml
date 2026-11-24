@@ -205,6 +205,16 @@ jobs:
             --target "$BUILD" \
             -r backend/lambda/mcp_code/requirements.txt \
             --quiet
+          # ENC-TSK-S57-C: dormant second kit edition under _kit030/ (see _build.yml).
+          python -m pip install \
+            --platform manylinux2014_aarch64 \
+            --implementation cp \
+            --python-version 3.12 \
+            --only-binary=:all: \
+            --no-deps \
+            --target "$BUILD/_kit030" \
+            io-kit-mcp-edge==0.3.0 \
+            --quiet
           ZIP="/tmp/enceladus-mcp-code.zip"
           (cd "$BUILD" && zip -qrX "$ZIP" .)
           echo "zip_path=${ZIP}" >> "$GITHUB_OUTPUT"

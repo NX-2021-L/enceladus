@@ -367,6 +367,9 @@ def test_function_requirements_pin_the_kit(function):
         pytest.skip(f"{path} not in this checkout")
     lines = [ln.strip() for ln in path.read_text().splitlines()]
     assert "io-kit-mcp-edge==0.1.3" in lines
+    # ENC-TSK-S57-C: requirements.txt keeps exactly this one pin; the dormant 0.3.0 edition is installed by the build
+    # workflows into _kit030 (see test_s57c_kit030_dormant.py), never through requirements.txt.
+    assert [ln for ln in lines if ln.startswith("io-kit-mcp-edge")] == ["io-kit-mcp-edge==0.1.3"]
 
 
 def test_mcp_code_build_job_mints_the_codeartifact_index_before_the_build_role():

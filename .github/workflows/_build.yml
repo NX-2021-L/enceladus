@@ -291,6 +291,22 @@ jobs:
                 --upgrade \
                 --target "$workdir" \
                 -r "$workdir/requirements.txt"
+
+              # ENC-TSK-S57-C: dormant second kit edition. A function whose requirements pin
+              # io-kit-mcp-edge (mcp_streamable) also gets 0.3.0 under _kit030/, NOT on the
+              # default import path: server.py puts it first on sys.path only for a base URL
+              # in its _KIT030_BASES allow-list (empty). 0.1.3 stays the root install above.
+              if grep -q '^io-kit-mcp-edge==' "$workdir/requirements.txt"; then
+                python -m pip install \
+                  --platform "${{ matrix.pip_platform }}" \
+                  --implementation cp \
+                  --python-version "${{ matrix.py_version }}" \
+                  --only-binary=:all: \
+                  --no-deps \
+                  --target "$workdir/_kit030" \
+                  io-kit-mcp-edge==0.3.0 \
+                  --quiet
+              fi
             fi
 
             # Zip at function root (matches Lambda handler expectations).
@@ -536,6 +552,19 @@ jobs:
             --upgrade \
             --target "$BUILD" \
             -r backend/lambda/mcp_code/requirements.txt \
+            --quiet
+
+          # ENC-TSK-S57-C: dormant second kit edition under _kit030/ (0.1.3 above stays the
+          # root install and requirements.txt keeps the single pin). server.py selects 0.3.0
+          # only for a base URL in its _KIT030_BASES allow-list, which is empty.
+          python -m pip install \
+            --platform manylinux2014_aarch64 \
+            --implementation cp \
+            --python-version 3.12 \
+            --only-binary=:all: \
+            --no-deps \
+            --target "$BUILD/_kit030" \
+            io-kit-mcp-edge==0.3.0 \
             --quiet
 
           # Zip (matches Lambda handler expectation: server.lambda_handler).
