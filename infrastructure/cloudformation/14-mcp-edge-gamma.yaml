@@ -3,7 +3,9 @@ Description: >
   Enceladus MCP edge, GAMMA (ENC-TSK-S57-b / ENC-TSK-Q71). The CloudFront distribution E2KVDHFSQ5G5VE that serves
   mcp-gamma.jreese.net, brought under CloudFormation by change-set IMPORT with zero diff: every property below is the
   live value as read on 2026-11-24 (ETag EN1VRQENFRJN5), nothing added. Production (E3IRO1VSMFENCC) is NOT in this
-  template and must not be added to it. The sign-in behaviors and origin (S57-c) land as a later, separate update.
+  template and must not be added to it. ENC-TSK-S57-d adds, as a stack UPDATE on top of the import, the origin of the
+  kit sign-in Function URL (enceladus-mcp-signin-gamma, alias live) and five cache behaviors that route the OAuth
+  authorization-server paths to it; every pre-existing property is unchanged.
 
 # Import contract. The distribution was created out of band, so it is adopted, never created, by
 # .github/workflows/cfn-resource-import.yml (mode=import) with infrastructure/cloudformation/resource-import-mcp-edge-gamma.json.
@@ -20,8 +22,11 @@ Description: >
 #   TrustedSigners / TrustedKeyGroups (disabled), FunctionAssociations (quantity 0), OriginGroups (0),
 #   CustomErrorResponses (0), GrpcConfig (disabled; not modeled by CloudFormation), CallerReference (create-time only;
 #   not modeled), Tags (none live; adding any would be a post-import update, not zero diff).
-# Do not "tidy" this file during the import: any change to a value below makes the first change-set after the import a
-# Modify rather than a no-op.
+# Do not "tidy" this file: any change to a pre-existing value below turns the next change-set into a Modify of something
+# other than the S57-d sign-in origin and behaviors.
+#
+# S57-d (stack UPDATE, not import): the update change-set must show ONE Modify (AWS::CloudFront::Distribution
+# McpEdgeDistribution, Replacement False) and nothing else. Apply path and rollback: docs/how-to/import-the-gamma-mcp-distribution.md.
 
 Parameters:
   EnvironmentSuffix:
@@ -39,6 +44,11 @@ Parameters:
     Default: "hi0dzmvqrc.execute-api.us-west-2.amazonaws.com"
     AllowedPattern: '^[a-z0-9.-]+$'
     Description: Host only of the gamma HTTP API (devops-tracker-api-gamma) that the /api/* behavior proxies to.
+  SigninFunctionUrlOriginDomainName:
+    Type: String
+    Default: "3rnsgocycmgl3hs37gqzpcw33q0ckhws.lambda-url.us-west-2.on.aws"
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Description: Host only of the Function URL of enceladus-mcp-signin-gamma alias live (output FunctionUrl of stack enceladus-mcp-signin-gamma). Origin of the five OAuth sign-in behaviors.
   AcmCertificateArn:
     Type: String
     Default: "arn:aws:acm:us-east-1:356364570033:certificate/2fe2e1cc-cc0f-4d24-94d7-dba31a9ac47e"
@@ -101,6 +111,20 @@ Resources:
                 - TLSv1.2
               OriginReadTimeout: 30
               OriginKeepaliveTimeout: 5
+          - Id: enceladus-mcp-signin-gamma-furl
+            DomainName: !Ref SigninFunctionUrlOriginDomainName
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+            OriginShield:
+              Enabled: false
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
           TargetOriginId: enceladus-mcp-gamma-furl
           ViewerProtocolPolicy: redirect-to-https
@@ -125,6 +149,59 @@ Resources:
             SmoothStreaming: false
             CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
             OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          # S57-d: kit sign-in service (enceladus-mcp-signin-gamma). Anchored patterns, evaluated in list order after /api/*; none can match
+          # /oauth/token, /oauth/register, /.well-known/oauth-protected-resource*, /, /mcp or /api/*. No Lambda@Edge here (the 401-header
+          # function belongs to the MCP default behavior only).
+          - PathPattern: "/.well-known/oauth-authorization-server*"
+            TargetOriginId: enceladus-mcp-signin-gamma-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/register"
+            TargetOriginId: enceladus-mcp-signin-gamma-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/authorize"
+            TargetOriginId: enceladus-mcp-signin-gamma-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/callback"
+            TargetOriginId: enceladus-mcp-signin-gamma-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/token"
+            TargetOriginId: enceladus-mcp-signin-gamma-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
-# No Outputs section: CloudFormation refuses an IMPORT change set whose template adds outputs
-# ("As part of the import operation, you cannot modify or add [Outputs]"). Add outputs in a later update.
+Outputs:
+  DistributionId:
+    Description: CloudFront distribution id of mcp-gamma.jreese.net.
+    Value: !Ref McpEdgeDistribution
+  DistributionDomainName:
+    Description: CloudFront domain name of the distribution (the alias mcp-gamma.jreese.net points here).
+    Value: !GetAtt McpEdgeDistribution.DomainName
