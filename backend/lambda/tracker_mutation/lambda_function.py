@@ -75,6 +75,20 @@ except ImportError:
         _VERSION_SEQ_AVAILABLE = True
     except ImportError:
         _VERSION_SEQ_AVAILABLE = False
+# ENC-TSK-S94 (ENC-ISS-908): the sequencing rule itself, imported separately from the
+# three primitives above because the PINNED layer (SharedLayerArn default
+# enceladus-shared:15, infrastructure/cloudformation/02-compute.yaml) does not carry it
+# yet -- at that pin this resolves to the bundled version_seq_util copy, and to the layer
+# once a later version is published. Unguarded imports of a symbol a pinned layer lacks
+# are what produced the :7 and :10 Runtime.ImportModuleError incidents recorded on that
+# parameter, so every hop is guarded and the last one degrades instead of bricking.
+try:
+    from enceladus_shared.version_seq import sequenced_governed_write_clause
+except ImportError:
+    try:
+        from version_seq_util import sequenced_governed_write_clause
+    except ImportError:
+        sequenced_governed_write_clause = None
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -771,10 +785,14 @@ _RESERVED_OVERRIDE_PATHS = {
     "status", "updated_at", "last_update_note", "sync_version",
     "history", "escalation_provenance", "escalated_closure", "closed_count",
     "write_kind",  # ENC-TSK-S47-0B: stamped by the applier; field_values may not set it
+    # ENC-TSK-S94 (ENC-ISS-908): stamped by the sequencing rule on the same
+    # UpdateItem; a field_values entry naming one of these would collide with that
+    # fragment and DynamoDB would reject the write.
+    "version_seq", "feed_scope", "t_ack", "projection_status",
 }
 
 
-def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
+def _render_update_expression(ordered_assignments, add_clauses=None, set_suffix="") -> str:
     """Render a SET (+ optional ADD) UpdateExpression from an ordered list of
     (top_level_path, expression_snippet) pairs, one snippet per DISTINCT
     top-level attribute path.
@@ -793,7 +811,22 @@ def _render_update_expression(ordered_assignments, add_clauses=None) -> str:
                 f"duplicate top-level path in UpdateExpression: {path!r}")
         seen.add(path)
         set_clauses.append(expr)
-    expression = "SET " + ", ".join(set_clauses)
+    # ENC-TSK-S94: set_suffix carries the appendable SET fragment produced by the
+    # sequencing rule (", version_seq = :vseq, feed_scope = :fscope, write_kind = ...").
+    # Its top-level paths join the SAME overlap check, so a call site that also
+    # assigns one of them fails here rather than at the live UpdateItem (ENC-ISS-759),
+    # and it is spliced before any ADD clause (ENC-TSK-P49).
+    suffix = str(set_suffix or "")
+    for assignment in suffix.split(","):
+        assignment = assignment.strip()
+        if not assignment:
+            continue
+        path = assignment.split("=", 1)[0].strip()
+        if path in seen:
+            raise ValueError(
+                f"duplicate top-level path in UpdateExpression: {path!r}")
+        seen.add(path)
+    expression = "SET " + ", ".join(set_clauses) + suffix
     if add_clauses:
         expression += " ADD " + ", ".join(add_clauses)
     return expression
@@ -878,9 +911,17 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         ("history", "history = list_append(if_not_exists(history, :empty), :hentry)"),
         ("escalation_provenance",
          "escalation_provenance = list_append(if_not_exists(escalation_provenance, :empty), :esc)"),
-        ("write_kind", "write_kind = :wk"),  # ENC-TSK-S47-0B
     ]
-    values[":wk"] = {"S": "governed"}
+    # ENC-TSK-S94 (ENC-ISS-908): this applier landed status=closed and added
+    # closed_count but allocated no version_seq, so an escalated close never
+    # appeared in GET /api/v1/feed/delta (a Query on version-seq-index) and a
+    # client that missed the push event could not heal it until the record's next
+    # sequenced write. The sequencing fragment also stamps write_kind, which is why
+    # the local ("write_kind", "write_kind = :wk") assignment is gone from the list
+    # above -- two assignments to one path are rejected by DynamoDB and now also by
+    # _render_update_expression's overlap check.
+    _esc_vseq_expr, _esc_vseq_vals = _sequencing_parts_or_governed()
+    values.update(_esc_vseq_vals)
 
     for index, (field, value) in enumerate(sorted(clean_field_values.items())):
         name_key = f"#fv{index}"
@@ -903,8 +944,20 @@ def _apply_direct_state_override(project_id: str, escalation: Dict, target: Dict
         if record_type == "task":
             add_clauses.append("closed_count :one_count")
             values[":one_count"] = {"N": "1"}
+            # ENC-TSK-S96-0A (W1.1): stamp closed_at, but ONLY when field_values is
+            # silent about it. closed_at stays out of _RESERVED_OVERRIDE_PATHS on
+            # purpose, so an io-approved escalation can supply the close time of a
+            # task the backfill could not date (ruling D-21). Stamping it
+            # unconditionally would name closed_at twice in one expression and
+            # _render_update_expression would raise (ENC-ISS-759), breaking exactly
+            # the route D-21 relies on. See DOC-B8285D689DAC section 2.
+            if "closed_at" not in clean_field_values:
+                _cl_expr, _cl_vals = _closed_at_set_parts(now)
+                assignments.append(("closed_at", _cl_expr.lstrip(", ")))
+                values.update(_cl_vals)
 
-    update_expression = _render_update_expression(assignments, add_clauses)
+    update_expression = _render_update_expression(
+        assignments, add_clauses, set_suffix=_esc_vseq_expr)
 
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE,
@@ -1147,6 +1200,50 @@ _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature
 # direct PATCH or create attempt is rejected with HTTP 400 RESERVED_FIELD.
 # Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
 _F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
+
+# ENC-TSK-S96-0A (ENC-PLN-108 W1.1) / DOC-B8285D689DAC section 1: server-stamped
+# lifecycle TIMESTAMPS on task records. first_checked_out_at is written once, by
+# if_not_exists in the checkout UpdateItem; closed_at is written by the six close
+# writers through _closed_at_set_parts. Neither is writable by an agent, io or
+# coordination caller, so a direct create or tracker.set attempt is rejected with
+# HTTP 400 RESERVED_FIELD -- the same posture as the F41 counters, kept in its own
+# set because these are stamps rather than counters and the refusal must not claim
+# they are "incremented".
+#
+# This does NOT close the escalation route: closed_at stays deliberately absent
+# from _RESERVED_OVERRIDE_PATHS so an io-approved direct_state_override may still
+# supply the close time of a task the backfill could not date (ruling D-21). That
+# path runs through _apply_direct_state_override, not through this guard.
+_W11_SERVER_STAMPED_TIMESTAMPS = frozenset({"first_checked_out_at", "closed_at"})
+
+# ENC-TSK-S96-0F (ENC-PLN-108 W1.6) / DOC-5E1E205FA664 ruling D-20 and sections 5.3,
+# 5.4: the optional `wave` label on task records. It is AUTHORED -- the opposite of the
+# W1.1 stamps above -- so it must NOT appear in the W1.1 stamp set directly above,
+# _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS. It is a plain string that
+# is carried through without interpretation: feed_query lens_attrs() emits it as the
+# corpus attribute `wave`, appsync_feed_publisher as the live-event field recordWave,
+# and the ui-v2 Plans wave resolver reads it as its highest-precedence input. Making it
+# anything but an optional string breaks all three.
+#
+# Rule: valid on task records only; a str, trimmed; at most _WAVE_MAX_LENGTH characters
+# after trimming; no control characters (a label, not prose). Empty / whitespace-only
+# means "no wave": omitted at create, stored as "" by tracker.set (an explicit clear --
+# inert, because every consumer omits an empty value).
+_WAVE_MAX_LENGTH = 64
+
+
+def _normalize_wave(raw: Any) -> Tuple[str, str]:
+    """Return (trimmed_wave, error_message); error_message is "" when the value is valid."""
+    if raw is None:
+        return "", ""
+    if not isinstance(raw, str):
+        return "", f"wave must be a string, got {type(raw).__name__}."
+    wave = raw.strip()
+    if len(wave) > _WAVE_MAX_LENGTH:
+        return "", f"wave must be at most {_WAVE_MAX_LENGTH} characters after trimming; got {len(wave)}."
+    if wave and not wave.isprintable():
+        return "", "wave must not contain control characters or line breaks."
+    return wave, ""
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1395,8 +1492,19 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
         # ENC-TSK-S47-0B: even without version_seq the write MUST clear a sticky write_kind=marker,
         # or the stream filter drops this governed MODIFY.
         return ", write_kind = :wa_wkind", {":wa_wkind": {"S": "governed"}}
+    # ENC-TSK-S94: allocation stays HERE -- it is this module's long-standing seam
+    # (the suites monkeypatch allocate_version_seq to count calls) and the number is
+    # recorded on the write-attribution context below. Only the composition of
+    # version_seq + feed_scope + write_kind is shared, through
+    # sequenced_governed_write_clause; this function then adds tracker_mutation's own
+    # attribution (S26-0A) and ack/projection markers (S28-0E) on top.
     seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
-    expr, vals = version_seq_update_clause(seq)
+    if sequenced_governed_write_clause is not None:
+        expr, vals = sequenced_governed_write_clause(seq)
+    else:  # pragma: no cover - only when neither layer nor bundle carries the rule
+        expr, vals = version_seq_update_clause(seq)
+        expr += ", write_kind = :vsq_wkind"
+        vals = {**vals, ":vsq_wkind": {"S": "governed"}}
     if _WA:
         _WA["version_seq"] = seq
     cid, wtool = _WA.get("correlation_id"), _WA.get("write_tool")
@@ -1410,11 +1518,77 @@ def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
             vals[":wa_tool"] = {"S": wtool}
     if expr:  # ENC-TSK-S28-0E: ack basis + projection marker, same UpdateItem as the write
         vals = dict(vals)
-        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat, write_kind = :wa_wkind"
+        # ENC-TSK-S94: write_kind is stamped by the sequencing rule above. Assigning
+        # it again here would name one document path twice and DynamoDB would reject
+        # the whole UpdateExpression ("Two document paths overlap").
+        expr += ", t_ack = :wa_tack, projection_status = :wa_pstat"
         vals[":wa_tack"] = {"N": str(_wa_ack_now())}
         vals[":wa_pstat"] = {"S": "pending"}
-        vals[":wa_wkind"] = {"S": "governed"}  # ENC-TSK-S47-0B
     return expr, vals
+
+
+def _sequencing_parts_or_governed() -> Tuple[str, Dict[str, Dict[str, str]]]:
+    """_version_seq_update_parts(), but fail-open (ENC-TSK-S94 / ENC-ISS-908).
+
+    Used by the three close sites this task sequenced: the escalation
+    direct_state_override, the arc-walker code_only close and the human-override
+    advance. Allocating a version_seq is a SEPARATE UpdateItem on the version_seq
+    counter, and none of those three sites performs it inside the try/except that
+    guards its own write -- the arc-walker in particular would let a counter
+    ClientError escape its walk loop. A close must not fail because its sequence
+    number could not be allocated, so on failure this returns a fragment that still
+    stamps write_kind (keeping the DynamoDB-stream filters happy) and leaves the
+    write unsequenced, exactly as it was before this task.
+
+    The generic PATCH and the PWA legacy close keep calling
+    _version_seq_update_parts directly: an allocation failure surfacing as a failed
+    write is their long-standing contract and is not changed here.
+    """
+    try:
+        return _version_seq_update_parts()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ENC-ISS-908] version_seq allocation failed; the write will be "
+            "governed but UNSEQUENCED")
+        return ", write_kind = :vsq_wkind", {":vsq_wkind": {"S": "governed"}}
+
+
+_CLOSED_AT_VALUE_KEY = ":cl_at"
+
+
+def _closed_at_set_parts(now: str) -> Tuple[str, Dict[str, Dict[str, str]]]:
+    """ENC-TSK-S96-0A (ENC-PLN-108 W1.1) -- the single closed_at stamping rule.
+
+    Returns ``(set_fragment, values)`` where ``set_fragment`` is APPENDABLE: it
+    begins with ``", "`` and is meant to be concatenated onto an existing ``SET``
+    clause. ``closed_at`` holds the transition time of the MOST RECENT close;
+    ``closed_count`` already records how many times a task has closed
+    (DOC-B8285D689DAC section 1).
+
+    Caller contract -- the same three rules the sequencing fragment carries, for
+    the same reasons:
+
+      1. Append INSIDE the ``SET`` clause and BEFORE any ``ADD`` clause. A ``SET``
+         assignment placed after ``" ADD ..."`` is invalid UpdateExpression syntax
+         (ENC-TSK-P49, where every governed task close failed on that ordering).
+      2. Call it only when the write actually lands ``status = closed`` on a
+         ``task``. The field is defined on ``tracker.task``; other record types
+         close without it, exactly as they carry no ``closed_count``.
+      3. Do NOT call it when the caller's own payload already assigns
+         ``closed_at``. DynamoDB rejects an expression naming one document path
+         twice, and ``_render_update_expression`` raises the same defect in-process
+         (ENC-ISS-759).
+
+    Rule 3 is not hypothetical. ``closed_at`` is deliberately absent from
+    ``_RESERVED_OVERRIDE_PATHS``, so an io-approved escalation may supply it
+    through ``field_values`` for a task whose close time the backfill could not
+    establish -- the route ruling D-21 depends on. The escalation applier therefore
+    stamps only when ``field_values`` is silent, which keeps D-21's route open and
+    keeps the overlap guard meaningful (DOC-B8285D689DAC section 2).
+    """
+    return ", closed_at = %s" % _CLOSED_AT_VALUE_KEY, {
+        _CLOSED_AT_VALUE_KEY: {"S": now},
+    }
 
 
 def _get_events():
@@ -3208,6 +3382,7 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
         extra_set = ""
         extra_vals: Dict[str, Any] = {}
         add_clause = ""
+        _aw_closed_at_pending = False
         if target == "closed" and transition_type == "code_only":
             if not re.match(r"^[0-9a-f]{40}$", commit_sha):
                 summary["halted_reason"] = "gate_fail:missing_commit_sha"
@@ -3228,6 +3403,11 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             extra_vals[":coe"] = {"M": {
                 "commit_sha": _ser_s(commit_sha), "github_verified": {"BOOL": True},
             }}
+            # ENC-TSK-S96-0A (W1.1): the walker's code_only close is a close, so it
+            # stamps closed_at. It rides extra_set, which is spliced inside SET and
+            # before add_clause (ENC-TSK-P49). now2 is minted just below and is the
+            # same instant the status transition records.
+            _aw_closed_at_pending = True
             add_clause = " ADD closed_count :one"
         else:
             derivation = (
@@ -3237,6 +3417,10 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
 
         # (4) Idempotent conditional write: advance iff status == expected_prior (§8 idempotency).
         now2 = _now_z()
+        if _aw_closed_at_pending:
+            _aw_cl_expr, _aw_cl_vals = _closed_at_set_parts(now2)
+            extra_set += _aw_cl_expr
+            extra_vals.update(_aw_cl_vals)
         hentry = _arc_walk_history_entry(now2, current, target, gate_class, derivation, pinned_matrix)
         note = f"[ARC-WALKER] auto-advanced {current} -> {target} (system:arc-walker)"
         ws_av = {"M": {
@@ -3244,20 +3428,26 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
             "dispatch_id": _ser_s(""), "coordination_request_id": _ser_s(""),
             "timestamp": _ser_s(now2),
         }}
+        # ENC-TSK-S94 (ENC-ISS-908): the walker's advances -- the code_only close
+        # among them -- allocated no version_seq, so they never reached the feed
+        # delta. The fragment must sit INSIDE SET and BEFORE add_clause (ENC-TSK-P49:
+        # a SET assignment after " ADD ..." is a ValidationException), and it stamps
+        # write_kind in place of the local ":wk" assignment removed here.
+        _aw_vseq_expr, _aw_vseq_vals = _sequencing_parts_or_governed()
         update_expr = (
-            "SET write_kind = :wk, #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "SET #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "history = list_append(if_not_exists(history, :empty), :hentry)"
-            + extra_set + add_clause
+            + extra_set + _aw_vseq_expr + add_clause
         )
         attr_vals = {
             ":next": _ser_s(target), ":now": _ser_s(now2), ":note": _ser_s(note), ":wsrc": ws_av,
             ":zero": {"N": "0"}, ":one": {"N": "1"},
             ":hentry": {"L": [hentry]}, ":empty": {"L": []},
             ":expected": _ser_s(current),
-            ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
         }
         attr_vals.update(extra_vals)
+        attr_vals.update(_aw_vseq_vals)
         try:
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
@@ -3416,6 +3606,9 @@ _LIST_COMPACT_FIELDS = (
     "last_update_note", "update", "components", "transition_type",
     # lineage / relationships (ids only)
     "parent", "parent_task_id", "is_child", "subtask_ids", "primary_task",
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): the authored plan-wave label -- a short, usually
+    # absent string. Listed so a wave a plan author just wrote is visible when listing tasks.
+    "wave",
     "related_task_ids", "related_issue_ids", "related_feature_ids",
     # checkout / liveness
     "checkout_state", "checked_out_by", "checked_out_at",
@@ -4493,6 +4686,21 @@ def _handle_create_record(
     # exclusively by the tracker lifecycle handler. Guard runs early so client
     # attempts to seed these fields fail fast with HTTP 400 RESERVED_FIELD
     # rather than being silently dropped after the project-prefix lookup.
+    for _w11_field in _W11_SERVER_STAMPED_TIMESTAMPS:
+        if _w11_field in body:
+            return _error(
+                400,
+                (
+                    f"Field '{_w11_field}' is server-stamped and must not be "
+                    f"supplied at create time. first_checked_out_at is stamped on "
+                    f"the first checkout and closed_at on each close."
+                ),
+                code="RESERVED_FIELD",
+                field=_w11_field,
+                reason="server_side_only",
+                rule_citation="ENC-TSK-S96-0A / DOC-B8285D689DAC section 1",
+            )
+
     for _f41_field in _F41_RESERVED_COUNTER_FIELDS:
         if _f41_field in body:
             return _error(
@@ -4564,6 +4772,27 @@ def _handle_create_record(
             record_type=record_type,
             governed_rules=["Hierarchical sub-task IDs are only supported for task records."],
         )
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): the optional wave label. Task-only, same posture as is_child
+    # directly above and transition_type below: HTTP 400 through _tracker_create_validation_error.
+    # Rejected on any other record type whenever the key is present with a non-null value,
+    # even an empty one, so a mis-routed create fails loudly rather than being dropped.
+    wave = ""
+    if body.get("wave") is not None:
+        if record_type != "task":
+            return _tracker_create_validation_error(
+                f"wave is only valid for task records, not {record_type}.",
+                record_type=record_type,
+                governed_rules=["wave is an optional plan-wave label and is only meaningful on tasks (ENC-TSK-S96-0F)."],
+            )
+        wave, _wave_err = _normalize_wave(body.get("wave"))
+        if _wave_err:
+            return _tracker_create_validation_error(
+                _wave_err,
+                record_type=record_type,
+                governed_rules=[
+                    f"wave is an optional string of at most {_WAVE_MAX_LENGTH} characters with no control characters (ENC-TSK-S96-0F)."
+                ],
+            )
     if is_child and parent_task_id and "-TSK-" not in parent_task_id.upper():
         return _tracker_create_validation_error(
             f"parent_task_id must reference a task ID (contains -TSK-). Got: '{parent_task_id}'.",
@@ -4876,6 +5105,9 @@ def _handle_create_record(
         # sealed values (no_code, code_only) can actually take effect.
         if transition_type:
             item["transition_type"] = _ser_s(transition_type)
+        # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): authored wave label; omitted when empty.
+        if wave:
+            item["wave"] = _ser_s(wave)
         # ENC-TSK-F76 / ENC-ISS-289: persist components at create time so agent
         # checkouts don't require a follow-up tracker.set to satisfy the
         # ENC-FTR-041 component-enforcement check at the first advance gate.
@@ -5010,6 +5242,8 @@ def _handle_create_record(
     # The ID-Service path (flag ON) has no inline counter: record + audit (+ marker) only.
     def _s28_receipt_for(nid: str) -> Dict[str, Any]:
         rec: Dict[str, Any] = {"success": True, "record_id": nid, "created_at": now}
+        if wave:  # ENC-TSK-S96-0F: echo the stored (trimmed) label; absent when none was set
+            rec["wave"] = wave
         if category_warning:
             rec["warning"] = category_warning
         if record_type == "issue" and location_context_warnings:
@@ -5902,13 +6136,25 @@ def _apply_user_initiated_advance(
     # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
     # gate observes the counter the instant the transition commits.
     ui_update_expr = (
-        "SET write_kind = :wk, #fld = :val, updated_at = :now, last_update_note = :note, "
+        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
         "transition_evidence = :te, "
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
         "history = list_append(if_not_exists(history, :empty), :hentry)"
     )
     if latch_nf:
         ui_update_expr += ", auto_walk_opt_out = :optout"
+    # ENC-TSK-S94 (ENC-ISS-908): the human-override advance allocated no version_seq,
+    # so a PWA-initiated close was invisible to the feed delta. Splice the sequencing
+    # fragment inside SET and BEFORE the closed_count ADD (ENC-TSK-P49); it stamps
+    # write_kind in place of the local ":wk" assignment removed above.
+    # ENC-TSK-S96-0A (W1.1): stamp closed_at on a task close, inside SET and
+    # before the closed_count ADD (ENC-TSK-P49).
+    _ui_cl_vals: Dict[str, Dict[str, str]] = {}
+    if new_lower == "closed" and record_type == "task":
+        _ui_cl_expr, _ui_cl_vals = _closed_at_set_parts(now)
+        ui_update_expr += _ui_cl_expr
+    _ui_vseq_expr, _ui_vseq_vals = _sequencing_parts_or_governed()
+    ui_update_expr += _ui_vseq_expr
     if new_lower == "closed":
         ui_update_expr += " ADD closed_count :one"
     ui_attr_values = {
@@ -5916,8 +6162,9 @@ def _apply_user_initiated_advance(
         ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
         ":zero": {"N": "0"}, ":one": {"N": "1"},
         ":hentry": {"L": hentry_list}, ":empty": {"L": []},
-        ":wk": {"S": "governed"},  # ENC-TSK-S47-0B
     }
+    ui_attr_values.update(_ui_vseq_vals)
+    ui_attr_values.update(_ui_cl_vals)
     if latch_nf:
         ui_attr_values[":optout"] = {"BOOL": True}
     try:
@@ -6173,6 +6420,21 @@ def _handle_update_field(
     # fields are incremented atomically by the same UpdateExpression that
     # performs the triggering state transition (checkout / close) below — they
     # are never writable by clients and must never be accepted via tracker.set.
+    if field in _W11_SERVER_STAMPED_TIMESTAMPS:
+        return _error(
+            400,
+            (
+                f"Field '{field}' is server-stamped by the tracker lifecycle "
+                f"handler and is not writable via tracker.set / tracker.create. "
+                f"first_checked_out_at is stamped once on the first checkout; "
+                f"closed_at is stamped on each close."
+            ),
+            code="RESERVED_FIELD",
+            field=field,
+            reason="server_side_only",
+            rule_citation="ENC-TSK-S96-0A / DOC-B8285D689DAC section 1",
+        )
+
     if field in _F41_RESERVED_COUNTER_FIELDS:
         return _error(
             400,
@@ -6913,6 +7175,30 @@ def _handle_update_field(
                 expected_format="task ID containing -TSK-",
             )
 
+    # ENC-TSK-S96-0F (ENC-PLN-108 W1.6): wave is task-only (same posture as primary_task above:
+    # HTTP 400 through _tracker_field_validation_error). `value` is normalised to the trimmed
+    # string here, so the generic write below stores it and the response echoes it.
+    if field == "wave":
+        if record_type != "task":
+            return _tracker_field_validation_error(
+                f"wave is only valid on task records, not {record_type}.",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format="short plan-wave label on a task",
+            )
+        value, _wave_err = _normalize_wave(value)
+        if _wave_err:
+            return _tracker_field_validation_error(
+                _wave_err,
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format=f"string of at most {_WAVE_MAX_LENGTH} characters, no control characters; empty clears",
+            )
+
     now = _now_z()
     note_suffix = _write_source_note_suffix(body)
 
@@ -6945,6 +7231,14 @@ def _handle_update_field(
                 "history = list_append(if_not_exists(history, :empty), :hentry)"
             )
             if record_type == "task":
+                # ENC-TSK-S96-0A (ENC-PLN-108 W1.1): stamp first_checked_out_at on
+                # the FIRST checkout only. if_not_exists makes the write idempotent,
+                # so a re-checkout leaves the original instant untouched, which is
+                # what the lens needs to start a task's bar. The assignment sits
+                # INSIDE SET and BEFORE the ADD below (ENC-TSK-P49).
+                checkout_update_expr += (
+                    ", first_checked_out_at = if_not_exists(first_checked_out_at, :now)"
+                )
                 checkout_update_expr += " ADD checkout_count :one"
             try:
                 ddb.update_item(
@@ -7136,6 +7430,17 @@ def _handle_update_field(
     # spliced BEFORE any ADD clause — SET assignments appended after
     # " ADD closed_count :one" are invalid UpdateExpression syntax (ENC-TSK-P49:
     # every governed task close failed on exactly that ordering).
+    # ENC-TSK-S96-0A (ENC-PLN-108 W1.1): stamp closed_at when this PATCH is the
+    # write that lands a task at closed. Inside SET, before the ADD (ENC-TSK-P49).
+    _patch_is_task_close = (
+        field == "status" and record_type == "task"
+        and str(value).strip().lower() == "closed"
+    )
+    _patch_cl_vals: Dict[str, Dict[str, str]] = {}
+    if _patch_is_task_close:
+        _patch_cl_expr, _patch_cl_vals = _closed_at_set_parts(now)
+        update_expr += _patch_cl_expr
+
     vseq_expr, vseq_vals = _version_seq_update_parts()
     update_expr += vseq_expr
 
@@ -7145,7 +7450,7 @@ def _handle_update_field(
     # commit as a single atomic DynamoDB operation. ADD treats a missing
     # attribute as 0, which preserves pre-FTR-076-v2 records and keeps the
     # fail-closed DESIGNS gate semantic (closed_count>=1 required).
-    if field == "status" and record_type == "task" and str(value).strip().lower() == "closed":
+    if _patch_is_task_close:
         update_expr += " ADD closed_count :one"
 
     attr_values = {
@@ -7158,6 +7463,7 @@ def _handle_update_field(
         attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
     attr_values.update(vseq_vals)
+    attr_values.update(_patch_cl_vals)
 
     # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
     # (not just the pre-check above) against a write that landed in between —
@@ -7333,6 +7639,12 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
             # write re-surfaces in the feed-delta projection (version-seq-index
             # GSI) — same idiom as _handle_log (M79) and the generic PATCH path.
             # The vseq clause MUST stay inside SET, spliced BEFORE any ADD clause.
+            # ENC-TSK-S96-0A (W1.1): stamp closed_at on this legacy PWA close too,
+            # inside SET and before the ADD (ENC-TSK-P49).
+            _pwa_cl_vals: Dict[str, Dict[str, str]] = {}
+            if record_type == "task" and closed_status == "closed":
+                _pwa_cl_expr, _pwa_cl_vals = _closed_at_set_parts(now)
+                pwa_close_update_expr += _pwa_cl_expr
             _vseq_expr, _vseq_vals = _version_seq_update_parts()
             pwa_close_update_expr += _vseq_expr
             if record_type == "task" and closed_status == "closed":
@@ -7344,6 +7656,7 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 ":expected": {"N": str(current_version)},
             }
             _pwa_close_vals.update(_vseq_vals)
+            _pwa_close_vals.update(_pwa_cl_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=pwa_close_update_expr,
@@ -11009,6 +11322,176 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-S96-0D (ENC-PLN-108 W1.4, ruling D-21): the lifecycle-stamp backfill route.
+#
+#   POST /api/v1/tracker/{project}/task/{id}/lifecycle-backfill
+#
+# This is the ONE governed route through which historical tasks are dated. It is a
+# MARKER write: write_kind = "marker", no version_seq, and set-if-absent. Three
+# properties make the roughly 7,878 writes invisible to the stream consumers, and
+# each is load-bearing:
+#
+#   1. It touches first_checked_out_at, closed_at, closed_at_unknown and write_kind
+#      ONLY. W1.3 (ENC-TSK-S96-0C) added exactly those three names to
+#      PROJECTION_ONLY_ATTRS in opensearch_indexer, governance_audit and
+#      convergence_telemetry, whose guard is a SUBSET test on the stream diff. The
+#      moment this route also bumped updated_at, sync_version, history or
+#      last_update_note, the diff would stop being a subset and every record would
+#      re-enter those three pipelines in one burst. So it must not, and
+#      _LBF_MARKER_ATTRS below is the single list a test holds both sides to.
+#   2. It allocates no version_seq (so it never enters the feed delta) and it does
+#      NOT use the sequencing fragment, which resets write_kind to "governed" and
+#      would defeat the feed_publisher / graph_sync / appsync event-source filters.
+#   3. It is set-if-absent (if_not_exists): a value already on the record -- a live
+#      stamp from W1.1/W1.2, or a time io established through an escalation -- is
+#      never replaced.
+#
+# How the W1.1 client guard stays intact. The W1.1 server-stamped-timestamp guard still
+# rejects first_checked_out_at and closed_at with RESERVED_FIELD at create and at
+# PATCH, untouched. This route is a different, server-side stamping path, and it is
+# not a hole in that guard because it ACCEPTS NO TIMESTAMP FROM THE CLIENT AT ALL:
+# the request names a record, the Lambda reads that record's own history and runs
+# lifecycle_backfill itself, and a body that names any of the three attributes is
+# refused with the same RESERVED_FIELD. A caller can therefore ask for a record to
+# be dated; it cannot choose the date.
+#
+# Auth: internal API key only (a human Cognito session is refused -- io's route for
+# fixing one record's date is an escalation), and when a scope map is configured the
+# key must also carry tracker:backfill.
+# ---------------------------------------------------------------------------
+try:
+    import lifecycle_backfill as _lifecycle_backfill
+except ImportError:  # pragma: no cover - packaging guard; the route then answers 503
+    _lifecycle_backfill = None
+
+# The ONLY attributes the marker write may touch, besides write_kind. Mirrors
+# PROJECTION_ONLY_ATTRS of the three W1.3 consumers (verified by test).
+_LBF_MARKER_ATTRS = ("first_checked_out_at", "closed_at", "closed_at_unknown")
+_LBF_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_LBF_ALLOWED_BODY_KEYS = frozenset({
+    "backfill_run_id", "dry_run", "write_source", "governance_hash", "correlation_id",
+})
+
+
+def _lbf_marker_write_parts(to_set: Dict[str, Any], run_id: str, now: str):
+    """(UpdateExpression, ExpressionAttributeValues) for the marker write.
+
+    Contains write_kind and the attributes in ``to_set`` and nothing else -- no
+    updated_at, sync_version, history, last_update_note, version_seq or feed_scope --
+    and no ADD clause. Every attribute is if_not_exists.
+    """
+    assigns = ["write_kind = :lbf_wk"]
+    values: Dict[str, Any] = {":lbf_wk": {"S": "marker"}}
+    # One loop, one spelling: every stamp is if_not_exists, so a value already on the record
+    # (a live W1.1/W1.2 stamp, or a time io set through an escalation) is never replaced.
+    for attr, token in (("first_checked_out_at", ":lbf_fco"), ("closed_at", ":lbf_cat"),
+                        ("closed_at_unknown", ":lbf_cau")):
+        if attr not in to_set:
+            continue
+        assigns.append(f"{attr} = if_not_exists({attr}, {token})")
+        if attr == "closed_at_unknown":
+            values[token] = _ser_value(
+                _lifecycle_backfill.marker_value(to_set[attr], run_id, now))
+        else:
+            values[token] = {"S": to_set[attr]}
+    return "SET " + ", ".join(assigns), values
+
+
+def _handle_lifecycle_backfill(project_id: str, record_type: str, record_id: str,
+                               body: Dict, claims: Optional[Dict]) -> Dict:
+    if _lifecycle_backfill is None:
+        return _error(503, "lifecycle_backfill module is not packaged with this Lambda.")
+    if (claims or {}).get("auth_mode") != "internal-key":
+        return _error(403, "The lifecycle backfill route accepts an internal API key only.",
+                      code="PERMISSION_DENIED")
+    if record_type != "task":
+        return _error(400, "The lifecycle backfill applies to tasks only.", field="record_type")
+    if not isinstance(body, dict):
+        return _error(400, "Invalid JSON body.")
+    for attr in _LBF_MARKER_ATTRS:
+        if attr in body:
+            return _error(
+                400,
+                f"'{attr}' is derived by the server from the record's own history and must not be "
+                f"supplied. A close time io establishes later goes through an escalation (ruling D-21).",
+                code="RESERVED_FIELD", field=attr, reason="server_side_only",
+                rule_citation="ENC-TSK-S96-0D / DOC-5E1E205FA664 ruling D-21",
+            )
+    unknown_keys = sorted(set(body) - _LBF_ALLOWED_BODY_KEYS)
+    if unknown_keys:
+        return _error(400, f"Unsupported body field(s): {unknown_keys}.", field=unknown_keys[0])
+    run_id = str(body.get("backfill_run_id") or "").strip()
+    if not _LBF_RUN_ID_RE.match(run_id):
+        return _error(400, "backfill_run_id is required (1-64 chars of [A-Za-z0-9._:-]).",
+                      field="backfill_run_id")
+    dry_run = body.get("dry_run") is True
+
+    try:
+        raw = _get_record_raw(project_id, record_type, record_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ERROR] lifecycle-backfill read failed for %s: %s", record_id, exc)
+        return _error(500, "Database read failed. Please try again.")
+    if raw is None:
+        return _error(404, f"Record not found: {record_id}")
+    record = _deser_item(raw)
+    plan = _lifecycle_backfill.plan_lifecycle_stamps(record)
+    to_set = plan["set"]
+    now = _now_z()
+    result: Dict[str, Any] = {
+        "success": True, "record_id": record_id, "backfill_run_id": run_id,
+        "write_kind": "marker", "version_seq_allocated": False,
+        "checkout_class": plan["checkout_class"], "close_class": plan["close_class"],
+        "flags": plan["flags"], "attributes_set": sorted(to_set),
+    }
+    for k in ("close_writer", "unknown_reason", "unknown_detail"):
+        if k in plan:
+            result[k] = plan[k]
+    for k, v in to_set.items():
+        if k != "closed_at_unknown":
+            result[k] = v
+
+    if not to_set:
+        result["outcome"] = "noop"
+        return _response(200, result)
+    if dry_run:
+        result["outcome"] = "dry_run"
+        return _response(200, result)
+
+    expr, values = _lbf_marker_write_parts(to_set, run_id, now)
+    # Optimistic guard: the derivation above is only valid for the record as read.
+    # Marker writes bump neither updated_at nor sync_version, so those two (plus
+    # status) are exactly what a concurrent GOVERNED write would have moved. On a
+    # mismatch nothing is written and the caller retries against the new record.
+    cond = ["attribute_exists(record_id)", "#lbf_st = :lbf_seen_st"]
+    names = {"#lbf_st": "status"}
+    values[":lbf_seen_st"] = raw.get("status") or {"S": ""}
+    for attr, token in (("updated_at", ":lbf_seen_upd"), ("sync_version", ":lbf_seen_sv")):
+        if raw.get(attr) is not None:
+            cond.append(f"{attr} = {token}")
+            values[token] = raw[attr]
+        else:
+            cond.append(f"attribute_not_exists({attr})")
+    try:
+        _get_ddb().update_item(
+            TableName=DYNAMODB_TABLE,
+            Key=_build_key(project_id, record_type, record_id),
+            UpdateExpression=expr,
+            ConditionExpression=" AND ".join(cond),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if _is_conditional_check_failed(exc):
+            return _error(409, "The record changed while it was being read; nothing was written. Retry.",
+                          code="RECORD_CHANGED", retryable=True)
+        logger.error("[ERROR] lifecycle-backfill write failed for %s: %s", record_id, exc)
+        return _error(500, "Database write failed.")
+    logger.info("[SUCCESS] lifecycle-backfill %s run=%s set=%s", record_id, run_id, sorted(to_set))
+    result["outcome"] = "written"
+    return _response(200, result)
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
@@ -11029,7 +11512,7 @@ _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend|lifecycle-backfill)$"
 )
 # ENC-TSK-Q10 / ENC-ISS-791: reserved project segment. GET /_/{type}/{id} asks the
 # server to derive the owning project from the record id (projects table), so a
@@ -11613,10 +12096,12 @@ def _lambda_handler_inner(event: Dict, context: Any) -> Dict:
         record_id = m_sub.group("id")
         sub = m_sub.group("sub")
 
-        claims, auth_err = _authenticate(
-            event,
-            ["tracker:read"] if method == "GET" else ["tracker:write"],
-        )
+        # ENC-TSK-S96-0D: the lifecycle backfill additionally needs tracker:backfill
+        # when an internal-key scope map is configured.
+        _sub_scopes = ["tracker:read"] if method == "GET" else ["tracker:write"]
+        if sub == "lifecycle-backfill":
+            _sub_scopes = ["tracker:write", "tracker:backfill"]
+        claims, auth_err = _authenticate(event, _sub_scopes)
         if auth_err:
             return auth_err
 
@@ -11640,6 +12125,8 @@ def _lambda_handler_inner(event: Dict, context: Any) -> Dict:
             return _handle_release(project_id, record_type, record_id, body, event=event)
         elif sub == "acceptance-evidence" and method == "POST":
             return _handle_acceptance_evidence(project_id, record_type, record_id, body)
+        elif sub == "lifecycle-backfill" and method == "POST":
+            return _handle_lifecycle_backfill(project_id, record_type, record_id, body, claims)
         else:
             return _error(405, f"Method {method} not allowed on /{sub}.")
 
@@ -11737,6 +12224,7 @@ def _wa_tool_for(method: str, path: str) -> Tuple[str, str, str]:
             ("log", "POST"): "tracker.log", ("checkout", "POST"): "checkout.task",
             ("checkout", "DELETE"): "checkout.release",
             ("acceptance-evidence", "POST"): "tracker.set_acceptance_evidence",
+            ("lifecycle-backfill", "POST"): "tracker.lifecycle_backfill",
         }.get((sub, method), f"tracker.{sub}")
         return tool, m.group("project"), m.group("id")
     m = _RE_RECORD.match(path)

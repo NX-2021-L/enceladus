@@ -88,6 +88,12 @@ describe('resolveRecordTarget (ENC-TSK-P58)', () => {
     expect(resolveRecordTarget('   ', PROJECTS)).toBeNull()
   })
 
+  it('returns null for an undefined or null id instead of throwing (ENC-TSK-T30 / ENC-ISS-926)', () => {
+    expect(resolveRecordTarget(undefined, PROJECTS)).toBeNull()
+    expect(resolveRecordTarget(null, PROJECTS)).toBeNull()
+    expect(resolveRecordTarget(undefined, PROJECTS, 'issue')).toBeNull()
+  })
+
   it('returns null for a tracker hint whose project prefix is unregistered', () => {
     expect(resolveRecordTarget('ZZZ-ISS-001', PROJECTS, 'issue')).toBeNull()
   })

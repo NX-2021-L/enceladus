@@ -228,6 +228,21 @@ SCHEMA_VERSION = 2
 # recordTitle is truncated so v2 stays within the per-event size budget.
 RECORD_TITLE_MAX_CHARS = 160
 
+# ENC-TSK-S97-0B (ENC-PLN-108 W2.2, DOC-5E1E205FA664 section 5.3): optional lineage / lifecycle
+# fields on the live event. Purely additive -- schemaVersion stays 2 and every field is OMITTED
+# (never null, never empty string) when the source record does not carry the value, so a client on
+# an older kit that ignores unknown keys is unaffected. payload key -> tracker record attribute.
+# Deliberate asymmetry (ruling D-26): the live event carries the three timestamps; the feed_query
+# corpus row does not (they are the bulk of the corpus widening's cost and reach the page another way).
+LIVE_EVENT_OPTIONAL_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("recordCreatedAt", "created_at"),
+    ("recordParent", "parent"),
+    ("recordFirstCheckedOutAt", "first_checked_out_at"),
+    ("recordClosedAt", "closed_at"),
+    # ENC-TSK-S96-0F (W1.6) adds the wave attribute on records; absent until then.
+    ("recordWave", "wave"),
+)
+
 
 def _provider_from_text(text: Any) -> str:
     if not isinstance(text, str) or not text:
@@ -492,8 +507,11 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     Returns None if the record cannot be resolved to a target (no recordId).
     Field set is the B67 AC-10 contract (v1 keys, unchanged) plus the ENC-TSK-R53-0C
     v2 additions (schemaVersion, recordTitle, recordStatus, recordPriority,
-    recordUpdatedAt, optional recordVersionSeq); raw DynamoDB item images are
-    NOT inlined (AC-23 payload budget).
+    recordUpdatedAt, optional recordVersionSeq) and the ENC-TSK-S97-0B optional
+    additions (recordCreatedAt, recordParent, recordFirstCheckedOutAt,
+    recordClosedAt, recordWave -- each omitted when the record lacks the value;
+    schemaVersion stays 2); raw DynamoDB item images are NOT inlined (AC-23
+    payload budget).
     """
     if is_documents_record(record):
         return _build_document_event_payload(record, batch_counter)
@@ -599,6 +617,11 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     version_seq = _coerce_version_seq(primary.get("version_seq"))
     if version_seq is not None:
         payload["recordVersionSeq"] = version_seq
+    # ENC-TSK-S97-0B: optional lineage/lifecycle fields, stream image only, omitted when absent.
+    for payload_key, record_key in LIVE_EVENT_OPTIONAL_FIELDS:
+        value = _first_nonempty(primary.get(record_key))
+        if value:
+            payload[payload_key] = value
     return payload
 
 

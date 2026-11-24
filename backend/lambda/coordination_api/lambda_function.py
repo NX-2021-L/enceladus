@@ -62,6 +62,12 @@ try:  # DVP-TSK-A23 (E4-R29): web push primitives; absent -> notification routes
 except Exception:  # noqa: BLE001
     _webpush = None  # type: ignore[assignment]
 import notify_v2  # ENC-TSK-Q83: notify v2 routes + sender (no import of this module)
+# ENC-TSK-S94 (ENC-ISS-908): the one sequencing rule for this lambda's status writes.
+from version_seq_ops import (
+    closed_at_set_parts,
+    closed_count_add_parts,
+    sequenced_write_parts,
+)
 
 try:
     from mcp_client import CoordinationMcpClient
@@ -2211,28 +2217,50 @@ def _set_tracker_status(
     # Returns True on successful write, False on CCFX (drift). History is
     # still appended on success only.
     _ = governance_hash, coordination_request_id, dispatch_id, provider
-    project_id, _record_type, sk = _key_for_record_id(record_id)
+    project_id, record_type, sk = _key_for_record_id(record_id)
     ddb = _get_ddb()
     now = _now_z()
+    # ENC-TSK-S94 (ENC-ISS-908): this writer allocated no version_seq, so every
+    # status it set -- closes included -- was invisible to the Query on
+    # version-seq-index behind GET /api/v1/feed/delta, and a client that missed the
+    # push event could not heal the record until its next sequenced write. It also
+    # never added closed_count, the gate evidence for component.advance
+    # approved -> designed (ENC-FTR-076). Both now ride the write that already
+    # happens. The SET fragment stamps write_kind (replacing the local ":wk"
+    # assignment) and MUST precede the ADD clause (ENC-TSK-P49). The
+    # ConditionExpression and the CCFX-to-False contract below are untouched.
+    _vseq_expr, _vseq_vals = sequenced_write_parts(ddb, TRACKER_TABLE)
+    # ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): a close through this writer
+    # also dates itself. Same predicate as the closed_count ADD below, so the
+    # date and the count cannot disagree; spliced inside SET and before that ADD
+    # (ENC-TSK-P49). Unlike the sequencing fragment this one is a plain
+    # assignment, so it survives every rung of version_seq_ops' import ladder.
+    _ca_expr, _ca_vals = closed_at_set_parts(record_type, new_status, now)
+    _cc_expr, _cc_vals = closed_count_add_parts(record_type, new_status)
+    _update_expr = (
+        "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one"
+        + _vseq_expr + _ca_expr + _cc_expr
+    )
+    _attr_values = {
+        ":new_status": _serialize(new_status),
+        ":expected_prior": _serialize(expected_prior_status),
+        ":ts": _serialize(now),
+        ":note": _serialize(note[:1000]),
+        ":zero": _serialize(0),
+        ":one": _serialize(1),
+    }
+    _attr_values.update(_vseq_vals)
+    _attr_values.update(_ca_vals)
+    _attr_values.update(_cc_vals)
     try:
         ddb.update_item(
             TableName=TRACKER_TABLE,
             Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
-            UpdateExpression=(
-                "SET write_kind = :wk, #status = :new_status, updated_at = :ts, last_update_note = :note, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one"
-            ),
+            UpdateExpression=_update_expr,
             ConditionExpression="#status = :expected_prior",
             ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":wk": {"S": "governed"},
-                ":new_status": _serialize(new_status),
-                ":expected_prior": _serialize(expected_prior_status),
-                ":ts": _serialize(now),
-                ":note": _serialize(note[:1000]),
-                ":zero": _serialize(0),
-                ":one": _serialize(1),
-            },
+            ExpressionAttributeValues=_attr_values,
         )
     except ddb.exceptions.ConditionalCheckFailedException:
         logger.warning(

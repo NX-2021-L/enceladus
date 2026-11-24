@@ -1214,3 +1214,83 @@ def test_project_tracker_query_attaches_version_seq(monkeypatch):
     by_id = {task["task_id"]: task for task in tasks}
     assert by_id["ENC-TSK-1"]["version_seq"] == 5101
     assert "version_seq" not in by_id["ENC-TSK-2"]
+
+
+# --- ENC-TSK-S97-0A (ENC-PLN-108 W2.1): /feed/delta rows carry the same lens attributes as /feed/corpus -------------
+
+def _ddb_s(value: str) -> dict:
+    return {"S": value}
+
+
+def _ddb_l(values) -> dict:
+    return {"L": [{"S": v} for v in values]}
+
+
+def _delta_raw(record_type: str, item_id: str, **extra) -> dict:
+    return {
+        "project_id": _ddb_s("enceladus"),
+        "record_id": _ddb_s(f"{record_type}#{item_id}"),
+        "record_type": _ddb_s(record_type),
+        "item_id": _ddb_s(item_id),
+        "title": _ddb_s("t"),
+        "status": _ddb_s("open"),
+        "priority": _ddb_s("P1"),
+        "updated_at": _ddb_s("2026-11-19T00:00:00Z"),
+        **extra,
+    }
+
+
+_STAMPS = {
+    "created_at": _ddb_s("2026-01-01T00:00:00Z"),
+    "first_checked_out_at": _ddb_s("2026-01-02T00:00:00Z"),
+    "closed_at": _ddb_s("2026-01-03T00:00:00Z"),
+}
+
+
+def test_delta_plan_row_carries_objectives_set_in_stored_order_and_omits_when_empty():
+    stored = ["ENC-TSK-300", "ENC-TSK-100", "ENC-TSK-200"]
+    entry = feed_query._delta_corpus_entry(
+        _delta_raw("plan", "ENC-PLN-001", objectives_set=_ddb_l(stored)), "enceladus"
+    )
+    assert entry["attrs"]["objectives_set"] == stored
+    empty = feed_query._delta_corpus_entry(
+        _delta_raw("plan", "ENC-PLN-002", objectives_set=_ddb_l([])), "enceladus"
+    )
+    assert "objectives_set" not in empty["attrs"]
+
+
+def test_delta_task_row_carries_parent_and_wave_only_when_present():
+    full = feed_query._delta_corpus_entry(
+        _delta_raw("task", "ENC-TSK-AAA", parent=_ddb_s("ENC-TSK-PPP"), wave=_ddb_s("W2.1")), "enceladus"
+    )
+    assert full["attrs"]["parent"] == "ENC-TSK-PPP"
+    assert full["attrs"]["wave"] == "W2.1"
+    bare = feed_query._delta_corpus_entry(_delta_raw("task", "ENC-TSK-BBB"), "enceladus")
+    assert "parent" not in bare["attrs"] and "wave" not in bare["attrs"]
+
+
+def test_delta_rows_never_carry_the_lifecycle_timestamps():
+    """AC-3 / ruling D-26 on the delta path, with every timestamp present on the source item."""
+    rows = [
+        feed_query._delta_corpus_entry(
+            _delta_raw("task", "ENC-TSK-AAA", parent=_ddb_s("ENC-TSK-P"), wave=_ddb_s("W1"), **_STAMPS), "enceladus"
+        ),
+        feed_query._delta_corpus_entry(
+            _delta_raw("plan", "ENC-PLN-001", objectives_set=_ddb_l(["ENC-TSK-1"]), **_STAMPS), "enceladus"
+        ),
+    ]
+    for entry in rows:
+        for key in ("created_at", "first_checked_out_at", "closed_at"):
+            assert key not in entry["attrs"], (entry["record_id"], key)
+            assert key not in entry, (entry["record_id"], key)
+
+
+def test_corpus_and_delta_agree_on_lens_attributes():
+    """The two builders share corpus.lens_attrs, so one record yields identical lens attrs on both paths."""
+    raw = _delta_raw("task", "ENC-TSK-AAA", parent=_ddb_s("ENC-TSK-PPP"), wave=_ddb_s("W2.1"))
+    transformed = feed_query._TRANSFORM["task"](raw, "enceladus")
+    via_corpus = feed_query.feed_corpus.build_tracker_entries_from_records([transformed], [], [], [], [])[0]["attrs"]
+    via_delta = feed_query._delta_corpus_entry(raw, "enceladus")["attrs"]
+    lens = ("objectives_set", "parent", "wave")
+    assert {k: via_corpus[k] for k in lens if k in via_corpus} == {k: via_delta[k] for k in lens if k in via_delta}
+    assert via_corpus["parent"] == "ENC-TSK-PPP" and via_corpus["wave"] == "W2.1"

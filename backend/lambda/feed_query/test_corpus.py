@@ -302,3 +302,125 @@ def test_public_items_carry_version_seq_per_space():
     assert by_id["ENC-TSK-1"]["version_seq"] == 5101
     assert by_id["DOC-B"]["version_seq"] == 185
     assert "version_seq" not in by_id["DOC-C"]
+
+
+# --- ENC-TSK-S97-0A (ENC-PLN-108 W2.1): corpus lens attributes (rulings D-26 / D-27 / D-28) ---------------------------
+
+# D-26: measured against the live corpus these three are ~89 percent of the widening's cost. They must never ride a
+# corpus or delta row; the Plans page gets them from ENC-TSK-T05's plan-scoped read.
+_FORBIDDEN_LENS_ATTRS = ("created_at", "first_checked_out_at", "closed_at")
+_ALLOWED_NEW_ATTRS = {"objectives_set", "parent", "wave"}
+_BASE_ATTRS = {"status", "priority", "category", "severity", "components", "tags", "checkout_state"}
+
+
+def _plan_record(**over) -> dict:
+    return {
+        "plan_id": "ENC-PLN-001",
+        "project_id": "enceladus",
+        "title": "A plan",
+        "status": "started",
+        "priority": "P1",
+        "category": "operational",
+        "updated_at": "2026-11-19T00:00:00Z",
+        **over,
+    }
+
+
+def _task_record(**over) -> dict:
+    return {
+        "task_id": "ENC-TSK-AAA",
+        "project_id": "enceladus",
+        "title": "A task",
+        "status": "open",
+        "priority": "P1",
+        "category": "implementation",
+        "updated_at": "2026-11-19T00:00:00Z",
+        **over,
+    }
+
+
+def _attrs_for(tasks=(), plans=()) -> dict:
+    entries = corpus.build_tracker_entries_from_records(list(tasks), [], [], [], list(plans))
+    assert len(entries) == 1
+    return entries[0]["attrs"]
+
+
+def test_plan_row_carries_objectives_set_in_stored_order():
+    # Deliberately not alphabetical and with a repeat-free but non-sorted order: stored order is the contract.
+    stored = ["ENC-TSK-300", "ENC-TSK-100", "ENC-TSK-200"]
+    attrs = _attrs_for(plans=[_plan_record(objectives_set=stored)])
+    assert attrs["objectives_set"] == stored
+    assert "parent" not in attrs and "wave" not in attrs
+
+
+def test_plan_row_omits_empty_objectives_set():
+    for empty in ([], None, "", ["", "  "]):
+        attrs = _attrs_for(plans=[_plan_record(objectives_set=empty)])
+        assert "objectives_set" not in attrs, empty
+    assert "objectives_set" not in _attrs_for(plans=[_plan_record()])
+
+
+def test_task_row_carries_parent_when_it_has_one():
+    attrs = _attrs_for(tasks=[_task_record(parent="ENC-TSK-PPP")])
+    assert attrs["parent"] == "ENC-TSK-PPP"
+    assert "objectives_set" not in attrs
+
+
+def test_task_row_omits_parent_when_it_has_none():
+    for none in (None, "", "   "):
+        assert "parent" not in _attrs_for(tasks=[_task_record(parent=none)]), none
+    assert "parent" not in _attrs_for(tasks=[_task_record()])
+
+
+def test_task_row_carries_wave_when_set_and_omits_it_otherwise():
+    assert _attrs_for(tasks=[_task_record(wave="W2.1")])["wave"] == "W2.1"
+    for none in (None, ""):
+        assert "wave" not in _attrs_for(tasks=[_task_record(wave=none)]), none
+    assert "wave" not in _attrs_for(tasks=[_task_record()])
+
+
+def test_parent_and_wave_ride_task_rows_only():
+    # objectives_set is a plan attribute; parent/wave are task attributes. A stray value on another type is ignored.
+    plan_attrs = _attrs_for(plans=[_plan_record(parent="ENC-TSK-X", wave="W1")])
+    assert "parent" not in plan_attrs and "wave" not in plan_attrs
+    task_attrs = _attrs_for(tasks=[_task_record(objectives_set=["ENC-TSK-1"])])
+    assert "objectives_set" not in task_attrs
+    issue_entries = corpus.build_tracker_entries_from_records(
+        [], [{"issue_id": "ENC-ISS-1", "project_id": "enceladus", "parent": "ENC-FTR-1", "wave": "W1",
+              "objectives_set": ["X"], "status": "open", "priority": "P2"}], [], [], [],
+    )
+    assert not _ALLOWED_NEW_ATTRS & set(issue_entries[0]["attrs"])
+
+
+def test_lifecycle_timestamps_are_absent_from_corpus_rows():
+    """AC-3 / ruling D-26: created_at, first_checked_out_at and closed_at are NOT corpus attributes, even when the
+    source record carries every one of them. Guards against a later change quietly reintroducing the widening."""
+    stamped = {
+        "created_at": "2026-01-01T00:00:00Z",
+        "first_checked_out_at": "2026-01-02T00:00:00Z",
+        "closed_at": "2026-01-03T00:00:00Z",
+    }
+    entries = corpus.build_tracker_entries_from_records(
+        [_task_record(parent="ENC-TSK-P", wave="W2.1", **stamped)],
+        [_task_record(**stamped) | {"issue_id": "ENC-ISS-1"}],
+        [_task_record(**stamped) | {"feature_id": "ENC-FTR-1"}],
+        [_task_record(**stamped) | {"lesson_id": "ENC-LSN-1"}],
+        [_plan_record(objectives_set=["ENC-TSK-1"], **stamped)],
+    )
+    assert len(entries) == 5
+    for entry in entries:
+        for key in _FORBIDDEN_LENS_ATTRS:
+            assert key not in entry["attrs"], (entry["record_id"], key)
+            assert key not in entry, (entry["record_id"], key)
+    # A fully populated row grows by exactly the three allowed attributes and nothing else.
+    for entry in entries:
+        assert set(entry["attrs"]) <= _BASE_ATTRS | _ALLOWED_NEW_ATTRS, entry["record_id"]
+
+
+def test_lens_attrs_never_emits_the_forbidden_timestamps():
+    everything = {**_task_record(parent="P", wave="W1", objectives_set=["A"]),
+                  "created_at": "x", "first_checked_out_at": "y", "closed_at": "z"}
+    for record_type in ("task", "plan", "issue", "feature", "lesson"):
+        out = corpus.lens_attrs(record_type, "ID-1", everything)
+        assert set(out) <= _ALLOWED_NEW_ATTRS
+        assert not set(out) & set(_FORBIDDEN_LENS_ATTRS)
