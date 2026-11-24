@@ -16,6 +16,10 @@ The client is a separate stack because a us-west-2 stack cannot create a client 
 
 The fleet registry (`fleet.enceladus.json`: the `enceladus` profile and the two connectors) is shipped inside the zip as `fleet.json`, because kit 0.3.0 ships none. Override at build time with `IO_KIT_FLEET_JSON` (inline) or `IO_KIT_FLEET_FILE`. The service signs in only the connectors on its own origin (`sign_in_service: self`).
 
+## Profile guard (F-12)
+
+`tools/check_mcp_signin_client.py` statically checks `13-mcp-signin-client.yaml` and runs in CI (`.github/workflows/mcp-signin-client-guard.yml`, with a self-test that proves it fails on each weakening) on every pull request that touches the template, the tool or the workflow. It enforces: `ExplicitAuthFlows` is exactly `ALLOW_REFRESH_TOKEN_AUTH` (and never `ALLOW_USER_AUTH`, `ALLOW_USER_PASSWORD_AUTH`, `ALLOW_ADMIN_USER_PASSWORD_AUTH` or `ALLOW_CUSTOM_AUTH`); no secret (`GenerateSecret: false`); authorization-code flow only with `AllowedOAuthFlowsUserPoolClient: true`; identity provider `COGNITO` only; scopes within openid, email, profile; every callback (both branches of the environment `!If`) exactly `https://mcp.jreese.net/callback` or `https://mcp-gamma.jreese.net/callback`; and token revocation on. The check reads the template from the working tree only: no AWS credentials, no network. Changing the profile on purpose means changing the guard in the same pull request, which review then sees.
+
 ## Before the function can start: the state key (out of band)
 
 The function reads an HMAC key from SSM SecureString `/enceladus/mcp-signin/state-key` (us-west-2, default `alias/aws/ssm` key) once per cold start. The stack never creates, reads or prints it. Create it once, without echoing it:
