@@ -2,8 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Enceladus MCP edge, PRODUCTION (ENC-TSK-S57-f / ENC-TSK-Q71). The CloudFront distribution E3IRO1VSMFENCC that serves
   mcp.jreese.net, brought under CloudFormation by change-set IMPORT with zero diff: every property below is the live
-  value as read on 2026-11-24 (ETag E1VC38T7YXB528), nothing added. The gamma distribution is a different stack
-  (template 14). The sign-in origin and behaviors land as a later, separately approved update.
+  value as read on 2026-11-24 (ETag E1VC38T7YXB528). The gamma distribution is a different stack (template 14).
+  On top of the import, a stack UPDATE (io-approved 2026-11-24) adds the origin of the kit sign-in Function URL
+  (enceladus-mcp-signin, alias live) and five cache behaviors that route the OAuth authorization-server paths to it;
+  every pre-existing property is unchanged.
 
 # Import contract. The distribution was created out of band, so it is adopted, never created, by
 # .github/workflows/cfn-resource-import.yml (mode=import) with infrastructure/cloudformation/resource-import-mcp-edge-prod.json.
@@ -21,8 +23,11 @@ Description: >
 #   TrustedSigners / TrustedKeyGroups (disabled), FunctionAssociations (quantity 0), OriginGroups (0),
 #   CustomErrorResponses (0), GrpcConfig (disabled; not modeled by CloudFormation), CallerReference (create-time only;
 #   not modeled), Tags (none live; adding any would be a post-import update, not zero diff).
-# Do not "tidy" this file during the import: any change to a value below makes the first change-set after the import a
-# Modify rather than a no-op.
+# Do not "tidy" this file: any change to a pre-existing value below turns the next change-set into a Modify of something
+# other than the sign-in origin and behaviors.
+#
+# Routing (stack UPDATE, not import): the update change-set must show ONE Modify (AWS::CloudFront::Distribution
+# McpEdgeDistribution, Replacement False) and nothing else.
 
 Parameters:
   EnvironmentSuffix:
@@ -35,6 +40,11 @@ Parameters:
     Default: "udal3ytbj4ndsxre3yq26qnfoa0jxnaq.lambda-url.us-west-2.on.aws"
     AllowedPattern: '^[a-z0-9.-]+$'
     Description: Host only of the Function URL of enceladus-mcp-code alias live (the only origin). Must equal the live origin for a zero-diff import.
+  SigninFunctionUrlOriginDomainName:
+    Type: String
+    Default: "uje3ftiqibdzlxwmtjeqgos6zu0lmqoq.lambda-url.us-west-2.on.aws"
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Description: Host only of the Function URL of enceladus-mcp-signin alias live (output FunctionUrl of stack enceladus-mcp-signin). Origin of the five sign-in behaviors.
   AcmCertificateArn:
     Type: String
     Default: "arn:aws:acm:us-east-1:356364570033:certificate/1441b37a-3154-439d-b8a1-ca9cd71c6fd1"
@@ -83,6 +93,20 @@ Resources:
                 - TLSv1.2
               OriginReadTimeout: 30
               OriginKeepaliveTimeout: 5
+          - Id: enceladus-mcp-signin-furl
+            DomainName: !Ref SigninFunctionUrlOriginDomainName
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+            OriginShield:
+              Enabled: false
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
           TargetOriginId: enceladus-mcp-code-furl
           ViewerProtocolPolicy: redirect-to-https
@@ -97,6 +121,60 @@ Resources:
             - EventType: origin-response
               LambdaFunctionARN: !Ref EdgeFunctionVersionArn
               IncludeBody: false
+        CacheBehaviors:
+          # Kit sign-in service (enceladus-mcp-signin). Anchored patterns, evaluated in list order; none can match /oauth/token,
+          # /oauth/register, /.well-known/oauth-protected-resource*, / or /mcp. No Lambda@Edge here (the 401-header function
+          # belongs to the MCP default behavior only).
+          - PathPattern: "/.well-known/oauth-authorization-server*"
+            TargetOriginId: enceladus-mcp-signin-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/register"
+            TargetOriginId: enceladus-mcp-signin-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/authorize"
+            TargetOriginId: enceladus-mcp-signin-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/callback"
+            TargetOriginId: enceladus-mcp-signin-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+          - PathPattern: "/token"
+            TargetOriginId: enceladus-mcp-signin-furl
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+            CachedMethods: [HEAD, GET]
+            Compress: true
+            SmoothStreaming: false
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
-# No Outputs section: CloudFormation refuses an IMPORT change set whose template adds outputs
-# ("As part of the import operation, you cannot modify or add [Outputs]"). Add outputs in a later update.
+Outputs:
+  DistributionId:
+    Description: CloudFront distribution id of mcp.jreese.net.
+    Value: !Ref McpEdgeDistribution
+  DistributionDomainName:
+    Description: CloudFront domain name of the distribution (the alias mcp.jreese.net points here).
+    Value: !GetAtt McpEdgeDistribution.DomainName
