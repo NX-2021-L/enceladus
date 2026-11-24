@@ -69,3 +69,34 @@ Then gamma is back on 0.1.3: host serves `/authorize`, `/callback`, the registra
 * `ProbeSpec` has no response-header check, so it needs a small extension (`required_header`, checked in `probe_target`).
 
 If wanted, it is a separate change: a `PROBE_TABLE["enceladus-mcp-code-gamma"]` entry (`base_url=https://mcp-gamma.jreese.net`, `QUALIFIER_ALIAS_QUALIFIED`, probes PRM 200 with `required_header=("x-io-kit-mcp", "0.3.0")` and `/` 401), `ProbeSpec.required_header`, and the two env-variant tests updated. Production's entry and probes would not change.
+
+## Production (mcp.jreese.net): verification and rollback
+
+Production joins `_KIT030_BASES` in ENC-TSK-S57 (production step). The function is `enceladus-mcp-code` (alias `live`), sign-in client `4c366av0vc1530di5a4illnap`; the old confidential client stays accepted and `/oauth/token` stays host-served until it has been unused for 30 days.
+
+PRM header and body (expect `200`, `x-io-kit-mcp: 0.3.0`, `resource` `https://mcp.jreese.net`, `authorization_servers` `["https://mcp.jreese.net"]`):
+
+```bash
+curl -si https://mcp.jreese.net/.well-known/oauth-protected-resource | grep -i -E '^(HTTP|x-io-kit-mcp)|resource|authorization_servers'
+curl -si -X POST https://mcp.jreese.net/mcp -H 'content-type: application/json' -d '{}' | grep -i -E '^(HTTP|www-authenticate|x-io-kit-mcp)'   # 401, resource_metadata=".../.well-known/oauth-protected-resource"
+```
+
+Strict-registration check (expect `400`: the sign-in service refuses a non-allow-listed callback; `201` means the CloudFront routing is not live):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://mcp.jreese.net/register -H 'content-type: application/json' \
+  -d '{"redirect_uris":["https://evil.example/cb"],"client_name":"probe"}'
+```
+
+Fleet probe for connector `enceladus` (all checks blocking; C13, C14 and C16 must pass):
+
+```bash
+cd <io-kit checkout>   # origin/main
+MCP_PROBE_NO_CODEARTIFACT=1 node packages/mcp/fleet/mcp-fleet.mjs probe --connector enceladus --strict --out /tmp/fleet-prod.json; echo "exit=$?"
+```
+
+Rollback (one command, seconds; production is back on 0.1.3 with the host serving `/authorize` and `/callback`; roll the CloudFront routing back too if it is live):
+
+```bash
+aws lambda update-alias --region us-west-2 --function-name enceladus-mcp-code --name live --function-version <previous>
+```
