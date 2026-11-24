@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cognito public app client of the Enceladus MCP kit sign-in service (ENC-TSK-S57-a). Deployed in us-east-1, where
+  the user pool us-east-1_b2D0V3E1k lives (a us-west-2 stack cannot create a client in it). Its ClientId output is
+  the CognitoClientId parameter of 12-mcp-signin.yaml. Creates one client and nothing else.
+
+# One fixed PUBLIC client (no secret) for the kit's createSignInService, which relays /authorize and /token to the
+# Cognito hosted UI. Neither existing MCP client qualifies: enceladus-mcp-code carries a secret.
+# ExplicitAuthFlows is ALLOW_REFRESH_TOKEN_AUTH only: no ALLOW_USER_AUTH, USER_PASSWORD, ADMIN_USER_PASSWORD or CUSTOM
+# flow may ever be added here (the passkeys-cognito-native rule). Token lifetimes match enceladus-mcp-code.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: Appended to the client name. Production uses "", gamma uses "-gamma".
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_b2D0V3E1k
+    AllowedPattern: '^us-east-1_[A-Za-z0-9]+$'
+    Description: The Enceladus user pool (hand-made, not in IaC). This stack must run in us-east-1.
+
+Conditions:
+  IsGamma: !Equals [!Ref EnvironmentSuffix, "-gamma"]
+
+Resources:
+  SignInClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "enceladus-mcp-signin${EnvironmentSuffix}"
+      UserPoolId: !Ref CognitoUserPoolId
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !If [IsGamma, "https://mcp-gamma.jreese.net/callback", "https://mcp.jreese.net/callback"]
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+Outputs:
+  ClientId:
+    Description: Public app client id; pass as CognitoClientId to 12-mcp-signin.yaml.
+    Value: !Ref SignInClient
+  CallbackUrl:
+    Value: !If [IsGamma, "https://mcp-gamma.jreese.net/callback", "https://mcp.jreese.net/callback"]

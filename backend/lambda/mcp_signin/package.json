@@ -1,0 +1,14 @@
+{
+  "name": "enceladus-mcp-signin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kit sign-in service for the Enceladus MCP hosts (ENC-TSK-S57-a)",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "bash build.sh"
+  },
+  "dependencies": {
+    "@io-kit/mcp": "0.3.0"
+  }
+}

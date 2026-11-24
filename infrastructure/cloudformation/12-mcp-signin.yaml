@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus MCP kit sign-in service (ENC-TSK-S57-a). One arm64 Node 22 Lambda behind a Function URL on the `live`
+  alias. Carries NO traffic until a later step routes the MCP CloudFront distribution's OAuth paths to it.
+  Gamma first (EnvironmentSuffix -gamma); the same template serves production with "". Code ships out of band
+  (backend/lambda/mcp_signin/ship.sh). The Cognito public client lives in 13-mcp-signin-client.yaml because the
+  user pool is in us-east-1 and this stack is in us-west-2. No NAT, VPC endpoints, Secrets Manager, alarms or schedules.
+
+# Why this is not a Python Lambda and not in 02-compute.yaml: the sign-in service is the io-kit `createSignInService`
+# (@io-kit/mcp 0.3.0, Node; the kit declares engines node >=22, and nodejs20.x is deprecated). It has its own build (CodeArtifact npm) and ship path, so it is its own stack and is
+# deliberately outside lambda_workflow_manifest.json, envs/*.yaml and the Gen2 python matrix.
+#
+# State-signing HMAC key: SSM SecureString at StateKeyParameterName, created OUT OF BAND (never by this stack, never
+# printed). The function reads it once per cold start. Until the parameter exists the function fails closed (500) on
+# every request, which is harmless while it carries no traffic.
+#
+# The alias `live` is created pointing at a placeholder version (an alias cannot point at $LATEST). The ship script
+# publishes real versions and moves `live`; later stack deploys leave the alias alone because the template value is
+# unchanged. Do not make SignInShellVersion depend on anything that changes (the ENC-ISS-313 stomp class).
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: Appended to every resource name. Production uses "", gamma uses "-gamma".
+  CognitoClientId:
+    Type: String
+    AllowedPattern: '^[a-z0-9]{20,40}$'
+    Description: >-
+      Public app client id of the sign-in service: the ClientId output of the 13-mcp-signin-client stack in
+      us-east-1 (same EnvironmentSuffix). No default on purpose; the deploy passes it.
+  CognitoAuthOrigin:
+    Type: String
+    Default: "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com"
+    AllowedPattern: '^https://[^/\s]+$'
+    Description: Origin of the Cognito hosted UI (classic prefix domain) of us-east-1_b2D0V3E1k; the function's authorize/token/revoke endpoints.
+  StateKeyParameterName:
+    Type: String
+    Default: "/enceladus/mcp-signin/state-key"
+    AllowedPattern: '^/[A-Za-z0-9_.\-/]+$'
+    Description: SSM SecureString holding the HMAC state key (created out of band). The role may read only this parameter.
+
+Conditions:
+  IsGamma: !Equals [!Ref EnvironmentSuffix, "-gamma"]
+
+Resources:
+  SignInRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-mcp-signin-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: mcp-signin-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-signin${EnvironmentSuffix}:*"
+              - Sid: ReadStateKey
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${StateKeyParameterName}"
+              # alias/aws/ssm is the SecureString key; an alias cannot be a Resource, so scope by ViaService.
+              - Sid: DecryptStateKeyViaSsm
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "kms:ViaService": !Sub "ssm.${AWS::Region}.amazonaws.com"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-signin
+        - Key: Task
+          Value: ENC-TSK-S57
+
+  SignInLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-mcp-signin${EnvironmentSuffix}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-signin
+        - Key: Task
+          Value: ENC-TSK-S57
+
+  SignInFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SignInLogGroup
+    Properties:
+      FunctionName: !Sub "enceladus-mcp-signin${EnvironmentSuffix}"
+      Description: Enceladus MCP kit sign-in service (@io-kit/mcp createSignInService). ENC-TSK-S57-a.
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      MemorySize: 256
+      Timeout: 10
+      Handler: index.handler
+      Role: !GetAtt SignInRole.Arn
+      Environment:
+        Variables:
+          CONNECT_ORIGIN: !If [IsGamma, "https://mcp-gamma.jreese.net", "https://mcp.jreese.net"]
+          AUTH_ORIGIN: !Ref CognitoAuthOrigin
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          STATE_KEY_PARAM: !Ref StateKeyParameterName
+      # NEVER change this ZipFile value: a changed Code property would make CloudFormation overwrite the shipped code.
+      Code:
+        ZipFile: "exports.handler = async () => ({ statusCode: 503, body: 'placeholder; ship.sh ships the real code' });\n"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-signin
+        - Key: Task
+          Value: ENC-TSK-S57
+
+  # Aliases cannot target $LATEST, so one placeholder version exists. ship.sh publishes the real ones and moves `live`.
+  SignInShellVersion:
+    Type: AWS::Lambda::Version
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref SignInFunction
+      Description: placeholder shell; the real versions are published by ship.sh
+
+  SignInLiveAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref SignInFunction
+      FunctionVersion: !GetAtt SignInShellVersion.Version
+      Name: live
+
+  # The Function URL sits on the ALIAS (the ENC-ISS-306 lesson: never an unqualified URL a code update can switch).
+  SignInUrl:
+    Type: AWS::Lambda::Url
+    DependsOn: SignInLiveAlias
+    Properties:
+      TargetFunctionArn: !Ref SignInFunction
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  SignInUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SignInLiveAlias
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  SignInInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SignInLiveAlias
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  FunctionUrl:
+    Description: Function URL of the live alias (the future CloudFront origin; do not use directly).
+    Value: !GetAtt SignInUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref SignInFunction
+  ConnectOrigin:
+    Value: !If [IsGamma, "https://mcp-gamma.jreese.net", "https://mcp.jreese.net"]
