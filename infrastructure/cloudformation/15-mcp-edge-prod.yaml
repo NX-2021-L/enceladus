@@ -25,6 +25,11 @@ Description: >
 # Modify rather than a no-op.
 
 Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: [""]
+    Description: Production only (empty suffix). Declared because tools/pre-deploy-health-gate.sh requires every template to carry it; gamma's distribution is template 14.
   FunctionUrlOriginDomainName:
     Type: String
     Default: "udal3ytbj4ndsxre3yq26qnfoa0jxnaq.lambda-url.us-west-2.on.aws"
