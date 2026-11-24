@@ -25,6 +25,12 @@ describe('resolveProjectFromRecordId', () => {
 })
 
 describe('inferRecordNavigation', () => {
+  it('returns null for an undefined, null or empty id instead of throwing (ENC-TSK-T30 / ENC-ISS-926)', () => {
+    expect(inferRecordNavigation(undefined, PROJECTS)).toBeNull()
+    expect(inferRecordNavigation(null, PROJECTS)).toBeNull()
+    expect(inferRecordNavigation('  ', PROJECTS)).toBeNull()
+  })
+
   it('resolves tracker record with project', () => {
     expect(inferRecordNavigation('enc-tsk-k21', PROJECTS)).toEqual({
       type: 'task',

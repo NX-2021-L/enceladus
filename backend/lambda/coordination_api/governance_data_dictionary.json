@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-23.01",
-  "updated_at": "2026-11-23T18:40:00Z",
-  "last_change_summary": "ENC-TSK-S57-C: the MCP server zip now carries a dormant second io-kit-mcp-edge edition. 0.1.3 stays the pinned root install (requirements.txt) and 0.3.0 is installed by the build workflows with --no-deps under _kit030/. server.py gains an allow-list of base URLs (_KIT030_BASES, EMPTY) and a per-base sign-in client id map; only a base in the allow-list (decided from CUSTOM_DOMAIN at import) puts _kit030 first on sys.path, builds the 0.3.0 EdgeConfig (sign_in_service = the base) and skips the host /authorize and /callback routes, keeping /oauth/token and /oauth/register. No runtime change: nothing is allow-listed, production and gamma behave as before. Previous: ENC-TSK-S88: meta sentinels validate against suggested_component_id at propose and are rewritten to meta:{minted id} at approve. ENC-TSK-S85 (ENC-PLN-107): component enforcement defaults to enforce with a grandfather epoch (COMPONENT_ENFORCEMENT_EPOCH, default 2026-11-15T06:00:00Z); tasks created before it keep observe behaviour. Previous: ENC-TSK-S82 slice 3 (final): proposal contract complete. approve 200 adds approved_component_id; 412 carries the current proposal under `proposal`; GET /components/{id} for a component returns `edges` (DESIGNS/IMPLEMENTS/DEPLOYS forward edges read by key query from the tracker relationship rows, each with locked and lock_trigger); the component.proposed SNS event field `component_id` is renamed `proposal_ref`; one best-effort web push per new proposal (notify type component_proposal, deep link /component-registry/proposals/<ref>) over the existing approver allowlist and push-subscription rows, no new infrastructure; ENABLE_COMPONENT_PROPOSAL resolves true when unset or AppConfig unreachable (explicit false still disables); MCP component.propose forwards suggested_component_id and the capability arrays and returns the proposal ref, component.get (search) reads a component or a cprop- proposal, and component actions register unconditionally. No new route or persistent resource. Previous: ENC-TSK-S82 slice 2: component proposals are cprop-<10 hex> records (record_kind=proposal, proposal_status pending|approved|rejected, version, suggested_component_id advisory). POST /components/propose returns proposal_ref, never component_id; approve (decider only) mints the chosen comp- ID in one TransactWriteItems with If-Match or expected_version (428 absent, 412 stale or decided, 409 ID taken); reject writes no component; GET /components/{ref} returns the proposal view; GET /components excludes proposals unless kind=proposal. ENC-TSK-S82 slice 1 (ENC-ISS-805): component registry decider guard. _require_component_decider (human Cognito ID-token principal AND approver allowlist, fail-closed) replaces the fail-open _is_cognito_session on component approve, reject, revert, deprecate, restore and delete, is added to components create and to PATCH of transition_type, required_transition_type, lifecycle_status, status, project_id and component_id (the checkout-assistant key keeps its server-to-server allowance for the two transition-type fields only), and gates the io-unconditional branch of components advance; refusal is 403 COMPONENT_DECIDER_REQUIRED. Internal-key, managed-token and machine Cognito principals can no longer mutate the registry. No schema change. Previous: ENC-TSK-S47-0B (ENC-PLN-104 W6b.2): write_kind stream-filter key. Every item write stamps write_kind: governed writes (tracker_mutation and document_api create/update/log/evidence/put/patch) set \"governed\", marker writes (graph_sync projection marker, feed_publisher feed_published_version_seq claim/release) set \"marker\". The graph_sync tracker/documents stream mappings, the graph_sync and feed_publisher SQS FIFO mappings (body filter) and the appsync feed publisher stream mappings now filter out write_kind=marker via two OR'd patterns (anything-but marker; write_kind.S exists:false for legacy items), keeping REMOVE; Pipe SourceParameters are untouched. write_kind joins PROJECTION_ONLY_ATTRS in every consumer loop guard. Additive; adds the write_kind field to tracker.task and docstore.document. | ENC-TSK-S83 (ENC-PLN-107): fail-closed component use, observe mode. checkout_service reads env COMPONENT_REGISTRY_ENFORCEMENT (off|observe|enforce; anything else reads as observe; deployed default observe; plain env var, no AppConfig read, so it resolves identically whether AppConfig is reachable or not). For component ids absent from component-registry at checkout.task and checkout.advance: observe logs one '[COMPONENT-ENFORCE] mode=observe would_reject=true op= task= component= caller=' line and continues; enforce returns 400 COMPONENT_NOT_REGISTERED naming the id and pointing to component.propose; off keeps today's fail-open. Registered components keep lifecycle semantics. tracker_mutation is not enforced: TrackerMutationRole cannot read component-registry and this slice adds no IAM. No new persistent resource.",
+  "version": "2026-11-24.01",
+  "updated_at": "2026-11-24T03:30:00Z",
+  "last_change_summary": "Back-sync of main into v4/main (ENC-TSK-S57 lane, io-approved 2026-11-24): v4/main had fallen 36 commits behind main, so every merge to v4/main redeployed gamma from code older than what gamma was running. This merge brings the change_log entries 2026-11-18.01 through 2026-11-19.10 from main and keeps v4/main's 2026-11-23.01 (ENC-TSK-S57-C). No behaviour beyond what main and v4/main each already shipped.",
   "owners": [
     "enceladus-platform"
   ],
@@ -546,6 +546,52 @@
           ],
           "definition": "Deterministic stream-filter key stamped on every item write (ENC-TSK-S47-0B, ENC-PLN-104 W6b.2). Governed writers (tracker_mutation, document_api: create, update, log, acceptance evidence, put, patch) set \"governed\" beside write_tool/t_ack in the same write; consumer marker writers (graph_sync projection marker projection_status/projected_version_seq/t_projected; feed_publisher feed_published_version_seq claim and release) set \"marker\". The Lambda event source mappings for graph_sync (tracker and documents streams, and the prod SQS FIFO leg matched on the message body), the feed_publisher SQS mapping and the appsync feed publisher stream mappings carry two OR'd filters (write_kind anything-but marker, and write_kind.S exists:false) so marker-only MODIFYs are never delivered while legacy items without the attribute still pass; REMOVE is kept. write_kind is also a consumer-owned loop-guard attribute (PROJECTION_ONLY_ATTRS) so the in-function _projection_only_diff guard stays as defense in depth.",
           "usage_guidance": "Server-stamped; never set it from a client. Absent on legacy items (treated as governed by the filters). A writer that mutates an item outside the governed helpers must also set write_kind=governed, otherwise a prior marker value would hide its event from the filtered consumers."
+        },
+        "first_checked_out_at": {
+          "type": "string",
+          "format": "ISO 8601 UTC",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-PLN-108 W1.1 (ENC-TSK-S96-0A) / DOC-B8285D689DAC section 1: server-stamped on the FIRST agent-session checkout of this task and immutable thereafter, via 'first_checked_out_at = if_not_exists(first_checked_out_at, :now)' inside the checkout UpdateItem in tracker_mutation, spliced before the 'ADD checkout_count' clause (ENC-TSK-P49 ordering). Holds the instant work first began, which is what the Plans timeline lens uses to start a task's bar. Absent when checkout_count is 0, and absent for the human-override borrow path and the coordination SSM dispatch, neither of which performs a checkout; in those cases the lens falls back to the first in-progress time in history if one exists and otherwise draws no bar start.",
+          "stamp_trigger": "tracker_mutation checkout UpdateExpression on every successful checkout.task, for task records only. if_not_exists makes a re-checkout a no-op for this field, so the value records the first checkout and never the latest.",
+          "usage_guidance": "Read-only for all external callers. Never supply in POST/PATCH bodies: tracker_mutation rejects both with HTTP 400 RESERVED_FIELD (_W11_SERVER_STAMPED_TIMESTAMPS). The checkout write allocates no version_seq of its own, but checkout_service always follows it with the status PATCH to in-progress, which does, so the stamp reaches GET /api/v1/feed/delta within the same checkout."
+        },
+        "closed_at": {
+          "type": "string",
+          "format": "ISO 8601 UTC",
+          "required": false,
+          "writable_by": [
+            "server",
+            "io-approved escalation"
+          ],
+          "definition": "ENC-PLN-108 W1.1 (ENC-TSK-S96-0A) / DOC-B8285D689DAC section 1: server-stamped at the transition time whenever a write sets status to closed, and OVERWRITTEN when a re-entered task closes again; closed_count records how many times a task has closed, so this field holds the most recent close. Written by SIX writers (ruling D-24): the five tracker_mutation close sites -- generic PATCH behind checkout.advance, legacy PWA close, escalation direct_state_override, arc-walker code_only close, human-override advance -- all of which go through the one helper _closed_at_set_parts, plus coordination_api _set_tracker_status in BOTH of its copies (lambda_function.py and tracker_ops.py). NOT written by bedrock_agent_actions, which refuses every tracker write (ENC-ISS-909, ENC-ISS-911, ENC-TSK-T04).",
+          "stamp_trigger": "tracker_mutation: _closed_at_set_parts, appended inside SET and before any ADD clause (ENC-TSK-P49), at each of the five close sites that land status=closed on a task. coordination_api: closed_at_set_parts in version_seq_ops, spliced the same way in BOTH _set_tracker_status copies (lambda_function.py and tracker_ops.py), under the same predicate as the closed_count ADD so the date and the count cannot disagree. The coordination_api half is independent of the version_seq sequencing rule, so it holds on every rung of that module's guarded import ladder, including the degraded rung that stamps write_kind alone.",
+          "escalation_route": "Deliberately ABSENT from tracker_mutation's _RESERVED_OVERRIDE_PATHS, so an io-approved direct_state_override MAY supply closed_at through field_values for a task whose close time the backfill could not establish from history (ruling D-21). The applier therefore stamps closed_at only when field_values is silent about it: assigning it from both the close helper and the override loop would name one document path twice, which DynamoDB rejects and _render_update_expression raises in-process (ENC-ISS-759). See DOC-B8285D689DAC section 2.",
+          "usage_guidance": "Read-only for ordinary callers. Never supply in POST/PATCH bodies: tracker_mutation rejects both with HTTP 400 RESERVED_FIELD (_W11_SERVER_STAMPED_TIMESTAMPS). The only client-supplied route is an io-approved escalation's field_values, per escalation_route above. Absent when the task has never closed, and absent on the backfill path when history carries no recognisable close note, where ruling D-21 forbids guessing -- that case is recorded by the separate closed_at_unknown waiver marker instead of a silent null."
+        },
+        "closed_at_unknown": {
+          "type": "map",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-PLN-108 W1.4 (ENC-TSK-S96-0D) / DOC-B8285D689DAC section 1, ruling D-21: explicit waiver marker, written ONLY by the lifecycle backfill, recording that a CLOSED task's close time could not be established from its history, why, and when the backfill ran. Keys: reason (one of no_recognised_close_note, close_by_unrecognised_writer, close_note_timestamp_unparsable, later_unrecognised_status_write, reopened_after_last_close), detail (human-readable account of what the history did show), basis (the ruling), backfill_run_id, recorded_at (ISO 8601 UTC) and extractor_version. It is the sibling of closed_at on the backfill path: a closed task carries closed_at when history proves the time, closed_at_unknown when it does not, and the backfill never writes a closed_at it cannot prove. In the manner of the ENC-FTR-121 waiver sentinels it is a visible record that the time is unknown, never a silent null. Never written by a live close path (a live close always knows its own time).",
+          "stamp_trigger": "tracker_mutation POST /api/v1/tracker/{project}/task/{id}/lifecycle-backfill (_handle_lifecycle_backfill), a MARKER write: write_kind=marker, no version_seq, set-if-absent. The Lambda derives the marker from the record's own history through lifecycle_backfill.plan_lifecycle_stamps; the request carries no timestamp.",
+          "usage_guidance": "Read-only. A task with this marker draws as any row without stamps (DOC-5E1E205FA664 invariant 6). A close time established later is set one record at a time through an io-approved escalation's field_values (closed_at is deliberately not in _RESERVED_OVERRIDE_PATHS); the backfill never replaces an existing closed_at or closed_at_unknown. Listed in PROJECTION_ONLY_ATTRS of opensearch_indexer, governance_audit and convergence_telemetry (ENC-TSK-S96-0C), which is why the backfill must touch first_checked_out_at, closed_at, closed_at_unknown and write_kind and nothing else."
+        },
+        "wave": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "agent",
+            "io",
+            "coordination"
+          ],
+          "max_length": 64,
+          "definition": "ENC-PLN-108 W1.6 (ENC-TSK-S96-0F) / DOC-5E1E205FA664 ruling D-20 and sections 5.3 and 5.4: the optional short label naming the plan wave a task belongs to (for example W1.6). It is AUTHORED, set by whoever writes the plan with tracker.create or tracker.set; it is NOT server-stamped and is the opposite of first_checked_out_at and closed_at. It is the highest-precedence input to the Plans wave resolver under ruling D-20: when present it wins over the parent-pointer derivation and over any W-number in a title, which the resolver never parses. Task records only. It reaches the client as the corpus and delta row attribute wave (feed_query lens_attrs, ENC-TSK-S97-0A) and as the optional live-event field recordWave (appsync_feed_publisher, ENC-TSK-S97-0B); both are omitted when the task carries no wave. It is a plain string carried through without interpretation, so it must never become a number, enum or map.",
+          "usage_guidance": "Set it at create (tracker.create ... wave) or later (tracker.set field=wave). The value is trimmed; it must be a string of at most 64 characters after trimming with no control characters or line breaks; anything else is HTTP 400. On any record type other than task, both create and set reject it with HTTP 400. An empty or whitespace-only value means no wave: tracker.create omits the attribute and tracker.set stores an empty string, which every consumer treats as absent. tracker.create returns the stored label in its receipt when one was set. It is writable by ordinary callers and is not in _W11_SERVER_STAMPED_TIMESTAMPS, _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS."
         }
       }
     },
@@ -1675,6 +1721,11 @@
           "type": "string",
           "definition": "Optional S3 key for a pre-built Lambda artifact zip (ENC-TSK-E29 / ENC-TSK-E20 AC-6). Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). When present, deploy_intake validates the arch tag matches the target environment inferred from project_id.",
           "usage_guidance": "Pass when the deployment uses a pre-built artifact from the split-artifact build pipeline (build-lambda-artifacts.yml). deploy_intake validates the S3 key format and arch tag. The key is persisted to the DDB request record for audit. MCP server deploy_submit tool accepts and forwards this field."
+        },
+        "record_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "ENC-ISS-916. Marks the submission as RETROSPECTIVE telemetry for a deploy that already completed, not a request to deploy. When true the row is stored with status 'recorded' rather than 'pending' and no SQS trigger is sent on any path, regardless of the project's deploy state. Strict, fail-closed coercion: only boolean True or the strings 'true'/'1'."
         }
       }
     },
@@ -2471,6 +2522,14 @@
         "release_notes_guidance": {
           "type": "string",
           "definition": "Governance instruction text directing the submitting agent to create a release notes document via documents_put before the deploy completes. Included when release_notes_required=true."
+        },
+        "record_only": {
+          "type": "boolean",
+          "description": "ENC-ISS-916. Echoes whether the submission was accepted as record-only telemetry."
+        },
+        "status": {
+          "type": "string",
+          "description": "ENC-ISS-916. The stored row's status: 'recorded' for a record_only submission, otherwise 'pending'."
         }
       }
     },
@@ -3878,7 +3937,7 @@
         },
         "attrs": {
           "type": "object",
-          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents; tracker records when present — always arrays), document_subtype, subtypepattern; ENC-TSK-P60 adds components (tasks — always an array; string-typed anomalies are coerced to one-element lists and logged with the record id, ENC-ISS-714) and checkout_state (tasks/plans when present). Delta entries carry the same attrs for parity."
+          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents; tracker records when present — always arrays), document_subtype, subtypepattern; ENC-TSK-P60 adds components (tasks — always an array; string-typed anomalies are coerced to one-element lists and logged with the record id, ENC-ISS-714) and checkout_state (tasks/plans when present). Delta entries carry the same attrs for parity. ENC-TSK-S97-0A (ENC-PLN-108 W2.1, DOC-5E1E205FA664 section 5.3, rulings D-26/D-27/D-28) adds exactly three optional keys, each omitted when empty: objectives_set (plan rows), parent (task rows) and wave (task rows). created_at, first_checked_out_at and closed_at are deliberately ABSENT from corpus and delta rows per ruling D-26; they reach the Plans page through ENC-TSK-T05's plan-scoped read. Both the corpus and delta builders obtain these three from one shared helper, corpus.lens_attrs, so the two paths cannot drift."
         },
         "version_seq": {
           "type": "integer",
@@ -3887,11 +3946,33 @@
         "document_counter_exclusion": {
           "type": "string",
           "definition": "ENC-TSK-Q34 (AC-5): the DOCUMENTS_TABLE counter sentinel (document_id __COUNTER__VERSION_SEQ__, or any row with record_type counter) is excluded from corpus items, total_matches and facets."
+        },
+        "attrs.objectives_set": {
+          "type": "array",
+          "item_type": "string",
+          "source_field": "objectives_set",
+          "required": false,
+          "definition": "Plan rows only. The plan's objective record IDs in the order stored on the plan -- never sorted, never de-duplicated, because the wave resolver's ordering depends on authored order. Omitted when empty. Stored order holds only for plans written as a DynamoDB list, which is how tracker_mutation writes them; a legacy string-set plan would read back sorted.",
+          "usage_guidance": "Read it as given. Do not sort or de-duplicate. Absence means the plan has no objectives, not that the field was dropped."
+        },
+        "attrs.parent": {
+          "type": "string",
+          "source_field": "parent",
+          "required": false,
+          "definition": "Task rows only. The task's parent record ID, omitted when the task has none (about 4,270 of 8,130 task rows carry one). On the row by ruling D-28 at a measured 2.2 percent of the corpus, because the Plans wave resolver's precedence step 2 computes wave membership from parent pointers; without it the majority of production plans cannot group offline.",
+          "usage_guidance": "The offline branch of the Plans page depends on this field. Removing it breaks hierarchical wave grouping with no request to fall back on."
+        },
+        "attrs.wave": {
+          "type": "string",
+          "source_field": "wave",
+          "required": false,
+          "definition": "Task rows only. The optional short wave label a task carries, added to tracker.task by ENC-TSK-S96-0F (ENC-PLN-108 W1.6) under ruling D-20. Omitted when absent, which is every record until W1.6 is deployed and plan authoring begins writing it. Carried through as a string without interpretation.",
+          "usage_guidance": "Highest-precedence input to the wave resolver: a task carrying wave is placed by label, never by title grammar or position."
         }
       }
     },
     "feed_query.delta": {
-      "description": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): GET /api/v1/feed/delta?since=<version_seq> returns incremental corpus changes ordered by monotonic tracker.version_seq via the version-seq-index GSI (feed_scope=global). Response includes changed Tier-1 corpus items (with version_seq), delete tombstones, and latest_version_seq watermark for client gap-healing. Distinct from legacy GET /api/v1/feed?since=<ISO8601> incremental path. ENC-TSK-M79: tracker_mutation's write paths that stamp version_seq/feed_scope on every mutating UpdateExpression are _stamp_version_seq_on_create_item (record creation) and _version_seq_update_parts (spliced into both the generic single-field PATCH path, _handle_update_field, and the worklog-append path, _handle_log). Before M79, _handle_log's UpdateExpression omitted version_seq/feed_scope entirely, so a pure worklog append (no field PATCH) never re-surfaced the record in this delta projection — fixed by splicing _version_seq_update_parts() into _handle_log identically to the PATCH path's idiom. ENC-TSK-M92 (P0): the M79 fix covered only the MCP/checkout worklog path; the PWA close/note/reopen/worklog button routes through a SEPARATE handler, _handle_pwa_action, whose four mutating branches also omitted version_seq/feed_scope. So a gamma-native human UI write landed but never re-surfaced here (latest_version_seq pinned at 622 despite live writes). M92 splices _version_seq_update_parts() into all four _handle_pwa_action branches (close spliced inside SET, before its ADD closed_count clause). With M92, EVERY tracker write path that mutates a record stamps version_seq/feed_scope: create, generic PATCH, worklog-append (_handle_log), and PWA action (_handle_pwa_action).",
+      "description": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): GET /api/v1/feed/delta?since=<version_seq> returns incremental corpus changes ordered by monotonic tracker.version_seq via the version-seq-index GSI (feed_scope=global). Response includes changed Tier-1 corpus items (with version_seq), delete tombstones, and latest_version_seq watermark for client gap-healing. Distinct from legacy GET /api/v1/feed?since=<ISO8601> incremental path. ENC-TSK-M79: tracker_mutation's write paths that stamp version_seq/feed_scope on every mutating UpdateExpression are _stamp_version_seq_on_create_item (record creation) and _version_seq_update_parts (spliced into both the generic single-field PATCH path, _handle_update_field, and the worklog-append path, _handle_log). Before M79, _handle_log's UpdateExpression omitted version_seq/feed_scope entirely, so a pure worklog append (no field PATCH) never re-surfaced the record in this delta projection — fixed by splicing _version_seq_update_parts() into _handle_log identically to the PATCH path's idiom. ENC-TSK-M92 (P0): the M79 fix covered only the MCP/checkout worklog path; the PWA close/note/reopen/worklog button routes through a SEPARATE handler, _handle_pwa_action, whose four mutating branches also omitted version_seq/feed_scope. So a gamma-native human UI write landed but never re-surfaced here (latest_version_seq pinned at 622 despite live writes). M92 splices _version_seq_update_parts() into all four _handle_pwa_action branches (close spliced inside SET, before its ADD closed_count clause). With M92, EVERY tracker write path that mutates a record stamps version_seq/feed_scope: create, generic PATCH, worklog-append (_handle_log), and PWA action (_handle_pwa_action). ENC-TSK-S94 (ENC-ISS-908): the closing claim above was FALSE for task closes. Status closed was written to tasks by SEVEN paths and only two allocated a version_seq -- the generic PATCH behind checkout.advance and the PWA legacy close. The other five wrote the close unsequenced, so it never appeared in this delta and a client that missed the push event could not heal that record until its next sequenced write: the escalation direct_state_override applier, the arc-walker code_only close and the human-override advance (all in tracker_mutation), plus coordination_api _set_tracker_status (both copies: lambda_function.py and tracker_ops.py) and bedrock_agent_actions _handle_tracker_status. The last two also never added closed_count, the gate evidence for component.advance approved -> designed (ENC-FTR-076). S94 routes every one of them through ONE rule, enceladus_shared.version_seq.sequenced_governed_write_clause / sequenced_governed_write_parts (bundled fallback in tracker_mutation/version_seq_util.py), which returns an appendable SET fragment stamping version_seq, feed_scope and write_kind together. Two caller rules hold everywhere: the fragment is spliced inside SET and BEFORE any ADD clause (ENC-TSK-P49 -- a SET assignment after ' ADD ...' is a ValidationException that once broke every governed task close), and no call site may assign write_kind itself (DynamoDB rejects an expression naming one document path twice; tracker_mutation's _render_update_expression now checks the fragment's paths against its own assignments so the defect fails in-process, ENC-ISS-759). coordination_api and bedrock are NOT routed through the tracker_mutation API: _set_tracker_status is fail-closed on ConditionExpression #status = :expected_prior and returns False on CCFX so the coordination lifecycle sees drift, and reproducing that contract across a service boundary would add a synchronous edge and a new partial-failure mode inside a lifecycle terminal (DOC-5E1E205FA664 decision D-12, alternative taken). Sequencing is best-effort at the three tracker_mutation sites S94 added and at both external writers: allocation is a separate UpdateItem, so if the counter fails the write still lands governed but unsequenced rather than failing the close. The stamped lifecycle fields first_checked_out_at and closed_at are NOT part of S94; they are DOC-5E1E205FA664 decision D-4 and need a dictionary amendment of their own. ENC-TSK-T04 (ENC-ISS-909 / ENC-ISS-911) then removed the bedrock writer from this picture entirely: PUT /tracker/{recordId}/status, POST /tracker/create and POST /tracker/{recordId}/log on the Bedrock agent surface now fail closed, so the sequencing S94 gave that handler is moot and bedrock_agent_actions is a tracker READER only. See entity bedrock_agent_actions.lambda.",
       "fields": {
         "since": {
           "type": "integer",
@@ -3920,6 +4001,17 @@
         "doc_truncated": {
           "type": "boolean",
           "definition": "ENC-TSK-Q34 (AC-3): same window semantics for the document half (present only with doc_since)."
+        },
+        "version_seq": {
+          "type": "integer",
+          "definition": "ENC-TSK-S94 (ENC-ISS-908): monotonic sequence allocated from the single counter item (project_id __feed__, record_id counter#version_seq) and stamped on a record by the same UpdateItem as the write it sequences. It is the cursor this endpoint queries (feed_scope = global AND version_seq > :since on version-seq-index), and a write without it is invisible to the pull path.",
+          "invariant": "MONOTONE CURSOR, NOT A COUNTER, AND NOT GAPLESS. Allocation is its own UpdateItem and runs BEFORE the caller's write, which at several sites is conditional, so a ConditionalCheckFailed (or any failed write after a successful allocation) burns a number and leaves a permanent gap in the sequence. Gaps are harmless to a 'version_seq > :cursor' Query and to the client's 25-sequence-unit heal re-read. No consumer may derive a count, a total, a rate or a write-volume metric from version_seq, and no consumer may assume consecutive values.",
+          "write_sites": "Stamped by: tracker_mutation _stamp_version_seq_on_create_item (create), _version_seq_update_parts (generic PATCH _handle_update_field, worklog _handle_log, PWA _handle_pwa_action) and _sequencing_parts_or_governed (the escalation direct_state_override applier, the arc-walker close and the human-override advance -- fail-open, ENC-TSK-S94); coordination_api version_seq_ops.sequenced_write_parts (_set_tracker_status, both copies); and, until ENC-TSK-T04, bedrock_agent_actions _handle_tracker_status -- that surface now REFUSES every tracker write (ENC-ISS-909 / ENC-ISS-911), so it is no longer a write site at all. Marker writes (write_kind = marker) deliberately allocate none and are dropped by the stream event-source filters."
+        },
+        "attrs_parity": {
+          "type": "object",
+          "definition": "Delta items carry the same attrs as corpus items, including the three added by ENC-TSK-S97-0A -- objectives_set, parent and wave -- assembled by _delta_corpus_entry in feed_query/lambda_function.py through the shared corpus.lens_attrs helper. created_at, first_checked_out_at and closed_at are deliberately absent here too, per ruling D-26. This is a separate amendment from the S94 note on the stamped lifecycle fields (ruling D-4), which concerns the tracker record rather than the feed row.",
+          "usage_guidance": "A client applying a delta must see the same row shape it got from the corpus seed; any attr added to one builder must be added to the other through lens_attrs."
         }
       }
     },
@@ -7992,7 +8084,7 @@
       "telemetry_eligible": false
     },
     "appsync_feed.event": {
-      "description": "ENC-TSK-K20 (B67 AC-10 / AC-23): lightweight real-time event payload emitted by devops-appsync-feed-publisher to AppSync Events. Server-pre-rendered (summary is computed in the Lambda). Raw DynamoDB item images are NOT inlined; median payload <= 500 bytes (AC-23) for v1, <= 700 bytes for v2 (ENC-TSK-R54-0C adds schemaVersion/recordTitle/recordStatus/recordPriority/recordUpdatedAt/recordVersionSeq; additive, v1 keys unchanged; schemaVersion absent = v1). Since ENC-TSK-R55-0B the publisher also consumes the documents table stream and emits document-shaped events (record_type document) on the same channels. Published to /feed/updates, /records/{recordId}, and /projects/{projectId}.",
+      "description": "ENC-TSK-K20 (B67 AC-10 / AC-23): lightweight real-time event payload emitted by devops-appsync-feed-publisher to AppSync Events. Server-pre-rendered (summary is computed in the Lambda). Raw DynamoDB item images are NOT inlined; median payload <= 500 bytes (AC-23) for v1, <= 700 bytes for v2 (ENC-TSK-R54-0C adds schemaVersion/recordTitle/recordStatus/recordPriority/recordUpdatedAt/recordVersionSeq; additive, v1 keys unchanged; schemaVersion absent = v1). Since ENC-TSK-R55-0B the publisher also consumes the documents table stream and emits document-shaped events (record_type document) on the same channels. Published to /feed/updates, /records/{recordId}, and /projects/{projectId}. ENC-TSK-S97-0B adds five optional record-shadow fields (recordCreatedAt, recordParent, recordFirstCheckedOutAt, recordClosedAt, recordWave) without touching schemaVersion. The three timestamps are carried on the EVENT but deliberately NOT on corpus or delta rows (ruling D-26); see feed_query.corpus attrs.",
       "fields": {
         "eventId": {
           "definition": "UUID v7 (time-ordered, RFC 9562 §5.7) generated in-Lambda; leading 48 ms bits make it sort by creation time.",
@@ -8068,6 +8160,36 @@
         "recordVersionSeq": {
           "definition": "Optional. The row's own version_seq (integer, its own sequence space; not the event cursor). Omitted when absent or non-integral; clients must not require it.",
           "type": "integer"
+        },
+        "recordCreatedAt": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional, added by ENC-TSK-S97-0B (ENC-PLN-108 W2.2). Carries the record's creation instant, read from the stream image's created_at. Omitted when the record has no value, and omitted rather than emitted as null or an empty string when the value is empty or whitespace-only -- an explicit null key would change JSON serialization and IndexedDB row equality on the client. schemaVersion stays 2; this field is purely additive and never required.",
+          "usage_guidance": "Clients must not require it. The io-kit @io-kit/search consumer (ENC-TSK-S97-0C) copies it into IndexRow.fields as 'created_at', on both the mergeHeadline merge path and the unknown-row insert path. A missing field never overwrites or clears a stored value."
+        },
+        "recordParent": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional, added by ENC-TSK-S97-0B (ENC-PLN-108 W2.2). Carries the record's parent record id, read from the stream image's parent. Omitted when the record has no value, and omitted rather than emitted as null or an empty string when the value is empty or whitespace-only -- an explicit null key would change JSON serialization and IndexedDB row equality on the client. schemaVersion stays 2; this field is purely additive and never required.",
+          "usage_guidance": "Clients must not require it. The io-kit @io-kit/search consumer (ENC-TSK-S97-0C) copies it into IndexRow.fields as 'parent', on both the mergeHeadline merge path and the unknown-row insert path. A missing field never overwrites or clears a stored value."
+        },
+        "recordFirstCheckedOutAt": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional, added by ENC-TSK-S97-0B (ENC-PLN-108 W2.2). Carries the instant the task was FIRST checked out, stamped once and never overwritten (ENC-TSK-S96-0A), read from the stream image's first_checked_out_at. Omitted when the record has no value, and omitted rather than emitted as null or an empty string when the value is empty or whitespace-only -- an explicit null key would change JSON serialization and IndexedDB row equality on the client. schemaVersion stays 2; this field is purely additive and never required.",
+          "usage_guidance": "Clients must not require it. The io-kit @io-kit/search consumer (ENC-TSK-S97-0C) copies it into IndexRow.fields as 'first_checked_out_at', on both the mergeHeadline merge path and the unknown-row insert path. A missing field never overwrites or clears a stored value."
+        },
+        "recordClosedAt": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional, added by ENC-TSK-S97-0B (ENC-PLN-108 W2.2). Carries the transition instant of the task's MOST RECENT close (ENC-TSK-S96-0A and S96-0B); closed_count already records how many times it has closed, read from the stream image's closed_at. Omitted when the record has no value, and omitted rather than emitted as null or an empty string when the value is empty or whitespace-only -- an explicit null key would change JSON serialization and IndexedDB row equality on the client. schemaVersion stays 2; this field is purely additive and never required.",
+          "usage_guidance": "Clients must not require it. The io-kit @io-kit/search consumer (ENC-TSK-S97-0C) copies it into IndexRow.fields as 'closed_at', on both the mergeHeadline merge path and the unknown-row insert path. A missing field never overwrites or clears a stored value."
+        },
+        "recordWave": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional, added by ENC-TSK-S97-0B (ENC-PLN-108 W2.2). Carries the optional short wave label a task carries, added to tracker.task by ENC-TSK-S96-0F under ruling D-20, read from the stream image's wave. Omitted when the record has no value, and omitted rather than emitted as null or an empty string when the value is empty or whitespace-only -- an explicit null key would change JSON serialization and IndexedDB row equality on the client. schemaVersion stays 2; this field is purely additive and never required.",
+          "usage_guidance": "Clients must not require it. The io-kit @io-kit/search consumer (ENC-TSK-S97-0C) copies it into IndexRow.fields as 'wave', on both the mergeHeadline merge path and the unknown-row insert path. A missing field never overwrites or clears a stored value."
         }
       },
       "owner": "pwa-realtime",
@@ -10270,9 +10392,87 @@
         "ENC-TSK-S29-0A",
         "DOC-E32D0ED08473"
       ]
+    },
+    "bedrock_agent_actions.lambda": {
+      "description": "ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): the Bedrock agent action group (enceladus-bedrock-agent-actions, and -gamma) is a READ-ONLY surface over the tracker. Its three former tracker write handlers now fail closed and return a refusal naming the governed path. They were removed rather than gated because none could enforce governance and the lambda has no governed write path available: no tracker API base URL and no internal API key in its environment, its only HTTP egress being GitHub. Routing them through tracker_mutation -- where the transition matrix and the checkout/SCI gates live -- would have required a new secret and CFN plumbing for an endpoint with zero invocations in the preceding 30 days on both planes and no log events since 2026-08-26 (prod) / 2026-08-23 (gamma). The defects, by severity: _handle_tracker_status applied ANY status with no transition matrix, no dictionary legality check, no checkout/SCI ownership and no expected-prior ConditionExpression, an FSM bypass that could regress a closed record or overwrite a concurrent governed advance last-writer-wins (ENC-ISS-909); _handle_tracker_create minted its own record id as prefix + type_code + three digits of a random UUID, a 1000-value space against a tracker holding on the order of a thousand records, and wrote it with an UNCONDITIONAL put_item, so a collision replaced the colliding governed record in full -- status, history, acceptance_criteria, checkout state, version_seq -- silently and under a bedrock-agent write_source (ENC-ISS-911, data loss, and a violation of the server's exclusive right to allocate record ids); _handle_tracker_log appended history ungoverned and unsequenced, the mildest of the three but still unauthenticated. All three stamped write_kind=governed while bypassing governance, which made the DynamoDB-stream event-source filters carry writes no gate had approved; no write path on this surface stamps write_kind any longer.",
+      "fields": {
+        "refused_write_paths": {
+          "type": "array[string]",
+          "definition": "Action-group routes that now return a refusal instead of writing: PUT /tracker/{recordId}/status -> use MCP checkout.advance; POST /tracker/create -> use MCP tracker.create (the server allocates the record id); POST /tracker/{recordId}/log -> use MCP checkout.append_worklog, or tracker.log for non-task records.",
+          "usage_guidance": "The refusal payload carries error, refused_operation, governed_path and governance_reference so the calling agent is told where to go rather than only that it may not proceed. Reversible by design: if the capability is ever wanted, implement it through the tracker_mutation API with the env var, secret and CFN plumbing that implies -- do not re-add a direct DynamoDB write here."
+        },
+        "read_paths_unaffected": {
+          "type": "array[string]",
+          "definition": "Deliberately untouched: GET /tracker/{recordId}, GET /tracker/list/{projectId}, GET /projects/{projectId}, GET /projects, GET /documents/search, GET /documents/{documentId}, FUNCTION check_document_policy, GET /deployment/{projectId}, GET /components, GET /codemap/{projectId}, GET /schema/version. The GitHub write handlers (POST /github/branch, /github/commit, /github/pr) are a separate surface and are out of scope: they write a repository, not the governed tracker."
+        },
+        "invariant": {
+          "type": "string",
+          "definition": "No DynamoDB write against TRACKER_TABLE may exist in backend/lambda/bedrock_agent_actions/lambda_function.py. Fenced by test_tracker_write_fail_closed_t04.py, which scans the module for update_item/put_item/delete_item/transact_write_items near a TRACKER_TABLE reference, tokenises the source to assert write_kind is never assigned in code, and asserts that no `uuid.uuid4().int` record-id minting reappears."
+        }
+      }
+    },
+    "feed_query.plan_scope": {
+      "description": "ENC-TSK-T05 (ENC-PLN-108 W2.6, DOC-5E1E205FA664 section 5.3, rulings D-9 / D-26 / D-27 / D-28): GET /api/v1/feed/plan-scope is the Plans page's plan-scoped read, called once per Plans page open and by no other route. It returns the newest 20 plans and the task rows of their trees. Every row is produced by corpus.build_tracker_entries_from_records (the corpus builder, which calls build_tracker_entry) at corpus.LENS_SCOPE_PLAN, so a row from this route and a row from /feed/corpus are the same shape: one row contract, two scopes, no second builder to keep in sync. The two scopes differ only in which optional attrs are present; see attrs.created_at. Handler: _handle_plan_scope in feed_query/lambda_function.py; pure selection and tree logic in feed_query/plan_scope.py. Reads: plans through project-type-index (project_id AND record_type = plan), the task to parent map from the warm corpus cache or one corpus-style tracker load, and a concurrent BatchGetItem of only the tree's task keys.",
+      "fields": {
+        "endpoint": {
+          "type": "string",
+          "definition": "GET /api/v1/feed/plan-scope -- JWT-gated (401 unauthenticated) OR X-Coordination-Internal-Key for service callers, exactly as /feed/corpus (the check runs in lambda_handler before routing). Query param: project_id (comma-separated, case-insensitive, the corpus's own filter). Without it every active project is read, as the corpus does. No limit, cursor or sort parameters: the page is fixed by decision D-9. Requires API Gateway route RouteFeedPlanScope (03-api.yaml)."
+        },
+        "scope": {
+          "type": "string",
+          "definition": "Always 'plan' in the response body: the lens scope the rows were built at (corpus.LENS_SCOPE_PLAN). Rows at the corpus and delta scope are LENS_SCOPE_CORPUS and are what /feed/corpus and /feed/delta emit."
+        },
+        "items": {
+          "type": "array",
+          "definition": "Plan rows first, newest first, then task rows in task-id order. Each is a corpus row: record_id, record_type, project_id, title, updated_at, source, record_key, attrs, and version_seq when the record has one. attrs are exactly the corpus attrs for the same record plus the three plan-scope timestamps.",
+          "usage_guidance": "Merge by record_key. A row here overlays the corpus row of the same record; it never replaces rows the corpus has and never introduces a row shape the corpus lacks."
+        },
+        "attrs.created_at": {
+          "type": "string",
+          "source_field": "created_at",
+          "required": false,
+          "definition": "Plan and task rows, plan scope ONLY, omitted when the record has none. ISO-8601 UTC. Present on this route and deliberately absent from every /feed/corpus and /feed/delta row (ruling D-26): about 89 percent of the corpus widening's cost against the live corpus. It is affordable here because this response is bounded to 20 plans and their trees.",
+          "usage_guidance": "Do not copy this onto the corpus. The Plans page orders plans by it (selectPlans, rule R5) and places the first bar of a task on the time scale with it when first_checked_out_at is absent."
+        },
+        "attrs.first_checked_out_at": {
+          "type": "string",
+          "source_field": "first_checked_out_at",
+          "required": false,
+          "definition": "Task rows, plan scope ONLY, omitted when the task has none. The instant of the task's first checkout, stamped once by tracker_mutation (ENC-TSK-S96-0A) and immutable. Read from the raw item by the plan-scope overlay, not by _transform_task_from_ddb, so the legacy feed is unchanged. Absent from corpus and delta rows per ruling D-26.",
+          "usage_guidance": "Starts a task's bar on the Plans time scale. Absent for tasks never checked out and for historical tasks the W1 backfill could not date."
+        },
+        "attrs.closed_at": {
+          "type": "string",
+          "source_field": "closed_at",
+          "required": false,
+          "definition": "Task rows, plan scope ONLY, omitted when the task has none. The instant of the task's most recent close (ENC-TSK-S96-0A; the W1 backfill dates historical tasks). Read from the raw item by the plan-scope overlay. Absent from corpus and delta rows per ruling D-26. closed_at_unknown is not carried: a task with no closed_at draws as any row without stamps.",
+          "usage_guidance": "Ends a task's bar on the Plans time scale."
+        },
+        "ordering": {
+          "type": "string",
+          "definition": "Plans are chosen and ordered exactly as the Plans lens does (selectPlans, rule R5): created_at descending; a plan with no parseable created_at sorts after every dated plan; ties, including between undated plans, break on the plan id descending with digit runs compared as numbers. updated_at is never a fallback. Twenty is a bound, not a promise: fewer plans give fewer rows."
+        },
+        "tree": {
+          "type": "string",
+          "definition": "A plan's tree is its objectives_set tasks (stored order) plus every task reachable from them by parent pointer, at most three levels below each objective (the resolver's MAX_DESCENDANT_DEPTH). Only task rows are tree members, as in the lens: objectives and descendants that are issues, features or lessons are never returned. subtask_ids is never read because it disagrees with parent in production. A parent cycle terminates. The union over all plans is capped at 3000 task rows (plan_scope.MAX_PLAN_TREE_TASKS); hitting the cap sets truncated=true.",
+          "usage_guidance": "Task membership is taken from the corpus population (closed tasks older than 365 days are out), which is the population the Plans page resolves waves against."
+        },
+        "truncated": {
+          "type": "boolean",
+          "definition": "True when the 3000-task ceiling cut the walk short. The depth bound is a design limit and never sets it."
+        },
+        "counts": {
+          "type": "object",
+          "definition": "total_plans (plans matching the project filter, shown or not), plan_count, task_count, page_size (20), generated_at, version ('1.0')."
+        },
+        "d26_lifecycle_timestamps": {
+          "type": "string",
+          "definition": "This route carries created_at, first_checked_out_at and closed_at; feed_query.corpus and feed_query.delta deliberately do not (ruling D-26). That is not an inconsistency: D-26 removed them from the 12,562-row corpus seed to keep its widening small, and placed them here, on a 20-plan response, where they are needed. The two live in one helper, corpus.lens_attrs(record_type, record_id, record, scope), whose scope defaults to the corpus scope, so no caller gets the timestamps without asking for the plan scope. test_corpus.py and test_lambda_function.py assert their absence from corpus and delta rows; test_plan_scope_t05.py asserts their presence here."
+        }
+      }
     }
   },
-  "change_summary": "ENC-TSK-Q34 (ENC-ISS-765 / ENC-ISS-731, ENC-ISS-830 follow-on): feed_query corpus items carry version_seq (tracker counter for tracker entries, DOCUMENTS_TABLE counter for documents) and exclude the __COUNTER__VERSION_SEQ__ sentinel row; GET /api/v1/feed/delta gains an optional doc_since cursor that returns document changes and archived/deleted document tombstones in their own sequence space (latest_doc_version_seq, doc_truncated), and both halves are bounded to 500 rows per response with a truncated flag and resumable latest cursor.",
+  "change_summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable.",
   "change_log": [
     {
       "version": "2026-04-22.01",
@@ -11503,9 +11703,69 @@
       "summary": "ENC-TSK-S85 (ENC-PLN-107): checkout_service COMPONENT_REGISTRY_ENFORCEMENT now defaults to enforce, gated by a grandfather epoch COMPONENT_ENFORCEMENT_EPOCH (default 2026-11-15T06:00:00Z). A task created before the epoch (or with no usable created_at) behaves as observe: logged with mode=enforce grandfathered=true, never rejected. Tasks created at or after the epoch are rejected with COMPONENT_NOT_REGISTERED at checkout.task and agent checkout.advance. Legacy JSON-string components fields are parsed as lists. Census DOC-7107B4D00D9A, backlog ENC-ISS-905. Terminal approval script retired."
     },
     {
+      "version": "2026-11-18.01",
+      "date": "2026-11-18",
+      "summary": "ENC-TSK-S94 (ENC-ISS-908): every task close is now sequenced. Five of seven status=closed writers allocated no version_seq (escalation direct_state_override, arc-walker code_only close, human-override advance, coordination_api _set_tracker_status x2, bedrock_agent_actions _handle_tracker_status), so those closes were invisible to GET /api/v1/feed/delta; the two outside tracker_mutation also never added closed_count (ENC-FTR-076 gate evidence). All now share one rule, enceladus_shared.version_seq.sequenced_governed_write_clause, spliced inside SET before any ADD (ENC-TSK-P49) and stamping write_kind exactly once (ENC-ISS-759). feed_query.delta.version_seq records the invariant: version_seq is a monotone cursor, not a counter, and not gapless -- never derive a count from it. DOC-5E1E205FA664 decision D-12 resolved to the alternative (no routing through the tracker_mutation API); D-4's first_checked_out_at / closed_at are not in scope."
+    },
+    {
+      "version": "2026-11-19.01",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-T04 (ENC-ISS-909, ENC-ISS-911): the Bedrock agent action group is now a READ-ONLY tracker surface. Its three write handlers fail closed and name the governed path: PUT /tracker/{recordId}/status was an FSM bypass (any status, no transition matrix, no ownership, no expected-prior condition); POST /tracker/create minted a 3-digit random record id and put_item'd it unconditionally, so a collision silently overwrote a live governed record in full (data loss); POST /tracker/{recordId}/log appended history ungoverned. All three mislabelled their writes write_kind=governed. Not routed through tracker_mutation because the lambda has no tracker API base or internal key and the endpoint had zero invocations in 30 days. New entity bedrock_agent_actions.lambda records the boundary; feed_query.delta's write-site list is corrected because bedrock is no longer a write site at all."
+    },
+    {
+      "version": "2026-11-19.02",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0A (ENC-PLN-108 W1.1): two governed, server-stamped lifecycle timestamps on tracker.task. first_checked_out_at is written once by if_not_exists in the checkout UpdateItem and is immutable thereafter. closed_at is written at the transition time by all six close writers through the single helper _closed_at_set_parts and is overwritten when a re-entered task closes again, with closed_count still recording how many times. Both are rejected with HTTP 400 RESERVED_FIELD on create and on tracker.set via the new _W11_SERVER_STAMPED_TIMESTAMPS guard. closed_at remains deliberately absent from _RESERVED_OVERRIDE_PATHS so ruling D-21's io-approved escalation route can still supply a close time the backfill could not establish; the applier stamps only when field_values is silent, which keeps the ENC-ISS-759 overlap guard meaningful."
+    },
+    {
+      "version": "2026-11-19.03",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0B (ENC-PLN-108 W1.2, ruling D-22): the coordination_api half of closed_at is now real. W1.1 declared six writers for the field; at that point only the five tracker_mutation sites wrote it. Both coordination_api _set_tracker_status copies now stamp closed_at through closed_at_set_parts in version_seq_ops, beside the closed_count ADD and under the identical predicate. No field is added or removed and no type changes; closed_at's stamp_trigger is amended to name the second writer pair and to record that the stamp does not depend on the sequencing rule, so it survives every rung of the pinned-layer import ladder."
+    },
+    {
+      "version": "2026-11-19.04",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0C (ENC-PLN-108 W1.3): the stream consumers' projection-only loop guard now lists first_checked_out_at, closed_at and closed_at_unknown. The W1 backfill dates roughly 7,878 historical task records as MARKER writes (write_kind=marker, no version_seq); without those names the backfill diff is not a subset of PROJECTION_ONLY_ATTRS and every record would be re-indexed, re-audited and re-counted in one burst by opensearch_indexer, governance_audit and convergence_telemetry. Safe because no GOVERNED path writes those attributes alone: a real close also moves status, updated_at, sync_version and history, and a real checkout also moves checkout_state, so a genuine lifecycle write never becomes a subset. The guard is duplicated per Lambda by design, since FilterCriteria cannot compare stream images. Consequence recorded for ENC-TSK-S96-0D: the backfill must touch these attributes and write_kind ONLY -- bumping updated_at would break the subset match and restore the burst. No field added or removed."
+    },
+    {
+      "version": "2026-11-19.05",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S97-0A (ENC-PLN-108 W2.1): feed/corpus and feed/delta rows carry exactly three new optional attrs -- objectives_set on plan rows in the plan's stored order, parent on task rows that have one, and wave on task rows that carry it -- each omitted when empty. Rulings D-26, D-27 and D-28 govern what is NOT added: created_at, first_checked_out_at and closed_at stay off every corpus and delta row, because measured against the live corpus those three are 89 percent of the widening's cost (about 793 KiB of 927 KiB) while parent is 11 percent (104 KiB, 2.2 percent of the corpus). Those three reach the Plans page through ENC-TSK-T05's plan-scoped read instead. parent is on the row because the wave resolver's precedence step 2 computes membership from parent pointers, so without it most production plans cannot group offline. Implementation note recorded because the task description was wrong about it: corpus and delta do NOT share one attrs builder -- corpus rows come from build_tracker_entries_from_records in corpus.py, delta rows from _delta_corpus_entry in feed_query/lambda_function.py -- so both now call one shared corpus.lens_attrs and cannot drift."
+    },
+    {
+      "version": "2026-11-19.06",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0D (ENC-PLN-108 W1.4, ruling D-21): the W1 lifecycle backfill. tracker.task gains closed_at_unknown, the explicit waiver marker for a closed task whose history proves no close time (reason, detail, basis, backfill_run_id, recorded_at, extractor_version). tracker_mutation gains one governed route, POST /api/v1/tracker/{project}/task/{id}/lifecycle-backfill, the only way historical tasks are dated: a MARKER write (write_kind=marker, no version_seq), set-if-absent, touching first_checked_out_at, closed_at, closed_at_unknown and write_kind only -- exactly the PROJECTION_ONLY_ATTRS of the three W1.3 consumers, so no consumer re-processes a backfilled record. The route accepts no timestamp from the client (a body naming any of the three attributes is 400 RESERVED_FIELD, and the W1.1 create/PATCH guard is unchanged): the Lambda reads the record's own history and runs the extractor itself. It takes an internal API key only (plus tracker:backfill when a scope map is configured). The extractor (lifecycle_backfill.py) recognises the checkout note and the close notes of the five tracker_mutation close sites, both coordination_api _set_tracker_status copies (one shared note) and the retired bedrock_agent_actions writer (history only, ruling D-24), and never guesses: no recognised close, an unparsable timestamp, a later status write by an unknown writer, or a re-open without a recognised re-close all yield closed_at_unknown and no closed_at. No existing field changes type."
+    },
+    {
+      "version": "2026-11-19.07",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S97-0B (ENC-PLN-108 W2.2): the /feed/updates live event gains five OPTIONAL fields, each omitted when the record does not carry the value -- recordCreatedAt, recordParent, recordFirstCheckedOutAt, recordClosedAt and recordWave. schemaVersion stays 2 and nothing becomes required: the change is purely additive, so a client on the older kit applies the event unchanged. Note the deliberate asymmetry with ENC-TSK-S97-0A, which is NOT a contradiction: the live EVENT carries the three lifecycle timestamps, while the corpus and delta ROWS deliberately do not (ruling D-26), because against the live corpus those three are 89 percent of the row widening's cost and the Plans page gets them instead from ENC-TSK-T05's plan-scoped read. An event is one record; a corpus seed is 12,562 of them. Empty and whitespace-only values are omitted rather than emitted as null, because an explicit null key changes JSON serialization and IndexedDB row equality on the client. Consumer contract fixed with io-kit @io-kit/search (ENC-TSK-S97-0C): mergeHeadline and the unknown-row insert path copy these into IndexRow.fields in snake_case as created_at, parent, first_checked_out_at, closed_at and wave. Size note: a fully populated event grows by about 150 bytes, which exceeds the 500-to-700-byte step this entry describes for v2; the suite's 1200-byte hard ceiling still passes and the 700-byte median budget was not re-measured."
+    },
+    {
+      "version": "2026-11-19.08",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-S96-0F (ENC-PLN-108 W1.6, ruling D-20): tracker.task gains the optional AUTHORED string field wave. tracker.create and tracker.set accept it on task records and reject it on every other record type with HTTP 400; the value is trimmed, limited to 64 characters, and may not contain control characters. It is a plain string carried through without interpretation, and three merged consumers depend on that: feed_query lens_attrs() emits it as the corpus attribute wave, appsync_feed_publisher emits it as the live-event field recordWave, and the ui-v2 Plans wave resolver reads it as its highest-precedence input. It is deliberately NOT in _W11_SERVER_STAMPED_TIMESTAMPS, _F41_RESERVED_COUNTER_FIELDS or _RESERVED_OVERRIDE_PATHS: unlike first_checked_out_at and closed_at it is written by the plan-authoring caller, not stamped by the server."
+    },
+    {
+      "version": "2026-11-19.09",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-T05 (ENC-PLN-108 W2.6): feed_query gains GET /api/v1/feed/plan-scope, the Plans page's one plan-scoped read: the newest 20 plans (decision D-9) and the task rows of their trees. Rows are produced by corpus.build_tracker_entries_from_records, the same builder the corpus uses, at a new lens scope (corpus.LENS_SCOPE_PLAN), so a row here and a corpus row are one shape: one row contract, two scopes. The scope selects only which optional attributes are present. This route carries created_at, first_checked_out_at and closed_at, which corpus and delta rows deliberately omit under ruling D-26 (about 89 percent of the row widening's cost against the live corpus, about 793 KiB of 927 KiB): they are affordable here because the response is bounded to 20 plans and their trees rather than the 12,562-row corpus, and the Plans page needs them to place bars on the time scale. corpus.lens_attrs gains a scope argument that defaults to the corpus scope, so corpus and delta rows are unchanged and ENC-TSK-S97-0A's absence guarantees still hold. parent and wave stay on corpus rows (D-28), so the page renders its complete wave structure before this read lands. Ordering is created_at descending with undated plans last and the plan id descending as the tie-break. The tree is the plan's objectives_set tasks plus their parent-pointer descendants to three levels (the resolver's MAX_DESCENDANT_DEPTH), tasks only, capped at 3000 rows with an explicit truncated flag. Auth and project scoping are /feed/corpus's. The shared task transform is unchanged: first_checked_out_at and closed_at are read from the raw item by a plan-scope overlay so GET /api/v1/feed and /feed/tasks.json do not change by a byte. A new API Gateway route (RouteFeedPlanScope in 03-api.yaml) is required for the path to be reachable."
+    },
+    {
+      "version": "2026-11-19.10",
+      "date": "2026-11-19",
+      "summary": "ENC-TSK-T10 (ENC-ISS-916): POST /api/v1/deploy/submit accepts an optional boolean record_only. The endpoint is the deploy REQUEST intake, but _deploy.yml's 'Record deploy -> DPL' job uses it to record a deploy that has ALREADY completed. Until now such a submission was stored with status 'pending' and, when the project's deploy state is ACTIVE, sent an SQS {trigger: deploy_request} message that woke deploy_orchestrator, which attempted a second independent deployment from the legacy source-archive path -- a production-overwrite exposure that only failed on a source_dir name mismatch. With record_only true the row is stored with the terminal status 'recorded' instead of 'pending' and NO SQS trigger is sent on any path, whatever the deploy state. The terminal status matters independently: _handle_state_set re-triggers on every request# row whose status is 'pending' when a project is flipped to ACTIVE, so a suppressed-but-pending row would remain a deferred trigger. Coercion is strict and fails closed (only True, 'true' or '1'), so a malformed flag falls back to the ordinary request path rather than silently swallowing a deployment. Submissions without the flag are unchanged."
+    },
+    {
       "version": "2026-11-23.01",
       "date": "2026-11-23",
       "summary": "ENC-TSK-S57-C: dormant dual install of io-kit-mcp-edge in the MCP server zip. requirements.txt stays on 0.1.3 (production path unchanged); _build.yml (matrix build for mcp_streamable and the build-mcp-code job) and build-lambda-artifacts.yml install 0.3.0 with --no-deps into _kit030/. server.py adds _KIT030_BASES (empty allow-list), _KIT030_SIGNIN_CLIENT_IDS (public client id per base) and _kit030_edge_config (explicit EdgeConfig: sign_in_service = the base, client_ids = [sign-in client, env client], no registration_facade/authorization_server/authorize_redirect). When, and only when, CUSTOM_DOMAIN is in the allow-list, _kit030 leads sys.path before the first io_kit_mcp_edge import, the host stops serving /authorize and /callback (the sign-in service owns them; /oauth/token and /oauth/register stay) and the legacy verifier also accepts the sign-in client id. With the allow-list empty every path is the existing one. Activation (adding the gamma base) is a separate change."
+    },
+    {
+      "version": "2026-11-24.01",
+      "date": "2026-11-24",
+      "summary": "Back-sync of main into v4/main: v4/main receives main's 36 commits (ENC-PLN-108 Plans work, ENC-TSK-S94/S96/S97/S98/S99, T03-T22, T27, T30) and keeps its own ENC-TSK-S57 sign-in work. Dictionary entries 2026-11-18.01 through 2026-11-19.10 come from main; 2026-11-23.01 stays. No new behaviour."
     }
   ]
 }

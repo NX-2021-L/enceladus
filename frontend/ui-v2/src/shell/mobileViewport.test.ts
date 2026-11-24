@@ -447,3 +447,116 @@ describe('PWA UI polish (ENC-TSK-M75)', () => {
     expect(mobileBlock).toMatch(/\.ev2-tn__title\{[^}]*display:\s*none/)
   })
 })
+
+describe('mobile nav drawer scroll lock (ENC-ISS-918)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  /** Every max-width:48rem block, not just the first: the drawer's open-state
+   *  scroll rule lives in a second one, placed after the base .ev2-shell__nav
+   *  rule so that rule stays the first match for layoutContract's ruleBody(). */
+  const mobileBlock = (() => {
+    let rest = shellCss
+    const blocks: string[] = []
+    for (;;) {
+      const block = extractBlock(rest, /@media \(max-width: 48rem\) \{/)
+      if (!block) break
+      blocks.push(block)
+      const at = rest.indexOf(block)
+      rest = rest.slice(at + block.length)
+    }
+    return blocks.join('\n')
+  })()
+
+  /**
+   * io, from gamma on a phone: "when i scroll on the page the page scrolls
+   * behind the menu frozen".
+   *
+   * Measured on the live gamma build: `.ev2-shell__nav` already had
+   * overscroll-behavior:contain, but with the menu list shorter than the
+   * drawer it was not a scroll container (scrollHeight === clientHeight), so
+   * containment never applied and the gesture chained out to the page
+   * scroller. Forcing it to be a scroll container fixes it: with the rule
+   * injected live, a real wheel left `.ev2-al__content` scrollTop at 250, and
+   * with the list made tall the drawer itself still scrolled 0 -> 500.
+   */
+  it('makes the drawer a scroll container so its containment actually applies', () => {
+    expect(mobileBlock).toMatch(
+      /\.ev2-shell--nav-open\s+\.ev2-shell__nav\s*\{[^}]*overflow-y:\s*scroll/,
+    )
+    expect(mobileBlock).toMatch(
+      /\.ev2-shell--nav-open\s+\.ev2-shell__nav\s*\{[^}]*overscroll-behavior:\s*contain/,
+    )
+  })
+
+  it('makes the scrim refuse the gesture outright', () => {
+    // The scrim is rendered only while the drawer is open, so the declarations
+    // live on the existing scrim rule rather than a competing --nav-open one
+    // (a second rule would shadow the geometry assertion above, which matches
+    // the FIRST .ev2-shell__nav-scrim rule in the block).
+    const scrimRule = mobileBlock.match(/\.ev2-shell__nav-scrim\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(scrimRule).toMatch(/touch-action:\s*none/)
+    expect(scrimRule).toMatch(/overscroll-behavior:\s*contain/)
+  })
+
+  /**
+   * The regression this fix must never become: locking `.ev2-al__content` is
+   * the obvious move, and it breaks the sticky search controls below 960px
+   * (searchControls.contract.test.ts). Pin it here too so the reason survives
+   * next to the fix.
+   */
+  /**
+   * ENC-TSK-T16 W7-F2 narrowed this. It used to forbid locking .ev2-al__content at all, because below 960px
+   * .io-search__controls is position:sticky against it and overflow there breaks the sticky edge. That reasoning is
+   * about the DEFAULT state and does not survive contact with the open drawer: ISS-918 stopped the gesture CHAINING
+   * out of the drawer but left .ev2-al__content a live scroller, so the page behind the menu still moved -- which is
+   * what io reported again from prod, on a build that already carried the ISS-918 fix.
+   *
+   * So the contract is now about WHEN, not whether. Unqualified, the lock is still forbidden. Scoped to --nav-open
+   * it is required, and it is safe on both counts: the sticky edge is under a full-screen drawer and a scrim, and a
+   * toggled overflow preserves scrollTop (measured on the live gamma build: 200 before, during and after).
+   */
+  it('locks .ev2-al__content only while the drawer is open', () => {
+    expect(mobileBlock).toMatch(
+      /\.ev2-shell--nav-open\s+\.ev2-al__content\s*\{[^}]*overflow:\s*hidden/,
+    )
+    // The unqualified form would break the sticky edge on every route, at every moment. Every rule that locks the
+    // content scroller must name the open drawer in its selector.
+    const locks = [...mobileBlock.matchAll(/([^{}]+)\{([^}]*overflow:\s*hidden[^}]*)\}/g)]
+      .filter(([, selector]) => /\.ev2-al__content\s*$/.test(selector as string))
+      .map(([, selector]) => (selector as string).trim())
+    expect(locks.length).toBeGreaterThan(0)
+    for (const selector of locks) expect(selector).toContain('--nav-open')
+  })
+
+  /**
+   * ENC-TSK-T19, correcting W7-F2's first attempt. The bar is raised above the drawer so a drawer whose top meets
+   * the bar cannot bury the Menu button that closes it.
+   *
+   * It must NOT be taken out of flow to do that. `position: fixed` here was the regression io caught on gamma: the
+   * page behind slid up by the bar's full height (content top 111 -> 0 at a 59px inset) and showed through between
+   * the bar and the drawer. Anything out-of-flow -- fixed or absolute -- reintroduces that jump, so the test names
+   * them rather than just asserting the current value.
+   */
+  it('raises the app bar above the drawer without taking it out of flow', () => {
+    const rule = /\.ev2-shell--nav-open\s+\.ev2-shell__bar\s*\{([^}]*)\}/.exec(mobileBlock)
+    expect(rule).not.toBeNull()
+    const body = rule![1] as string
+    expect(body).not.toMatch(/position:\s*(fixed|absolute)/)
+    const z = /z-index:\s*(\d+)/.exec(body)
+    expect(z).not.toBeNull()
+    // Above the drawer (4) and the scrim (3), or the bar would be the thing that gets covered.
+    expect(Number(z![1])).toBeGreaterThan(4)
+    // A z-index only applies to a positioned box, so the rule must still position it -- just in flow.
+    expect(body).toMatch(/position:\s*relative/)
+  })
+
+  /**
+   * touch-action:none on the drawer itself would stop the drawer's OWN list
+   * from scrolling when it is taller than the viewport, which the live check
+   * confirmed must keep working.
+   */
+  it('does not disable touch on the drawer, which must still scroll its own list', () => {
+    expect(mobileBlock).not.toMatch(
+      /\.ev2-shell--nav-open\s+\.ev2-al__nav\s*\{[^}]*touch-action:\s*none/,
+    )
+  })
+})
