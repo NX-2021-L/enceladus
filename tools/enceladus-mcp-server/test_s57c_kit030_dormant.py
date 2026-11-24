@@ -1,7 +1,8 @@
-"""ENC-TSK-S57-C: the io-kit-mcp-edge 0.3.0 edition ships dormant beside the pinned 0.1.3.
+"""ENC-TSK-S57-C / S57-E: the io-kit-mcp-edge 0.3.0 edition beside the pinned 0.1.3, selected for gamma only.
 
 The zip carries 0.1.3 at its root (requirements.txt, production) and 0.3.0 under ``_kit030``. A base URL in
-``server._KIT030_BASES`` (EMPTY in this change) runs the 0.3.0 edge; every other base takes the unchanged 0.1.3 path.
+``server._KIT030_BASES`` (gamma only since S57-E) runs the 0.3.0 edge; every other base, production included, takes the
+unchanged 0.1.3 path.
 
 The 0.3.0 behaviour tests run in a fresh interpreter (a process holds one ``io_kit_mcp_edge``) against a real 0.3.0 kit
 named by S57C_KIT030_DIR (the directory that holds ``io_kit_mcp_edge/``, e.g. a ``pip install --no-deps --target``); they skip
@@ -35,23 +36,43 @@ def _kit030_dir():
     return raw
 
 
-# --- dormant: nothing changes while the allow-list is empty ------------------------------------
+# --- activation state: gamma is selected, nothing else is --------------------------------------
 
-def test_allow_list_is_empty_and_gamma_has_a_sign_in_client():
+def test_allow_list_is_gamma_only_and_gamma_has_a_sign_in_client():
     mod = _load_server(ENCELADUS_MCP_TRANSPORT="streamable_http")
-    assert mod._KIT030_BASES == frozenset()
+    assert mod._KIT030_BASES == frozenset({GAMMA})
+    assert PROD not in mod._KIT030_BASES
     assert mod._KIT030_SIGNIN_CLIENT_IDS == {GAMMA: GAMMA_SIGNIN_CLIENT}
 
 
-@pytest.mark.parametrize("domain", ["mcp-gamma.jreese.net", GAMMA, PROD, ""])
-def test_empty_allow_list_never_selects_and_never_touches_sys_path(monkeypatch, domain):
+@pytest.mark.parametrize("domain", ["mcp-gamma.jreese.net", GAMMA, GAMMA + "/"])
+def test_gamma_domain_is_selected_and_adds_the_sign_in_client(monkeypatch, domain):
     monkeypatch.setenv("CUSTOM_DOMAIN", domain)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    mod = _load_server(ENCELADUS_MCP_TRANSPORT="streamable_http", CUSTOM_DOMAIN=domain)
+    assert mod._kit030_selected() is True
+    assert mod._kit030_extra_client_ids() == [GAMMA_SIGNIN_CLIENT]
+    assert sys.path[0] == mod._KIT030_DIR
+
+
+@pytest.mark.parametrize("domain", ["mcp.jreese.net", PROD, PROD + "/", "mcp-gamma.jreese.net.evil.example",
+                                    "https://mcp-beta.jreese.net", "localhost:8080", ""])
+def test_production_and_every_other_base_is_never_selected_and_never_touches_sys_path(monkeypatch, domain):
+    monkeypatch.setenv("CUSTOM_DOMAIN", domain)
+    monkeypatch.setattr(sys, "path", list(sys.path))
     before = list(sys.path)
     mod = _load_server(ENCELADUS_MCP_TRANSPORT="streamable_http", CUSTOM_DOMAIN=domain)
     assert mod._kit030_selected() is False
     assert mod._kit030_extra_client_ids() == []
     mod._ensure_kit030_path()
     assert sys.path == before
+
+
+def test_unset_custom_domain_is_never_selected(monkeypatch):
+    monkeypatch.delenv("CUSTOM_DOMAIN", raising=False)
+    mod = _load_server(ENCELADUS_MCP_TRANSPORT="streamable_http")
+    monkeypatch.delenv("CUSTOM_DOMAIN", raising=False)
+    assert mod._kit030_selected() is False and mod._kit030_extra_client_ids() == []
 
 
 def test_selection_follows_custom_domain_exactly_as_the_server_base_does(monkeypatch):
