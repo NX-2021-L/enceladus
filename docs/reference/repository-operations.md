@@ -75,6 +75,13 @@ MCP tool handlers must access business data through Enceladus service APIs rathe
 - Guard script: `tools/check_mcp_api_boundary.py`
 - Rationale: [About the MCP API boundary](../explanation/about-the-mcp-api-boundary.md)
 
+## MCP sign-in client guard
+
+The Cognito public client of the MCP sign-in service must keep its F-12 profile.
+
+- CI guard: `.github/workflows/mcp-signin-client-guard.yml`
+- Guard script and self-test: `tools/check_mcp_signin_client.py`, `tools/test_check_mcp_signin_client.py`
+
 ## Architecture documentation sync
 
 Changes to `docs/ARCHITECTURE.md` on `main` are synchronized to the Enceladus docstore.

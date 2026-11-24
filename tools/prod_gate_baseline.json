@@ -302,6 +302,10 @@
       "class": "inert",
       "notes": "guard"
     },
+    "mcp-signin-client-guard.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
     "nightly-parity-audit.yml": {
       "class": "inert",
       "notes": "read-only audit"
