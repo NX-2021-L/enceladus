@@ -470,19 +470,20 @@ INTERFACE_MODE = _normalize_interface_mode(
 logger = logging.getLogger(SERVER_NAME)
 
 # ---------------------------------------------------------------------------
-# io_kit_mcp_edge 0.3.0 selection (ENC-TSK-S57-C). DORMANT: the allow-list is empty.
+# io_kit_mcp_edge 0.3.0 selection (ENC-TSK-S57-C, activated for gamma only by ENC-TSK-S57-E).
 #
 # The zip carries two kit editions: io-kit-mcp-edge 0.1.3 at the zip root (the pinned
 # requirements.txt, what production runs) and 0.3.0 under <task root>/_kit030. A base URL in
 # _KIT030_BASES runs the 0.3.0 edge (PRM, OPTIONS and the bearer gate only; the sign-in service
 # owns /.well-known/oauth-authorization-server*, /register, /authorize, /callback and /token).
-# Gamma's base (https://mcp-gamma.jreese.net) is added in the activation PR; production is never
-# added without its own approved step. The decision is made from the environment only
+# Gamma's base (https://mcp-gamma.jreese.net) is the only member (S57-E); production
+# (https://mcp.jreese.net) is never added without its own approved step. Gamma relies on CloudFront
+# routing those five paths to the sign-in service (S57-D): without it they reach the bearer gate. The decision is made from the environment only
 # (CUSTOM_DOMAIN, the value _get_server_base_url yields), because no event exists at import time,
 # and _KIT030_DIR must lead sys.path BEFORE the first `import io_kit_mcp_edge` in the process.
 # Every kit import goes through _get_kit_edge_api (below), which re-asserts the path first.
 # ---------------------------------------------------------------------------
-_KIT030_BASES: frozenset = frozenset()
+_KIT030_BASES: frozenset = frozenset({"https://mcp-gamma.jreese.net"})
 # Public Cognito app client ids of the sign-in service, per base (not secrets).
 _KIT030_SIGNIN_CLIENT_IDS: Dict[str, str] = {"https://mcp-gamma.jreese.net": "4r6e9pfkccv050akrcu2ihlen4"}
 _KIT030_DIR = os.path.join(
