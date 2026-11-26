@@ -7,7 +7,7 @@ Description: >
   user pool is in us-east-1 and this stack is in us-west-2. No NAT, VPC endpoints, Secrets Manager, alarms or schedules.
 
 # Why this is not a Python Lambda and not in 02-compute.yaml: the sign-in service is the io-kit `createSignInService`
-# (@io-kit/mcp 0.3.0, Node; the kit declares engines node >=22, and nodejs20.x is deprecated). It has its own build (CodeArtifact npm) and ship path, so it is its own stack and is
+# (@io-kit/mcp 0.3.1, Node; the kit declares engines node >=22, and nodejs20.x is deprecated). It has its own build (CodeArtifact npm) and ship path, so it is its own stack and is
 # deliberately outside lambda_workflow_manifest.json, envs/*.yaml and the Gen2 python matrix.
 #
 # State-signing HMAC key: SSM SecureString at StateKeyParameterName, created OUT OF BAND (never by this stack, never

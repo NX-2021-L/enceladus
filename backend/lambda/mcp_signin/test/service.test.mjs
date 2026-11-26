@@ -1,4 +1,4 @@
-// Behaviour of the kit's createSignInService as configured here. Needs @io-kit/mcp 0.3.0 installed (CodeArtifact);
+// Behaviour of the kit's createSignInService as configured here. Needs @io-kit/mcp 0.3.1 installed (CodeArtifact);
 // without it these tests are SKIPPED, loudly, and config.test.mjs still runs offline.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -69,6 +69,12 @@ test("/authorize with an allowed redirect goes to Cognito with the stack's clien
   assert.equal(to.searchParams.get("redirect_uri"), `${BASE}/callback`);
   assert.equal(to.searchParams.get("code_challenge_method"), "S256");
   assert.ok(to.searchParams.get("state").includes("."), "state is the signed blob");
+});
+
+test("/authorize accepts the resource as clients send it: Cursor's trailing slash and the MCP path (DVP-TSK-M49)", { skip }, async () => {
+  for (const resource of [`${BASE}/`, `${BASE}/mcp`, `${BASE}/mcp/`]) {
+    assert.equal((await svc().handle(authorize({ resource }))).status, 302, resource);
+  }
 });
 
 test("/authorize refuses a wrong client, a missing PKCE challenge and a resource of another host", { skip }, async () => {
