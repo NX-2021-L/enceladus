@@ -1,6 +1,6 @@
 # How to deploy, ship and roll back the MCP sign-in service (ENC-TSK-S57-a)
 
-The sign-in service is the io-kit `createSignInService` (`@io-kit/mcp` 0.3.0) running as one Lambda, `enceladus-mcp-signin-gamma` (production later: `enceladus-mcp-signin`), in us-west-2. It is the OAuth authorization server the MCP hosts will advertise: it serves `/.well-known/oauth-authorization-server`, `/register` (allow-listed callbacks only: claude.ai, claude.com, Cursor, loopback), `/authorize`, `/callback` and `/token`, and relays them to the Cognito hosted UI of pool `us-east-1_b2D0V3E1k` (classic prefix domain `enceladus-status-356364570033`) using one fixed public client.
+The sign-in service is the io-kit `createSignInService` (`@io-kit/mcp` 0.3.1; 0.3.1 accepts the resource as clients send it, DVP-TSK-M49) running as one Lambda, `enceladus-mcp-signin-gamma` (production later: `enceladus-mcp-signin`), in us-west-2. It is the OAuth authorization server the MCP hosts will advertise: it serves `/.well-known/oauth-authorization-server`, `/register` (allow-listed callbacks only: claude.ai, claude.com, Cursor, loopback), `/authorize`, `/callback` and `/token`, and relays them to the Cognito hosted UI of pool `us-east-1_b2D0V3E1k` (classic prefix domain `enceladus-status-356364570033`) using one fixed public client.
 
 **S57-a carries no traffic.** Nothing routes to the Function URL; `mcp.jreese.net` and `mcp-gamma.jreese.net` behave exactly as before.
 
@@ -14,7 +14,7 @@ The sign-in service is the io-kit `createSignInService` (`@io-kit/mcp` 0.3.0) ru
 
 The client is a separate stack because a us-west-2 stack cannot create a client in a us-east-1 pool. The client id reaches the function as a stack parameter (`CognitoClientId`) fed from the client stack's `ClientId` output; it is never hard-coded. The client is public (no secret), code flow, scopes openid email profile, `ALLOW_REFRESH_TOKEN_AUTH` only, revocation on, callback exactly `https://mcp-gamma.jreese.net/callback`, 60 minute access/ID tokens, 30 day refresh.
 
-The fleet registry (`fleet.enceladus.json`: the `enceladus` profile and the two connectors) is shipped inside the zip as `fleet.json`, because kit 0.3.0 ships none. Override at build time with `IO_KIT_FLEET_JSON` (inline) or `IO_KIT_FLEET_FILE`. The service signs in only the connectors on its own origin (`sign_in_service: self`).
+The fleet registry (`fleet.enceladus.json`: the `enceladus` profile and the two connectors) is shipped inside the zip as `fleet.json`, because kit 0.3.x ships none. Override at build time with `IO_KIT_FLEET_JSON` (inline) or `IO_KIT_FLEET_FILE`. The service signs in only the connectors on its own origin (`sign_in_service: self`).
 
 ## Profile guard (F-12)
 
