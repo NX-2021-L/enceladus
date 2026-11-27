@@ -34,6 +34,20 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-T28: lock-file reading lives in a sourceable library so the
+# classification can be tested without running this script's side effects.
+# See tools/lib/agent-lock.selftest.sh. BASH_SOURCE resolves correctly whether
+# this file is executed or `source`d, which the usage note above allows.
+# ---------------------------------------------------------------------------
+_AWI_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/agent-lock.sh"
+if [ ! -r "$_AWI_LIB" ]; then
+  echo "[ERROR] Missing required library: $_AWI_LIB" >&2
+  exit 1
+fi
+# shellcheck source=tools/lib/agent-lock.sh
+. "$_AWI_LIB"
+
+# ---------------------------------------------------------------------------
 # Resolve repo root (the main checkout, not a worktree)
 # ---------------------------------------------------------------------------
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)"
@@ -102,20 +116,45 @@ mkdir -p "$WORKTREE_DIR" "$LOCK_DIR"
 STALE_LOCK_AGE_SECONDS=21600  # 6 hours (ENC-ISS-632)
 
 ACTIVE_COUNT=0
+UNREADABLE_COUNT=0
 for lockfile in "$LOCK_DIR"/*.lock; do
   [ -f "$lockfile" ] || continue
-  LOCK_PID="$(grep '^pid=' "$lockfile" | cut -d= -f2)"
-  LOCK_WT="$(grep '^worktree=' "$lockfile" | cut -d= -f2)"
-  LOCK_PROV="$(grep '^provider=' "$lockfile" | cut -d= -f2)"
+  # ENC-TSK-T28: read every field through agent_lock_field, which cannot fail.
+  # These were bare `grep ... | cut` command substitutions, and `grep` exits 1
+  # when it matches nothing -- so under this script's own `set -euo pipefail` a
+  # single lock file not in key=value form aborted the entire invocation here,
+  # before "[INFO] Fetching origin...", leaving no worktree and exit 1. Three
+  # such files have been present in this repository since August 2026, so step
+  # 0.2 of the documented bootstrap was failing for every session.
+  LOCK_PID="$(agent_lock_field "$lockfile" pid)"
+  LOCK_WT="$(agent_lock_field "$lockfile" worktree)"
+  LOCK_PROV="$(agent_lock_field "$lockfile" provider)"
+  LOCK_STATE="$(agent_lock_classify "$lockfile")"
 
-  if kill -0 "$LOCK_PID" 2>/dev/null; then
+  # ENC-TSK-T28: a lock with no usable pid is UNKNOWN -- neither live nor
+  # provably dead -- and is reported without being counted as an active session
+  # and without being swept. It is not counted because a stale file should not
+  # masquerade as a colleague at work: the three legacy files above reported as
+  # "Active session: ... (PID 0)" on every run for months, because `kill -0 0`
+  # signals the caller's own process group and therefore succeeds. It is not
+  # swept because the sweep below force-removes a worktree and deletes an
+  # unpushed branch, and ENC-ISS-632 is the record of that going wrong when the
+  # pid signal was trusted too readily; the case where we know least about the
+  # owner is the last place to act destructively.
+  if [ "$LOCK_STATE" = "unknown" ]; then
+    UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
+    echo "[WARN] Unreadable lock (no usable pid), left untouched: $(basename "$lockfile")${LOCK_PROV:+ provider=$LOCK_PROV}"
+    continue
+  fi
+
+  if [ "$LOCK_STATE" = "live" ]; then
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
     echo "[WARN] Active session: $LOCK_PROV (PID $LOCK_PID) in $LOCK_WT"
     continue
   fi
 
   # Fix D.4: read branch BEFORE removing the lock file to avoid read-after-delete.
-  LOCK_BRANCH="$(grep '^branch=' "$lockfile" 2>/dev/null | cut -d= -f2 || true)"
+  LOCK_BRANCH="$(agent_lock_field "$lockfile" branch)"
 
   # Gate 1 (ENC-ISS-632): age -- macOS/BSD stat uses -f %m, GNU stat uses -c %Y.
   LOCK_MTIME="$(stat -f %m "$lockfile" 2>/dev/null || stat -c %Y "$lockfile" 2>/dev/null || echo 0)"
@@ -155,6 +194,15 @@ done
 
 if [ "$ACTIVE_COUNT" -gt 0 ]; then
   echo "[WARN] $ACTIVE_COUNT other agent session(s) active. Worktree isolation is protecting you."
+fi
+
+# ENC-TSK-T28: reported separately from ACTIVE_COUNT on purpose. These are not
+# sessions at work, so folding them into that number overstates what is running
+# and tells the reader nothing about what to do; naming them as unreadable
+# points at the fix, which is for a human to inspect and delete the files.
+if [ "$UNREADABLE_COUNT" -gt 0 ]; then
+  echo "[WARN] $UNREADABLE_COUNT lock file(s) in $LOCK_DIR carry no usable pid. They are NOT counted as active sessions and were NOT swept."
+  echo "[WARN] They block nothing. Inspect and remove them by hand once you are satisfied the worktree and branch each names are finished with."
 fi
 
 # ---------------------------------------------------------------------------
