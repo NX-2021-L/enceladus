@@ -20,7 +20,7 @@ node -e '
 const f = JSON.parse(require("fs").readFileSync("build/fleet.json", "utf8"));
 if (!(f.connectors || []).some((c) => c.profile === "enceladus")) { console.error("fleet.json has no enceladus connector"); process.exit(1); }
 const v = require("./build/node_modules/@io-kit/mcp/package.json").version;
-if (v !== "0.3.1") { console.error("expected @io-kit/mcp 0.3.1, got " + v); process.exit(1); }
+if (v !== "0.3.2") { console.error("expected @io-kit/mcp 0.3.2, got " + v); process.exit(1); }
 '
 rm -f build/.npmrc
 ( cd build && zip -qr ../mcp_signin.zip . )

@@ -4,12 +4,8 @@
 // same code serves gamma (https://mcp-gamma.jreese.net) and, later, production (https://mcp.jreese.net).
 export const PROFILE = "enceladus";
 export const DEFAULT_STATE_KEY_PARAM = "/enceladus/mcp-signin/state-key";
-export const EXACT_CALLBACKS = [
-  "https://claude.ai/api/mcp/auth_callback",
-  "https://claude.com/api/mcp/auth_callback",
-  "https://www.cursor.com/agents/mcp/oauth/callback",
-  "cursor://anysphere.cursor-mcp/oauth/callback",
-];
+// Client callbacks are the kit's: with supportedClients omitted, @io-kit/mcp (0.3.2+) accepts every supported client
+// (SUPPORTED_CLIENT_CALLBACKS: Claude, Cursor, ChatGPT) plus loopback. A client is added in the kit, not here (DVP-TSK-M50).
 
 export function requireOrigin(env, name) {
   const v = String((env ?? {})[name] ?? "").trim().replace(/\/+$/, "");
@@ -65,7 +61,6 @@ export function buildConfig({ fleet, stateKey, env = process.env }) {
       clientId,
       scopes: ["openid", "email", "profile"],
     },
-    supportedClients: { exact: EXACT_CALLBACKS, loopback: true },
     resources,
     stateKey,
   };

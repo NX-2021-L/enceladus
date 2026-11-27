@@ -1,6 +1,6 @@
 # How to deploy, ship and roll back the MCP sign-in service (ENC-TSK-S57-a)
 
-The sign-in service is the io-kit `createSignInService` (`@io-kit/mcp` 0.3.1; 0.3.1 accepts the resource as clients send it, DVP-TSK-M49) running as one Lambda, `enceladus-mcp-signin-gamma` (production later: `enceladus-mcp-signin`), in us-west-2. It is the OAuth authorization server the MCP hosts will advertise: it serves `/.well-known/oauth-authorization-server`, `/register` (allow-listed callbacks only: claude.ai, claude.com, Cursor, loopback), `/authorize`, `/callback` and `/token`, and relays them to the Cognito hosted UI of pool `us-east-1_b2D0V3E1k` (classic prefix domain `enceladus-status-356364570033`) using one fixed public client.
+The sign-in service is the io-kit `createSignInService` (`@io-kit/mcp` 0.3.2; 0.3.1 accepts the resource as clients send it, DVP-TSK-M49; 0.3.2 supplies the client list, DVP-TSK-M50) running as one Lambda, `enceladus-mcp-signin-gamma` (production later: `enceladus-mcp-signin`), in us-west-2. It is the OAuth authorization server the MCP hosts will advertise: it serves `/.well-known/oauth-authorization-server`, `/register` (allow-listed callbacks only: claude.ai, claude.com, Cursor, ChatGPT, loopback), `/authorize`, `/callback` and `/token`, and relays them to the Cognito hosted UI of pool `us-east-1_b2D0V3E1k` (classic prefix domain `enceladus-status-356364570033`) using one fixed public client.
 
 **S57-a carries no traffic.** Nothing routes to the Function URL; `mcp.jreese.net` and `mcp-gamma.jreese.net` behave exactly as before.
 
