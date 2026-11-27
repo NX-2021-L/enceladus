@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { buildConfig, EXACT_CALLBACKS, stateKeyParam, resourcesFromFleet, DEFAULT_STATE_KEY_PARAM } from "../config.mjs";
+import { buildConfig, stateKeyParam, resourcesFromFleet, DEFAULT_STATE_KEY_PARAM } from "../config.mjs";
 
 const CLIENT = "a1b2c3d4e5f6g7h8i9j0k1l2m3";
 const env = {
@@ -21,7 +21,8 @@ test("gamma config: Cognito endpoints, the stack's client id, same-origin resour
   assert.equal(cfg.profile.tokenUrl, `${env.AUTH_ORIGIN}/oauth2/token`);
   assert.equal(cfg.profile.revokeUrl, `${env.AUTH_ORIGIN}/oauth2/revoke`);
   assert.deepEqual(cfg.resources, ["https://mcp-gamma.jreese.net"]);
-  assert.deepEqual(cfg.supportedClients, { exact: EXACT_CALLBACKS, loopback: true });
+  // clients come from the kit's default list (DVP-TSK-M50), so the config names none
+  assert.equal(cfg.supportedClients, undefined);
   assert.equal(cfg.stateKey, key);
 });
 

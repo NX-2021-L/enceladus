@@ -1,4 +1,4 @@
-// Behaviour of the kit's createSignInService as configured here. Needs @io-kit/mcp 0.3.1 installed (CodeArtifact);
+// Behaviour of the kit's createSignInService as configured here. Needs @io-kit/mcp 0.3.2 installed (CodeArtifact);
 // without it these tests are SKIPPED, loudly, and config.test.mjs still runs offline.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -84,7 +84,7 @@ test("/authorize refuses a wrong client, a missing PKCE challenge and a resource
 });
 
 test("/register refuses a non-allow-listed callback", { skip }, async () => {
-  for (const uri of ["https://evil.example/cb", "http://example.com/cb", "https://claude.ai/not-the-callback", "http://localhost:3000/cb#frag"]) {
+  for (const uri of ["https://evil.example/cb", "http://example.com/cb", "https://claude.ai/not-the-callback", "http://localhost:3000/cb#frag", "https://chatgpt.com/other", "https://chatgpt.com.evil.example/connector_platform_oauth_redirect"]) {
     const res = await svc().handle(post("/register", { redirect_uris: [uri] }));
     assert.equal(res.status, 400, uri);
     assert.equal((await res.json()).error, "invalid_redirect_uri");
@@ -94,12 +94,13 @@ test("/register refuses a non-allow-listed callback", { skip }, async () => {
   assert.equal((await svc().handle(post("/register", { redirect_uris: ["https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"] }))).status, 400);
 });
 
-test("/register accepts claude.ai, claude.com, Cursor and loopback and returns the stack's public client", { skip }, async () => {
+test("/register accepts claude.ai, claude.com, Cursor, ChatGPT and loopback and returns the stack's public client", { skip }, async () => {
   for (const uri of [
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
     "https://www.cursor.com/agents/mcp/oauth/callback",
     "cursor://anysphere.cursor-mcp/oauth/callback",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
     "http://localhost:8787/callback",
     "http://127.0.0.1:54321/cb",
     "http://[::1]:9000/cb",
