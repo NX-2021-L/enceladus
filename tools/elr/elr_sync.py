@@ -295,7 +295,53 @@ def build_manifest(repo_root: Path, elr_root: Path, generated_at: Optional[str] 
     }
 
 
+def check_manifest(repo_root: Path, elr_root: Path) -> Dict[str, Any]:
+    """Compare the committed manifest's ``files`` against the tree on disk
+    without writing anything (ENC-ISS-902 / ENC-TSK-S58 CI guard).
+
+    Only ``files`` (path, sha256, size_bytes) is compared: ``source_ref``
+    and ``generated_at`` name the commit the manifest was generated FROM,
+    which by construction is the parent of the commit that carries it, so
+    they can never equal the PR head and are not drift.
+    """
+    operation = "elr_sync.check_manifest"
+    manifest_path = elr_root / MANIFEST_FILENAME
+    try:
+        committed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        committed_files = {e["path"]: e for e in committed.get("files", [])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return _refusal_digest(
+            operation, 409, "manifest-unreadable", [{"path": str(manifest_path), "reason": type(exc).__name__}],
+            local_path=str(manifest_path), anomalies=[],
+        )
+
+    expected_files = {e["path"]: e for e in build_manifest(repo_root, elr_root, generated_at="check")["files"]}
+    violations: List[Dict[str, Any]] = []
+    for path in sorted(set(committed_files) | set(expected_files)):
+        listed, actual = committed_files.get(path), expected_files.get(path)
+        if listed is None:
+            violations.append({"path": path, "reason": "runtime-file-not-in-manifest"})
+        elif actual is None:
+            violations.append({"path": path, "reason": "listed-file-missing"})
+        elif listed.get("sha256") != actual["sha256"] or listed.get("size_bytes") != actual["size_bytes"]:
+            violations.append({"path": path, "reason": "hash-mismatch"})
+
+    if violations:
+        return _refusal_digest(
+            operation, 409, "manifest-stale", violations,
+            local_path=str(manifest_path),
+            counts={"file_count": len(expected_files), "violation_count": len(violations)},
+            anomalies=["run: python3 tools/elr/elr_sync.py generate-manifest, then commit tools/elr/elr_manifest.json"],
+        )
+    return build_digest(
+        operation, True, 200, anomalies=[], local_path=str(manifest_path),
+        counts={"file_count": len(expected_files), "violation_count": 0},
+    )
+
+
 def cmd_generate_manifest(args: argparse.Namespace) -> Dict[str, Any]:
+    if getattr(args, "check", False):
+        return check_manifest(REPO_ROOT, ELR_ROOT)
     manifest = build_manifest(REPO_ROOT, ELR_ROOT, args.generated_at)
     out_path = ELR_ROOT / MANIFEST_FILENAME
     out_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -848,6 +894,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--generated-at",
         default=None,
         help="Override generated_at (ISO-8601). Default: HEAD's committer date (deterministic).",
+    )
+    gen_parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Write nothing; exit 1 if the committed manifest's files (path, sha256, size) do not "
+            "match the runtime files on disk. Used by the elr-manifest-guard CI workflow."
+        ),
     )
 
     pull_parser = subparsers.add_parser(
